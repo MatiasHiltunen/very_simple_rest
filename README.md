@@ -39,13 +39,9 @@ very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.g
 ## Quick Start
 
 ```rust
-use actix_web::{App, HttpServer, web};
-use serde::{Deserialize, Serialize};
-use sqlx::{AnyPool, FromRow};
 use very_simple_rest::prelude::*;
 
-// Define your data models with RBAC
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "post", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Post {
@@ -56,8 +52,7 @@ pub struct Post {
     pub updated_at: Option<String>,
 }
 
-// Create relationships between entities
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "comment", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Comment {
@@ -70,8 +65,7 @@ pub struct Comment {
     pub updated_at: Option<String>,
 }
 
-// User model for authentication
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "user", id = "id", db = "sqlite")]
 #[require_role(read = "admin", update = "admin", delete = "admin")]
 pub struct User {
@@ -83,18 +77,23 @@ pub struct User {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Logging and DB setup
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     sqlx::any::install_default_drivers();
-    
     let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
 
+    // Start server
     HttpServer::new(move || {
         App::new()
+            .wrap(Logger::default())
+            .wrap(Cors::permissive())
+            .wrap(DefaultHeaders::new().add(("X-Version", "0.1.0")))
             .service(
-                web::scope("/api")
+                scope("/api")
                     .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
                     .configure(|cfg| User::configure(cfg, pool.clone()))
                     .configure(|cfg| Post::configure(cfg, pool.clone()))
-                    .configure(|cfg| Comment::configure(cfg, pool.clone()))
+                    .configure(|cfg| Comment::configure(cfg, pool.clone())),
             )
     })
     .bind(("127.0.0.1", 8080))?
