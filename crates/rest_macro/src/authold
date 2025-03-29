@@ -1,0 +1,139 @@
+
+use actix_web::{web, HttpResponse, Responder};
+use serde::{Serialize, Deserialize};
+use chrono::{Utc, Duration};
+use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
+use actix_web::{FromRequest, HttpRequest, dev::Payload, Error as ActixError};
+use std::future::{ready, Ready};
+use sqlx::AnyPool;
+use bcrypt::{hash, verify};
+
+const SECRET: &[u8] = b"super-secret-key";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: i64,
+    roles: Vec<String>,
+    exp: usize,
+}
+
+#[derive(Clone)]
+pub struct UserContext {
+    pub id: i64,
+    pub roles: Vec<String>,
+}
+
+impl FromRequest for UserContext {
+    type Error = ActixError;
+    type Future = Ready<Result<Self, Self::Error>>;
+
+    fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
+        use actix_web::{error::ErrorUnauthorized, http::header};
+
+        let token = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|s| s.to_string());
+
+        if let Some(token) = token {
+            match decode::<Claims>(&token, &DecodingKey::from_secret(SECRET), &Validation::default()) {
+                Ok(data) => {
+                    let claims = data.claims;
+                    return ready(Ok(UserContext {
+                        id: claims.sub,
+                        roles: claims.roles,
+                    }));
+                }
+                Err(_) => return ready(Err(ErrorUnauthorized("Invalid token"))),
+            }
+        }
+
+        ready(Err(ErrorUnauthorized("Missing token")))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterInput {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginInput {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: Option<i64>,
+    pub email: String,
+    pub password_hash: String,
+    pub role: String,
+}
+
+pub async fn register(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -> impl Responder {
+    let hash = match hash(&input.password, 12) {
+        Ok(h) => h,
+        Err(_) => return HttpResponse::InternalServerError().body("Hash error"),
+    };
+
+    let res = sqlx::query("INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)")
+        .bind(&input.email)
+        .bind(hash)
+        .bind("user")
+        .execute(db.get_ref())
+        .await;
+
+    match res {
+        Ok(_) => HttpResponse::Created().finish(),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Error: {}", e)),
+    }
+}
+
+pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl Responder {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = ?")
+        .bind(&input.email)
+        .fetch_optional(db.get_ref())
+        .await;
+
+    if let Ok(Some(user)) = user {
+        if verify(&input.password, &user.password_hash).unwrap_or(false) {
+            let claims = Claims {
+                sub: user.id.unwrap(),
+                roles: vec![user.role.clone()],
+                exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
+            };
+            if let Ok(token) = encode(&Header::default(), &claims, &EncodingKey::from_secret(SECRET)) {
+                return HttpResponse::Ok().json(serde_json::json!({ "token": token }));
+            }
+        }
+    }
+
+    HttpResponse::Unauthorized().body("Invalid credentials")
+}
+
+pub async fn me(user: UserContext) -> impl Responder {
+    HttpResponse::Ok().json(user)
+}
+
+pub fn configure_auth(cfg: &mut web::ServiceConfig, pool: AnyPool) {
+    let db = web::Data::new(pool.clone());
+    cfg.app_data(db.clone());
+
+    actix_web::rt::spawn(async move {
+        let sql = "CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL
+        )";
+        let _ = sqlx::query(sql).execute(&pool).await;
+    });
+
+    cfg.route("/auth/register", web::post().to(register));
+    cfg.route("/auth/login", web::post().to(login));
+    cfg.route("/auth/me", web::get().to(me));
+}

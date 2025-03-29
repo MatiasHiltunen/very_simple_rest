@@ -1,0 +1,18 @@
+[package]
+name = "demo"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+actix-web = "4"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros"] }
+serde_json = "1.0"
+jsonwebtoken = "9"
+bcrypt = "0.15"
+chrono = "0.4"
+rest_macro = { path = "../../crates/rest_macro" }
+rest_macro_core = { path = "../../crates/rest_macro_core" }
+

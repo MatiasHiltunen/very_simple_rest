@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/rest_macro",
+    "crates/rest_macro_core",
+    "examples"
+]
+resolver = "2"
+
+[workspace.dependencies]
+actix-web = "4"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros"] }
+serde_json = "1.0"
+jsonwebtoken = "9"
+bcrypt = "0.15"
+chrono = "0.4"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+proc-macro2 = "1.0"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "An opinionated macro wrapper for building REST APIs with Actix Web and SQLx"
+license = "MIT"
+
+# Workspace-wide features
+[workspace.features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+mysql = ["sqlx/mysql"]
