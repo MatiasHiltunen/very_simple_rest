@@ -137,7 +137,6 @@ This generates nested routes like `/api/post/{post_id}/comment` automatically.
 - Support for all SQLx database backends
 - More flexible role definitions
 - Custom validation rules
-- GraphQL support
 - Swagger/OpenAPI documentation generation
 
 ## Contributions
