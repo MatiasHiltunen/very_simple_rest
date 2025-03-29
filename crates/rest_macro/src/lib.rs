@@ -22,10 +22,30 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     let table_name = lower_name.clone();
     let id_field = "id";
 
-    // Set default role requirements
-    let read_role = Some("admin".to_string());
-    let update_role = Some("admin".to_string());
-    let delete_role = Some("admin".to_string());
+    // Default role requirements
+    let mut read_role = None;
+    let mut update_role = None;
+    let mut delete_role = None;
+
+    // Parse require_role attributes
+    for attr in &input.attrs {
+        if attr.path().is_ident("require_role") {
+            let _ = attr.parse_nested_meta(|meta| {
+                let path = meta.path.get_ident().unwrap().to_string();
+                let value = meta.value()?.parse::<syn::LitStr>()?.value();
+                
+                if path == "read" {
+                    read_role = Some(value);
+                } else if path == "update" {
+                    update_role = Some(value);
+                } else if path == "delete" {
+                    delete_role = Some(value);
+                }
+                
+                Ok(())
+            });
+        }
+    }
 
     // Generate role check for read operations
     let read_check = if let Some(role) = &read_role {
