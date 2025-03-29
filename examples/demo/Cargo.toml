@@ -15,4 +15,9 @@ bcrypt = "0.15"
 chrono = "0.4"
 rest_macro = { path = "../../crates/rest_macro" }
 rest_macro_core = { path = "../../crates/rest_macro_core" }
+log = "0.4"
+env_logger = "0.10"
 
+[[example]]
+name = "demo"
+path = "src/main.rs"

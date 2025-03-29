@@ -2,7 +2,7 @@
 members = [
     "crates/rest_macro",
     "crates/rest_macro_core",
-    "examples"
+    "examples/demo"
 ]
 resolver = "2"
 
@@ -31,3 +31,4 @@ default = ["sqlite"]
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
+
