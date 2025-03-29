@@ -13,6 +13,28 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 - **Database Agnostic**: Currently defaults to SQLite, with plans to support all SQLx targets
 - **Relationship Handling**: Define foreign keys and nested routes between resources
 
+## Installation
+
+You can include this library in your project by adding it as a git dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git" }
+```
+
+Or specify a particular branch or tag:
+
+```toml
+[dependencies]
+very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git", branch = "main" }
+```
+
+Enable specific database features:
+
+```toml
+[dependencies]
+very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git", features = ["sqlite"] }
+```
 
 ## Quick Start
 
