@@ -1,4 +1,8 @@
 use actix_web::{App, HttpServer, middleware::Logger};
+use actix_web::middleware::DefaultHeaders;
+use actix_web::web::scope;
+use actix_cors::Cors;
+use actix_files as fs;
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, FromRow};
 use rest_macro::RestApi;
@@ -7,7 +11,7 @@ use log::{info, warn, debug, LevelFilter};
 use env_logger::Env;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-#[rest_api(table = "posts", id = "id", db = "sqlite")]
+#[rest_api(table = "post", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Post {
     pub id: Option<i64>,
@@ -19,13 +23,13 @@ pub struct Post {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-#[rest_api(table = "comments", id = "id", db = "sqlite")]
+#[rest_api(table = "comment", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Comment {
     pub id: Option<i64>,
     pub title: String,
     pub content: String,
-    #[relation(foreign_key = "post_id", references = "posts.id", nested_route = "true")]
+    #[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
     pub post_id: i64,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -34,7 +38,7 @@ pub struct Comment {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-#[rest_api(table = "users", id = "id", db = "sqlite")]
+#[rest_api(table = "user", id = "id", db = "sqlite")]
 #[require_role(read = "admin", update = "admin", delete = "admin")]
 pub struct User {
     pub id: Option<i64>,
@@ -56,28 +60,28 @@ fn log_available_endpoints() {
     
     // User endpoints
     info!("Users (requires admin role):");
-    info!("  GET    /users          - Get all users");
-    info!("  GET    /users/{id}     - Get user by ID");
-    info!("  POST   /users          - Create a new user");
-    info!("  PUT    /users/{id}     - Update user");
-    info!("  DELETE /users/{id}     - Delete user");
+    info!("  GET    /user          - Get all users");
+    info!("  GET    /user/{id}     - Get user by ID");
+    info!("  POST   /user          - Create a new user");
+    info!("  PUT    /user/{id}     - Update user");
+    info!("  DELETE /user/{id}     - Delete user");
     
     // Post endpoints
     info!("Posts (requires user role):");
-    info!("  GET    /posts          - Get all posts");
-    info!("  GET    /posts/{id}     - Get post by ID");
-    info!("  POST   /posts          - Create a new post");
-    info!("  PUT    /posts/{id}     - Update post");
-    info!("  DELETE /posts/{id}     - Delete post");
+    info!("  GET    /post          - Get all posts");
+    info!("  GET    /post/{id}     - Get post by ID");
+    info!("  POST   /post          - Create a new post");
+    info!("  PUT    /post/{id}     - Update post");
+    info!("  DELETE /post/{id}     - Delete post");
     
     // Comment endpoints
     info!("Comments (requires user role):");
-    info!("  GET    /comments         - Get all comments");
-    info!("  GET    /comments/{id}    - Get comment by ID");
-    info!("  POST   /comments         - Create a new comment");
-    info!("  PUT    /comments/{id}    - Update comment");
-    info!("  DELETE /comments/{id}    - Delete comment");
-    info!("  GET    /posts/{id}/comments - Get comments for a post");
+    info!("  GET    /comment         - Get all comments");
+    info!("  GET    /comment/{id}    - Get comment by ID");
+    info!("  POST   /comment         - Create a new comment");
+    info!("  PUT    /comment/{id}    - Update comment");
+    info!("  DELETE /comment/{id}    - Delete comment");
+    info!("  GET    /post/{id}/comment - Get comments for a post");
     
     info!("=====================================");
 }
@@ -104,12 +108,29 @@ async fn main() -> std::io::Result<()> {
     log_available_endpoints();
     
     let server = HttpServer::new(move || {
+        // Configure CORS for frontend
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600);
+
         App::new()
             .wrap(Logger::default())
+            .wrap(cors)
+            .wrap(DefaultHeaders::new().add(("X-Version", "0.1.0")))
+            // Api routes
+            .service(
+                scope("/api")
+                    .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
+                    .configure(|cfg| User::configure(cfg, pool.clone()))
+                    .configure(|cfg| Post::configure(cfg, pool.clone()))
+                    .configure(|cfg| Comment::configure(cfg, pool.clone()))
+            )
+            // Route auth endpoints to root level as well for compatibility
             .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
-            .configure(|cfg| User::configure(cfg, pool.clone()))
-            .configure(|cfg| Post::configure(cfg, pool.clone()))
-            .configure(|cfg| Comment::configure(cfg, pool.clone()))
+            // Serve static files from the public directory
+            .service(fs::Files::new("/", "examples/demo/public").index_file("index.html"))
     })
     .bind(("127.0.0.1", 8080))?;
     

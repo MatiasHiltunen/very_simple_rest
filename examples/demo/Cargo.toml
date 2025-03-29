@@ -17,6 +17,8 @@ rest_macro = { path = "../../crates/rest_macro" }
 rest_macro_core = { path = "../../crates/rest_macro_core" }
 log = "0.4"
 env_logger = "0.10"
+actix-cors = "0.6"
+actix-files = "0.6"
 
 [[example]]
 name = "demo"

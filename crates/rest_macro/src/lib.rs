@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{quote, format_ident};
-use syn::{parse_macro_input, DeriveInput, Lit, Expr, ExprLit};
+use syn::{parse_macro_input, DeriveInput};
 use std::collections::HashSet;
 
 #[proc_macro_derive(RestApi, attributes(rest_api, require_role, relation))]
@@ -21,6 +21,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     let db_type = "sqlite";
     let table_name = lower_name.clone();
     let id_field = "id";
+
+    // Track relations for nested routes
+    let mut relation_field = String::new();
+    let mut relation_parent_table = String::new();
 
     // Default role requirements
     let mut read_role = None;
@@ -85,6 +89,39 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             for field in &fields_named.named {
                 let name = field.ident.as_ref().unwrap().to_string();
                 let ident = field.ident.as_ref().unwrap();
+                
+                // Check for relation attribute
+                for attr in &field.attrs {
+                    if attr.path().is_ident("relation") {
+                        let mut foreign_key = None;
+                        let mut references = None;
+                        let mut nested_route = false;
+                        
+                        let _ = attr.parse_nested_meta(|meta| {
+                            let path = meta.path.get_ident().unwrap().to_string();
+                            
+                            if path == "foreign_key" {
+                                foreign_key = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                            } else if path == "references" {
+                                references = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                            } else if path == "nested_route" {
+                                let value = meta.value()?.parse::<syn::LitStr>()?.value();
+                                nested_route = value == "true";
+                            }
+                            
+                            Ok(())
+                        });
+                        
+                        if let (Some(_), Some(refs)) = (foreign_key, references) {
+                            let parts: Vec<&str> = refs.split('.').collect();
+                            if parts.len() == 2 {
+                                let parent_table = parts[0];
+                                relation_field = name.clone();
+                                relation_parent_table = parent_table.to_string();
+                            }
+                        }
+                    }
+                }
 
                 if name == "created_at" || name == "updated_at" {
                     field_defs.push(format!("{} TEXT DEFAULT CURRENT_TIMESTAMP", name));
@@ -162,6 +199,15 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                             .route(web::put().to(Self::update))
                             .route(web::delete().to(Self::delete))
                     );
+                    
+                    // Configure nested routes if relation field exists
+                    let has_relation = !#relation_field.is_empty();
+                    if has_relation {
+                        cfg.service(
+                            web::resource(format!("/{}/{{parent_id}}/{}", #relation_parent_table, #table_name))
+                                .route(web::get().to(Self::get_by_parent_id))
+                        );
+                    }
                 }
 
                 async fn create_table_if_not_exists(db: web::Data<AnyPool>) {
@@ -229,6 +275,22 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                         .await
                     {
                         Ok(_) => HttpResponse::Ok().finish(),
+                        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                    }
+                }
+                
+                // Handler for nested routes - returns all child items for a parent
+                async fn get_by_parent_id(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
+                    #read_check
+                    
+                    let parent_id = path.into_inner();
+                    let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #relation_field);
+                    match sqlx::query_as::<_, Self>(&sql)
+                        .bind(parent_id)
+                        .fetch_all(db.get_ref())
+                        .await
+                    {
+                        Ok(items) => HttpResponse::Ok().json(items),
                         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
                     }
                 }
