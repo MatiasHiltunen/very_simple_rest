@@ -3,7 +3,7 @@ use actix_web::{FromRequest, HttpRequest};
 use actix_web::dev::Payload;
 use serde::{Serialize, Deserialize};
 use std::future::{ready, Ready};
-use sqlx::{FromRow, AnyPool, Row};
+use sqlx::{FromRow, AnyPool};
 use jsonwebtoken::{encode, decode, EncodingKey, DecodingKey, Header, Validation};
 use chrono::{Utc, Duration};
 use bcrypt::{hash, verify};

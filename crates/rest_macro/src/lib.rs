@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
-use quote::{quote, format_ident};
-use syn::{parse_macro_input, DeriveInput};
+use quote::{format_ident, quote};
 use std::collections::HashSet;
+use syn::{parse_macro_input, DeriveInput};
 
 #[proc_macro_derive(RestApi, attributes(rest_api, require_role, relation))]
 pub fn rest_api_macro(input: TokenStream) -> TokenStream {
@@ -37,7 +37,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             let _ = attr.parse_nested_meta(|meta| {
                 let path = meta.path.get_ident().unwrap().to_string();
                 let value = meta.value()?.parse::<syn::LitStr>()?.value();
-                
+
                 if path == "read" {
                     read_role = Some(value);
                 } else if path == "update" {
@@ -45,7 +45,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                 } else if path == "delete" {
                     delete_role = Some(value);
                 }
-                
+
                 Ok(())
             });
         }
@@ -89,17 +89,17 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             for field in &fields_named.named {
                 let name = field.ident.as_ref().unwrap().to_string();
                 let ident = field.ident.as_ref().unwrap();
-                
+
                 // Check for relation attribute
                 for attr in &field.attrs {
                     if attr.path().is_ident("relation") {
                         let mut foreign_key = None;
                         let mut references = None;
                         let mut nested_route = false;
-                        
+
                         let _ = attr.parse_nested_meta(|meta| {
                             let path = meta.path.get_ident().unwrap().to_string();
-                            
+
                             if path == "foreign_key" {
                                 foreign_key = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                             } else if path == "references" {
@@ -108,10 +108,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                                 let value = meta.value()?.parse::<syn::LitStr>()?.value();
                                 nested_route = value == "true";
                             }
-                            
+
                             Ok(())
                         });
-                        
+
                         if let (Some(_), Some(refs)) = (foreign_key, references) {
                             let parts: Vec<&str> = refs.split('.').collect();
                             if parts.len() == 2 {
@@ -167,9 +167,18 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             }
         }
     }
+    // let insert_fields: Vec<String> = field_names.iter().cloned().filter(|f| !skip_insert_fields.contains(f)).collect();
 
-    let insert_fields: Vec<String> = field_names.iter().cloned().filter(|f| !skip_insert_fields.contains(f)).collect();
-    let insert_placeholders = insert_fields.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let insert_fields: Vec<String> = field_names
+        .iter()
+        .filter(|&f| !skip_insert_fields.contains(f))
+        .cloned()
+        .collect();
+    let insert_placeholders = insert_fields
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
     let update_sql = update_clauses.join(", ");
     let insert_fields_csv = insert_fields.join(", ");
     let field_defs_sql = field_defs.join(", ");
@@ -201,7 +210,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                             .route(web::put().to(Self::update))
                             .route(web::delete().to(Self::delete))
                     );
-                    
+
                     // Configure nested routes if relation field exists
                     let has_relation = !#relation_field.is_empty();
                     if has_relation {
@@ -219,7 +228,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_all(user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-                    
+
                     let sql = format!("SELECT * FROM {}", #table_name);
                     match sqlx::query_as::<_, Self>(&sql).fetch_all(db.get_ref()).await {
                         Ok(data) => HttpResponse::Ok().json(data),
@@ -229,7 +238,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_one(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-                    
+
                     let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query_as::<_, Self>(&sql)
                         .bind(path.into_inner())
@@ -244,7 +253,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn create(item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
-                    
+
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
                     let mut q = sqlx::query(&sql);
                     #(#bind_fields_insert)*
@@ -256,7 +265,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn update(path: web::Path<i64>, item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
-                    
+
                     let sql = format!("UPDATE {} SET {} WHERE {} = ?", #table_name, #update_sql, #id_field);
                     let mut q = sqlx::query(&sql);
                     #(#bind_fields_update)*
@@ -269,7 +278,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn delete(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #delete_check
-                    
+
                     let sql = format!("DELETE FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query(&sql)
                         .bind(path.into_inner())
@@ -280,11 +289,11 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
                     }
                 }
-                
+
                 // Handler for nested routes - returns all child items for a parent
                 async fn get_by_parent_id(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-                    
+
                     let parent_id = path.into_inner();
                     let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #relation_field);
                     match sqlx::query_as::<_, Self>(&sql)

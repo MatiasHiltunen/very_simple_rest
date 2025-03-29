@@ -41,7 +41,7 @@ pub struct Post {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     sqlx::any::install_default_drivers();
-    
+
     let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
 
     HttpServer::new(move || {
@@ -69,31 +69,39 @@ The library supports the following methods for setting the JWT secret (in order 
 For production environments, it's strongly recommended to set a persistent secret using one of the first two methods.
 */
 
-// Re-export the RestApi derive macro
 pub use rest_macro::RestApi;
-
-// Re-export core module to make it available to the macro implementation
 pub use rest_macro_core as core;
 
-// Re-export authentication module with improved type organization
 pub mod auth {
     pub use rest_macro_core::auth::{
-        auth_routes, 
-        me, 
-        login, 
-        register, 
-        UserContext, 
-        User,
-        RegisterInput, 
-        LoginInput
+        auth_routes, login, me, register, LoginInput, RegisterInput, User, UserContext,
     };
 }
 
-/// A convenience module that re-exports all the common types
+pub use actix_cors;
+pub use actix_files;
+pub use actix_web;
+pub use env_logger;
+pub use log;
+pub use serde;
+pub use sqlx;
+
 pub mod prelude {
-    pub use crate::RestApi;
     pub use crate::auth;
     pub use crate::auth::UserContext;
-    // Also make core module available to users
     pub use crate::core;
-} 
+    pub use crate::RestApi;
+
+    pub use actix_web::{
+        middleware::{DefaultHeaders, Logger},
+        web::{self, scope},
+        App, HttpResponse, HttpServer, Responder,
+    };
+
+    pub use actix_cors::Cors;
+    pub use actix_files as fs;
+    pub use env_logger::Env;
+    pub use log::{debug, error, info, trace, warn};
+    pub use serde::{Deserialize, Serialize};
+    pub use sqlx::{AnyPool, FromRow};
+}
