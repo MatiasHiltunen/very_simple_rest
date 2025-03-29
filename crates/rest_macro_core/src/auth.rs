@@ -9,8 +9,8 @@ use chrono::{Utc, Duration};
 use bcrypt::{hash, verify};
 use dotenv::dotenv;
 use std::env;
-use rand::{thread_rng, Rng};
-use rand::distributions::Alphanumeric;
+use rand::{rng, Rng};
+use rand::distr::Alphanumeric;
 use std::sync::OnceLock;
 
 // Function to get JWT secret from environment or generate a random one
@@ -35,7 +35,7 @@ fn get_jwt_secret() -> &'static [u8] {
         }
         
         // Generate random secret (32 characters)
-        let random_secret: String = thread_rng()
+        let random_secret: String = rng()
             .sample_iter(&Alphanumeric)
             .take(32)
             .map(char::from)
