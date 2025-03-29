@@ -76,7 +76,7 @@ async function register() {
     
     try {
         const data = { email, password };
-        const response = await fetchJson(`${ROOT_URL}/auth/register`, {
+        const response = await fetchJson(`${API_URL}/auth/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
@@ -99,7 +99,7 @@ async function login() {
     
     try {
         const data = { email, password };
-        const response = await fetchJson(`${ROOT_URL}/auth/login`, {
+        const response = await fetchJson(`${API_URL}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
@@ -124,7 +124,7 @@ async function fetchUserInfo() {
     }
     
     try {
-        const userData = await fetchJson(`${ROOT_URL}/auth/me`, {
+        const userData = await fetchJson(`${API_URL}/auth/me`, {
             headers: { 'Authorization': `Bearer ${authToken}` }
         });
         

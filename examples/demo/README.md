@@ -93,12 +93,12 @@ Open the web client at http://localhost:8080 to interact with the API through a 
 
 ```bash
 # Register a new user
-curl -X POST http://localhost:8080/auth/register \
+curl -X POST http://localhost:8080/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email": "user@example.com", "password": "password123"}'
 
 # Login to get a token
-curl -X POST http://localhost:8080/auth/login \
+curl -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email": "user@example.com", "password": "password123"}'
 

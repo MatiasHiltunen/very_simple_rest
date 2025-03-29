@@ -35,9 +35,9 @@ This is a simple frontend client to test the REST Macro Demo API. It demonstrate
 The REST API exposes the following endpoints:
 
 ### Authentication
-- `POST /auth/register` - Register a new user (default role: user)
-- `POST /auth/login` - Login and get a JWT token
-- `GET /auth/me` - Get information about the authenticated user
+- `POST /api/auth/register` - Register a new user (default role: user)
+- `POST /api/auth/login` - Login and get a JWT token
+- `GET /api/auth/me` - Get information about the authenticated user
 
 ### Posts
 - `GET /api/post` - Get all posts (requires "user" role)

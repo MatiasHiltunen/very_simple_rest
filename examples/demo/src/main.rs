@@ -54,34 +54,34 @@ fn log_available_endpoints() {
     
     // Auth endpoints
     info!("Authentication:");
-    info!("  POST   /auth/register  - Register a new user");
-    info!("  POST   /auth/login     - Login and get a JWT token");
-    info!("  GET    /auth/me        - Get authenticated user info");
+    info!("  POST   /api/auth/register  - Register a new user");
+    info!("  POST   /api/auth/login     - Login and get a JWT token");
+    info!("  GET    /api/auth/me        - Get authenticated user info");
     
     // User endpoints
     info!("Users (requires admin role):");
-    info!("  GET    /user          - Get all users");
-    info!("  GET    /user/{id}     - Get user by ID");
-    info!("  POST   /user          - Create a new user");
-    info!("  PUT    /user/{id}     - Update user");
-    info!("  DELETE /user/{id}     - Delete user");
+    info!("  GET    /api/user          - Get all users");
+    info!("  GET    /api/user/{id}     - Get user by ID");
+    info!("  POST   /api/user          - Create a new user");
+    info!("  PUT    /api/user/{id}     - Update user");
+    info!("  DELETE /api/user/{id}     - Delete user");
     
     // Post endpoints
     info!("Posts (requires user role):");
-    info!("  GET    /post          - Get all posts");
-    info!("  GET    /post/{id}     - Get post by ID");
-    info!("  POST   /post          - Create a new post");
-    info!("  PUT    /post/{id}     - Update post");
-    info!("  DELETE /post/{id}     - Delete post");
+    info!("  GET    /api/post          - Get all posts");
+    info!("  GET    /api/post/{id}     - Get post by ID");
+    info!("  POST   /api/post          - Create a new post");
+    info!("  PUT    /api/post/{id}     - Update post");
+    info!("  DELETE /api/post/{id}     - Delete post");
     
     // Comment endpoints
     info!("Comments (requires user role):");
-    info!("  GET    /comment         - Get all comments");
-    info!("  GET    /comment/{id}    - Get comment by ID");
-    info!("  POST   /comment         - Create a new comment");
-    info!("  PUT    /comment/{id}    - Update comment");
-    info!("  DELETE /comment/{id}    - Delete comment");
-    info!("  GET    /post/{id}/comment - Get comments for a post");
+    info!("  GET    /api/comment         - Get all comments");
+    info!("  GET    /api/comment/{id}    - Get comment by ID");
+    info!("  POST   /api/comment         - Create a new comment");
+    info!("  PUT    /api/comment/{id}    - Update comment");
+    info!("  DELETE /api/comment/{id}    - Delete comment");
+    info!("  GET    /api/post/{id}/comment - Get comments for a post");
     
     info!("=====================================");
 }
@@ -127,8 +127,6 @@ async fn main() -> std::io::Result<()> {
                     .configure(|cfg| Post::configure(cfg, pool.clone()))
                     .configure(|cfg| Comment::configure(cfg, pool.clone()))
             )
-            // Route auth endpoints to root level as well for compatibility
-            .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
             // Serve static files from the public directory
             .service(fs::Files::new("/", "examples/demo/public").index_file("index.html"))
     })

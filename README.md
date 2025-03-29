@@ -68,9 +68,13 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
-            .configure(|cfg| User::configure(cfg, pool.clone()))
-            .configure(|cfg| Post::configure(cfg, pool.clone()))
+            .service(
+                web::scope("/api")
+                    .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
+                    .configure(|cfg| User::configure(cfg, pool.clone()))
+                    .configure(|cfg| Post::configure(cfg, pool.clone()))
+                    .configure(|cfg| Comment::configure(cfg, pool.clone()))
+            )
     })
     .bind(("127.0.0.1", 8080))?
     .run()
@@ -82,9 +86,9 @@ async fn main() -> std::io::Result<()> {
 
 The library provides these authentication endpoints out of the box:
 
-- **POST /auth/register** - Register a new user
-- **POST /auth/login** - Login and get a JWT token
-- **GET /auth/me** - Get information about the authenticated user
+- **POST /api/auth/register** - Register a new user
+- **POST /api/auth/login** - Login and get a JWT token
+- **GET /api/auth/me** - Get information about the authenticated user
 
 ### JWT Secret Configuration
 
@@ -99,7 +103,7 @@ For production environments, it's strongly recommended to set a persistent secre
 ### Example login:
 
 ```bash
-curl -X POST http://localhost:8080/auth/login \
+curl -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email": "admin@example.com", "password": "password123"}'
 ```
@@ -126,7 +130,7 @@ Define relationships between entities:
 pub post_id: i64,
 ```
 
-This generates nested routes like `/post/{post_id}/comment` automatically.
+This generates nested routes like `/api/post/{post_id}/comment` automatically.
 
 ## Roadmap
 
