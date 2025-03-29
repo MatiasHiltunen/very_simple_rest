@@ -39,14 +39,13 @@ very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.g
 ## Quick Start
 
 ```rust
-use actix_web::{App, HttpServer};
+use actix_web::{App, HttpServer, web};
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, FromRow};
-use rest_macro::RestApi;
-use rest_macro_core::auth;
+use very_simple_rest::prelude::*;
 
 // Define your data models with RBAC
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
 #[rest_api(table = "post", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Post {
@@ -58,7 +57,7 @@ pub struct Post {
 }
 
 // Create relationships between entities
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
 #[rest_api(table = "comment", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Comment {
@@ -72,7 +71,7 @@ pub struct Comment {
 }
 
 // User model for authentication
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
 #[rest_api(table = "user", id = "id", db = "sqlite")]
 #[require_role(read = "admin", update = "admin", delete = "admin")]
 pub struct User {
@@ -171,4 +170,4 @@ This library has been built with assistance from OpenAI's o4 and Anthropic's Cla
 
 ## License
 
-MIT
+MIT 
