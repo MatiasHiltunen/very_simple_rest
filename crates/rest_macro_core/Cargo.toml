@@ -12,4 +12,6 @@ sqlx.workspace = true
 serde_json.workspace = true
 jsonwebtoken.workspace = true
 bcrypt.workspace = true
-chrono.workspace = true 
+chrono.workspace = true
+dotenv = "0.15.0"
+rand = "0.8.5" 

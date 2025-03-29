@@ -25,7 +25,7 @@ use rest_macro_core::auth;
 
 // Define your data models with RBAC
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-#[rest_api(table = "posts", id = "id", db = "sqlite")]
+#[rest_api(table = "post", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Post {
     pub id: Option<i64>,
@@ -37,13 +37,13 @@ pub struct Post {
 
 // Create relationships between entities
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-#[rest_api(table = "comments", id = "id", db = "sqlite")]
+#[rest_api(table = "comment", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Comment {
     pub id: Option<i64>,
     pub title: String,
     pub content: String,
-    #[relation(foreign_key = "post_id", references = "posts.id", nested_route = "true")]
+    #[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
     pub post_id: i64,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -51,7 +51,7 @@ pub struct Comment {
 
 // User model for authentication
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-#[rest_api(table = "users", id = "id", db = "sqlite")]
+#[rest_api(table = "user", id = "id", db = "sqlite")]
 #[require_role(read = "admin", update = "admin", delete = "admin")]
 pub struct User {
     pub id: Option<i64>,
@@ -86,6 +86,16 @@ The library provides these authentication endpoints out of the box:
 - **POST /auth/login** - Login and get a JWT token
 - **GET /auth/me** - Get information about the authenticated user
 
+### JWT Secret Configuration
+
+The library supports the following methods for setting the JWT secret (in order of precedence):
+
+1. Environment variable: `JWT_SECRET=your_secret_here`
+2. `.env` file in your project root: `JWT_SECRET=your_secret_here`
+3. If no secret is provided, a random secret is generated at startup (not recommended for production)
+
+For production environments, it's strongly recommended to set a persistent secret using one of the first two methods.
+
 ### Example login:
 
 ```bash
@@ -112,11 +122,11 @@ This will:
 Define relationships between entities:
 
 ```rust
-#[relation(foreign_key = "post_id", references = "posts.id", nested_route = "true")]
+#[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
 pub post_id: i64,
 ```
 
-This generates nested routes like `/posts/{post_id}/comments` automatically.
+This generates nested routes like `/post/{post_id}/comment` automatically.
 
 ## Roadmap
 

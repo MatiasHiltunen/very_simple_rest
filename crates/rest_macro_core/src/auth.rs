@@ -7,8 +7,44 @@ use sqlx::{FromRow, AnyPool, Row};
 use jsonwebtoken::{encode, decode, EncodingKey, DecodingKey, Header, Validation};
 use chrono::{Utc, Duration};
 use bcrypt::{hash, verify};
+use dotenv::dotenv;
+use std::env;
+use rand::{thread_rng, Rng};
+use rand::distributions::Alphanumeric;
+use std::sync::OnceLock;
 
-const SECRET: &[u8] = b"super-secret-key";
+// Function to get JWT secret from environment or generate a random one
+fn get_jwt_secret() -> &'static [u8] {
+    static JWT_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
+    
+    JWT_SECRET.get_or_init(|| {
+        // Try loading from .env file
+        let _ = dotenv();
+        
+        // Try to get from environment variable
+        match env::var("JWT_SECRET") {
+            Ok(secret) => {
+                if !secret.is_empty() {
+                    return secret.into_bytes();
+                }
+                // Fall through to random generation if empty
+            }
+            Err(_) => {
+                // Fall through to random generation
+            }
+        }
+        
+        // Generate random secret (32 characters)
+        let random_secret: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+        
+        eprintln!("WARNING: No JWT_SECRET found in environment. Using random secret (will change on restart)");
+        random_secret.into_bytes()
+    }).as_slice()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -38,7 +74,7 @@ impl FromRequest for UserContext {
             .map(|s| s.to_string());
 
         if let Some(token) = token {
-            match decode::<Claims>(&token, &DecodingKey::from_secret(SECRET), &Validation::default()) {
+            match decode::<Claims>(&token, &DecodingKey::from_secret(get_jwt_secret()), &Validation::default()) {
                 Ok(data) => {
                     let claims = data.claims;
                     return ready(Ok(UserContext {
@@ -111,7 +147,7 @@ pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl
             exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
         };
 
-        match encode(&Header::default(), &claims, &EncodingKey::from_secret(SECRET)) {
+        match encode(&Header::default(), &claims, &EncodingKey::from_secret(get_jwt_secret())) {
             Ok(token) => HttpResponse::Ok().json(serde_json::json!({ "token": token })),
             Err(_) => HttpResponse::InternalServerError().body("Token generation failed"),
         }
