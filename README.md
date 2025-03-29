@@ -17,24 +17,19 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 
 You can include this library in your project by adding it as a git dependency in your `Cargo.toml`:
 
+_Note that you need to add the other dependencies aswell_
+
 ```toml
 [dependencies]
 very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git" }
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.7", features = ["macros", "runtime-tokio", "sqlite"] }
+actix-web = "4"
+env_logger = "0.10"
+log = "0.4"
 ```
 
-Or specify a particular branch or tag:
 
-```toml
-[dependencies]
-very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git", branch = "main" }
-```
-
-Enable specific database features:
-
-```toml
-[dependencies]
-very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git", features = ["sqlite"] }
-```
 
 ## Quick Start
 
