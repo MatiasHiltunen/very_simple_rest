@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use very_simple_rest::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
