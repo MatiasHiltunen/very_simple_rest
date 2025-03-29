@@ -583,11 +583,10 @@ dependencies = [
  "env_logger",
  "jsonwebtoken",
  "log",
- "rest_macro",
- "rest_macro_core",
  "serde",
  "serde_json",
  "sqlx",
+ "very_simple_rest",
 ]
 
 [[package]]
@@ -1818,6 +1817,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "rest_macro_core",
  "syn 2.0.100",
 ]
 
@@ -2195,6 +2195,7 @@ dependencies = [
  "sha2",
  "sqlx-core",
  "sqlx-mysql",
+ "sqlx-postgres",
  "sqlx-sqlite",
  "syn 1.0.109",
  "tempfile",
@@ -2661,6 +2662,21 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "very_simple_rest"
+version = "0.1.0"
+dependencies = [
+ "actix-cors",
+ "actix-files",
+ "actix-web",
+ "env_logger",
+ "log",
+ "rest_macro",
+ "rest_macro_core",
+ "serde",
+ "sqlx",
+]
 
 [[package]]
 name = "wasi"

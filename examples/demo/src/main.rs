@@ -5,12 +5,12 @@ use actix_cors::Cors;
 use actix_files as fs;
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, FromRow};
-use rest_macro::RestApi;
-use rest_macro_core::auth;
+use very_simple_rest::prelude::*;
+use very_simple_rest::core;
 use log::{info, warn, debug, LevelFilter};
 use env_logger::Env;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
 #[rest_api(table = "post", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Post {
@@ -22,7 +22,7 @@ pub struct Post {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
 #[rest_api(table = "comment", id = "id", db = "sqlite")]
 #[require_role(read = "user", update = "user", delete = "user")]
 pub struct Comment {
@@ -37,7 +37,7 @@ pub struct Comment {
 
 
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, very_simple_rest::RestApi)]
 #[rest_api(table = "user", id = "id", db = "sqlite")]
 #[require_role(read = "admin", update = "admin", delete = "admin")]
 pub struct User {

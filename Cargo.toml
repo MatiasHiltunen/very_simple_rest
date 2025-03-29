@@ -17,18 +17,61 @@ chrono = "0.4"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 proc-macro2 = "1.0"
+dotenv = "0.15.0"
+rand = "0.8.5"
+rest_macro = { path = "crates/rest_macro", version = "0.1.0" }
+rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.0" }
+log = "0.4"
+env_logger = "0.10"
+actix-cors = "0.6"
+actix-files = "0.6"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Matias Hiltunen"]
 description = "An opinionated macro wrapper for building REST APIs with Actix Web and SQLx"
 license = "MIT"
+repository = "https://github.com/MatiasHiltunen/very_simple_rest"
+keywords = ["rest", "api", "actix", "sqlx", "macros"]
+categories = ["web-programming", "database"]
 
-# Workspace-wide features
-[workspace.features]
+# This section is for the top-level crate that re-exports the components
+[package]
+name = "very_simple_rest"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Dependencies for the top-level crate
+[dependencies]
+actix-web.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+rest_macro = { workspace = true }
+rest_macro_core = { workspace = true }
+# Additional dependencies required by the example
+log.workspace = true
+env_logger.workspace = true
+actix-cors.workspace = true
+actix-files.workspace = true
+
+# Feature configuration for the top-level crate
+[features]
 default = ["sqlite"]
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
+
+# Add an example that points to the demo package
+[[example]]
+name = "demo"
+path = "examples/demo/src/main.rs"
+required-features = ["sqlite"]
 

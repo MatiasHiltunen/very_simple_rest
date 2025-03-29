@@ -179,7 +179,9 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             use super::*;
             use actix_web::{web, HttpResponse, Responder};
             use sqlx::AnyPool;
-            use rest_macro_core::auth::UserContext;
+
+            // Access UserContext through the core module which is re-exported in rest_api
+            use very_simple_rest::core::auth::UserContext;
 
             impl #struct_name {
                 pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
