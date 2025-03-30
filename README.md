@@ -1,6 +1,6 @@
 # REST Macro - Opinionated API Builder
 
-> **Note**: This project is currently a work in progress and under active development. APIs will change, and features are incomplete.
+> **Note**: This project is currently very much in progress and under active development. APIs will change, and features are incomplete.
 
 A Rust library providing an opinionated higher-level macro wrapper for Actix Web and SQLx, designed for rapid API prototyping.
 
@@ -29,7 +29,14 @@ env_logger = "0.10"
 log = "0.4"
 ```
 
+## Examples
 
+
+The code includes example project `demo`. To run it, clone the repo and run from project's root:
+
+```sh
+cargo run --example demo
+```
 
 ## Quick Start
 
