@@ -6,7 +6,7 @@ use std::path::Path;
 use reqwest;
 
 // Base URL for raw content (not the HTML view)
-const TEMPLATE_DIR_URL: &str = "https://raw.githubusercontent.com/MatiasHiltunen/very_simple_rest/demo/examples/template";
+const TEMPLATE_DIR_URL: &str = "https://raw.githubusercontent.com/MatiasHiltunen/very_simple_rest/refs/heads/main/examples/template";
 const TEMPLATE_MAIN_RS: &str = "src/main.rs";
 const TEMPLATE_CARGO_TOML: &str = "Cargo.toml";
 const TEMPLATE_ENV_EXAMPLE: &str = ".env.example";
