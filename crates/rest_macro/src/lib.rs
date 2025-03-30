@@ -54,7 +54,8 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     // Generate role check for read operations
     let read_check = if let Some(role) = &read_role {
         quote! {
-            if !user.roles.contains(&String::from(#role)) {
+            // Admin role always has access
+            if !user.roles.contains(&String::from("admin")) && !user.roles.contains(&String::from(#role)) {
                 return HttpResponse::Forbidden().body("Insufficient privileges");
             }
         }
@@ -65,7 +66,8 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     // Generate role check for update operations
     let update_check = if let Some(role) = &update_role {
         quote! {
-            if !user.roles.contains(&String::from(#role)) {
+            // Admin role always has access
+            if !user.roles.contains(&String::from("admin")) && !user.roles.contains(&String::from(#role)) {
                 return HttpResponse::Forbidden().body("Insufficient privileges");
             }
         }
@@ -76,7 +78,8 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     // Generate role check for delete operations
     let delete_check = if let Some(role) = &delete_role {
         quote! {
-            if !user.roles.contains(&String::from(#role)) {
+            // Admin role always has access
+            if !user.roles.contains(&String::from("admin")) && !user.roles.contains(&String::from(#role)) {
                 return HttpResponse::Forbidden().body("Insufficient privileges");
             }
         }
