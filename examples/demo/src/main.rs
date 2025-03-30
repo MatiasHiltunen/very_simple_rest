@@ -90,6 +90,13 @@ async fn main() -> std::io::Result<()> {
     // Tables will be automatically created by the RestApi macro
     info!("Tables will be created automatically by the RestApi macro");
 
+    // Check for admin user and create one if needed
+    match auth::ensure_admin_exists(&pool).await {
+        Ok(true) => info!("Admin user is set up and ready"),
+        Ok(false) => info!("No admin user found and no ADMIN_EMAIL/ADMIN_PASSWORD environment variables set. Admin user will need to be created manually."),
+        Err(e) => warn!("Failed to verify admin user: {}", e),
+    }
+
     // Log available endpoints
     log_available_endpoints();
 

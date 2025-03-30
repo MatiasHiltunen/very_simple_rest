@@ -130,6 +130,46 @@ curl -X POST http://localhost:8080/api/auth/login \
   -d '{"email": "admin@example.com", "password": "password123"}'
 ```
 
+## User Management
+
+The library provides two methods for creating admin users:
+
+### 1. Environment Variables (Non-Interactive)
+
+Set these environment variables before starting your application:
+
+```
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=securepassword
+```
+
+If no admin user exists, one will be created automatically with these credentials.
+
+### 2. CLI Tool (Interactive)
+
+The library includes a CLI tool for managing your API, with specific commands for user management:
+
+```bash
+# Setup wizard with interactive prompts
+vsr setup
+
+# Create an admin user
+vsr create-admin
+
+# Create an admin with specific credentials
+vsr create-admin --email admin@example.com --password securepassword
+
+# Check database status including admin users
+vsr check-db
+
+# Generate a .env template file
+vsr gen-env
+```
+
+The CLI tool provides a secure way to set up admin users with password confirmation and validation.
+
+For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
+
 ## RBAC Attributes
 
 Protect your endpoints with declarative role requirements:

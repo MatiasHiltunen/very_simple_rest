@@ -75,6 +75,7 @@ pub use rest_macro_core as core;
 pub mod auth {
     pub use rest_macro_core::auth::{
         auth_routes, login, me, register, LoginInput, RegisterInput, User, UserContext,
+        ensure_admin_exists,
     };
 }
 
