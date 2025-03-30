@@ -1,0 +1,39 @@
+[package]
+name = "rest_api_cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "CLI tool for managing very_simple_rest API setups"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+dialoguer = "0.11"
+console = "0.15"
+indicatif = "0.17"
+sqlx.workspace = true
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+dotenv.workspace = true
+rest_macro_core = { workspace = true }
+bcrypt.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+colored = "2.0"
+rand.workspace = true
+regex = "1.10.2"
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+
+[lib]
+name = "rest_api_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vsr"
+path = "src/main.rs"

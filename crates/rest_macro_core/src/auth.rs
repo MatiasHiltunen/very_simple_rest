@@ -12,6 +12,9 @@ use std::env;
 use rand::{rng, Rng};
 use rand::distr::Alphanumeric;
 use std::sync::OnceLock;
+use std::io::{stdin, stdout, Write};
+use rpassword;
+
 
 // Function to get JWT secret from environment or generate a random one
 fn get_jwt_secret() -> &'static [u8] {
@@ -158,6 +161,140 @@ pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl
 
 pub async fn me(user: UserContext) -> impl Responder {
     HttpResponse::Ok().json(user)
+}
+
+/// Check if an admin user exists, and create one automatically if not
+/// 
+/// This function will:
+/// 1. Ensure the user table exists
+/// 2. Check if an admin user already exists
+/// 3. If not, prompt the user to enter admin credentials via stdin
+/// 
+/// Returns true if an admin exists (either previously or newly created),
+/// false only if there was an error creating the admin user.
+pub async fn ensure_admin_exists(pool: &AnyPool) -> Result<bool, sqlx::Error> {
+    // First make sure the user table exists
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL
+        )"
+    )
+    .execute(pool)
+    .await?;
+
+    // Check if any admin exists
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
+        .fetch_one(pool)
+        .await?;
+    
+    let admin_exists = count > 0;
+    
+    if admin_exists {
+        println!("[INFO] Admin user is set up and ready");
+        return Ok(true);
+    }
+    
+    println!("[INFO] No admin user found. Creating an admin user...");
+    
+    // Try to get admin credentials from environment variables first
+    let (email, password) = if let (Ok(email), Ok(password)) = (std::env::var("ADMIN_EMAIL"), std::env::var("ADMIN_PASSWORD")) {
+        if !email.is_empty() && !password.is_empty() {
+            println!("[INFO] Using environment variables for admin credentials");
+            (email, password)
+        } else {
+            prompt_admin_credentials()
+        }
+    } else {
+        prompt_admin_credentials()
+    };
+    
+    // Create the admin user
+    let password_hash = match hash(&password, 12) {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("[ERROR] Failed to hash password: {}", e);
+            return Ok(false);
+        }
+    };
+    
+    let result = sqlx::query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
+        .bind(&email)
+        .bind(password_hash)
+        .bind("admin")
+        .execute(pool)
+        .await;
+    
+    match result {
+        Ok(_) => {
+            println!("[SUCCESS] Admin user created successfully!");
+            println!("--------------------------------------------");
+            println!("🔐 Admin User Created 🔐");
+            println!("Email: {}", email);
+            println!("--------------------------------------------");
+            Ok(true)
+        },
+        Err(e) => {
+            eprintln!("[ERROR] Failed to create admin user: {}", e);
+            Ok(false)
+        },
+    }
+}
+
+/// Prompt for admin credentials via stdin
+fn prompt_admin_credentials() -> (String, String) {
+    println!("[INFO] Please enter admin credentials:");
+    
+    // Prompt for email
+    let mut email = String::new();
+    print!("Admin email: ");
+    stdout().flush().unwrap();
+    stdin().read_line(&mut email).unwrap();
+    let email = email.trim().to_string();
+    
+    // Prompt for password securely (no echo)
+    let password = match rpassword::prompt_password("Admin password: ") {
+        Ok(password) => password,
+        Err(e) => {
+            eprintln!("[ERROR] Failed to read password: {}", e);
+            println!("[WARN] Using default admin credentials as fallback.");
+            return create_default_admin();
+        }
+    };
+    
+    // Simple validation
+    if email.is_empty() || password.is_empty() {
+        println!("[WARN] Email or password cannot be empty. Using default email and a random password.");
+        return create_default_admin();
+    }
+    
+    (email, password)
+}
+
+/// Create default admin credentials as a fallback
+fn create_default_admin() -> (String, String) {
+    use rand::Rng;
+    
+    // Characters to use for password generation
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    
+    // Generate a secure random password
+    let mut rng = rand::rng();
+    let password: String = (0..12)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect();
+    
+    // Use a default admin email
+    let email = "admin@example.com".to_string();
+    
+    println!("[INFO] Creating default admin user");
+    
+    (email, password)
 }
 
 pub fn auth_routes(cfg: &mut web::ServiceConfig, db: AnyPool) {

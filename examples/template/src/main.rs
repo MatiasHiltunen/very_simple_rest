@@ -112,7 +112,7 @@ async fn main() -> std::io::Result<()> {
                     .configure(|cfg| Comment::configure(cfg, server_pool.clone())),
             )
             // Serve static files from the public directory
-            .service(fs::Files::new("/", "examples/demo/public").index_file("index.html"))
+            .service(fs::Files::new("/", "public").index_file("index.html"))
     })
     .bind(("127.0.0.1", 8080))?;
 
@@ -123,12 +123,9 @@ async fn main() -> std::io::Result<()> {
         Ok(false) => {
             error!("Failed to create admin user - shutting down");
             return Ok(());
-        }
+        },
         Err(e) => {
-            error!(
-                "Database error when checking/creating admin user: {} - shutting down",
-                e
-            );
+            error!("Database error when checking/creating admin user: {} - shutting down", e);
             return Ok(());
         }
     }

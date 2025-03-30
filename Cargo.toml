@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = [ "crates/rest_api_cli",
     "crates/rest_macro",
     "crates/rest_macro_core",
     "examples/demo"
@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.dependencies]
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8.3", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros"] }
+sqlx = { version = "0.8.3", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros", "chrono"] }
 serde_json = "1.0"
 jsonwebtoken = "9"
 bcrypt = "0.17"
@@ -19,6 +19,7 @@ syn = { version = "2.0", features = ["full"] }
 proc-macro2 = "1.0"
 dotenv = "0.15.0"
 rand = "0.9.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
 rest_macro = { path = "crates/rest_macro", version = "0.1.0" }
 rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.0" }
 log = "0.4"
