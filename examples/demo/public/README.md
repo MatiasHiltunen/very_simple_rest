@@ -8,6 +8,9 @@ This is a simple frontend client to test the REST Macro Demo API. It demonstrate
 - **Posts CRUD**: Create and retrieve posts
 - **Comments CRUD**: Create and retrieve comments, including comments for a specific post
 - **Role-Based Access Control**: Demonstrates how the API enforces role-based access control
+- **User Management**: Admin-only interface for managing users (create, edit, delete)
+- **Search & Filtering**: Dynamic searching across all resources (posts, comments, users)
+- **Pagination & Sorting**: Control page size, navigate through pages, and sort by different fields
 
 ## Setup
 
@@ -29,18 +32,29 @@ This is a simple frontend client to test the REST Macro Demo API. It demonstrate
 3. Create a new post
 4. Create comments for the post
 5. Retrieve posts and comments
+6. Try searching and filtering resources using the search controls
+7. If you're an admin, manage users through the user management panel
 
-## API Endpoints
+## API Endpoints with Query Parameters
 
-The REST API exposes the following endpoints:
+The REST API exposes the following endpoints with query parameters for searching, filtering, and pagination:
 
 ### Authentication
 - `POST /api/auth/register` - Register a new user (default role: user)
 - `POST /api/auth/login` - Login and get a JWT token
 - `GET /api/auth/me` - Get information about the authenticated user
 
+### Users (Admin Only)
+- `GET /api/user` - Get all users
+  - Parameters: `page`, `limit`, `order_by`, `order_dir`, `search`
+- `GET /api/user/{id}` - Get a user by ID
+- `POST /api/user` - Create a new user
+- `PUT /api/user/{id}` - Update a user
+- `DELETE /api/user/{id}` - Delete a user
+
 ### Posts
 - `GET /api/post` - Get all posts (requires "user" role)
+  - Parameters: `page`, `limit`, `order_by`, `order_dir`, `search`
 - `GET /api/post/{id}` - Get a post by ID (requires "user" role)
 - `POST /api/post` - Create a new post (requires "user" role)
 - `PUT /api/post/{id}` - Update a post (requires "user" role)
@@ -48,8 +62,20 @@ The REST API exposes the following endpoints:
 
 ### Comments
 - `GET /api/comment` - Get all comments (requires "user" role)
+  - Parameters: `page`, `limit`, `order_by`, `order_dir`, `search`
 - `GET /api/comment/{id}` - Get a comment by ID (requires "user" role)
 - `POST /api/comment` - Create a new comment (requires "user" role)
 - `PUT /api/comment/{id}` - Update a comment (requires "user" role)
 - `DELETE /api/comment/{id}` - Delete a comment (requires "user" role)
-- `GET /api/post/{id}/comment` - Get all comments for a post (requires "user" role) 
+- `GET /api/post/{id}/comment` - Get all comments for a post (requires "user" role)
+  - Parameters: `page`, `limit`, `order_by`, `order_dir`, `search`
+
+## Query Parameters
+
+All list endpoints support the following query parameters:
+
+- `page`: Page number (default: 1)
+- `limit`: Number of items per page (default: 10)
+- `order_by`: Field to sort by (e.g., 'id', 'title', 'created_at')
+- `order_dir`: Sort direction ('asc' or 'desc')
+- `search`: Search term to filter results (searches across all text fields) 
