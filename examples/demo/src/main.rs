@@ -88,18 +88,9 @@ async fn main() -> std::io::Result<()> {
     info!("Database connection established");
 
     // Tables will be automatically created by the RestApi macro
-    info!("Tables will be created automatically by the RestApi macro");
+    info!("Configuring server with automatic table creation...");
 
-    // Check for admin user and create one if needed
-    match auth::ensure_admin_exists(&pool).await {
-        Ok(true) => info!("Admin user is set up and ready"),
-        Ok(false) => info!("No admin user found and no ADMIN_EMAIL/ADMIN_PASSWORD environment variables set. Admin user will need to be created manually."),
-        Err(e) => warn!("Failed to verify admin user: {}", e),
-    }
-
-    // Log available endpoints
-    log_available_endpoints();
-
+    let server_pool = pool.clone();
     let server = HttpServer::new(move || {
         // Configure CORS for frontend
         let cors = Cors::default()
@@ -115,15 +106,35 @@ async fn main() -> std::io::Result<()> {
             // Api routes
             .service(
                 scope("/api")
-                    .configure(|cfg| auth::auth_routes(cfg, pool.clone()))
-                    .configure(|cfg| User::configure(cfg, pool.clone()))
-                    .configure(|cfg| Post::configure(cfg, pool.clone()))
-                    .configure(|cfg| Comment::configure(cfg, pool.clone())),
+                    .configure(|cfg| auth::auth_routes(cfg, server_pool.clone()))
+                    .configure(|cfg| User::configure(cfg, server_pool.clone()))
+                    .configure(|cfg| Post::configure(cfg, server_pool.clone()))
+                    .configure(|cfg| Comment::configure(cfg, server_pool.clone())),
             )
             // Serve static files from the public directory
             .service(fs::Files::new("/", "examples/demo/public").index_file("index.html"))
     })
     .bind(("127.0.0.1", 8080))?;
+
+    // Check for admin user or create one interactively if needed
+    info!("Checking for admin user...");
+    match auth::ensure_admin_exists(&pool).await {
+        Ok(true) => info!("Admin user is ready for login"),
+        Ok(false) => {
+            error!("Failed to create admin user - shutting down");
+            return Ok(());
+        }
+        Err(e) => {
+            error!(
+                "Database error when checking/creating admin user: {} - shutting down",
+                e
+            );
+            return Ok(());
+        }
+    }
+
+    // Log available endpoints
+    log_available_endpoints();
 
     info!("Server starting at http://127.0.0.1:8080");
     server.run().await

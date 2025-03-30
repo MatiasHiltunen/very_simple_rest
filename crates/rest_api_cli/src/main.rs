@@ -123,8 +123,22 @@ async fn main() -> Result<()> {
                     commands::admin::create_admin(&database_url, email, password).await?;
                 },
                 _ => {
-                    let (email, password) = commands::admin::prompt_admin_credentials().await?;
-                    commands::admin::create_admin(&database_url, email, password).await?;
+                    // Check environment variables if command line args not provided
+                    let env_email = std::env::var("ADMIN_EMAIL").ok();
+                    let env_password = std::env::var("ADMIN_PASSWORD").ok();
+                    
+                    match (env_email, env_password) {
+                        (Some(email), Some(password)) => {
+                            println!("{}", "Using admin credentials from environment variables".yellow());
+                            commands::admin::create_admin(&database_url, email, password).await?;
+                        },
+                        _ => {
+                            println!("{}", "No credentials provided via arguments or environment variables".yellow());
+                            println!("{}", "Please enter admin credentials:".cyan());
+                            let (email, password) = commands::admin::prompt_admin_credentials().await?;
+                            commands::admin::create_admin(&database_url, email, password).await?;
+                        }
+                    }
                 }
             }
         },
