@@ -160,6 +160,59 @@ pub async fn me(user: UserContext) -> impl Responder {
     HttpResponse::Ok().json(user)
 }
 
+/// Check if an admin user exists, and create one from environment variables if not
+/// 
+/// This is meant to be called programmatically, not interactively.
+/// It will only create an admin user if both ADMIN_EMAIL and ADMIN_PASSWORD
+/// environment variables are set.
+/// 
+/// Returns true if an admin exists (either previously or newly created),
+/// false otherwise.
+pub async fn ensure_admin_exists(pool: &AnyPool) -> Result<bool, sqlx::Error> {
+    // Check if any admin exists
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
+        .fetch_one(pool)
+        .await?;
+    
+    let admin_exists = count > 0;
+    
+    if admin_exists {
+        return Ok(true);
+    }
+    
+    // Try to get admin credentials from environment
+    let admin_email = match std::env::var("ADMIN_EMAIL") {
+        Ok(email) if !email.is_empty() => email,
+        _ => return Ok(false), // Don't create admin if no email specified
+    };
+    
+    let admin_password = match std::env::var("ADMIN_PASSWORD") {
+        Ok(password) if !password.is_empty() => password,
+        _ => return Ok(false), // Don't create admin if no password specified
+    };
+    
+    // Create the admin user
+    let password_hash = match hash(&admin_password, 12) {
+        Ok(hash) => hash,
+        Err(_) => return Ok(false),
+    };
+    
+    let result = sqlx::query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
+        .bind(&admin_email)
+        .bind(password_hash)
+        .bind("admin")
+        .execute(pool)
+        .await;
+    
+    match result {
+        Ok(_) => {
+            println!("Created admin user with email: {}", admin_email);
+            Ok(true)
+        },
+        Err(_) => Ok(false),
+    }
+}
+
 pub fn auth_routes(cfg: &mut web::ServiceConfig, db: AnyPool) {
     let db = web::Data::new(db);
     cfg.app_data(db.clone());
