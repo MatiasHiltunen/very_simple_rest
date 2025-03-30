@@ -5,7 +5,8 @@ use std::io::Write;
 use std::path::Path;
 use reqwest;
 
-const TEMPLATE_DIR_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest/tree/demo/examples/template";
+// Base URL for raw content (not the HTML view)
+const TEMPLATE_DIR_URL: &str = "https://raw.githubusercontent.com/MatiasHiltunen/very_simple_rest/demo/examples/template";
 const TEMPLATE_MAIN_RS: &str = "src/main.rs";
 const TEMPLATE_CARGO_TOML: &str = "Cargo.toml";
 const TEMPLATE_ENV_EXAMPLE: &str = ".env.example";
@@ -42,6 +43,8 @@ pub fn create_project(
     
     // Download and process template files
     let client = reqwest::blocking::Client::new();
+    
+    println!("Downloading template files from GitHub...");
     
     // Main source file
     fetch_and_process_file(
@@ -124,7 +127,7 @@ fn fetch_and_process_file(
     destination: &Path,
     replacements: &[(&str, &str)],
 ) -> Result<()> {
-    println!("Fetching template file: {}", url);
+    println!("Fetching: {}", url);
     
     // Fetch file content from URL
     let response = client.get(url)
