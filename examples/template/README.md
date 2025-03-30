@@ -1,77 +1,110 @@
-# {{project_name}}
+# REST Macro Demo
 
-{{description}}
+This is a demonstration of the REST Macro library, showing how to easily create RESTful APIs with CRUD operations, authentication, and role-based access control.
 
-This project was generated using [very_simple_rest](https://github.com/MatiasHiltunen/very_simple_rest), a lightweight framework for building REST APIs with Rust.
+## Features Demonstrated
 
-## Features
+- **REST API Generation**: Automatically generate CRUD endpoints from Rust structs
+- **Authentication**: JWT-based authentication with role-based access control
+- **Relationships**: Foreign key relationships and nested routes
+- **Frontend Client**: A simple web client to interact with the API
 
-- RESTful API with automatic CRUD endpoints
-- JWT authentication and role-based access control
-- Database integration with SQLite (configurable for PostgreSQL/MySQL)
-- Structured logging
-- Environment-based configuration
+## Running the Demo
 
-## Getting Started
+```bash
+# Start the server
+cargo run
 
-### Prerequisites
+# The server will be available at:
+# http://localhost:8080
+```
 
-- Rust (latest stable)
-- SQLite (or your preferred database)
+## JWT Secret Configuration
 
-### Installation
+The library supports the following methods for setting the JWT secret (in order of precedence):
 
-1. Clone the repository
-   ```bash
-   git clone {{repository_url}}
-   cd {{project_name}}
-   ```
+1. Environment variable: `JWT_SECRET=your_secret_here`
+2. `.env` file in your project root: `JWT_SECRET=your_secret_here`
+3. If no secret is provided, a random secret is generated at startup (not recommended for production)
 
-2. Set up environment variables
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings
-   ```
+For the demo, the random secret is fine, but for production use, you should set a persistent secret.
 
-3. Run the application
-   ```bash
-   cargo run
-   ```
+## Project Structure
 
-4. Visit the API at `http://localhost:8080/api`
+- `src/main.rs` - The main server implementation
+- `public/` - Frontend client files
+  - `index.html` - The HTML interface
+  - `app.js` - JavaScript code for interacting with the API
+  - `README.md` - Documentation for the frontend client
 
-## API Endpoints
+## API Models
 
-### Authentication
+The demo implements the following models:
 
-- `POST /api/auth/register` - Create a new user account
-- `POST /api/auth/login` - Get a JWT token
-- `GET /api/auth/me` - Get current user info
+### User
 
-### Users (Admin Only)
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[rest_api(table = "user", id = "id", db = "sqlite")]
+#[require_role(read = "admin", update = "admin", delete = "admin")]
+pub struct User {
+    pub id: Option<i64>,
+    pub email: String,
+    pub password_hash: String,
+    pub role: String,
+}
+```
 
-- `GET /api/user` - List all users
-- `GET /api/user/{id}` - Get user by ID
-- `POST /api/user` - Create a new user
-- `PUT /api/user/{id}` - Update user
-- `DELETE /api/user/{id}` - Delete user
+### Post
 
-### Posts (User Role Required)
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[rest_api(table = "post", id = "id", db = "sqlite")]
+#[require_role(read = "user", update = "user", delete = "user")]
+pub struct Post {
+    pub id: Option<i64>,
+    pub title: String,
+    pub content: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+```
 
-- `GET /api/post` - List all posts
-- `GET /api/post/{id}` - Get post by ID
-- `POST /api/post` - Create a new post
-- `PUT /api/post/{id}` - Update post
-- `DELETE /api/post/{id}` - Delete post
+### Comment
 
-## Configuration
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+#[rest_api(table = "comment", id = "id", db = "sqlite")]
+#[require_role(read = "user", update = "user", delete = "user")]
+pub struct Comment {
+    pub id: Option<i64>,
+    pub title: String,
+    pub content: String,
+    #[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
+    pub post_id: i64,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+```
 
-All configuration is done through environment variables. See `.env.example` for available options.
+## Testing the API
 
-## License
+Open the web client at http://localhost:8080 to interact with the API through a user interface, or use curl to make direct API calls:
 
-{{license}}
+```bash
+# Register a new user
+curl -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "password123"}'
 
-## Author
+# Login to get a token
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "password123"}'
 
-{{author}} 
+# Create a post (with token)
+curl -X POST http://localhost:8080/api/post \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"title": "My First Post", "content": "Hello, world!"}'
+```

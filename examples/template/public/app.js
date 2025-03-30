@@ -1,243 +1,254 @@
-// API Base URL
-const API_BASE_URL = '/api';
-
-// Store authentication token
-let authToken = localStorage.getItem('token') || '';
+// API client for the REST Macro Demo
+const API_URL = 'http://localhost:8080/api';
+const ROOT_URL = 'http://localhost:8080';
+let authToken = localStorage.getItem('authToken') || '';
+let userRole = '';
 
 // DOM Elements
-const statusElement = document.getElementById('status');
-const responsesElement = document.getElementById('responses');
+const authOutput = document.getElementById('authOutput');
+const postsOutput = document.getElementById('postsOutput');
+const commentsOutput = document.getElementById('commentsOutput');
+const tokenDisplay = document.getElementById('tokenDisplay');
 
-// Update UI based on authentication status
-function updateAuthStatus() {
-    if (authToken) {
-        statusElement.textContent = 'Authenticated';
-        statusElement.className = 'authenticated';
-        document.querySelectorAll('.requires-auth').forEach(el => {
-            el.classList.remove('disabled');
-        });
-    } else {
-        statusElement.textContent = 'Not Authenticated';
-        statusElement.className = 'not-authenticated';
-        document.querySelectorAll('.requires-auth').forEach(el => {
-            el.classList.add('disabled');
-        });
-    }
+// Show token if it exists
+if (authToken) {
+    tokenDisplay.innerHTML = `<span class="success">Token loaded from storage!</span>`;
+    // Get user info
+    fetchUserInfo();
 }
 
-// Display API responses
-function displayResponse(response, isError = false) {
-    const responseDiv = document.createElement('div');
-    responseDiv.className = isError ? 'response error' : 'response success';
-    
-    // Create timestamp
-    const timestamp = document.createElement('div');
-    timestamp.className = 'timestamp';
-    timestamp.textContent = new Date().toLocaleTimeString();
-    responseDiv.appendChild(timestamp);
-    
-    // Create content
-    const content = document.createElement('pre');
-    content.textContent = typeof response === 'string' 
-        ? response 
-        : JSON.stringify(response, null, 2);
-    responseDiv.appendChild(content);
-    
-    // Add to responses container
-    responsesElement.prepend(responseDiv);
-    
-    // Limit number of responses
-    if (responsesElement.children.length > 5) {
-        responsesElement.removeChild(responsesElement.lastChild);
-    }
+// Event Listeners
+document.getElementById('registerBtn').addEventListener('click', register);
+document.getElementById('loginBtn').addEventListener('click', login);
+document.getElementById('createPostBtn').addEventListener('click', createPost);
+document.getElementById('getPostsBtn').addEventListener('click', getPosts);
+document.getElementById('createCommentBtn').addEventListener('click', createComment);
+document.getElementById('getCommentsBtn').addEventListener('click', getComments);
+document.getElementById('getPostCommentsBtn').addEventListener('click', getPostComments);
+
+// Helper functions
+function displayError(outputElement, message) {
+    outputElement.innerHTML = `<span class="error">Error: ${message}</span>`;
 }
 
-// API request helper function
-async function apiRequest(endpoint, method = 'GET', data = null) {
-    const headers = {
-        'Content-Type': 'application/json',
-    };
-    
-    if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
-    }
-    
+function displaySuccess(outputElement, message) {
+    outputElement.innerHTML = `<span class="success">${message}</span>`;
+}
+
+function displayJSON(outputElement, data) {
+    outputElement.innerHTML = JSON.stringify(data, null, 2);
+}
+
+async function fetchJson(url, options = {}) {
     try {
-        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-            method,
-            headers,
-            body: data ? JSON.stringify(data) : null,
-        });
+        const response = await fetch(url, options);
+        const contentType = response.headers.get('content-type');
         
-        const responseData = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(responseData.message || `HTTP error! Status: ${response.status}`);
+        if (response.status >= 400) {
+            if (contentType && contentType.includes('application/json')) {
+                const errorData = await response.json();
+                throw new Error(errorData.message || 'API Error');
+            } else {
+                const errorText = await response.text();
+                throw new Error(errorText || `HTTP Error ${response.status}`);
+            }
         }
         
-        displayResponse(responseData);
-        return responseData;
+        if (contentType && contentType.includes('application/json')) {
+            return await response.json();
+        }
+        
+        return await response.text();
     } catch (error) {
-        displayResponse(error.message, true);
         throw error;
     }
 }
 
-// Register a new user
+// Auth functions
 async function register() {
-    const email = document.getElementById('register-email').value;
-    const password = document.getElementById('register-password').value;
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
     
     if (!email || !password) {
-        displayResponse('Email and password are required', true);
+        displayError(authOutput, 'Email and password are required');
         return;
     }
     
     try {
-        const response = await apiRequest('/auth/register', 'POST', { 
-            email, 
-            password 
+        const data = { email, password };
+        const response = await fetchJson(`${API_URL}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
         });
-        authToken = response.token;
-        localStorage.setItem('token', authToken);
-        updateAuthStatus();
+        
+        displaySuccess(authOutput, 'Registration successful! Please login.');
     } catch (error) {
-        console.error('Registration failed:', error);
+        displayError(authOutput, error.message);
     }
 }
 
-// Login user
 async function login() {
-    const email = document.getElementById('login-email').value;
-    const password = document.getElementById('login-password').value;
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
     
     if (!email || !password) {
-        displayResponse('Email and password are required', true);
+        displayError(authOutput, 'Email and password are required');
         return;
     }
     
     try {
-        const response = await apiRequest('/auth/login', 'POST', { 
-            email, 
-            password 
+        const data = { email, password };
+        const response = await fetchJson(`${API_URL}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
         });
+        
         authToken = response.token;
-        localStorage.setItem('token', authToken);
-        updateAuthStatus();
+        localStorage.setItem('authToken', authToken);
+        displaySuccess(authOutput, 'Login successful!');
+        tokenDisplay.innerHTML = `<span class="success">Auth token received and stored!</span>`;
+        
+        // Get user info after login
+        fetchUserInfo();
     } catch (error) {
-        console.error('Login failed:', error);
+        displayError(authOutput, error.message);
     }
 }
 
-// Get current user
-async function getCurrentUser() {
+async function fetchUserInfo() {
     if (!authToken) {
-        displayResponse('Authentication required', true);
+        displayError(authOutput, 'Not logged in');
         return;
     }
     
     try {
-        await apiRequest('/auth/me');
+        const userData = await fetchJson(`${API_URL}/auth/me`, {
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        
+        userRole = userData.roles[0];
+        authOutput.innerHTML = `Logged in as: ${userRole} role`;
     } catch (error) {
-        console.error('Failed to get user:', error);
-        // If authentication fails, clear token
-        if (error.message.includes('401')) {
-            authToken = '';
-            localStorage.removeItem('token');
-            updateAuthStatus();
-        }
+        displayError(authOutput, 'Failed to get user info: ' + error.message);
     }
 }
 
-// Logout user
-function logout() {
-    authToken = '';
-    localStorage.removeItem('token');
-    updateAuthStatus();
-    displayResponse('Logged out successfully');
-}
-
-// Create a new post
+// Post functions
 async function createPost() {
     if (!authToken) {
-        displayResponse('Authentication required', true);
+        displayError(postsOutput, 'You must be logged in to create posts');
         return;
     }
     
-    const title = document.getElementById('post-title').value;
-    const content = document.getElementById('post-content').value;
+    const title = document.getElementById('postTitle').value;
+    const content = document.getElementById('postContent').value;
     
     if (!title || !content) {
-        displayResponse('Title and content are required', true);
+        displayError(postsOutput, 'Title and content are required');
         return;
     }
     
     try {
-        await apiRequest('/post', 'POST', { title, content });
-        // Clear form
-        document.getElementById('post-title').value = '';
-        document.getElementById('post-content').value = '';
+        const data = { title, content };
+        const response = await fetchJson(`${API_URL}/post`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(postsOutput, 'Post created successfully!');
+        document.getElementById('postTitle').value = '';
+        document.getElementById('postContent').value = '';
+        
+        // Refresh posts list
+        getPosts();
     } catch (error) {
-        console.error('Failed to create post:', error);
+        displayError(postsOutput, error.message);
     }
 }
 
-// Get all posts
 async function getPosts() {
     try {
-        await apiRequest('/post');
+        const posts = await fetchJson(`${API_URL}/post`, {
+            headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+        });
+        
+        displayJSON(postsOutput, posts);
     } catch (error) {
-        console.error('Failed to get posts:', error);
+        displayError(postsOutput, error.message);
     }
 }
 
-// Get post by ID
-async function getPostById() {
-    const id = document.getElementById('post-id').value;
+// Comment functions
+async function createComment() {
+    if (!authToken) {
+        displayError(commentsOutput, 'You must be logged in to create comments');
+        return;
+    }
     
-    if (!id) {
-        displayResponse('Post ID is required', true);
+    const postId = document.getElementById('postId').value;
+    const title = document.getElementById('commentTitle').value;
+    const content = document.getElementById('commentContent').value;
+    
+    if (!postId || !title || !content) {
+        displayError(commentsOutput, 'Post ID, title and content are required');
         return;
     }
     
     try {
-        await apiRequest(`/post/${id}`);
+        const data = { post_id: parseInt(postId), title, content };
+        const response = await fetchJson(`${API_URL}/comment`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(commentsOutput, 'Comment created successfully!');
+        document.getElementById('commentTitle').value = '';
+        document.getElementById('commentContent').value = '';
+        
+        // Refresh comments list
+        getComments();
     } catch (error) {
-        console.error('Failed to get post:', error);
+        displayError(commentsOutput, error.message);
     }
 }
 
-// Initialize app
-function init() {
-    // Set up event listeners
-    document.getElementById('register-form').addEventListener('submit', (e) => {
-        e.preventDefault();
-        register();
-    });
-    
-    document.getElementById('login-form').addEventListener('submit', (e) => {
-        e.preventDefault();
-        login();
-    });
-    
-    document.getElementById('get-user-btn').addEventListener('click', getCurrentUser);
-    document.getElementById('logout-btn').addEventListener('click', logout);
-    
-    document.getElementById('create-post-form').addEventListener('submit', (e) => {
-        e.preventDefault();
-        createPost();
-    });
-    
-    document.getElementById('get-posts-btn').addEventListener('click', getPosts);
-    
-    document.getElementById('get-post-form').addEventListener('submit', (e) => {
-        e.preventDefault();
-        getPostById();
-    });
-    
-    // Initialize authentication status
-    updateAuthStatus();
+async function getComments() {
+    try {
+        const comments = await fetchJson(`${API_URL}/comment`, {
+            headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+        });
+        
+        displayJSON(commentsOutput, comments);
+    } catch (error) {
+        displayError(commentsOutput, error.message);
+    }
 }
 
-// Run initialization when DOM is loaded
-document.addEventListener('DOMContentLoaded', init); 
+async function getPostComments() {
+    const postId = document.getElementById('postId').value;
+    
+    if (!postId) {
+        displayError(commentsOutput, 'Post ID is required');
+        return;
+    }
+    
+    try {
+        const comments = await fetchJson(`${API_URL}/post/${postId}/comment`, {
+            headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+        });
+        
+        displayJSON(commentsOutput, comments);
+    } catch (error) {
+        displayError(commentsOutput, error.message);
+    }
+} 
