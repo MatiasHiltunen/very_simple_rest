@@ -9,7 +9,6 @@ Cargo.lock
 
 # Environment files
 .env
-.env.*
 
 # IDE files
 .idea/
