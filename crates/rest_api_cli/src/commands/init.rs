@@ -1,10 +1,17 @@
 use crate::error::Result;
 use colored::Colorize;
-use std::fs::{self, File, create_dir_all};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::fs::{File, create_dir_all};
+use std::io::Write;
+use std::path::Path;
+use reqwest;
 
-const TEMPLATE_DIR: &str = "examples/template";
+const TEMPLATE_DIR_URL: &str = "https://raw.githubusercontent.com/MatiasHiltunen/very_simple_rest/refs/heads/demo/examples/demo";
+const TEMPLATE_MAIN_RS: &str = "src/main.rs";
+const TEMPLATE_CARGO_TOML: &str = "Cargo.toml";
+const TEMPLATE_ENV_EXAMPLE: &str = ".env.example";
+const TEMPLATE_README_MD: &str = "README.md";
+const TEMPLATE_PUBLIC_INDEX: &str = "public/index.html";
+const TEMPLATE_PUBLIC_APP_JS: &str = "public/app.js";
 
 /// Create a new project from the template
 pub fn create_project(
@@ -27,25 +34,32 @@ pub fn create_project(
     create_dir_all(&project_dir)?;
     println!("{} {}", "Created project directory:".green(), project_dir.display());
     
-    // Clone repository if provided, otherwise copy template
-    let template_dir = PathBuf::from(TEMPLATE_DIR);
-    if !template_dir.exists() {
-        return Err(crate::error::Error::Config(format!(
-            "Template directory not found: {}",
-            template_dir.display()
-        )));
-    }
-    
     // Create src directory
     create_dir_all(project_dir.join("src"))?;
     
     // Create public directory
     create_dir_all(project_dir.join("public"))?;
     
-    // Copy and process template files
-    copy_and_process_dir(
-        &template_dir,
-        &project_dir,
+    // Download and process template files
+    let client = reqwest::blocking::Client::new();
+    
+    // Main source file
+    fetch_and_process_file(
+        &client,
+        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_MAIN_RS),
+        &project_dir.join(TEMPLATE_MAIN_RS),
+        &[
+            ("{{project_name}}", name),
+            ("{{description}}", &description),
+            ("{{author}}", &author),
+        ],
+    )?;
+    
+    // Cargo.toml
+    fetch_and_process_file(
+        &client,
+        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_CARGO_TOML),
+        &project_dir.join(TEMPLATE_CARGO_TOML),
         &[
             ("{{project_name}}", name),
             ("{{description}}", &description),
@@ -53,6 +67,45 @@ pub fn create_project(
             ("{{license}}", license),
             ("{{repository_url}}", repository.as_deref().unwrap_or("")),
         ],
+    )?;
+    
+    // .env.example
+    fetch_and_process_file(
+        &client,
+        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_ENV_EXAMPLE),
+        &project_dir.join(TEMPLATE_ENV_EXAMPLE),
+        &[],
+    )?;
+    
+    // README.md
+    fetch_and_process_file(
+        &client,
+        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_README_MD),
+        &project_dir.join(TEMPLATE_README_MD),
+        &[
+            ("{{project_name}}", name),
+            ("{{description}}", &description),
+            ("{{author}}", &author),
+            ("{{license}}", license),
+        ],
+    )?;
+    
+    // public/index.html
+    fetch_and_process_file(
+        &client,
+        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_PUBLIC_INDEX),
+        &project_dir.join(TEMPLATE_PUBLIC_INDEX),
+        &[
+            ("{{project_name}}", name),
+        ],
+    )?;
+    
+    // public/app.js
+    fetch_and_process_file(
+        &client,
+        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_PUBLIC_APP_JS),
+        &project_dir.join(TEMPLATE_PUBLIC_APP_JS),
+        &[],
     )?;
     
     println!("\n{} {}", "Project created successfully at:".green().bold(), project_dir.display());
@@ -64,55 +117,46 @@ pub fn create_project(
     Ok(())
 }
 
-/// Copy directory recursively and process template files
-fn copy_and_process_dir(
-    source: &Path,
+/// Fetch a file from URL and process its content
+fn fetch_and_process_file(
+    client: &reqwest::blocking::Client,
+    url: &str,
     destination: &Path,
     replacements: &[(&str, &str)],
 ) -> Result<()> {
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let file_name = source_path.file_name().unwrap().to_string_lossy().to_string();
-        
-        // Skip .git directory and any hidden files
-        if file_name.starts_with('.') {
-            continue;
-        }
-        
-        let destination_path = destination.join(&file_name);
-        
-        if source_path.is_dir() {
-            if !destination_path.exists() {
-                create_dir_all(&destination_path)?;
-            }
-            copy_and_process_dir(&source_path, &destination_path, replacements)?;
-        } else {
-            process_and_copy_file(&source_path, &destination_path, replacements)?;
-            println!("{} {}", "Created:".green(), destination_path.display());
-        }
+    println!("Fetching template file: {}", url);
+    
+    // Fetch file content from URL
+    let response = client.get(url)
+        .send()
+        .map_err(|e| crate::error::Error::Config(format!("Failed to fetch template file: {}", e)))?;
+    
+    if !response.status().is_success() {
+        return Err(crate::error::Error::Config(format!(
+            "Failed to fetch template file: HTTP status {}", 
+            response.status()
+        )));
     }
     
-    Ok(())
-}
-
-/// Process and copy a file, replacing template placeholders
-fn process_and_copy_file(
-    source: &Path,
-    destination: &Path,
-    replacements: &[(&str, &str)],
-) -> Result<()> {
-    let mut source_file = File::open(source)?;
-    let mut content = String::new();
-    source_file.read_to_string(&mut content)?;
+    let content = response.text()
+        .map_err(|e| crate::error::Error::Config(format!("Failed to read template content: {}", e)))?;
     
-    // Replace placeholders
+    // Create parent directories if needed
+    if let Some(parent) = destination.parent() {
+        create_dir_all(parent)?;
+    }
+    
+    // Process content with replacements
+    let mut processed_content = content;
     for (placeholder, value) in replacements {
-        content = content.replace(placeholder, value);
+        processed_content = processed_content.replace(placeholder, value);
     }
     
-    let mut destination_file = File::create(destination)?;
-    destination_file.write_all(content.as_bytes())?;
+    // Write to destination file
+    let mut file = File::create(destination)?;
+    file.write_all(processed_content.as_bytes())?;
+    
+    println!("{} {}", "Created:".green(), destination.display());
     
     Ok(())
 } 
