@@ -1,27 +1,17 @@
 [package]
-name = "demo"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+name = "template"
+version = "0.1.0"
 
 [dependencies]
-actix-web = { workspace = true }
-serde = { workspace = true }
-sqlx = { workspace = true }
-serde_json = { workspace = true }
-jsonwebtoken = { workspace = true }
-bcrypt = { workspace = true }
-chrono = { workspace = true }
-very_simple_rest = { path = "../.." }
-log = { workspace = true }
-env_logger = { workspace = true }
-actix-cors = { workspace = true }
-actix-files = { workspace = true }
-
-# Explicitly defining the binary target to avoid confusion
-[[bin]]
-name = "demo"
-path = "src/main.rs"
-
-
+actix-web = "4"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8.3", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros", "chrono"] }
+serde_json = "1.0"
+jsonwebtoken = "9"
+bcrypt = "0.17"
+chrono = "0.4"
+very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git" }
+log = "0.4"
+env_logger = "0.11"
+actix-cors = "0.7"
+actix-files = "0.6"
