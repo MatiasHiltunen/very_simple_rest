@@ -7,8 +7,15 @@ let userRole = '';
 // DOM Elements
 const authOutput = document.getElementById('authOutput');
 const postsOutput = document.getElementById('postsOutput');
+const postUpdatedOutput = document.getElementById('postUpdatedOutput');
 const commentsOutput = document.getElementById('commentsOutput');
+const commentUpdatedOutput = document.getElementById('commentUpdatedOutput');
 const tokenDisplay = document.getElementById('tokenDisplay');
+
+const postUpdateTitle = document.getElementById('postUpdateTitle');
+const postUpdateContent = document.getElementById('postUpdateContent');
+const commentUpdateTitle = document.getElementById('commentUpdateTitle');
+const commentUpdateContent = document.getElementById('commentUpdateContent');
 
 // Show token if it exists
 if (authToken) {
@@ -21,10 +28,19 @@ if (authToken) {
 document.getElementById('registerBtn').addEventListener('click', register);
 document.getElementById('loginBtn').addEventListener('click', login);
 document.getElementById('createPostBtn').addEventListener('click', createPost);
+document.getElementById('deletePostBtn').addEventListener('click', deletePost);
 document.getElementById('getPostsBtn').addEventListener('click', getPosts);
 document.getElementById('createCommentBtn').addEventListener('click', createComment);
+document.getElementById('deleteCommentBtn').addEventListener('click', deleteComment);
 document.getElementById('getCommentsBtn').addEventListener('click', getComments);
 document.getElementById('getPostCommentsBtn').addEventListener('click', getPostComments);
+
+document.getElementById('loadPostForUpdateBtn').addEventListener('click', loadPost);
+document.getElementById('updatePostBtn').addEventListener('click', updatePost);
+document.getElementById('patchPostBtn').addEventListener('click', patchPost);
+document.getElementById('loadCommentForUpdateBtn').addEventListener('click', loadComment);
+document.getElementById('updateCommentBtn').addEventListener('click', updateComment);
+document.getElementById('patchCommentBtn').addEventListener('click', patchComment);
 
 // Helper functions
 function displayError(outputElement, message) {
@@ -172,6 +188,43 @@ async function createPost() {
     }
 }
 
+async function deletePost() {
+    console.log("Attempting to delete post...");
+    if (!authToken) {
+        displayError(postsOutput, 'You must be logged in to delete posts');
+        console.error('Delete Post Error: Not authenticated.');
+        return;
+    }
+    
+    const id = document.getElementById('postIdToDelete').value;
+    
+    if (!id) {
+        displayError(postsOutput, 'Id is required');
+        console.error('Delete Post Error: No ID specified.');
+        return;
+    }
+    
+    try {
+        console.log(`Sending DELETE request for post ID: ${id}`);
+        const response = await fetchJson(`${API_URL}/post/${id}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            },
+        });
+        
+        displaySuccess(postsOutput, 'Post deleted successfully!');
+        console.log(`Post ID: ${id} deleted successfully.`);
+        document.getElementById('postIdToDelete').value = '';
+        
+        // Refresh posts list
+        getPosts();
+    } catch (error) {
+        displayError(postsOutput, error.message);
+        console.error('Delete Post Error:', error.message);
+    }
+}
+
 async function getPosts() {
     try {
         const posts = await fetchJson(`${API_URL}/post`, {
@@ -181,6 +234,82 @@ async function getPosts() {
         displayJSON(postsOutput, posts);
     } catch (error) {
         displayError(postsOutput, error.message);
+    }
+}
+
+async function loadPost() {
+    const id = document.getElementById('postToUpdateId').value;
+    if (!id) return;
+
+    const post = await fetchJson(`${API_URL}/post/${id}`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+    });
+
+    document.getElementById('postUpdateTitle').value = post.title;
+    document.getElementById('postUpdateContent').value = post.content;
+}
+
+async function updatePost() {
+    if (!authToken) {
+        displayError(postUpdatedOutput, 'You must be logged in to update posts');
+        return;
+    }
+    
+    const id = Number(document.getElementById('postToUpdateId').value);
+    const title = document.getElementById('postUpdateTitle').value;
+    const content = document.getElementById('postUpdateContent').value;
+    
+    if (!title || !content) {
+        displayError(postUpdatedOutput, 'Title and content are required');
+        return;
+    }
+    
+    try {
+        const data = { title, content };
+        const response = await fetchJson(`${API_URL}/post/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(postUpdatedOutput, 'Post edited successfully!');
+        
+        // Refresh posts list
+        getPosts();
+    } catch (error) {
+        displayError(postUpdatedOutput, error.message);
+    }
+}
+
+async function patchPost() {
+    if (!authToken) {
+        displayError(postUpdatedOutput, 'You must be logged in to update posts');
+        return;
+    }
+
+    const id = Number(document.getElementById('postToUpdateId').value);
+    const content = document.getElementById('postUpdateContent').value;
+    
+    try {
+        const data = { content };
+        const response = await fetchJson(`${API_URL}/post/${id}`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(postUpdatedOutput, 'Post edited successfully!');
+        
+        // Refresh posts list
+        getPosts();
+    } catch (error) {
+        displayError(postUpdatedOutput, error.message);
     }
 }
 
@@ -222,6 +351,37 @@ async function createComment() {
     }
 }
 
+async function deleteComment() {
+    if (!authToken) {
+        displayError(commentsOutput, 'You must be logged in to delete comments');
+        return;
+    }
+
+    const id = document.getElementById('commentToDeleteId').value;
+    
+    if (!id) {
+        displayError(commentsOutput, 'Comment ID is required');
+        return;
+    }
+
+    try {
+        await fetchJson(`${API_URL}/comment/${id}`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        });
+
+        displaySuccess(commentsOutput, 'Comment deleted successfully!');
+        document.getElementById('commentToDeleteId').value = '';
+
+        // Refresh comments list
+        getComments();
+    } catch (error) {
+        displayError(commentsOutput, error.message);
+    }
+}
+
 async function getComments() {
     try {
         const comments = await fetchJson(`${API_URL}/comment`, {
@@ -252,3 +412,85 @@ async function getPostComments() {
         displayError(commentsOutput, error.message);
     }
 } 
+
+async function loadComment() {
+    const id = document.getElementById('commentToUpdateId').value;
+
+    if (!id) {
+        displayError(commentUpdatedOutput, 'Comment ID is required');
+        return;
+    }
+
+    const comment = await fetchJson(`${API_URL}/comment/${id}`, {
+        headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    });
+
+    document.getElementById('postIdToUpdateComment').value = comment.post_id;
+    document.getElementById('commentUpdateTitle').value = comment.title;
+    document.getElementById('commentUpdateContent').value = comment.content;
+}
+
+async function updateComment() {
+    if (!authToken) {
+        displayError(commentUpdatedOutput, 'You must be logged in to create posts');
+        return;
+    }
+    
+    const post_id = Number(document.getElementById('postIdToUpdateComment').value);
+    const id = Number(document.getElementById('commentToUpdateId').value);
+    const title = document.getElementById('commentUpdateTitle').value;
+    const content = document.getElementById('commentUpdateContent').value;
+    
+    if (!title || !content || !post_id) {
+        displayError(commentUpdatedOutput, 'Title, content, and post id are required');
+        return;
+    }
+    
+    try {
+        const data = { title, content, post_id };
+        const response = await fetchJson(`${API_URL}/comment/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(commentUpdatedOutput, 'Comment edited successfully!');
+        
+        // Refresh comments list
+        getComments();
+    } catch (error) {
+        displayError(commentUpdatedOutput, error.message);
+    }
+}
+
+async function patchComment() {
+    if (!authToken) {
+        displayError(commentUpdatedOutput, 'You must be logged in to create posts');
+        return;
+    }
+
+    const id = Number(document.getElementById('commentToUpdateId').value);
+    const content = document.getElementById('commentUpdateContent').value;
+    
+    try {
+        const data = { content };
+        const response = await fetchJson(`${API_URL}/comment/${id}`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(commentUpdatedOutput, 'Comment edited successfully!');
+        
+        // Refresh comments list
+        getComments();
+    } catch (error) {
+        displayError(commentUpdatedOutput, error.message);
+    }
+}

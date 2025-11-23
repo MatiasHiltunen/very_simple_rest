@@ -91,6 +91,8 @@
         <div id="tokenDisplay"></div>
     </div>
 
+    <h1>CRUD for Posts and Comments</h1>
+
     <div class="container">
         <div class="panel">
             <h2>Posts</h2>
@@ -105,6 +107,36 @@
             <button id="createPostBtn">Create Post</button>
             <button id="getPostsBtn">Get All Posts</button>
             <div id="postsOutput" class="output"></div>
+
+            <h2>Update Post</h2>
+            <div class="form-group">
+                <label for="postToUpdateId">Post ID:</label>
+                <input type="text" id="postToUpdateId">
+            </div>
+
+            <div class="form-group">
+                <label for="postUpdateTitle">Title:</label>
+                <input type="text" id="postUpdateTitle">
+            </div>
+
+            <div class="form-group">
+                <label for="postUpdateContent">Content:</label>
+                <textarea id="postUpdateContent" rows="4"></textarea>
+            </div>
+
+            <button id="loadPostForUpdateBtn">Load Post</button>
+            <button id="updatePostBtn">Update Post</button>
+            <div id="postUpdatedOutput" class="output"></div>
+
+            <h2>Patch Post (Only content can be edited)</h2>
+            <button id="patchPostBtn">Patch Post</button>
+
+            <h2>Delete Post</h2>
+            <div class="form-group">
+                <label for="postIdToDelete">ID:</label>
+                <input type="text" id="postIdToDelete" placeholder="Post ID">
+            </div>
+            <button id="deletePostBtn">Delete Post</button>
         </div>
         
         <div class="panel">
@@ -125,9 +157,46 @@
             <button id="getCommentsBtn">Get All Comments</button>
             <button id="getPostCommentsBtn">Get Comments for Post</button>
             <div id="commentsOutput" class="output"></div>
+
+            <h2>Update Comment</h2>
+            <div class="form-group">
+                <label for="postIdToUpdateComment">Post ID:</label>
+                <input type="text" id="postIdToUpdateComment">
+            </div>
+
+            <div class="form-group">
+                <label for="commentToUpdateId">Comment ID:</label>
+                <input type="text" id="commentToUpdateId">
+            </div>
+
+            <div class="form-group">
+                <label for="commentUpdateTitle">Title:</label>
+                <input type="text" id="commentUpdateTitle">
+            </div>
+
+            <div class="form-group">
+                <label for="commentUpdateContent">Content:</label>
+                <textarea id="commentUpdateContent" rows="4"></textarea>
+            </div>
+
+            <button id="loadCommentForUpdateBtn">Load Comment</button>
+            <button id="updateCommentBtn">Update Comment</button>
+            <div id="commentUpdatedOutput" class="output"></div>
+
+            <h2>Patch Comment (Only content can be edited)</h2>
+            <button id="patchCommentBtn">Patch Comment</button>
+
+            <div class="panel">
+            <h2>Delete Comment</h2>
+            <div class="form-group">
+                <label for="commentToDeleteId">ID:</label>
+                <input type="text" id="commentToDeleteId" placeholder="Comment ID">
+            </div>
+            <button id="deleteCommentBtn">Delete Comment</button>
+        </div>
         </div>
     </div>
-    
+
     <script src="app.js"></script>
 </body>
 </html> 

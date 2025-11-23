@@ -2,7 +2,7 @@ use very_simple_rest::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "post", id = "id", db = "sqlite")]
-#[require_role(read = "user", update = "user", delete = "user")]
+#[require_role(read = "user", update = "user", patch = "user", delete = "user")]
 pub struct Post {
     pub id: Option<i64>,
     pub title: String,
@@ -13,7 +13,7 @@ pub struct Post {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "comment", id = "id", db = "sqlite")]
-#[require_role(read = "user", update = "user", delete = "user")]
+#[require_role(read = "user", update = "user", patch = "user", delete = "user")]
 pub struct Comment {
     pub id: Option<i64>,
     pub title: String,
@@ -58,6 +58,7 @@ fn log_available_endpoints() {
     info!("  GET    /api/post/{id}     - Get post by ID");
     info!("  POST   /api/post          - Create a new post");
     info!("  PUT    /api/post/{id}     - Update post");
+    info!("  PATCH  /api/post/{id}     - Update post");
     info!("  DELETE /api/post/{id}     - Delete post");
 
     // Comment endpoints
@@ -66,6 +67,7 @@ fn log_available_endpoints() {
     info!("  GET    /api/comment/{id}    - Get comment by ID");
     info!("  POST   /api/comment         - Create a new comment");
     info!("  PUT    /api/comment/{id}    - Update comment");
+    info!("  PATCH  /api/comment/{id}    - Update comment");
     info!("  DELETE /api/comment/{id}    - Delete comment");
     info!("  GET    /api/post/{id}/comment - Get comments for a post");
 
