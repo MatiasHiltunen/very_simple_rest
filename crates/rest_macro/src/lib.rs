@@ -172,6 +172,33 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     }
     // let insert_fields: Vec<String> = field_names.iter().cloned().filter(|f| !skip_insert_fields.contains(f)).collect();
 
+    let (partial_struct_name, partial_fields) = if let syn::Data::Struct(data_struct) = &input.data {
+    if let syn::Fields::Named(fields_named) = &data_struct.fields {
+            let fields: Vec<_> = fields_named.named
+                .iter()
+                .filter(|f| f.ident.as_ref().unwrap() != "id")
+                .map(|f| {
+                    let ident = &f.ident;
+                    let ty = &f.ty;
+                    quote! { #ident: Option<#ty> }
+                })
+                .collect();
+            let name = format_ident!("Partial{}", struct_name);
+            (name, fields)
+        } else {
+            (format_ident!("Partial{}", struct_name), vec![])
+        }
+    } else {
+        (format_ident!("Partial{}", struct_name), vec![])
+    };
+
+    let expanded_partial = quote! {
+        #[derive(serde::Deserialize)]
+        pub struct #partial_struct_name {
+            #(#partial_fields),*
+        }
+    };
+
     let insert_fields: Vec<String> = field_names
         .iter()
         .filter(|&f| !skip_insert_fields.contains(f))
@@ -187,6 +214,8 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     let field_defs_sql = field_defs.join(", ");
 
     let expanded = quote! {
+        #expanded_partial
+
         mod #module_ident {
             use super::*;
             use actix_web::{web, HttpResponse, Responder};
@@ -211,6 +240,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                         web::resource(format!("/{}/{{id}}", #table_name))
                             .route(web::get().to(Self::get_one))
                             .route(web::put().to(Self::update))
+                            .route(web::patch().to(#partial_struct_name::patch))
                             .route(web::delete().to(Self::delete))
                     );
 
@@ -226,7 +256,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn create_table_if_not_exists(db: web::Data<AnyPool>) {
                     let sql = format!("CREATE TABLE IF NOT EXISTS {} ({})", #table_name, #field_defs_sql);
-                    let _ = sqlx::query(&sql).execute(db.get_ref()).await;
+                    let _ = sqlx::query::<sqlx::Any>(&sql).execute(db.get_ref()).await;
                 }
 
                 async fn get_all(user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
@@ -258,7 +288,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     #update_check
 
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query::<sqlx::Any>(&sql);
                     #(#bind_fields_insert)*
                     match q.execute(db.get_ref()).await {
                         Ok(_) => HttpResponse::Created().finish(),
@@ -270,7 +300,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     #update_check
 
                     let sql = format!("UPDATE {} SET {} WHERE {} = ?", #table_name, #update_sql, #id_field);
-                    let mut q = sqlx::query(&sql);
+                    let mut q = sqlx::query::<sqlx::Any>(&sql);
                     #(#bind_fields_update)*
                     q = q.bind(path.into_inner());
                     match q.execute(db.get_ref()).await {
@@ -283,7 +313,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     #delete_check
 
                     let sql = format!("DELETE FROM {} WHERE {} = ?", #table_name, #id_field);
-                    match sqlx::query(&sql)
+                    match sqlx::query::<sqlx::Any>(&sql)
                         .bind(path.into_inner())
                         .execute(db.get_ref())
                         .await
@@ -307,6 +337,21 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                         Ok(items) => HttpResponse::Ok().json(items),
                         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
                     }
+                }
+            }
+
+            // TODO: Implement patch handling for partial updates
+            impl #partial_struct_name {
+                async fn patch(path: web::Path<i64>, json: web::Json<#partial_struct_name>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
+                    #update_check
+
+                    let id = path.into_inner();
+                    let partial = json.into_inner();
+
+                    let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #id_field);
+                    let mut current = sqlx::query::<sqlx::Any>(&sql);
+
+                    HttpResponse::Ok().finish()
                 }
             }
         }
