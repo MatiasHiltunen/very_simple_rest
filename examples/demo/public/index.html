@@ -107,6 +107,13 @@
             <button id="createPostBtn">Create Post</button>
             <button id="getPostsBtn">Get All Posts</button>
             <div id="postsOutput" class="output"></div>
+
+            <h2>Delete Post</h2>
+            <div class="form-group">
+                <label for="postIdToDelete">Id:</label>
+                <input type="text" id="postIdToDelete" placeholder="Post title">
+            </div>
+            <button id="deletePostBtn">Delete Post</button>
         </div>
         
         <div class="panel">
@@ -127,28 +134,15 @@
             <button id="getCommentsBtn">Get All Comments</button>
             <button id="getPostCommentsBtn">Get Comments for Post</button>
             <div id="commentsOutput" class="output"></div>
-        </div>
-    </div>
 
-    <h1>Delete Posts and Comments</h1>
-
-    <div class="container">
-        <div class="panel">
-            <h2>Posts</h2>
-            <div class="form-group">
-                <label for="postIdToDelete">Id:</label>
-                <input type="text" id="postIdToDelete" placeholder="Post title">
-            </div>
-            <button id="deletePostBtn">Delete Post</button>
-        </div>
-        
-        <div class="panel">
-            <h2>Comments</h2>
+            <div class="panel">
+            <h2>Delete Comment</h2>
             <div class="form-group">
                 <label for="commentToDeleteId">Comment ID:</label>
                 <input type="text" id="commentToDeleteId" placeholder="Comment title">
             </div>
             <button id="deleteCommentBtn">Delete Comment</button>
+        </div>
         </div>
     </div>
     

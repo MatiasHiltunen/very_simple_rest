@@ -261,7 +261,7 @@ async function updatePost() {
     try {
         const data = { title, content };
         const response = await fetchJson(`${API_URL}/post/${id}`, {
-            method: 'PATCH',
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${authToken}`
