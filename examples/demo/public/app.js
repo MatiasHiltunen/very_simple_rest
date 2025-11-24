@@ -9,10 +9,13 @@ const authOutput = document.getElementById('authOutput');
 const postsOutput = document.getElementById('postsOutput');
 const postUpdatedOutput = document.getElementById('postUpdatedOutput');
 const commentsOutput = document.getElementById('commentsOutput');
+const commentUpdatedOutput = document.getElementById('commentUpdatedOutput');
 const tokenDisplay = document.getElementById('tokenDisplay');
 
 const postUpdateTitle = document.getElementById('postUpdateTitle');
 const postUpdateContent = document.getElementById('postUpdateContent');
+const commentUpdateTitle = document.getElementById('commentUpdateTitle');
+const commentUpdateContent = document.getElementById('commentUpdateContent');
 
 // Show token if it exists
 if (authToken) {
@@ -34,7 +37,8 @@ document.getElementById('getPostCommentsBtn').addEventListener('click', getPostC
 
 document.getElementById('loadPostForUpdateBtn').addEventListener('click', loadPost);
 document.getElementById('updatePostBtn').addEventListener('click', updatePost);
-//document.getElementById('loadCommentForUpdateBtn').addEventListener('click', loadComment);
+document.getElementById('loadCommentForUpdateBtn').addEventListener('click', loadComment);
+document.getElementById('updateCommentBtn').addEventListener('click', updateComment);
 
 // Helper functions
 function displayError(outputElement, message) {
@@ -245,7 +249,7 @@ async function loadPost() {
 
 async function updatePost() {
     if (!authToken) {
-        displayError(postsOutput, 'You must be logged in to create posts');
+        displayError(postUpdatedOutput, 'You must be logged in to update posts');
         return;
     }
     
@@ -254,7 +258,7 @@ async function updatePost() {
     const content = document.getElementById('postUpdateContent').value;
     
     if (!title || !content) {
-        displayError(postsOutput, 'Title and content are required');
+        displayError(postUpdatedOutput, 'Title and content are required');
         return;
     }
     
@@ -377,3 +381,56 @@ async function getPostComments() {
         displayError(commentsOutput, error.message);
     }
 } 
+
+async function loadComment() {
+    const id = document.getElementById('commentToUpdateId').value;
+
+    if (!id) {
+        displayError(commentUpdatedOutput, 'Comment ID is required');
+        return;
+    }
+
+    const comment = await fetchJson(`${API_URL}/comment/${id}`, {
+        headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    });
+
+    document.getElementById('postIdToUpdateComment').value = comment.post_id;
+    document.getElementById('commentUpdateTitle').value = comment.title;
+    document.getElementById('commentUpdateContent').value = comment.content;
+}
+
+async function updateComment() {
+    if (!authToken) {
+        displayError(commentUpdatedOutput, 'You must be logged in to create posts');
+        return;
+    }
+    
+    const post_id = Number(document.getElementById('postIdToUpdateComment').value);
+    const id = document.getElementById('commentToUpdateId').value;
+    const title = document.getElementById('commentUpdateTitle').value;
+    const content = document.getElementById('commentUpdateContent').value;
+    
+    if (!title || !content || !post_id) {
+        displayError(commentUpdatedOutput, 'Title, content, and post id are required');
+        return;
+    }
+    
+    try {
+        const data = { title, content, post_id };
+        const response = await fetchJson(`${API_URL}/comment/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(commentUpdatedOutput, 'Comment edited successfully!');
+        
+        // Refresh comments list
+        getComments();
+    } catch (error) {
+        displayError(commentUpdatedOutput, error.message);
+    }
+}
