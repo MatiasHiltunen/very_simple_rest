@@ -58,6 +58,7 @@ fn log_available_endpoints() {
     info!("  GET    /api/post/{id}     - Get post by ID");
     info!("  POST   /api/post          - Create a new post");
     info!("  PUT    /api/post/{id}     - Update post");
+    info!("  PATCH  /api/post/{id}     - Update post");
     info!("  DELETE /api/post/{id}     - Delete post");
 
     // Comment endpoints
@@ -66,6 +67,7 @@ fn log_available_endpoints() {
     info!("  GET    /api/comment/{id}    - Get comment by ID");
     info!("  POST   /api/comment         - Create a new comment");
     info!("  PUT    /api/comment/{id}    - Update comment");
+    info!("  PATCH  /api/comment/{id}    - Update comment");
     info!("  DELETE /api/comment/{id}    - Delete comment");
     info!("  GET    /api/post/{id}/comment - Get comments for a post");
 
