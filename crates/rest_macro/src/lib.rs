@@ -213,6 +213,140 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     let insert_fields_csv = insert_fields.join(", ");
     let field_defs_sql = field_defs.join(", ");
 
+    // Generate the patch implementation
+    let patch_impl = {
+        let mut set_tokens = Vec::new();
+        let mut bind_tokens = Vec::new();
+
+        for ident in &field_idents {
+            let name = ident.to_string();
+            if name == "id" || name == "created_at" || name == "updated_at" {
+                continue;
+            }
+
+            let name_lit = syn::LitStr::new(&name, ident.span());
+
+            set_tokens.push(quote! {
+                if partial.#ident.is_some() {
+                    if !first {
+                        sql.push_str(", ");
+                    }
+                    sql.push_str(#name_lit);
+                    sql.push_str(" = ?");
+                    first = false;
+                }
+            });
+
+            bind_tokens.push(quote! {
+                if let Some(v) = &partial.#ident {
+                    query = query.bind(v);
+                }
+            });
+        }
+
+        let updated_at_code = if field_names.contains(&"updated_at".to_string()) {
+            quote! {
+                if !first {
+                    sql.push_str(", updated_at = CURRENT_TIMESTAMP");
+                } else {
+                    sql.push_str("updated_at = CURRENT_TIMESTAMP");
+                    first = false;
+                }
+            }
+        } else {
+            quote! {}
+        };
+
+        quote! {
+            impl #partial_struct_name {
+                pub async fn patch(
+                    path: web::Path<i64>,
+                    json: web::Json<Self>,
+                    user: UserContext,
+                    db: web::Data<AnyPool>,
+                ) -> impl Responder {
+                    #update_check
+
+                    let id = path.into_inner();
+                    let partial = json.into_inner();
+
+                    let mut sql = String::from("UPDATE ");
+                    sql.push_str(#table_name);
+                    sql.push_str(" SET ");
+                    let mut first = true;
+
+                    #(#set_tokens)*
+
+                    #updated_at_code
+
+                    if first {
+                        return HttpResponse::Ok().finish();
+                    }
+
+                    sql.push_str(" WHERE id = ?");
+
+                    let mut query = sqlx::query(&sql);
+
+                    #(#bind_tokens)*
+
+                    query = query.bind(id);
+
+                    match query.execute(db.get_ref()).await {
+                        Ok(res) => {
+                            if res.rows_affected() > 0 {
+                                HttpResponse::Ok().finish()
+                            } else {
+                                HttpResponse::NotFound().finish()
+                            }
+                        }
+                        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                    }
+                }
+            }
+        }
+    };
+
+    // Conditional get_by_parent_id method
+    let get_by_parent_id_impl = if !relation_field.is_empty() {
+        let field_lit = syn::LitStr::new(&relation_field, struct_name.span());
+        
+        quote! {
+            async fn get_by_parent_id(
+                path: web::Path<i64>,
+                user: UserContext,
+                db: web::Data<AnyPool>,
+            ) -> impl Responder {
+                #read_check
+                let parent_id = path.into_inner();
+                let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #field_lit);
+                match sqlx::query_as::<_, Self>(&sql)
+                    .bind(parent_id)
+                    .fetch_all(db.get_ref())
+                    .await
+                {
+                    Ok(items) => HttpResponse::Ok().json(items),
+                    Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Conditional nested route registration
+    let nested_route_registration = if !relation_parent_table.is_empty() {
+        let parent_table_lit = syn::LitStr::new(&relation_parent_table, struct_name.span());
+        quote! {
+            cfg.service(
+                web::resource(format!("/{}/{{parent_id}}/{}", #parent_table_lit, #table_name))
+                    .route(web::get().to(Self::get_by_parent_id))
+            );
+        }
+    } else {
+        quote! {}
+    };
+
+    // FINAL EXPANDED OUTPUT
     let expanded = quote! {
         #expanded_partial
 
@@ -220,15 +354,12 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             use super::*;
             use actix_web::{web, HttpResponse, Responder};
             use sqlx::AnyPool;
-
-            // Access UserContext through the core module which is re-exported in rest_api
             use very_simple_rest::core::auth::UserContext;
 
             impl #struct_name {
                 pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
                     let db = web::Data::new(db);
                     cfg.app_data(db.clone());
-
                     actix_web::rt::spawn(Self::create_table_if_not_exists(db.clone()));
 
                     cfg.service(
@@ -244,14 +375,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                             .route(web::delete().to(Self::delete))
                     );
 
-                    // Configure nested routes if relation field exists
-                    let has_relation = !#relation_field.is_empty();
-                    if has_relation {
-                        cfg.service(
-                            web::resource(format!("/{}/{{parent_id}}/{}", #relation_parent_table, #table_name))
-                                .route(web::get().to(Self::get_by_parent_id))
-                        );
-                    }
+                    #nested_route_registration
                 }
 
                 async fn create_table_if_not_exists(db: web::Data<AnyPool>) {
@@ -261,7 +385,6 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_all(user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-
                     let sql = format!("SELECT * FROM {}", #table_name);
                     match sqlx::query_as::<_, Self>(&sql).fetch_all(db.get_ref()).await {
                         Ok(data) => HttpResponse::Ok().json(data),
@@ -271,10 +394,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_one(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-
+                    let id = path.into_inner();
                     let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query_as::<_, Self>(&sql)
-                        .bind(path.into_inner())
+                        .bind(id)
                         .fetch_optional(db.get_ref())
                         .await
                     {
@@ -286,7 +409,6 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn create(item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
-
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
                     let mut q = sqlx::query::<sqlx::Any>(&sql);
                     #(#bind_fields_insert)*
@@ -298,11 +420,11 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn update(path: web::Path<i64>, item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
-
+                    let id = path.into_inner();
                     let sql = format!("UPDATE {} SET {} WHERE {} = ?", #table_name, #update_sql, #id_field);
                     let mut q = sqlx::query::<sqlx::Any>(&sql);
                     #(#bind_fields_update)*
-                    q = q.bind(path.into_inner());
+                    q = q.bind(id);
                     match q.execute(db.get_ref()).await {
                         Ok(_) => HttpResponse::Ok().finish(),
                         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
@@ -311,10 +433,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn delete(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #delete_check
-
+                    let id = path.into_inner();
                     let sql = format!("DELETE FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query::<sqlx::Any>(&sql)
-                        .bind(path.into_inner())
+                        .bind(id)
                         .execute(db.get_ref())
                         .await
                     {
@@ -323,37 +445,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     }
                 }
 
-                // Handler for nested routes - returns all child items for a parent
-                async fn get_by_parent_id(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
-                    #read_check
-
-                    let parent_id = path.into_inner();
-                    let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #relation_field);
-                    match sqlx::query_as::<_, Self>(&sql)
-                        .bind(parent_id)
-                        .fetch_all(db.get_ref())
-                        .await
-                    {
-                        Ok(items) => HttpResponse::Ok().json(items),
-                        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-                    }
-                }
+                #get_by_parent_id_impl
             }
 
-            // TODO: Implement patch handling for partial updates
-            impl #partial_struct_name {
-                async fn patch(path: web::Path<i64>, json: web::Json<#partial_struct_name>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
-                    #update_check
-
-                    let id = path.into_inner();
-                    let partial = json.into_inner();
-
-                    let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #id_field);
-                    let mut current = sqlx::query::<sqlx::Any>(&sql);
-
-                    HttpResponse::Ok().finish()
-                }
-            }
+            #patch_impl
         }
     };
 

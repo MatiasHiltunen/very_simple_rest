@@ -257,15 +257,15 @@ async function updatePost() {
     const title = document.getElementById('postUpdateTitle').value;
     const content = document.getElementById('postUpdateContent').value;
     
-    if (!title || !content) {
+/*     if (!title || !content) {
         displayError(postUpdatedOutput, 'Title and content are required');
         return;
-    }
+    } */
     
     try {
-        const data = { title, content };
+        const data = { content };
         const response = await fetchJson(`${API_URL}/post/${id}`, {
-            method: 'PUT',
+            method: 'PATCH',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${authToken}`
@@ -410,15 +410,15 @@ async function updateComment() {
     const title = document.getElementById('commentUpdateTitle').value;
     const content = document.getElementById('commentUpdateContent').value;
     
-    if (!title || !content || !post_id) {
+/*     if (!title || !content || !post_id) {
         displayError(commentUpdatedOutput, 'Title, content, and post id are required');
         return;
-    }
+    } */
     
     try {
-        const data = { title, content, post_id };
+        const data = { content, post_id };
         const response = await fetchJson(`${API_URL}/comment/${id}`, {
-            method: 'PUT',
+            method: 'PATCH',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${authToken}`

@@ -2,7 +2,7 @@ use very_simple_rest::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "post", id = "id", db = "sqlite")]
-#[require_role(read = "user", update = "user", delete = "user")]
+#[require_role(read = "user", update = "user", patch = "user", delete = "user")]
 pub struct Post {
     pub id: Option<i64>,
     pub title: String,
@@ -13,7 +13,7 @@ pub struct Post {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "comment", id = "id", db = "sqlite")]
-#[require_role(read = "user", update = "user", delete = "user")]
+#[require_role(read = "user", update = "user", patch = "user", delete = "user")]
 pub struct Comment {
     pub id: Option<i64>,
     pub title: String,
