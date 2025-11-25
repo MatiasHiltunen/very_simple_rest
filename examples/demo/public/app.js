@@ -37,8 +37,10 @@ document.getElementById('getPostCommentsBtn').addEventListener('click', getPostC
 
 document.getElementById('loadPostForUpdateBtn').addEventListener('click', loadPost);
 document.getElementById('updatePostBtn').addEventListener('click', updatePost);
+document.getElementById('patchPostBtn').addEventListener('click', patchPost);
 document.getElementById('loadCommentForUpdateBtn').addEventListener('click', loadComment);
 document.getElementById('updateCommentBtn').addEventListener('click', updateComment);
+document.getElementById('patchCommentBtn').addEventListener('click', patchComment);
 
 // Helper functions
 function displayError(outputElement, message) {
@@ -253,14 +255,43 @@ async function updatePost() {
         return;
     }
     
-    const id = document.getElementById('postToUpdateId').value;
+    const id = Number(document.getElementById('postToUpdateId').value);
     const title = document.getElementById('postUpdateTitle').value;
     const content = document.getElementById('postUpdateContent').value;
     
-/*     if (!title || !content) {
+    if (!title || !content) {
         displayError(postUpdatedOutput, 'Title and content are required');
         return;
-    } */
+    }
+    
+    try {
+        const data = { title, content };
+        const response = await fetchJson(`${API_URL}/post/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(postUpdatedOutput, 'Post edited successfully!');
+        
+        // Refresh posts list
+        getPosts();
+    } catch (error) {
+        displayError(postUpdatedOutput, error.message);
+    }
+}
+
+async function patchPost() {
+    if (!authToken) {
+        displayError(postUpdatedOutput, 'You must be logged in to update posts');
+        return;
+    }
+
+    const id = Number(document.getElementById('postToUpdateId').value);
+    const content = document.getElementById('postUpdateContent').value;
     
     try {
         const data = { content };
@@ -406,17 +437,46 @@ async function updateComment() {
     }
     
     const post_id = Number(document.getElementById('postIdToUpdateComment').value);
-    const id = document.getElementById('commentToUpdateId').value;
+    const id = Number(document.getElementById('commentToUpdateId').value);
     const title = document.getElementById('commentUpdateTitle').value;
     const content = document.getElementById('commentUpdateContent').value;
     
-/*     if (!title || !content || !post_id) {
+    if (!title || !content || !post_id) {
         displayError(commentUpdatedOutput, 'Title, content, and post id are required');
         return;
-    } */
+    }
     
     try {
-        const data = { content, post_id };
+        const data = { title, content, post_id };
+        const response = await fetchJson(`${API_URL}/comment/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            },
+            body: JSON.stringify(data)
+        });
+        
+        displaySuccess(commentUpdatedOutput, 'Comment edited successfully!');
+        
+        // Refresh comments list
+        getComments();
+    } catch (error) {
+        displayError(commentUpdatedOutput, error.message);
+    }
+}
+
+async function patchComment() {
+    if (!authToken) {
+        displayError(commentUpdatedOutput, 'You must be logged in to create posts');
+        return;
+    }
+
+    const id = Number(document.getElementById('commentToUpdateId').value);
+    const content = document.getElementById('commentUpdateContent').value;
+    
+    try {
+        const data = { content };
         const response = await fetchJson(`${API_URL}/comment/${id}`, {
             method: 'PATCH',
             headers: {

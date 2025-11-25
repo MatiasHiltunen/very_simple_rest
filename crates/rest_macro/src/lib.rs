@@ -172,11 +172,26 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     }
     // let insert_fields: Vec<String> = field_names.iter().cloned().filter(|f| !skip_insert_fields.contains(f)).collect();
 
+    let insert_fields: Vec<String> = field_names
+        .iter()
+        .filter(|&f| !skip_insert_fields.contains(f))
+        .cloned()
+        .collect();
+    let insert_placeholders = insert_fields
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let update_sql = update_clauses.join(", ");
+    let insert_fields_csv = insert_fields.join(", ");
+    let field_defs_sql = field_defs.join(", ");
+
+    // Generate partial_struct_name and partial_fields for PATCH
     let (partial_struct_name, partial_fields) = if let syn::Data::Struct(data_struct) = &input.data {
-    if let syn::Fields::Named(fields_named) = &data_struct.fields {
+        if let syn::Fields::Named(fields_named) = &data_struct.fields {
             let fields: Vec<_> = fields_named.named
                 .iter()
-                .filter(|f| f.ident.as_ref().unwrap() != "id")
+                .filter(|f| f.ident.as_ref().unwrap() != "id")  // Skip primary key field
                 .map(|f| {
                     let ident = &f.ident;
                     let ty = &f.ty;
@@ -192,26 +207,20 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
         (format_ident!("Partial{}", struct_name), vec![])
     };
 
+    // Example:
+    //
+    // pub struct PartialPost {
+    //     title: Option<String>,
+    //     content: Option<String>,
+    //     created_at: Option<String>,
+    //     updated_at: Option<String>,
+    // }
     let expanded_partial = quote! {
         #[derive(serde::Deserialize)]
         pub struct #partial_struct_name {
             #(#partial_fields),*
         }
     };
-
-    let insert_fields: Vec<String> = field_names
-        .iter()
-        .filter(|&f| !skip_insert_fields.contains(f))
-        .cloned()
-        .collect();
-    let insert_placeholders = insert_fields
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
-    let update_sql = update_clauses.join(", ");
-    let insert_fields_csv = insert_fields.join(", ");
-    let field_defs_sql = field_defs.join(", ");
 
     // Generate the patch implementation
     let patch_impl = {
@@ -226,6 +235,16 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
             let name_lit = syn::LitStr::new(&name, ident.span());
 
+            // Example generated code:
+            //
+            // If the JSON body is:
+            // {
+            //     "title": "New title",
+            //     "content": "New content"
+            // }
+            //
+            // The generated code will be:
+            // UPDATE post SET title = ?, content = ? WHERE id = ?
             set_tokens.push(quote! {
                 if partial.#ident.is_some() {
                     if !first {
@@ -237,6 +256,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                 }
             });
 
+            // For each field that is Some in the PATCH request, bind its value to the SQL query
             bind_tokens.push(quote! {
                 if let Some(v) = &partial.#ident {
                     query = query.bind(v);
@@ -268,27 +288,27 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     #update_check
 
                     let id = path.into_inner();
-                    let partial = json.into_inner();
+                    let partial = json.into_inner();    // Instance of PartialStruct
 
                     let mut sql = String::from("UPDATE ");
                     sql.push_str(#table_name);
-                    sql.push_str(" SET ");
-                    let mut first = true;
+                    sql.push_str(" SET ");  // Start of SET clause
+                    let mut first = true;   // Boolean to track if it's the first field in SET clause
 
+                    // Build SET clause dynamically based on which fields are Some
                     #(#set_tokens)*
-
                     #updated_at_code
 
+                    // If no fields were updated, return OK
                     if first {
                         return HttpResponse::Ok().finish();
                     }
 
                     sql.push_str(" WHERE id = ?");
-
                     let mut query = sqlx::query(&sql);
 
+                    // Bind values for fields that are Some
                     #(#bind_tokens)*
-
                     query = query.bind(id);
 
                     match query.execute(db.get_ref()).await {
