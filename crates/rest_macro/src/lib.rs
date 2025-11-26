@@ -414,10 +414,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_one(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-                    let id = path.into_inner();
+                    
                     let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query_as::<_, Self>(&sql)
-                        .bind(id)
+                        .bind(path.into_inner())
                         .fetch_optional(db.get_ref())
                         .await
                     {
@@ -440,11 +440,11 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn update(path: web::Path<i64>, item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
-                    let id = path.into_inner();
+                    
                     let sql = format!("UPDATE {} SET {} WHERE {} = ?", #table_name, #update_sql, #id_field);
                     let mut q = sqlx::query(&sql);
                     #(#bind_fields_update)*
-                    q = q.bind(id);
+                    q = q.bind(path.into_inner());
                     match q.execute(db.get_ref()).await {
                         Ok(_) => HttpResponse::Ok().finish(),
                         Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
@@ -453,10 +453,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn delete(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #delete_check
-                    let id = path.into_inner();
+                    
                     let sql = format!("DELETE FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query(&sql)
-                        .bind(id)
+                        .bind(path.into_inner())
                         .execute(db.get_ref())
                         .await
                     {
