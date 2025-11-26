@@ -186,12 +186,194 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     let insert_fields_csv = insert_fields.join(", ");
     let field_defs_sql = field_defs.join(", ");
 
+    // Generate partial_struct_name and partial_fields for PATCH
+    let (partial_struct_name, partial_fields) = if let syn::Data::Struct(data_struct) = &input.data {
+        if let syn::Fields::Named(fields_named) = &data_struct.fields {
+            let fields: Vec<_> = fields_named.named
+                .iter()
+                .filter(|f| f.ident.as_ref().unwrap() != "id")  // Skip primary key field
+                .map(|f| {
+                    let ident = &f.ident;
+                    let ty = &f.ty;
+                    quote! { #ident: Option<#ty> }
+                })
+                .collect();
+            let name = format_ident!("Partial{}", struct_name);
+            (name, fields)
+        } else {
+            (format_ident!("Partial{}", struct_name), vec![])
+        }
+    } else {
+        (format_ident!("Partial{}", struct_name), vec![])
+    };
+
+    // Example:
+    //
+    // pub struct PartialPost {
+    //     title: Option<String>,
+    //     content: Option<String>,
+    //     created_at: Option<String>,
+    //     updated_at: Option<String>,
+    // }
+    let expanded_partial = quote! {
+        #[derive(serde::Deserialize)]
+        pub struct #partial_struct_name {
+            #(#partial_fields),*
+        }
+    };
+
+    // Generate the patch implementation
+    let patch_impl = {
+        let mut set_tokens = Vec::new();
+        let mut bind_tokens = Vec::new();
+
+        for ident in &field_idents {
+            let name = ident.to_string();
+            if name == "id" || name == "created_at" || name == "updated_at" {
+                continue;
+            }
+
+            let name_lit = syn::LitStr::new(&name, ident.span());
+
+            // Example generated code:
+            //
+            // If the JSON body is:
+            // {
+            //     "title": "New title",
+            //     "content": "New content"
+            // }
+            //
+            // The generated code will be:
+            // UPDATE post SET title = ?, content = ? WHERE id = ?
+            set_tokens.push(quote! {
+                if partial.#ident.is_some() {
+                    if !first {
+                        sql.push_str(", ");
+                    }
+                    sql.push_str(#name_lit);
+                    sql.push_str(" = ?");
+                    first = false;
+                }
+            });
+
+            // For each field that is Some in the PATCH request, bind its value to the SQL query
+            bind_tokens.push(quote! {
+                if let Some(v) = &partial.#ident {
+                    query = query.bind(v);
+                }
+            });
+        }
+
+        let updated_at_code = if field_names.contains(&"updated_at".to_string()) {
+            quote! {
+                if !first {
+                    sql.push_str(", updated_at = CURRENT_TIMESTAMP");
+                } else {
+                    sql.push_str("updated_at = CURRENT_TIMESTAMP");
+                    first = false;
+                }
+            }
+        } else {
+            quote! {}
+        };
+
+        quote! {
+            impl #partial_struct_name {
+                pub async fn patch(
+                    path: web::Path<i64>,
+                    json: web::Json<Self>,
+                    user: UserContext,
+                    db: web::Data<AnyPool>,
+                ) -> impl Responder {
+                    #update_check
+
+                    let id = path.into_inner();
+                    let partial = json.into_inner();    // Instance of PartialStruct
+
+                    let mut sql = String::from("UPDATE ");
+                    sql.push_str(#table_name);
+                    sql.push_str(" SET ");  // Start of SET clause
+                    let mut first = true;   // Boolean to track if it's the first field in SET clause
+
+                    // Build SET clause dynamically based on which fields are Some
+                    #(#set_tokens)*
+                    #updated_at_code
+
+                    // If no fields were updated, return OK
+                    if first {
+                        return HttpResponse::Ok().finish();
+                    }
+
+                    sql.push_str(" WHERE id = ?");
+                    let mut query = sqlx::query(&sql);
+
+                    // Bind values for fields that are Some
+                    #(#bind_tokens)*
+                    query = query.bind(id);
+
+                    match query.execute(db.get_ref()).await {
+                        Ok(res) => {
+                            if res.rows_affected() > 0 {
+                                HttpResponse::Ok().finish()
+                            } else {
+                                HttpResponse::NotFound().finish()
+                            }
+                        }
+                        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                    }
+                }
+            }
+        }
+    };
+
+    // Conditional get_by_parent_id method
+    let get_by_parent_id_impl = if !relation_field.is_empty() {
+        let field_lit = syn::LitStr::new(&relation_field, struct_name.span());
+        
+        quote! {
+            async fn get_by_parent_id(
+                path: web::Path<i64>,
+                user: UserContext,
+                db: web::Data<AnyPool>,
+            ) -> impl Responder {
+                #read_check
+
+                let parent_id = path.into_inner();
+                let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #field_lit);
+                match sqlx::query_as::<_, Self>(&sql)
+                    .bind(parent_id)
+                    .fetch_all(db.get_ref())
+                    .await
+                {
+                    Ok(items) => HttpResponse::Ok().json(items),
+                    Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Conditional nested route registration
+    let nested_route_registration = if !relation_field.is_empty() {
+        quote! {
+            cfg.service(
+                web::resource(format!("/{}/{{parent_id}}/{}", #relation_parent_table, #table_name))
+                    .route(web::get().to(Self::get_by_parent_id))
+            );
+        }
+    } else {
+        quote! {}
+    };
+
+    // FINAL EXPANDED OUTPUT
     let expanded = quote! {
+        #expanded_partial
+
         mod #module_ident {
             use super::*;
             use actix_web::{web, HttpResponse, Responder};
             use sqlx::AnyPool;
-
             // Access UserContext through the core module which is re-exported in rest_api
             use very_simple_rest::core::auth::UserContext;
 
@@ -199,7 +381,6 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                 pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
                     let db = web::Data::new(db);
                     cfg.app_data(db.clone());
-
                     actix_web::rt::spawn(Self::create_table_if_not_exists(db.clone()));
 
                     cfg.service(
@@ -211,17 +392,11 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                         web::resource(format!("/{}/{{id}}", #table_name))
                             .route(web::get().to(Self::get_one))
                             .route(web::put().to(Self::update))
+                            .route(web::patch().to(#partial_struct_name::patch))
                             .route(web::delete().to(Self::delete))
                     );
 
-                    // Configure nested routes if relation field exists
-                    let has_relation = !#relation_field.is_empty();
-                    if has_relation {
-                        cfg.service(
-                            web::resource(format!("/{}/{{parent_id}}/{}", #relation_parent_table, #table_name))
-                                .route(web::get().to(Self::get_by_parent_id))
-                        );
-                    }
+                    #nested_route_registration
                 }
 
                 async fn create_table_if_not_exists(db: web::Data<AnyPool>) {
@@ -293,22 +468,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     }
                 }
 
-                // Handler for nested routes - returns all child items for a parent
-                async fn get_by_parent_id(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
-                    #read_check
-
-                    let parent_id = path.into_inner();
-                    let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #relation_field);
-                    match sqlx::query_as::<_, Self>(&sql)
-                        .bind(parent_id)
-                        .fetch_all(db.get_ref())
-                        .await
-                    {
-                        Ok(items) => HttpResponse::Ok().json(items),
-                        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-                    }
-                }
+                #get_by_parent_id_impl
             }
+
+            #patch_impl
         }
     };
 
