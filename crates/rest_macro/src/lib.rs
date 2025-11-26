@@ -374,6 +374,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
             use super::*;
             use actix_web::{web, HttpResponse, Responder};
             use sqlx::AnyPool;
+            // Access UserContext through the core module which is re-exported in rest_api
             use very_simple_rest::core::auth::UserContext;
 
             impl #struct_name {
@@ -414,7 +415,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_one(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
-                    
+
                     let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query_as::<_, Self>(&sql)
                         .bind(path.into_inner())
@@ -440,7 +441,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn update(path: web::Path<i64>, item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
-                    
+
                     let sql = format!("UPDATE {} SET {} WHERE {} = ?", #table_name, #update_sql, #id_field);
                     let mut q = sqlx::query(&sql);
                     #(#bind_fields_update)*
@@ -453,7 +454,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn delete(path: web::Path<i64>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #delete_check
-                    
+
                     let sql = format!("DELETE FROM {} WHERE {} = ?", #table_name, #id_field);
                     match sqlx::query(&sql)
                         .bind(path.into_inner())
