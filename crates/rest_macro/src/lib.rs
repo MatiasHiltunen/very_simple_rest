@@ -337,6 +337,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                 db: web::Data<AnyPool>,
             ) -> impl Responder {
                 #read_check
+
                 let parent_id = path.into_inner();
                 let sql = format!("SELECT * FROM {} WHERE {} = ?", #table_name, #field_lit);
                 match sqlx::query_as::<_, Self>(&sql)
@@ -354,11 +355,10 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
     };
 
     // Conditional nested route registration
-    let nested_route_registration = if !relation_parent_table.is_empty() {
-        let parent_table_lit = syn::LitStr::new(&relation_parent_table, struct_name.span());
+    let nested_route_registration = if !relation_field.is_empty() {
         quote! {
             cfg.service(
-                web::resource(format!("/{}/{{parent_id}}/{}", #parent_table_lit, #table_name))
+                web::resource(format!("/{}/{{parent_id}}/{}", #relation_parent_table, #table_name))
                     .route(web::get().to(Self::get_by_parent_id))
             );
         }
@@ -406,6 +406,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn get_all(user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #read_check
+
                     let sql = format!("SELECT * FROM {}", #table_name);
                     match sqlx::query_as::<_, Self>(&sql).fetch_all(db.get_ref()).await {
                         Ok(data) => HttpResponse::Ok().json(data),
@@ -430,6 +431,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn create(item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
+
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
                     let mut q = sqlx::query(&sql);
                     #(#bind_fields_insert)*
