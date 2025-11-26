@@ -400,7 +400,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
 
                 async fn create_table_if_not_exists(db: web::Data<AnyPool>) {
                     let sql = format!("CREATE TABLE IF NOT EXISTS {} ({})", #table_name, #field_defs_sql);
-                    let _ = sqlx::query::<sqlx::Any>(&sql).execute(db.get_ref()).await;
+                    let _ = sqlx::query(&sql).execute(db.get_ref()).await;
                 }
 
                 async fn get_all(user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
@@ -430,7 +430,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                 async fn create(item: web::Json<Self>, user: UserContext, db: web::Data<AnyPool>) -> impl Responder {
                     #update_check
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                    let mut q = sqlx::query::<sqlx::Any>(&sql);
+                    let mut q = sqlx::query(&sql);
                     #(#bind_fields_insert)*
                     match q.execute(db.get_ref()).await {
                         Ok(_) => HttpResponse::Created().finish(),
@@ -442,7 +442,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     #update_check
                     let id = path.into_inner();
                     let sql = format!("UPDATE {} SET {} WHERE {} = ?", #table_name, #update_sql, #id_field);
-                    let mut q = sqlx::query::<sqlx::Any>(&sql);
+                    let mut q = sqlx::query(&sql);
                     #(#bind_fields_update)*
                     q = q.bind(id);
                     match q.execute(db.get_ref()).await {
@@ -455,7 +455,7 @@ pub fn rest_api_macro(input: TokenStream) -> TokenStream {
                     #delete_check
                     let id = path.into_inner();
                     let sql = format!("DELETE FROM {} WHERE {} = ?", #table_name, #id_field);
-                    match sqlx::query::<sqlx::Any>(&sql)
+                    match sqlx::query(&sql)
                         .bind(id)
                         .execute(db.get_ref())
                         .await
