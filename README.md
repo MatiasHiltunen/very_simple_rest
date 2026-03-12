@@ -269,6 +269,9 @@ indexes, type/nullability mismatches, and missing timestamp defaults.
 For a larger SQLite benchmark fixture with deep relations and a deterministic seed script, see
 `examples/sqlite_bench/`.
 
+For a policy-heavy `.eon` example with tenant claims, owner-scoped writes, and self-scoped
+resources, see `examples/fine_grained_policies/`.
+
 ## RBAC Attributes
 
 Protect your endpoints with declarative role requirements:

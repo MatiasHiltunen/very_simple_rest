@@ -378,6 +378,12 @@ mod tests {
             .join(name)
     }
 
+    fn policy_example_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/fine_grained_policies")
+            .join(name)
+    }
+
     #[test]
     fn migration_sql_orders_relations_and_emits_indexes() {
         let loaded =
@@ -462,6 +468,40 @@ mod tests {
         ));
         assert!(sql.contains(
             "CREATE INDEX idx_inventory_lot_warehouse_id ON inventory_lot (warehouse_id);"
+        ));
+    }
+
+    #[test]
+    fn migration_sql_renders_policy_example_and_indexes_policy_fields() {
+        let loaded = load_service_from_path(&policy_example_path("ops_control.eon"))
+            .expect("policy example should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        let workspace_pos = sql
+            .find("CREATE TABLE workspace")
+            .expect("workspace table should exist");
+        let project_pos = sql
+            .find("CREATE TABLE project")
+            .expect("project table should exist");
+        let incident_note_pos = sql
+            .find("CREATE TABLE incident_note")
+            .expect("incident_note table should exist");
+
+        assert!(workspace_pos < project_pos);
+        assert!(project_pos < incident_note_pos);
+        assert!(sql.contains("FOREIGN KEY (project_id) REFERENCES project(id)"));
+        assert!(sql.contains(
+            "CREATE INDEX idx_workspace_tenant_id ON workspace (tenant_id);"
+        ));
+        assert!(sql.contains(
+            "CREATE INDEX idx_workspace_owner_user_id ON workspace (owner_user_id);"
+        ));
+        assert!(sql.contains(
+            "CREATE INDEX idx_on_call_subscription_subscriber_user_id ON on_call_subscription (subscriber_user_id);"
+        ));
+        assert!(sql.contains(
+            "CREATE INDEX idx_audit_export_requested_by_user_id ON audit_export (requested_by_user_id);"
         ));
     }
 }
