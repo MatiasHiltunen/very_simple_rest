@@ -50,6 +50,38 @@ For non-interactive setup (e.g., in CI/CD pipelines):
 vsr setup --non-interactive
 ```
 
+### Server Generation
+
+Generate a runnable Rust server project from a bare `.eon` service:
+
+```bash
+vsr server emit --input api.eon --output-dir generated-api
+```
+
+This emits:
+
+- `Cargo.toml`
+- `src/main.rs`
+- the copied `.eon` file
+- `.env.example`
+- `migrations/0001_service.sql`
+
+You can also build a server binary directly:
+
+```bash
+vsr server build --input api.eon --output dist/api-server --release
+```
+
+Useful options:
+
+- `--with-auth` includes built-in auth routes plus `migrations/0000_auth.sql`
+- `--package-name` overrides the generated Cargo package name
+- `--build-dir` keeps the temporary Cargo project in a known location
+- `--keep-build-dir` preserves the generated build project after compilation
+
+`--with-auth` is rejected if the `.eon` service already defines a `user` table, because the
+built-in auth migration owns that table.
+
 ### Create Admin
 
 Create a new admin user:

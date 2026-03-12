@@ -77,6 +77,12 @@ enum Commands {
         command: MigrationCommand,
     },
 
+    /// Generate or build a runnable server from a bare `.eon` service file
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+
     /// Generate .env file template
     GenEnv {
         /// Path to the environment file
@@ -197,6 +203,71 @@ enum MigrationCommand {
         /// Directory containing `.sql` migration files
         #[arg(short, long, value_name = "DIR", default_value = "migrations")]
         dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommand {
+    /// Emit a standalone Rust server project for a `.eon` service
+    Emit {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: PathBuf,
+
+        /// Output directory for the generated server project
+        #[arg(short, long, value_name = "DIR")]
+        output_dir: PathBuf,
+
+        /// Override the generated Cargo package name
+        #[arg(long, value_name = "NAME")]
+        package_name: Option<String>,
+
+        /// Include built-in auth routes and auth migration SQL
+        #[arg(long)]
+        with_auth: bool,
+
+        /// Overwrite the output directory if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Build a server binary from a `.eon` service
+    Build {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: PathBuf,
+
+        /// Output binary path
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// Override the generated Cargo package name
+        #[arg(long, value_name = "NAME")]
+        package_name: Option<String>,
+
+        /// Temporary build directory for the generated Cargo project
+        #[arg(long, value_name = "DIR")]
+        build_dir: Option<PathBuf>,
+
+        /// Include built-in auth routes and auth migration SQL
+        #[arg(long)]
+        with_auth: bool,
+
+        /// Build an optimized release binary
+        #[arg(long)]
+        release: bool,
+
+        /// Cargo target triple to build for
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
+
+        /// Keep the generated build project after compiling
+        #[arg(long)]
+        keep_build_dir: bool,
+
+        /// Overwrite the output binary if it already exists
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -349,6 +420,49 @@ async fn main() -> Result<()> {
             MigrationCommand::Apply { dir } => {
                 println!("{}", "Applying migrations...".green().bold());
                 commands::migrate::apply_migrations(&database_url, dir).await?;
+            }
+        },
+
+        Commands::Server { command } => match command {
+            ServerCommand::Emit {
+                input,
+                output_dir,
+                package_name,
+                with_auth,
+                force,
+            } => {
+                println!("{}", "Generating server project...".green().bold());
+                commands::server::emit_server_project(
+                    input,
+                    output_dir,
+                    package_name.clone(),
+                    *with_auth,
+                    *force,
+                )?;
+            }
+            ServerCommand::Build {
+                input,
+                output,
+                package_name,
+                build_dir,
+                with_auth,
+                release,
+                target,
+                keep_build_dir,
+                force,
+            } => {
+                println!("{}", "Building server binary...".green().bold());
+                commands::server::build_server_binary(
+                    input,
+                    output,
+                    package_name.clone(),
+                    build_dir.clone(),
+                    *with_auth,
+                    *release,
+                    target.clone(),
+                    *keep_build_dir,
+                    *force,
+                )?;
             }
         },
 

@@ -156,6 +156,12 @@ The library includes a CLI tool for managing your API, with specific commands fo
 # Generate a migration for the built-in auth schema
 vsr migrate auth --output migrations/0000_auth.sql
 
+# Emit a standalone Rust server project from a bare .eon service
+vsr server emit --input api.eon --output-dir generated-api
+
+# Build a server binary directly from a bare .eon service
+vsr server build --input api.eon --output dist/api-server --release
+
 # Setup wizard with interactive prompts
 vsr setup
 
@@ -175,6 +181,31 @@ vsr gen-env
 The CLI tool provides a secure way to set up admin users with password confirmation and validation.
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
+
+## Server Generation
+
+The CLI can also turn a bare `.eon` service definition into a runnable Actix server project or a
+compiled binary:
+
+```bash
+# Generate a local Rust project you can inspect and edit
+vsr server emit --input tests/fixtures/blog_api.eon --output-dir generated-api
+
+# Build a binary directly from the same .eon file
+vsr server build --input tests/fixtures/blog_api.eon --output dist/blog-api --release
+```
+
+The emitted project includes:
+
+- `Cargo.toml` with the required runtime dependencies
+- `src/main.rs` wired to `rest_api_from_eon!`
+- the copied `.eon` file
+- `.env.example`
+- `migrations/0001_service.sql`
+
+When `--with-auth` is enabled, the project also includes built-in auth routes and
+`migrations/0000_auth.sql`. That flag cannot be used if the `.eon` service already defines a
+`user` table.
 
 ## Migrations
 

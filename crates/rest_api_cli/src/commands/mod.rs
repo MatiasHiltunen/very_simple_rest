@@ -4,4 +4,5 @@ pub mod env;
 pub mod gen_env;
 pub mod init;
 pub mod migrate;
+pub mod server;
 pub mod setup;
