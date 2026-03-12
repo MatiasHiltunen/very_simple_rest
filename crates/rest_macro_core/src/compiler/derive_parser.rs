@@ -1,0 +1,466 @@
+use std::collections::HashSet;
+
+use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
+
+use super::model::{
+    DbBackend, FieldSpec, PolicyAssignment, PolicyFilter, PolicyValueSource, ResourceSpec,
+    RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, validate_row_policies,
+};
+
+pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
+    let struct_ident = input.ident.clone();
+    let mut table_name = struct_ident.to_string().to_lowercase();
+    let mut id_field = "id".to_owned();
+    let mut db = DbBackend::Sqlite;
+    let mut roles = RoleRequirements::default();
+    let mut policies = RowPolicies::default();
+
+    for attr in &input.attrs {
+        if attr.path().is_ident("rest_api") {
+            attr.parse_nested_meta(|meta| {
+                let key = meta
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| meta.error("unsupported rest_api key"))?
+                    .to_string();
+                let lit = meta.value()?.parse::<Lit>()?;
+                match (key.as_str(), lit) {
+                    ("table", Lit::Str(value)) => table_name = value.value(),
+                    ("id", Lit::Str(value)) => id_field = value.value(),
+                    ("db", Lit::Str(value)) => db = parse_db_backend(&value.value(), value.span())?,
+                    _ => return Err(meta.error("expected string literal value")),
+                }
+                Ok(())
+            })?;
+        } else if attr.path().is_ident("require_role") {
+            attr.parse_nested_meta(|meta| {
+                let key = meta
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| meta.error("unsupported require_role key"))?
+                    .to_string();
+                let lit = meta.value()?.parse::<Lit>()?;
+                let value = match lit {
+                    Lit::Str(value) => value.value(),
+                    _ => return Err(meta.error("role values must be string literals")),
+                };
+
+                match key.as_str() {
+                    "read" => roles.read = Some(value),
+                    "create" => roles.create = Some(value),
+                    "update" => roles.update = Some(value),
+                    "delete" => roles.delete = Some(value),
+                    _ => return Err(meta.error("unsupported require_role key")),
+                }
+                Ok(())
+            })?;
+        } else if attr.path().is_ident("row_policy") {
+            attr.parse_nested_meta(|meta| {
+                let key = meta
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| meta.error("unsupported row_policy key"))?
+                    .to_string();
+                let lit = meta.value()?.parse::<Lit>()?;
+                match key.as_str() {
+                    "read" => {
+                        let value = expect_policy_string(meta.path.span(), lit)?;
+                        policies
+                            .read
+                            .extend(parse_filter_policies(&value.value(), value.span())?);
+                    }
+                    "create" => {
+                        let value = expect_policy_string(meta.path.span(), lit)?;
+                        policies
+                            .create
+                            .extend(parse_assignment_policies(&value.value(), value.span())?);
+                    }
+                    "update" => {
+                        let value = expect_policy_string(meta.path.span(), lit)?;
+                        policies
+                            .update
+                            .extend(parse_filter_policies(&value.value(), value.span())?);
+                    }
+                    "delete" => {
+                        let value = expect_policy_string(meta.path.span(), lit)?;
+                        policies
+                            .delete
+                            .extend(parse_filter_policies(&value.value(), value.span())?);
+                    }
+                    "admin_bypass" => policies.admin_bypass = parse_policy_bool(lit)?,
+                    _ => return Err(meta.error("unsupported row_policy key")),
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    let fields = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Named(fields) => fields,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &input,
+                    "RestApi only supports structs with named fields",
+                ));
+            }
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &input,
+                "RestApi can only be derived for structs",
+            ));
+        }
+    };
+
+    let mut parsed_fields = Vec::with_capacity(fields.named.len());
+    let mut seen_fields = HashSet::new();
+
+    for field in &fields.named {
+        let ident = field
+            .ident
+            .clone()
+            .ok_or_else(|| syn::Error::new_spanned(field, "expected named field"))?;
+        let field_name = ident.to_string();
+        if !seen_fields.insert(field_name.clone()) {
+            return Err(syn::Error::new_spanned(
+                &ident,
+                format!("duplicate field `{field_name}`"),
+            ));
+        }
+
+        let relation = parse_relation(field_name.as_str(), &field.attrs)?;
+        let is_id = field_name == id_field;
+        let generated = infer_generated_value(&field_name, is_id);
+
+        parsed_fields.push(FieldSpec {
+            ident,
+            ty: field.ty.clone(),
+            sql_type: infer_sql_type(&field.ty),
+            is_id,
+            generated,
+            relation,
+        });
+    }
+
+    if !parsed_fields.iter().any(|field| field.name() == id_field) {
+        return Err(syn::Error::new_spanned(
+            &struct_ident,
+            format!("configured id field `{id_field}` does not exist"),
+        ));
+    }
+    validate_row_policies(&parsed_fields, &policies, struct_ident.span())?;
+
+    Ok(ResourceSpec {
+        struct_ident: struct_ident.clone(),
+        impl_module_ident: default_resource_module_ident(&struct_ident),
+        table_name,
+        id_field,
+        db,
+        roles: roles.with_legacy_defaults(),
+        policies,
+        fields: parsed_fields,
+        write_style: WriteModelStyle::ExistingStructWithDtos,
+    })
+}
+
+fn parse_relation(
+    field_name: &str,
+    attrs: &[syn::Attribute],
+) -> syn::Result<Option<super::model::RelationSpec>> {
+    let mut relation = None;
+
+    for attr in attrs {
+        if !attr.path().is_ident("relation") {
+            continue;
+        }
+
+        let mut foreign_key = field_name.to_owned();
+        let mut references = None;
+        let mut nested_route = false;
+
+        attr.parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .ok_or_else(|| meta.error("unsupported relation key"))?
+                .to_string();
+            let lit = meta.value()?.parse::<Lit>()?;
+
+            match (key.as_str(), lit) {
+                ("foreign_key", Lit::Str(value)) => foreign_key = value.value(),
+                ("references", Lit::Str(value)) => references = Some(value.value()),
+                ("nested_route", Lit::Bool(value)) => nested_route = value.value(),
+                ("nested_route", Lit::Str(value)) => {
+                    nested_route = value.value().parse::<bool>().map_err(|_| {
+                        syn::Error::new(value.span(), "nested_route must be true or false")
+                    })?;
+                }
+                _ => return Err(meta.error("invalid relation attribute value")),
+            }
+
+            Ok(())
+        })?;
+
+        let references = references.ok_or_else(|| {
+            syn::Error::new(
+                attr.span(),
+                "relation requires `references = \"table.field\"`",
+            )
+        })?;
+        let (references_table, references_field) =
+            parse_reference_target(&references, attr.span())?;
+
+        relation = Some(super::model::RelationSpec {
+            foreign_key,
+            references_table,
+            references_field,
+            nested_route,
+        });
+    }
+
+    Ok(relation)
+}
+
+fn parse_reference_target(value: &str, span: proc_macro2::Span) -> syn::Result<(String, String)> {
+    let mut parts = value.split('.');
+    let table = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| syn::Error::new(span, "relation reference must be `table.field`"))?;
+    let field = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| syn::Error::new(span, "relation reference must be `table.field`"))?;
+
+    if parts.next().is_some() {
+        return Err(syn::Error::new(
+            span,
+            "relation reference must be exactly `table.field`",
+        ));
+    }
+
+    Ok((table.to_owned(), field.to_owned()))
+}
+
+fn parse_db_backend(value: &str, span: proc_macro2::Span) -> syn::Result<DbBackend> {
+    match value {
+        "sqlite" | "Sqlite" => Ok(DbBackend::Sqlite),
+        "postgres" | "Postgres" => Ok(DbBackend::Postgres),
+        "mysql" | "Mysql" | "MySql" => Ok(DbBackend::Mysql),
+        _ => Err(syn::Error::new(
+            span,
+            "db must be one of: sqlite, postgres, mysql",
+        )),
+    }
+}
+
+fn expect_policy_string(span: proc_macro2::Span, lit: Lit) -> syn::Result<syn::LitStr> {
+    match lit {
+        Lit::Str(value) => Ok(value),
+        _ => Err(syn::Error::new(
+            span,
+            "row_policy values must be string literals",
+        )),
+    }
+}
+
+fn parse_policy_bool(lit: Lit) -> syn::Result<bool> {
+    match lit {
+        Lit::Bool(value) => Ok(value.value),
+        Lit::Str(value) => value
+            .value()
+            .parse::<bool>()
+            .map_err(|_| syn::Error::new(value.span(), "admin_bypass must be true or false")),
+        _ => Err(syn::Error::new(
+            lit.span(),
+            "admin_bypass must be a boolean literal",
+        )),
+    }
+}
+
+fn parse_filter_policies(value: &str, span: proc_macro2::Span) -> syn::Result<Vec<PolicyFilter>> {
+    split_policy_entries(value, span)?
+        .into_iter()
+        .map(|entry| parse_filter_policy(&entry, span))
+        .collect()
+}
+
+fn parse_assignment_policies(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<Vec<PolicyAssignment>> {
+    split_policy_entries(value, span)?
+        .into_iter()
+        .map(|entry| parse_assignment_policy(&entry, span))
+        .collect()
+}
+
+fn split_policy_entries(value: &str, span: proc_macro2::Span) -> syn::Result<Vec<String>> {
+    let entries = value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if entries.is_empty() {
+        return Err(syn::Error::new(span, "row_policy values cannot be empty"));
+    }
+
+    Ok(entries)
+}
+
+fn parse_filter_policy(value: &str, span: proc_macro2::Span) -> syn::Result<PolicyFilter> {
+    if let Some(field) = parse_legacy_policy_field(value, RowPolicyKind::Owner) {
+        return Ok(PolicyFilter {
+            field,
+            source: PolicyValueSource::UserId,
+        });
+    }
+
+    if parse_legacy_policy_field(value, RowPolicyKind::SetOwner).is_some() {
+        return Err(syn::Error::new(
+            span,
+            "read, update, and delete row policies must use kind `Owner`",
+        ));
+    }
+
+    let (field, source) = parse_policy_expression(value, span)?;
+    Ok(PolicyFilter { field, source })
+}
+
+fn parse_assignment_policy(value: &str, span: proc_macro2::Span) -> syn::Result<PolicyAssignment> {
+    if let Some(field) = parse_legacy_policy_field(value, RowPolicyKind::SetOwner) {
+        return Ok(PolicyAssignment {
+            field,
+            source: PolicyValueSource::UserId,
+        });
+    }
+
+    if parse_legacy_policy_field(value, RowPolicyKind::Owner).is_some() {
+        return Err(syn::Error::new(
+            span,
+            "create row policy must use kind `SetOwner`",
+        ));
+    }
+
+    let (field, source) = parse_policy_expression(value, span)?;
+    Ok(PolicyAssignment { field, source })
+}
+
+fn parse_legacy_policy_field(value: &str, kind: RowPolicyKind) -> Option<String> {
+    let (parsed_kind, field) = value.split_once(':')?;
+    let parsed_kind = RowPolicyKind::parse(parsed_kind.trim())?;
+    if parsed_kind != kind {
+        return None;
+    }
+
+    let field = field.trim();
+    if field.is_empty() {
+        None
+    } else {
+        Some(field.to_owned())
+    }
+}
+
+fn parse_policy_expression(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<(String, PolicyValueSource)> {
+    let (field, source) = value
+        .split_once('=')
+        .ok_or_else(|| syn::Error::new(span, "row_policy values must use `field=source`"))?;
+    let field = field.trim();
+    if field.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "row_policy field name cannot be empty",
+        ));
+    }
+
+    let source = parse_policy_source(source, span)?;
+    Ok((field.to_owned(), source))
+}
+
+fn parse_policy_source(value: &str, span: proc_macro2::Span) -> syn::Result<PolicyValueSource> {
+    PolicyValueSource::parse(value).ok_or_else(|| {
+        syn::Error::new(
+            span,
+            "row_policy source must be `user.id` or `claim.<name>`",
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_row_policies_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[rest_api(table = "post", id = "id", db = "sqlite")]
+            #[row_policy(read = "owner:user_id", create = "set_owner:user_id", update = "owner:user_id", delete = "owner:user_id")]
+            struct Post {
+                id: Option<i64>,
+                title: String,
+                user_id: i64,
+            }
+        };
+
+        let resource = parse_derive_input(input).expect("row policies should parse");
+        assert_eq!(resource.policies.read[0].field, "user_id");
+        assert_eq!(
+            resource.policies.create[0].source,
+            super::super::model::PolicyValueSource::UserId
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_create_policy_kind() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[row_policy(create = "owner:user_id")]
+            struct Post {
+                id: Option<i64>,
+                user_id: i64,
+            }
+        };
+
+        let error = match parse_derive_input(input) {
+            Ok(_) => panic!("invalid create policy should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("SetOwner"));
+    }
+
+    #[test]
+    fn parses_claim_based_row_policies_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[row_policy(
+                read = "user_id=user.id; tenant_id=claim.tenant_id",
+                create = "user_id=user.id; tenant_id=claim.tenant_id",
+                update = "user_id=user.id; tenant_id=claim.tenant_id",
+                delete = "tenant_id=claim.tenant_id",
+                admin_bypass = false
+            )]
+            struct Post {
+                id: Option<i64>,
+                user_id: i64,
+                tenant_id: i64,
+            }
+        };
+
+        let resource = parse_derive_input(input).expect("claim row policies should parse");
+        assert!(!resource.policies.admin_bypass);
+        assert_eq!(resource.policies.read.len(), 2);
+        assert_eq!(
+            resource.policies.read[1].source,
+            super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+        );
+        assert_eq!(resource.policies.create.len(), 2);
+    }
+}

@@ -7,9 +7,11 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 ## Features
 
 - **Zero-boilerplate REST APIs**: Create complete CRUD endpoints with a single derive macro
+- **Typed write DTOs**: The derive macro and `.eon` macro both generate `Create` and `Update` payload types
+- **Compile-time `.eon` services**: Generate strongly typed resources and DTOs from a minimal `.eon` service file
+- **Migration generation**: Generate explicit SQL migrations from `.eon` service definitions
 - **Built-in authentication**: JWT-based authentication with role management
 - **Role-Based Access Control**: Declarative protection for your endpoints with role requirements
-- **Automatic Schema Generation**: Tables are created based on your Rust structs
 - **Database Agnostic**: Currently defaults to SQLite, with plans to support all SQLx targets
 - **Relationship Handling**: Define foreign keys and nested routes between resources
 
@@ -84,7 +86,7 @@ async fn main() -> std::io::Result<()> {
     sqlx::any::install_default_drivers();
     let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
 
-    // Start server
+    // Apply migrations before starting the server in production.
     HttpServer::new(move || {
         App::new()
             .wrap(Logger::default())
@@ -143,13 +145,17 @@ ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=securepassword
 ```
 
-If no admin user exists, one will be created automatically with these credentials.
+After the built-in auth schema has been migrated, `ensure_admin_exists` can create the first admin
+user automatically with these credentials.
 
 ### 2. CLI Tool (Interactive)
 
 The library includes a CLI tool for managing your API, with specific commands for user management:
 
 ```bash
+# Generate a migration for the built-in auth schema
+vsr migrate auth --output migrations/0000_auth.sql
+
 # Setup wizard with interactive prompts
 vsr setup
 
@@ -170,6 +176,68 @@ The CLI tool provides a secure way to set up admin users with password confirmat
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 
+## Migrations
+
+Generated REST resources no longer run `CREATE TABLE IF NOT EXISTS` at startup. For `.eon`
+services, generate explicit SQL and apply it before serving traffic:
+
+```bash
+# Generate the built-in auth migration
+vsr migrate auth --output migrations/0000_auth.sql
+
+# Generate migrations from Rust `#[derive(RestApi)]` resources
+vsr migrate derive --input src --exclude-table user --output migrations/0001_resources.sql
+
+# Generate an additive migration between two schema versions
+vsr migrate diff --from schema_v1.eon --to schema_v2.eon --output migrations/0002_additive.sql
+
+# Inspect a live database against a schema source
+vsr --database-url sqlite:app.db?mode=rwc migrate inspect --input src --exclude-table user
+
+# Generate a deterministic migration file from a .eon service
+vsr migrate generate --input tests/fixtures/blog_api.eon --output migrations/0001_init.sql
+
+# Verify that the checked-in SQL still matches the .eon schema
+vsr migrate check --input tests/fixtures/blog_api.eon --output migrations/0001_init.sql
+
+# Apply migrations to the configured database
+vsr --database-url sqlite:app.db?mode=rwc migrate apply --dir migrations
+```
+
+The generated SQL includes:
+
+- `CREATE TABLE` statements for each resource
+- Foreign keys for declared relations
+- Indexes for relation fields and row-policy fields
+
+Built-in auth now has the same explicit schema path:
+
+- `vsr migrate auth` generates the `user` table migration
+- `vsr setup` applies that auth migration before prompting for the first admin user
+- `ensure_admin_exists` no longer creates tables at server startup
+
+Derive-based resources can now use the same flow:
+
+- `vsr migrate derive --input src --output migrations/...` scans Rust sources for `#[derive(RestApi)]`
+- `--exclude-table user` avoids colliding with the built-in auth migration when your project also exposes `User`
+- `vsr migrate check-derive` verifies checked-in SQL against the current Rust resource definitions
+
+For additive schema evolution, `vsr migrate diff` compares two schema sources and emits only:
+
+- new tables
+- new indexes
+- safe added columns that are nullable or have generated timestamp defaults
+
+It intentionally rejects destructive or ambiguous changes such as removed fields, type changes,
+required backfilled columns, or new relation columns. Those still require a manual SQL migration.
+
+For live databases, `vsr migrate inspect` compares the current schema to a `.eon` file, a Rust
+source file, or a Rust source directory and reports missing tables, missing columns, missing
+indexes, type/nullability mismatches, and missing timestamp defaults.
+
+For a larger SQLite benchmark fixture with deep relations and a deterministic seed script, see
+`examples/sqlite_bench/`.
+
 ## RBAC Attributes
 
 Protect your endpoints with declarative role requirements:
@@ -183,6 +251,58 @@ This will:
 - Restrict update/delete operations to users with the "admin" role
 - Return 403 Forbidden if the user lacks the required role
 
+## Row Policies
+
+Portable row-level policies can be generated at the macro layer. They work for SQLite too,
+because the generated handlers enforce them in application code instead of relying on
+database-native RLS.
+
+For derive-based resources:
+
+```rust
+#[row_policy(
+    read = "owner:user_id",
+    create = "set_owner:user_id",
+    update = "owner:user_id",
+    delete = "owner:user_id"
+)]
+```
+
+This makes the generated handlers:
+
+- Filter reads to rows owned by the authenticated user
+- Bind `user.id` into `user_id` on create
+- Prevent ownership changes through update payloads
+- Return `404` for update/delete when the row is outside the caller's scope
+
+The same attribute also supports claim-based scoping and explicit admin bypass control:
+
+```rust
+#[row_policy(
+    read = "tenant_id=claim.tenant_id",
+    create = "user_id=user.id; tenant_id=claim.tenant_id",
+    update = "tenant_id=claim.tenant_id",
+    delete = "tenant_id=claim.tenant_id",
+    admin_bypass = false
+)]
+```
+
+This makes the generated handlers:
+
+- Read `tenant_id` from the JWT claims in `UserContext`
+- Force `user_id` and `tenant_id` on create, regardless of request payload
+- Keep tenant-scoped fields out of generated `Create`/`Update` DTOs
+- Apply the same tenant filter to admin users when `admin_bypass = false`
+
+When you use the built-in auth routes, `/auth/login` now emits numeric claims automatically from
+the `user` row:
+
+- Any numeric column ending in `_id` becomes a claim with the same name, such as `tenant_id` or `org_id`
+- Any numeric column named `claim_<name>` becomes a claim named `<name>`
+
+That lets claim-scoped policies work without a custom token issuer, as long as your user records
+carry the relevant columns.
+
 ## Relationships
 
 Define relationships between entities:
@@ -193,6 +313,83 @@ pub post_id: i64,
 ```
 
 This generates nested routes like `/api/post/{post_id}/comment` automatically.
+
+## EON Service Macro
+
+You can also generate a typed REST module from a `.eon` file at compile time:
+
+```rust
+use very_simple_rest::prelude::*;
+
+rest_api_from_eon!("tests/fixtures/blog_api.eon");
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    sqlx::any::install_default_drivers();
+    let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
+
+    HttpServer::new(move || {
+        App::new().service(scope("/api").configure(|cfg| blog_api::configure(cfg, pool.clone())))
+    })
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await
+}
+```
+
+Minimal `.eon` schema:
+
+```eon
+resources: [
+    {
+        name: "Post"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        policies: {
+            admin_bypass: false
+            read: [
+                "user_id=user.id"
+                { field: "tenant_id", equals: "claim.tenant_id" }
+            ]
+            create: [
+                "user_id=user.id"
+                { field: "tenant_id", value: "claim.tenant_id" }
+            ]
+            update: [
+                "user_id=user.id"
+                { field: "tenant_id", equals: "claim.tenant_id" }
+            ]
+            delete: { field: "tenant_id", equals: "claim.tenant_id" }
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "content", type: String }
+            { name: "user_id", type: I64 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+]
+```
+
+This generates:
+
+- `blog_api::Post`
+- `blog_api::PostCreate`
+- `blog_api::PostUpdate`
+- `blog_api::configure`
+
+The workspace uses the `eon` crate for parsing. For formatting `.eon` files, install the external formatter:
+
+```sh
+cargo install eonfmt
+eonfmt path/to/api.eon
+```
 
 ## Roadmap
 

@@ -1,0 +1,441 @@
+module: "commerce_bench_api"
+resources: [
+    {
+        name: "Account"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "name", type: String }
+            { name: "slug", type: String }
+            { name: "plan_tier", type: String }
+            { name: "is_active", type: Bool }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "AppUser"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            { name: "email", type: String }
+            { name: "display_name", type: String }
+            { name: "role", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Category"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            { name: "name", type: String }
+            { name: "slug", type: String }
+            { name: "sort_order", type: I32 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Supplier"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            { name: "name", type: String }
+            { name: "contact_email", type: String }
+            { name: "country_code", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Warehouse"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            { name: "name", type: String }
+            { name: "code", type: String }
+            { name: "city", type: String }
+            { name: "country_code", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Product"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "category_id"
+                type: I64
+                relation: {
+                    references: "category.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "supplier_id"
+                type: I64
+                relation: {
+                    references: "supplier.id"
+                    nested_route: true
+                }
+            }
+            { name: "sku", type: String }
+            { name: "name", type: String }
+            { name: "description", type: String }
+            { name: "unit_price", type: F64 }
+            { name: "is_active", type: Bool }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Customer"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            { name: "email", type: String }
+            { name: "full_name", type: String }
+            { name: "segment", type: String }
+            { name: "loyalty_points", type: I32 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Address"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "customer_id"
+                type: I64
+                relation: {
+                    references: "customer.id"
+                    nested_route: true
+                }
+            }
+            { name: "label", type: String }
+            { name: "line1", type: String }
+            { name: "city", type: String }
+            { name: "region", type: String }
+            { name: "postal_code", type: String }
+            { name: "country_code", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "SalesOrder"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "customer_id"
+                type: I64
+                relation: {
+                    references: "customer.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "billing_address_id"
+                type: I64
+                relation: {
+                    references: "address.id"
+                }
+            }
+            {
+                name: "shipping_address_id"
+                type: I64
+                relation: {
+                    references: "address.id"
+                }
+            }
+            { name: "status", type: String }
+            { name: "channel", type: String }
+            { name: "currency", type: String }
+            { name: "total_amount", type: F64 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "SalesOrderItem"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "order_id"
+                type: I64
+                relation: {
+                    references: "sales_order.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "product_id"
+                type: I64
+                relation: {
+                    references: "product.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "warehouse_id"
+                type: I64
+                relation: {
+                    references: "warehouse.id"
+                    nested_route: true
+                }
+            }
+            { name: "sku", type: String }
+            { name: "quantity", type: I32 }
+            { name: "unit_price", type: F64 }
+            { name: "discount_amount", type: F64 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Payment"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "order_id"
+                type: I64
+                relation: {
+                    references: "sales_order.id"
+                    nested_route: true
+                }
+            }
+            { name: "provider", type: String }
+            { name: "payment_method", type: String }
+            { name: "amount", type: F64 }
+            { name: "status", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Shipment"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "order_id"
+                type: I64
+                relation: {
+                    references: "sales_order.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "warehouse_id"
+                type: I64
+                relation: {
+                    references: "warehouse.id"
+                    nested_route: true
+                }
+            }
+            { name: "carrier", type: String }
+            { name: "tracking_number", type: String }
+            { name: "status", type: String }
+            { name: "shipped_at", type: String }
+            { name: "delivered_at", type: String, nullable: true }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "ShipmentItem"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "shipment_id"
+                type: I64
+                relation: {
+                    references: "shipment.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "order_item_id"
+                type: I64
+                relation: {
+                    references: "sales_order_item.id"
+                    nested_route: true
+                }
+            }
+            { name: "quantity", type: I32 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "InventoryLot"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "product_id"
+                type: I64
+                relation: {
+                    references: "product.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "warehouse_id"
+                type: I64
+                relation: {
+                    references: "warehouse.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "supplier_id"
+                type: I64
+                relation: {
+                    references: "supplier.id"
+                    nested_route: true
+                }
+            }
+            { name: "lot_code", type: String }
+            { name: "quantity_on_hand", type: I32 }
+            { name: "reserved_quantity", type: I32 }
+            { name: "unit_cost", type: F64 }
+            { name: "received_at", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "ReturnRequest"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "order_id"
+                type: I64
+                relation: {
+                    references: "sales_order.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "customer_id"
+                type: I64
+                relation: {
+                    references: "customer.id"
+                    nested_route: true
+                }
+            }
+            { name: "reason", type: String }
+            { name: "status", type: String }
+            { name: "refund_amount", type: F64 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "ReturnItem"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "return_request_id"
+                type: I64
+                relation: {
+                    references: "return_request.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "order_item_id"
+                type: I64
+                relation: {
+                    references: "sales_order_item.id"
+                    nested_route: true
+                }
+            }
+            { name: "quantity", type: I32 }
+            { name: "resolution", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "account_id"
+                type: I64
+                relation: {
+                    references: "account.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "user_id"
+                type: I64
+                relation: {
+                    references: "app_user.id"
+                    nested_route: true
+                }
+            }
+            { name: "entity_table", type: String }
+            { name: "entity_id", type: I64 }
+            { name: "action", type: String }
+            { name: "payload", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+]

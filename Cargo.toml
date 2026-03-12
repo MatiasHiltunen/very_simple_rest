@@ -17,6 +17,9 @@ chrono = "0.4"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 proc-macro2 = "1.0"
+proc-macro-crate = "3"
+eon = "0.2.0"
+heck = "0.5"
 dotenv = "0.15.0"
 rand = "0.9.0"
 uuid = { version = "1.8", features = ["v4", "serde"] }
@@ -70,9 +73,13 @@ sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
 
+[dev-dependencies]
+jsonwebtoken.workspace = true
+serde_json.workspace = true
+trybuild = "1"
+
 # Add an example that points to the demo package
 [[example]]
 name = "demo"
 path = "examples/demo/src/main.rs"
 required-features = ["sqlite"]
-

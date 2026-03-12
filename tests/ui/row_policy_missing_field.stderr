@@ -1,0 +1,5 @@
+error: row policy for `read` references missing field `user_id`
+ --> tests/ui/row_policy_missing_field.rs:7:8
+  |
+7 | struct MissingPolicyField {
+  |        ^^^^^^^^^^^^^^^^^^

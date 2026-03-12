@@ -1,0 +1,40 @@
+resources: [
+    {
+        name: "OwnedPost"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        policies: {
+            read: { kind: Owner, field: "user_id" }
+            create: { kind: SetOwner, field: "user_id" }
+            update: { kind: Owner, field: "user_id" }
+            delete: { kind: Owner, field: "user_id" }
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "subtitle", type: String, nullable: true }
+            { name: "user_id", type: I64 }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "AuditLog"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "message", type: String }
+            {
+                name: "user_id"
+                type: I64
+                relation: {
+                    references: "owned_post.user_id"
+                }
+            }
+            { name: "created_at", type: String }
+        ]
+    }
+]

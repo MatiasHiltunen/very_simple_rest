@@ -12,9 +12,10 @@ authorization, and relationship handling.
 ## Features
 
 - Zero-boilerplate REST APIs with a single derive macro
+- Typed `Create` / `Update` DTO generation for derive and `.eon` resources
+- Explicit SQL migration generation for `.eon` services
 - JWT-based authentication with role management
 - Role-Based Access Control (RBAC) for endpoint protection
-- Automatic database schema generation
 - Relationship handling with nested routes
 - Support for SQLite, PostgreSQL, and MySQL (via feature flags)
 
@@ -44,6 +45,7 @@ async fn main() -> std::io::Result<()> {
 
     let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
 
+    // Apply migrations before starting the server in production.
     HttpServer::new(move || {
         App::new()
             .service(
@@ -58,6 +60,29 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+## EON Macro
+
+The crate also exposes `rest_api_from_eon!` and `rest_api_eon!` for compile-time generation from
+minimal `.eon` service definitions. The generated module includes resource structs, `Create` and
+`Update` DTOs, a module-level `configure` function, and optional portable row policies based on
+`user.id` and JWT claims.
+
+Generated REST resources do not perform runtime schema creation. For `.eon` services, use the
+`vsr migrate generate`, `vsr migrate check`, and `vsr migrate apply` commands to manage schema
+explicitly.
+
+For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
+the `/auth/register` and `/auth/login` routes in a fresh database.
+
+For derive-based resources, use `vsr migrate derive --input src` and optionally
+`--exclude-table user` when the built-in auth migration already owns that table.
+
+For additive evolution between schema versions, `vsr migrate diff` emits only new tables, new
+indexes, and safe nullable/defaulted columns; destructive changes remain manual by design.
+
+For live drift checks, `vsr migrate inspect` compares the current database to a schema source and
+reports mismatches without generating SQL.
+
 ## JWT Secret Configuration
 
 The library supports the following methods for setting the JWT secret (in order of precedence):
@@ -67,15 +92,20 @@ The library supports the following methods for setting the JWT secret (in order 
 3. If no secret is provided, a random secret is generated at startup (not recommended for production)
 
 For production environments, it's strongly recommended to set a persistent secret using one of the first two methods.
+
+The built-in auth login route will also emit numeric claims automatically from `user` table
+columns such as `tenant_id`, `org_id`, or `claim_workspace_id`.
 */
 
-pub use rest_macro::RestApi;
+extern crate self as very_simple_rest;
+
+pub use rest_macro::{RestApi, rest_api_eon, rest_api_from_eon};
 pub use rest_macro_core as core;
 
 pub mod auth {
     pub use rest_macro_core::auth::{
-        auth_routes, login, me, register, LoginInput, RegisterInput, User, UserContext,
-        ensure_admin_exists,
+        LoginInput, RegisterInput, User, UserContext, auth_routes, ensure_admin_exists, login, me,
+        register,
     };
 }
 
@@ -91,12 +121,12 @@ pub mod prelude {
     pub use crate::auth;
     pub use crate::auth::UserContext;
     pub use crate::core;
-    pub use crate::RestApi;
+    pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 
     pub use actix_web::{
+        App, HttpResponse, HttpServer, Responder,
         middleware::{DefaultHeaders, Logger},
         web::{self, scope},
-        App, HttpResponse, HttpServer, Responder,
     };
 
     pub use actix_cors::Cors;

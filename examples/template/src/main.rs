@@ -87,8 +87,9 @@ async fn main() -> std::io::Result<()> {
     let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
     info!("Database connection established");
 
-    // Tables will be automatically created by the RestApi macro
-    info!("Configuring server with automatic table creation...");
+    // Apply `vsr migrate auth` and `vsr migrate derive --input src --exclude-table user`
+    // before starting the server.
+    info!("Configuring server with existing database schema...");
 
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {
@@ -123,9 +124,12 @@ async fn main() -> std::io::Result<()> {
         Ok(false) => {
             error!("Failed to create admin user - shutting down");
             return Ok(());
-        },
+        }
         Err(e) => {
-            error!("Database error when checking/creating admin user: {} - shutting down", e);
+            error!(
+                "Database error when checking/creating admin user: {} - shutting down",
+                e
+            );
             return Ok(());
         }
     }

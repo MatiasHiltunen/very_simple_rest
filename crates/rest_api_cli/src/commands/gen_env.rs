@@ -1,10 +1,10 @@
 use crate::error::Result;
 use colored::Colorize;
+use rand::Rng;
+use rand::distr::{Alphanumeric, SampleString};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use rand::Rng;
-use rand::distr::{Alphanumeric, SampleString};
 
 /// Generate a .env file with default configuration
 pub fn generate_env_file(path: Option<String>) -> Result<()> {
@@ -49,7 +49,10 @@ LOG_LEVEL=info
     file.write_all(env_content.as_bytes())?;
 
     println!("{} {}", "Environment file created at:".green(), env_path);
-    println!("\n{}", "Remember to update the settings if needed.".yellow());
+    println!(
+        "\n{}",
+        "Remember to update the settings if needed.".yellow()
+    );
 
     Ok(())
 }
@@ -61,10 +64,10 @@ fn generate_random_string(length: usize) -> String {
     // Generate alphanumeric part with special characters mixed in
     let alphanumeric = Alphanumeric.sample_string(&mut rng, length);
     let special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?";
-    
+
     // Mix in some special characters
     let mut result = alphanumeric.chars().collect::<Vec<_>>();
-    for _ in 0..length/4 {
+    for _ in 0..length / 4 {
         let pos = rng.random_range(0..length);
         let special_idx = rng.random_range(0..special_chars.len());
         if let Some(special) = special_chars.chars().nth(special_idx) {
@@ -73,6 +76,6 @@ fn generate_random_string(length: usize) -> String {
             }
         }
     }
-    
+
     result.into_iter().collect()
-} 
+}

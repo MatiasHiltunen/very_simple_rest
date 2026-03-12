@@ -1,0 +1,5 @@
+error: create row policy must use kind `SetOwner`
+ --> tests/ui/row_policy_invalid_create_kind.rs:6:23
+  |
+6 | #[row_policy(create = "owner:user_id")]
+  |                       ^^^^^^^^^^^^^^^

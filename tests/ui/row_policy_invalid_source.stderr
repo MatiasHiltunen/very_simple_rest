@@ -1,0 +1,5 @@
+error: row_policy source must be `user.id` or `claim.<name>`
+ --> tests/ui/row_policy_invalid_source.rs:6:21
+  |
+6 | #[row_policy(read = "tenant_id=session.tenant_id")]
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

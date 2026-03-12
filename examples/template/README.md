@@ -12,12 +12,22 @@ This is a demonstration of the REST Macro library, showing how to easily create 
 ## Running the Demo
 
 ```bash
+# Migrate the built-in auth schema first
+vsr migrate auth --output migrations/0000_auth.sql
+
+# Generate resource migrations from the derive-based models
+vsr migrate derive --input src --exclude-table user --output migrations/0001_resources.sql
+
+vsr --database-url sqlite:app.db?mode=rwc migrate apply --dir migrations
+
 # Start the server
 cargo run
 
 # The server will be available at:
 # http://localhost:8080
 ```
+
+The `user` table is excluded from the derive migration because the built-in auth migration owns it.
 
 ## JWT Secret Configuration
 

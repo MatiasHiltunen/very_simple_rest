@@ -1,0 +1,42 @@
+resources: [
+    {
+        name: "Post"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "content", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "Comment"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "content", type: String }
+            {
+                name: "post_id"
+                type: I64
+                relation: {
+                    references: "post.id"
+                    nested_route: true
+                }
+            }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+]

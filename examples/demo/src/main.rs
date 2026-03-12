@@ -89,8 +89,9 @@ async fn main() -> std::io::Result<()> {
     let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
     info!("Database connection established");
 
-    // Tables will be automatically created by the RestApi macro
-    info!("Configuring server with automatic table creation...");
+    // Apply `vsr migrate auth` and `vsr migrate derive --input src --exclude-table user`
+    // before starting the server.
+    info!("Configuring server with existing database schema...");
 
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {

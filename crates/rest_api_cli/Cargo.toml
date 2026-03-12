@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "1.0"
 dotenv.workspace = true
-rest_macro_core = { workspace = true }
+rest_macro_core = { workspace = true, features = ["codegen"] }
 bcrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
