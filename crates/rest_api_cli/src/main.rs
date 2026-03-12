@@ -83,6 +83,41 @@ enum Commands {
         command: ServerCommand,
     },
 
+    /// Generate an OpenAPI document from a `.eon` service or derive-based Rust sources
+    OpenApi {
+        /// Schema source (`.eon`, `.rs`, or a Rust source directory)
+        #[arg(short, long, value_name = "PATH")]
+        input: PathBuf,
+
+        /// Output OpenAPI JSON file
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// Override the document title
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+
+        /// Override the OpenAPI version string
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+
+        /// Server URL mounted in the generated document
+        #[arg(long, value_name = "URL", default_value = "/api")]
+        server_url: String,
+
+        /// Include built-in auth routes in the generated document
+        #[arg(long)]
+        with_auth: bool,
+
+        /// Exclude a table from the generated document
+        #[arg(long = "exclude-table", value_name = "TABLE")]
+        exclude_tables: Vec<String>,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Generate .env file template
     GenEnv {
         /// Path to the environment file
@@ -465,6 +500,29 @@ async fn main() -> Result<()> {
                 )?;
             }
         },
+
+        Commands::OpenApi {
+            input,
+            output,
+            title,
+            version,
+            server_url,
+            with_auth,
+            exclude_tables,
+            force,
+        } => {
+            println!("{}", "Generating OpenAPI spec...".green().bold());
+            commands::openapi::generate_openapi(
+                input,
+                output,
+                *force,
+                exclude_tables,
+                title.clone(),
+                version.clone(),
+                server_url,
+                *with_auth,
+            )?;
+        }
 
         Commands::GenEnv { path } => {
             println!("{}", "Generating environment file...".green().bold());

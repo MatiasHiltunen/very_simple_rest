@@ -4,9 +4,9 @@ use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
+use very_simple_rest::rest_api_from_eon;
 use very_simple_rest::sqlx::any::AnyPoolOptions;
 use very_simple_rest::sqlx::{self, FromRow};
-use very_simple_rest::rest_api_from_eon;
 
 const TEST_JWT_SECRET: &str = "fine-grained-policy-secret";
 
@@ -328,7 +328,10 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .to_request();
     let cross_tenant_admin_workspace_response =
         test::call_service(&app, cross_tenant_admin_workspace_get).await;
-    assert_eq!(cross_tenant_admin_workspace_response.status(), StatusCode::OK);
+    assert_eq!(
+        cross_tenant_admin_workspace_response.status(),
+        StatusCode::OK
+    );
 
     let admin_subscription_update = test::TestRequest::put()
         .uri(&format!("/api/on_call_subscription/{}", subscription.id))
@@ -344,7 +347,10 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .to_request();
     let admin_subscription_update_response =
         test::call_service(&app, admin_subscription_update).await;
-    assert_eq!(admin_subscription_update_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        admin_subscription_update_response.status(),
+        StatusCode::NOT_FOUND
+    );
 
     let owner_subscription_update = test::TestRequest::put()
         .uri(&format!("/api/on_call_subscription/{}", subscription.id))
@@ -379,7 +385,10 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .to_request();
     let admin_subscription_delete_response =
         test::call_service(&app, admin_subscription_delete).await;
-    assert_eq!(admin_subscription_delete_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        admin_subscription_delete_response.status(),
+        StatusCode::NOT_FOUND
+    );
 
     let owner_subscription_delete = test::TestRequest::delete()
         .uri(&format!("/api/on_call_subscription/{}", subscription.id))

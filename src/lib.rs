@@ -71,6 +71,10 @@ Generated REST resources do not perform runtime schema creation. For `.eon` serv
 `vsr migrate generate`, `vsr migrate check`, and `vsr migrate apply` commands to manage schema
 explicitly.
 
+For generated resource routes, `vsr openapi --input ... --output openapi.json` renders an OpenAPI
+document, and `vsr server emit` projects serve that same document at `/openapi.json` with Swagger
+UI at `/docs`. Add `--with-auth` when you also want the built-in auth routes in the document.
+
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
 the `/auth/register` and `/auth/login` routes in a fresh database.
 

@@ -491,12 +491,10 @@ mod tests {
         assert!(workspace_pos < project_pos);
         assert!(project_pos < incident_note_pos);
         assert!(sql.contains("FOREIGN KEY (project_id) REFERENCES project(id)"));
-        assert!(sql.contains(
-            "CREATE INDEX idx_workspace_tenant_id ON workspace (tenant_id);"
-        ));
-        assert!(sql.contains(
-            "CREATE INDEX idx_workspace_owner_user_id ON workspace (owner_user_id);"
-        ));
+        assert!(sql.contains("CREATE INDEX idx_workspace_tenant_id ON workspace (tenant_id);"));
+        assert!(
+            sql.contains("CREATE INDEX idx_workspace_owner_user_id ON workspace (owner_user_id);")
+        );
         assert!(sql.contains(
             "CREATE INDEX idx_on_call_subscription_subscriber_user_id ON on_call_subscription (subscriber_user_id);"
         ));

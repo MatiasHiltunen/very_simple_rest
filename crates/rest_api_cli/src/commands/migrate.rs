@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::commands::schema::{load_filtered_derive_service, load_schema_service};
+
 const MIGRATIONS_TABLE: &str = "_vsr_migrations";
 const BUILTIN_AUTH_MIGRATION: &str = "0000_builtin_auth.sql";
 
@@ -390,57 +392,6 @@ fn normalize_sql_type(raw: &str) -> String {
     } else {
         raw.trim().to_ascii_uppercase()
     }
-}
-
-fn load_schema_service(input: &Path, exclude_tables: &[String]) -> Result<compiler::ServiceSpec> {
-    let mut service = if input.extension().and_then(|ext| ext.to_str()) == Some("eon") {
-        compiler::load_service_from_path(input)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .with_context(|| {
-                format!("failed to load service definition from {}", input.display())
-            })?
-    } else {
-        compiler::load_derive_service_from_path(input)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .with_context(|| format!("failed to load derive resources from {}", input.display()))?
-    };
-
-    apply_table_exclusions(&mut service, exclude_tables, input)?;
-    Ok(service)
-}
-
-fn load_filtered_derive_service(
-    input: &Path,
-    exclude_tables: &[String],
-) -> Result<compiler::ServiceSpec> {
-    let mut service = compiler::load_derive_service_from_path(input)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .with_context(|| format!("failed to load derive resources from {}", input.display()))?;
-    apply_table_exclusions(&mut service, exclude_tables, input)?;
-    Ok(service)
-}
-
-fn apply_table_exclusions(
-    service: &mut compiler::ServiceSpec,
-    exclude_tables: &[String],
-    input: &Path,
-) -> Result<()> {
-    if !exclude_tables.is_empty() {
-        service.resources.retain(|resource| {
-            !exclude_tables
-                .iter()
-                .any(|excluded| excluded == &resource.table_name)
-        });
-    }
-
-    if service.resources.is_empty() {
-        bail!(
-            "no resources remain after exclusions for {}",
-            input.display()
-        );
-    }
-
-    Ok(())
 }
 
 async fn inspect_table_schema(

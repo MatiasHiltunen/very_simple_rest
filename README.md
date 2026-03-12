@@ -201,11 +201,35 @@ The emitted project includes:
 - `src/main.rs` wired to `rest_api_from_eon!`
 - the copied `.eon` file
 - `.env.example`
+- `openapi.json`
 - `migrations/0001_service.sql`
 
 When `--with-auth` is enabled, the project also includes built-in auth routes and
 `migrations/0000_auth.sql`. That flag cannot be used if the `.eon` service already defines a
 `user` table.
+
+Generated server projects serve the OpenAPI document at `/openapi.json` and a Swagger UI page at
+`/docs`.
+
+## OpenAPI
+
+You can also render an OpenAPI document directly from either a `.eon` file or derive-based Rust
+sources:
+
+```bash
+# Generate OpenAPI JSON from a bare .eon service
+vsr openapi --input tests/fixtures/blog_api.eon --output openapi.json
+
+# Generate the same kind of document from #[derive(RestApi)] resources
+vsr openapi --input src --exclude-table user --output openapi.json
+
+# Include the built-in auth routes in the document when you use them
+vsr openapi --input tests/fixtures/blog_api.eon --with-auth --output openapi-auth.json
+```
+
+The current generator covers generated resource routes, DTO schemas, nested collection routes, JWT
+bearer auth, the `/api` server base URL, and optional built-in auth routes when `--with-auth` is
+enabled. Generated server projects reuse the same document.
 
 ## Migrations
 
@@ -430,7 +454,7 @@ eonfmt path/to/api.eon
 - Support for all SQLx database backends
 - More flexible role definitions
 - Custom validation rules
-- Swagger/OpenAPI documentation generation
+- Richer OpenAPI response metadata and more detailed validation/error schemas
 
 ## Contributions
 

@@ -3,6 +3,7 @@ mod derive_parser;
 mod eon_parser;
 mod migrations;
 mod model;
+mod openapi;
 mod source_loader;
 
 use proc_macro2::TokenStream;
@@ -13,6 +14,7 @@ pub use model::{
     DbBackend, GeneratedValue, RelationSpec, ResourceSpec, RoleRequirements, RowPolicies,
     ServiceSpec, is_optional_type,
 };
+pub use openapi::OpenApiSpecOptions;
 
 pub fn expand_derive(input: DeriveInput, runtime_crate: Path) -> syn::Result<TokenStream> {
     let resource = derive_parser::parse_derive_input(input)?;
@@ -42,4 +44,11 @@ pub fn render_service_diff_migration_sql(
     next: &ServiceSpec,
 ) -> syn::Result<String> {
     migrations::render_service_diff_migration_sql(previous, next)
+}
+
+pub fn render_service_openapi_json(
+    service: &ServiceSpec,
+    options: &OpenApiSpecOptions,
+) -> syn::Result<String> {
+    openapi::render_service_openapi_json(service, options)
 }

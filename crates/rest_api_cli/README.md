@@ -64,6 +64,7 @@ This emits:
 - `src/main.rs`
 - the copied `.eon` file
 - `.env.example`
+- `openapi.json`
 - `migrations/0001_service.sql`
 
 You can also build a server binary directly:
@@ -81,6 +82,26 @@ Useful options:
 
 `--with-auth` is rejected if the `.eon` service already defines a `user` table, because the
 built-in auth migration owns that table.
+
+Generated server projects serve the OpenAPI document at `/openapi.json` and Swagger UI at `/docs`.
+
+### OpenAPI Generation
+
+Render an OpenAPI document from either a `.eon` service or derive-based Rust resources:
+
+```bash
+vsr openapi --input api.eon --output openapi.json
+vsr openapi --input src --exclude-table user --output openapi.json
+vsr openapi --input api.eon --with-auth --output openapi-auth.json
+```
+
+Useful options:
+
+- `--title` overrides the document title
+- `--version` overrides the OpenAPI version string in `info.version`
+- `--server-url` changes the generated server URL, which defaults to `/api`
+- `--with-auth` adds the built-in `/auth/register`, `/auth/login`, and `/auth/me` routes
+- `--exclude-table` removes specific tables from the document
 
 ### Create Admin
 
