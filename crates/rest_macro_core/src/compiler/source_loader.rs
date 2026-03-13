@@ -62,6 +62,7 @@ pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
     Ok(ServiceSpec {
         module_ident: sanitize_module_ident(module_name, Span::call_site()),
         resources,
+        static_mounts: Vec::new(),
     })
 }
 

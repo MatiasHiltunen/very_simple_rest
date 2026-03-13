@@ -202,10 +202,35 @@ pub struct ResourceSpec {
     pub write_style: WriteModelStyle,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaticMode {
+    Directory,
+    Spa,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaticCacheProfile {
+    NoStore,
+    Revalidate,
+    Immutable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticMountSpec {
+    pub mount_path: String,
+    pub source_dir: String,
+    pub resolved_dir: String,
+    pub mode: StaticMode,
+    pub index_file: Option<String>,
+    pub fallback_file: Option<String>,
+    pub cache: StaticCacheProfile,
+}
+
 #[derive(Clone)]
 pub struct ServiceSpec {
     pub module_ident: Ident,
     pub resources: Vec<ResourceSpec>,
+    pub static_mounts: Vec<StaticMountSpec>,
 }
 
 impl ResourceSpec {

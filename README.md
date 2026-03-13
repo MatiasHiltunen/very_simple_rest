@@ -112,7 +112,12 @@ The library provides these authentication endpoints out of the box:
 
 - **POST /api/auth/register** - Register a new user
 - **POST /api/auth/login** - Login and get a JWT token
-- **GET /api/auth/me** - Get information about the authenticated user
+- **GET /api/auth/me** - Get information about the authenticated account
+
+When you create built-in admin users through `vsr create-admin` or `vsr setup`, the CLI now
+inspects the live `user` table and also populates numeric claim columns such as `tenant_id`,
+`org_id`, or `claim_workspace_id`. Interactive flows prompt for those values, and non-interactive
+flows accept environment variables named `ADMIN_<COLUMN_NAME>`, such as `ADMIN_TENANT_ID=1`.
 
 ### JWT Secret Configuration
 
@@ -143,10 +148,13 @@ Set these environment variables before starting your application:
 ```
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=securepassword
+ADMIN_TENANT_ID=1
 ```
 
 After the built-in auth schema has been migrated, `ensure_admin_exists` can create the first admin
-user automatically with these credentials.
+user automatically with these credentials. If the `user` table also has numeric claim columns such
+as `tenant_id`, `org_id`, or `claim_workspace_id`, `ensure_admin_exists` now reads matching
+`ADMIN_<COLUMN_NAME>` variables and stores them on the admin row too.
 
 ### 2. CLI Tool (Interactive)
 
@@ -204,12 +212,15 @@ The emitted project includes:
 - `openapi.json`
 - `migrations/0001_service.sql`
 
-When `--with-auth` is enabled, the project also includes built-in auth routes and
+When `--with-auth` is enabled, the project also includes built-in auth and account routes plus
 `migrations/0000_auth.sql`. That flag cannot be used if the `.eon` service already defines a
 `user` table.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and a Swagger UI page at
 `/docs`.
+
+When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
+the generated project so the emitted server can serve them without extra setup.
 
 ## OpenAPI
 
@@ -223,13 +234,64 @@ vsr openapi --input tests/fixtures/blog_api.eon --output openapi.json
 # Generate the same kind of document from #[derive(RestApi)] resources
 vsr openapi --input src --exclude-table user --output openapi.json
 
-# Include the built-in auth routes in the document when you use them
+# Include the built-in auth and account routes in the document when you use them
 vsr openapi --input tests/fixtures/blog_api.eon --with-auth --output openapi-auth.json
 ```
 
 The current generator covers generated resource routes, DTO schemas, nested collection routes, JWT
-bearer auth, the `/api` server base URL, and optional built-in auth routes when `--with-auth` is
-enabled. Generated server projects reuse the same document.
+bearer auth, the `/api` server base URL, and optional built-in auth/account routes when
+`--with-auth` is enabled. In Swagger, login and registration appear under `Auth`, while the
+current-user endpoint appears under `Account`. Generated server projects reuse the same document.
+
+## Static Files In `.eon`
+
+Bare `.eon` services can configure static file serving at the service level:
+
+```eon
+module: "static_site_api"
+static: {
+    mounts: [
+        {
+            mount: "/assets"
+            dir: "public/assets"
+            mode: Directory
+            cache: Immutable
+        }
+        {
+            mount: "/"
+            dir: "public"
+            mode: Spa
+            index_file: "index.html"
+            fallback_file: "index.html"
+            cache: NoStore
+        }
+    ]
+}
+resources: [
+    {
+        name: "Page"
+        fields: [
+            { name: "title", type: "String" }
+        ]
+    }
+]
+```
+
+Supported static mount options:
+
+- `mount`: URL prefix such as `/assets` or `/`
+- `dir`: directory relative to the `.eon` file
+- `mode`: `Directory` or `Spa`
+- `index_file`: optional directory index file, defaulting to `index.html` for `Spa`
+- `fallback_file`: SPA fallback target, defaulting to `index.html` for `Spa`
+- `cache`: `NoStore`, `Revalidate`, or `Immutable`
+
+The loader validates that:
+
+- static directories stay under the `.eon` service root
+- reserved routes such as `/api`, `/auth`, `/docs`, and `/openapi.json` are not shadowed
+- SPA fallback only applies to `GET` and `HEAD` HTML navigations, not missing asset files
+- symlinked directories are rejected during emitted-project copying
 
 ## Migrations
 

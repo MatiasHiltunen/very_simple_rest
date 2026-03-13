@@ -75,7 +75,7 @@ vsr server build --input api.eon --output dist/api-server --release
 
 Useful options:
 
-- `--with-auth` includes built-in auth routes plus `migrations/0000_auth.sql`
+- `--with-auth` includes built-in auth/account routes plus `migrations/0000_auth.sql`
 - `--package-name` overrides the generated Cargo package name
 - `--build-dir` keeps the temporary Cargo project in a known location
 - `--keep-build-dir` preserves the generated build project after compilation
@@ -84,6 +84,8 @@ Useful options:
 built-in auth migration owns that table.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and Swagger UI at `/docs`.
+When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
+the generated project and wires the generated server to serve them.
 
 ### OpenAPI Generation
 
@@ -100,8 +102,46 @@ Useful options:
 - `--title` overrides the document title
 - `--version` overrides the OpenAPI version string in `info.version`
 - `--server-url` changes the generated server URL, which defaults to `/api`
-- `--with-auth` adds the built-in `/auth/register`, `/auth/login`, and `/auth/me` routes
+- `--with-auth` adds the built-in `/auth/register`, `/auth/login`, and `/auth/me` routes, with
+  `/auth/me` grouped under `Account` in Swagger
 - `--exclude-table` removes specific tables from the document
+
+### Static Files In `.eon`
+
+Bare `.eon` services can define service-level static mounts:
+
+```eon
+static: {
+    mounts: [
+        {
+            mount: "/assets"
+            dir: "public/assets"
+            mode: Directory
+            cache: Immutable
+        }
+        {
+            mount: "/"
+            dir: "public"
+            mode: Spa
+            index_file: "index.html"
+            fallback_file: "index.html"
+            cache: NoStore
+        }
+    ]
+}
+```
+
+Supported options:
+
+- `mount`: URL prefix such as `/assets` or `/`
+- `dir`: directory relative to the `.eon` file
+- `mode`: `Directory` or `Spa`
+- `index_file`: optional directory index file
+- `fallback_file`: SPA fallback file
+- `cache`: `NoStore`, `Revalidate`, or `Immutable`
+
+The loader rejects mounts that escape the `.eon` root or conflict with reserved routes such as
+`/api`, `/auth`, `/docs`, and `/openapi.json`.
 
 ### Create Admin
 
@@ -114,6 +154,11 @@ vsr create-admin
 # Non-interactive mode with parameters
 vsr create-admin --email admin@example.com --password secure_password
 ```
+
+If the built-in auth `user` table has extra numeric claim columns such as `tenant_id`,
+`org_id`, or `claim_workspace_id`, the CLI detects them automatically. Interactive admin creation
+prompts for those values, and non-interactive flows accept environment variables named
+`ADMIN_<COLUMN_NAME>`, for example `ADMIN_TENANT_ID=1`.
 
 ### Check Database
 
@@ -146,6 +191,7 @@ The CLI tool respects the following environment variables:
 | `DATABASE_URL` | Database connection string | `sqlite:app.db?mode=rwc` |
 | `ADMIN_EMAIL` | Default admin email address | None |
 | `ADMIN_PASSWORD` | Default admin password | None |
+| `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` | None |
 | `JWT_SECRET` | Secret key for JWT tokens | Auto-generated |
 
 ## Examples
@@ -170,6 +216,7 @@ vsr check-db
 export DATABASE_URL="sqlite:app.db?mode=rwc"
 export ADMIN_EMAIL="admin@example.com"
 export ADMIN_PASSWORD="secure_random_password"
+export ADMIN_TENANT_ID="1"
 
 # Create admin non-interactively
 vsr create-admin --email $ADMIN_EMAIL --password $ADMIN_PASSWORD

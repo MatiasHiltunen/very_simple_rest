@@ -75,6 +75,11 @@ pub fn generate_env_template() -> Result<()> {
     )?;
     writeln!(file, "# ADMIN_EMAIL=admin@example.com")?;
     writeln!(file, "# ADMIN_PASSWORD=securepassword")?;
+    writeln!(
+        file,
+        "# Optional auth claim columns use ADMIN_<COLUMN_NAME>, for example:"
+    )?;
+    writeln!(file, "# ADMIN_TENANT_ID=1")?;
     writeln!(file)?;
     writeln!(file, "# Server Configuration")?;
     writeln!(file, "# HOST=127.0.0.1")?;

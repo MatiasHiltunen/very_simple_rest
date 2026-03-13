@@ -3,6 +3,7 @@ use very_simple_rest::rest_api_from_eon;
 rest_api_from_eon!("tests/fixtures/blog_api.eon");
 rest_api_from_eon!("tests/fixtures/owned_api.eon");
 rest_api_from_eon!("tests/fixtures/tenant_api.eon");
+rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -94,4 +95,10 @@ fn eon_macro_claim_policies_trim_generated_dtos() {
     ) = tenant_api::TenantPost::configure;
 
     let _ = (post, create, update);
+}
+
+#[test]
+fn eon_macro_generates_static_configure_function() {
+    let _configure_static: fn(&mut very_simple_rest::actix_web::web::ServiceConfig) =
+        static_site_api::configure_static;
 }

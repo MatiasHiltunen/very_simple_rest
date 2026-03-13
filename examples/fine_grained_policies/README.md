@@ -33,6 +33,11 @@ sqlite3 app.db < examples/fine_grained_policies/auth_extension.sql
 After that, any numeric `tenant_id` value stored on the built-in `user` row will be emitted as a
 JWT claim on login.
 
+For resources that keep `admin_bypass: true`, the generated create DTOs also expose optional
+claim-backed fields such as `tenant_id`. That means an admin using `/docs` can still create those
+resources by supplying `tenant_id` explicitly even if the admin token itself does not carry the
+claim. Resources with `admin_bypass: false` still require the claim on the token.
+
 ## Generate And Apply
 
 ```bash

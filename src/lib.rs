@@ -64,8 +64,9 @@ async fn main() -> std::io::Result<()> {
 
 The crate also exposes `rest_api_from_eon!` and `rest_api_eon!` for compile-time generation from
 minimal `.eon` service definitions. The generated module includes resource structs, `Create` and
-`Update` DTOs, a module-level `configure` function, and optional portable row policies based on
-`user.id` and JWT claims.
+`Update` DTOs, a module-level `configure` function, a matching `configure_static` hook for
+service-level static mounts, and optional portable row policies based on `user.id` and JWT
+claims.
 
 Generated REST resources do not perform runtime schema creation. For `.eon` services, use the
 `vsr migrate generate`, `vsr migrate check`, and `vsr migrate apply` commands to manage schema
@@ -73,10 +74,21 @@ explicitly.
 
 For generated resource routes, `vsr openapi --input ... --output openapi.json` renders an OpenAPI
 document, and `vsr server emit` projects serve that same document at `/openapi.json` with Swagger
-UI at `/docs`. Add `--with-auth` when you also want the built-in auth routes in the document.
+UI at `/docs`. Add `--with-auth` when you also want the built-in auth/account routes in the
+document. In Swagger, `/auth/register` and `/auth/login` appear under `Auth`, while `/auth/me`
+appears under `Account`.
+
+`.eon` services can also define `static.mounts` with `Directory` or `Spa` modes. Static
+directories are resolved relative to the `.eon` file, reserved routes like `/api` and `/docs`
+cannot be shadowed, and `vsr server emit` copies the declared static directories into the emitted
+project automatically.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
 the `/auth/register` and `/auth/login` routes in a fresh database.
+
+When `ensure_admin_exists` or the CLI admin bootstrap creates the first admin user, numeric auth
+claim columns on `user` such as `tenant_id`, `org_id`, or `claim_workspace_id` can be supplied
+through matching `ADMIN_<COLUMN_NAME>` environment variables.
 
 For derive-based resources, use `vsr migrate derive --input src` and optionally
 `--exclude-table user` when the built-in auth migration already owns that table.

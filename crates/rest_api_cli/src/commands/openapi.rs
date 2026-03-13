@@ -134,5 +134,6 @@ mod tests {
             serde_json::from_str(&read_to_string(&output)).expect("document should parse");
         assert!(document["paths"]["/auth/login"]["post"].is_object());
         assert!(document["paths"]["/auth/me"]["get"].is_object());
+        assert_eq!(document["paths"]["/auth/me"]["get"]["tags"][0], "Account");
     }
 }

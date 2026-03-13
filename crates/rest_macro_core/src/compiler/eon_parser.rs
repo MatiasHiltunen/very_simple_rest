@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     env, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use heck::ToSnakeCase;
@@ -10,9 +10,10 @@ use syn::{LitStr, Type};
 
 use super::model::{
     DbBackend, FieldSpec, GeneratedValue, PolicyAssignment, PolicyFilter, PolicyValueSource,
-    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, WriteModelStyle,
-    default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
-    sanitize_struct_ident, validate_row_policies,
+    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile,
+    StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
+    validate_row_policies,
 };
 
 pub struct LoadedService {
@@ -26,7 +27,29 @@ struct ServiceDocument {
     module: Option<String>,
     #[serde(default)]
     db: DbBackend,
+    #[serde(default, rename = "static")]
+    static_config: Option<StaticConfigDocument>,
     resources: Vec<ResourceDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct StaticConfigDocument {
+    #[serde(default)]
+    mounts: Vec<StaticMountDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct StaticMountDocument {
+    mount: String,
+    dir: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    index_file: Option<String>,
+    #[serde(default)]
+    fallback_file: Option<String>,
+    #[serde(default)]
+    cache: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -167,6 +190,11 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         .and_then(|stem| stem.to_str())
         .unwrap_or("generated_api");
     let module_ident = sanitize_module_ident(document.module.as_deref().unwrap_or(file_stem), span);
+    let service_root = absolute_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let static_mounts = build_static_mounts(&service_root, document.static_config)?;
 
     let resources = build_resources(document.db, document.resources)?;
     if resources.is_empty() {
@@ -180,6 +208,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         service: ServiceSpec {
             module_ident,
             resources,
+            static_mounts,
         },
         include_path,
     })
@@ -277,6 +306,219 @@ fn build_resources(
     }
 
     Ok(result)
+}
+
+fn build_static_mounts(
+    service_root: &Path,
+    static_config: Option<StaticConfigDocument>,
+) -> syn::Result<Vec<StaticMountSpec>> {
+    let service_root = service_root
+        .canonicalize()
+        .unwrap_or_else(|_| service_root.to_path_buf());
+    let Some(static_config) = static_config else {
+        return Ok(Vec::new());
+    };
+
+    let mut mounts = Vec::with_capacity(static_config.mounts.len());
+    let mut seen_mounts = HashSet::new();
+    for mount in static_config.mounts {
+        let mount_path = normalize_mount_path(&mount.mount)?;
+        if !seen_mounts.insert(mount_path.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate static mount `{mount_path}`"),
+            ));
+        }
+        validate_mount_path(&mount_path)?;
+
+        let source_dir = validate_relative_path(&mount.dir, "static dir")?;
+        let resolved_dir = resolve_directory_under_root(&service_root, &source_dir)?;
+        let mode = parse_static_mode(mount.mode.as_deref().unwrap_or("Directory"))?;
+        let cache = parse_static_cache_profile(mount.cache.as_deref().unwrap_or("Revalidate"))?;
+        let index_file = mount
+            .index_file
+            .as_deref()
+            .map(|value| validate_relative_path(value, "static index_file"))
+            .transpose()?;
+        let fallback_file = mount
+            .fallback_file
+            .as_deref()
+            .map(|value| validate_relative_path(value, "static fallback_file"))
+            .transpose()?;
+
+        let (index_file, fallback_file) = match mode {
+            StaticMode::Directory => (index_file, fallback_file),
+            StaticMode::Spa => (
+                Some(index_file.unwrap_or_else(|| "index.html".to_owned())),
+                Some(fallback_file.unwrap_or_else(|| "index.html".to_owned())),
+            ),
+        };
+
+        if let Some(index_file) = &index_file {
+            resolve_file_under_root(&resolved_dir, index_file, "static index_file")?;
+        }
+        if let Some(fallback_file) = &fallback_file {
+            resolve_file_under_root(&resolved_dir, fallback_file, "static fallback_file")?;
+        }
+
+        mounts.push(StaticMountSpec {
+            mount_path,
+            source_dir,
+            resolved_dir: resolved_dir.display().to_string(),
+            mode,
+            index_file,
+            fallback_file,
+            cache,
+        });
+    }
+
+    Ok(mounts)
+}
+
+fn normalize_mount_path(value: &str) -> syn::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "static mount path cannot be empty",
+        ));
+    }
+
+    if !trimmed.starts_with('/') {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "static mount path must start with `/`",
+        ));
+    }
+
+    if trimmed != "/" && trimmed.ends_with('/') {
+        return Ok(trimmed.trim_end_matches('/').to_owned());
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn validate_mount_path(mount_path: &str) -> syn::Result<()> {
+    if matches!(mount_path, "/api" | "/auth" | "/docs" | "/openapi.json") {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("static mount `{mount_path}` conflicts with a reserved route"),
+        ));
+    }
+
+    if mount_path.contains("//") {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "static mount path cannot contain `//`",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_relative_path(value: &str, label: &str) -> syn::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{label} cannot be empty"),
+        ));
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{label} must be relative to the `.eon` file"),
+        ));
+    }
+
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{label} cannot escape the service directory"),
+        ));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn resolve_directory_under_root(service_root: &Path, relative_dir: &str) -> syn::Result<PathBuf> {
+    let resolved = service_root.join(relative_dir);
+    let canonical = resolved.canonicalize().map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("failed to resolve static dir `{relative_dir}`: {error}"),
+        )
+    })?;
+    if !canonical.starts_with(service_root) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("static dir `{relative_dir}` resolves outside the service directory"),
+        ));
+    }
+    if !canonical.is_dir() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("static dir `{relative_dir}` is not a directory"),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn resolve_file_under_root(
+    base_dir: &Path,
+    relative_file: &str,
+    label: &str,
+) -> syn::Result<PathBuf> {
+    let resolved = base_dir.join(relative_file);
+    let canonical = resolved.canonicalize().map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("failed to resolve {label} `{relative_file}`: {error}"),
+        )
+    })?;
+    if !canonical.starts_with(base_dir) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{label} `{relative_file}` resolves outside the static dir"),
+        ));
+    }
+    if !canonical.is_file() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{label} `{relative_file}` is not a file"),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn parse_static_mode(value: &str) -> syn::Result<StaticMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "directory" => Ok(StaticMode::Directory),
+        "spa" => Ok(StaticMode::Spa),
+        _ => Err(syn::Error::new(
+            Span::call_site(),
+            "static mode must be `Directory` or `Spa`",
+        )),
+    }
+}
+
+fn parse_static_cache_profile(value: &str) -> syn::Result<StaticCacheProfile> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "nostore" | "no_store" | "no-store" => Ok(StaticCacheProfile::NoStore),
+        "revalidate" => Ok(StaticCacheProfile::Revalidate),
+        "immutable" => Ok(StaticCacheProfile::Immutable),
+        _ => Err(syn::Error::new(
+            Span::call_site(),
+            "static cache must be `NoStore`, `Revalidate`, or `Immutable`",
+        )),
+    }
 }
 
 fn parse_field_type(field_ty: &FieldTypeDocument, nullable: bool) -> syn::Result<Type> {
@@ -567,10 +809,24 @@ fn parse_policy_source(value: &str) -> syn::Result<PolicyValueSource> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
 
     fn parse_document(source: &str) -> ServiceDocument {
         eon::from_str::<ServiceDocument>(source).expect("eon should parse")
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}_{stamp}"))
     }
 
     #[test]
@@ -600,6 +856,7 @@ mod tests {
                 module_ident: sanitize_module_ident("test", Span::call_site()),
                 resources: build_resources(document.db, document.resources)
                     .expect("resources should build"),
+                static_mounts: Vec::new(),
             },
             include_path: path.value(),
         };
@@ -761,6 +1018,131 @@ mod tests {
             error
                 .to_string()
                 .contains("must use type `i64` or `Option<i64>`")
+        );
+    }
+
+    #[test]
+    fn parses_static_mounts_from_eon() {
+        let root = temp_root("eon_static_mounts");
+        fs::create_dir_all(root.join("public/assets")).expect("asset dir should exist");
+        fs::write(root.join("public/index.html"), "<html>ok</html>").expect("index should exist");
+        fs::write(root.join("public/assets/app.js"), "console.log('ok');")
+            .expect("asset should exist");
+
+        let document = parse_document(
+            r#"
+            static: {
+                mounts: [
+                    {
+                        mount: "/assets"
+                        dir: "public/assets"
+                        mode: Directory
+                        cache: Immutable
+                    }
+                    {
+                        mount: "/"
+                        dir: "public"
+                        mode: Spa
+                        cache: NoStore
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let mounts =
+            build_static_mounts(&root, document.static_config).expect("mounts should parse");
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].mount_path, "/assets");
+        assert_eq!(mounts[0].source_dir, "public/assets");
+        assert_eq!(mounts[0].cache, StaticCacheProfile::Immutable);
+        assert_eq!(mounts[1].mode, StaticMode::Spa);
+        assert_eq!(mounts[1].index_file.as_deref(), Some("index.html"));
+        assert_eq!(mounts[1].fallback_file.as_deref(), Some("index.html"));
+    }
+
+    #[test]
+    fn rejects_static_mounts_that_escape_service_root() {
+        let root = temp_root("eon_static_escape");
+        fs::create_dir_all(&root).expect("root should exist");
+        let outside = root
+            .parent()
+            .expect("temp root should have a parent")
+            .join("outside-static");
+        fs::create_dir_all(&outside).expect("outside dir should exist");
+
+        let document = parse_document(
+            r#"
+            static: {
+                mounts: [
+                    {
+                        mount: "/"
+                        dir: "../outside-static"
+                        mode: Spa
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = build_static_mounts(&root, document.static_config)
+            .expect_err("escaping static mount should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot escape the service directory")
+        );
+    }
+
+    #[test]
+    fn rejects_static_mounts_that_conflict_with_reserved_routes() {
+        let root = temp_root("eon_static_reserved");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+
+        let document = parse_document(
+            r#"
+            static: {
+                mounts: [
+                    {
+                        mount: "/docs"
+                        dir: "public"
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = build_static_mounts(&root, document.static_config)
+            .expect_err("reserved route conflict should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with a reserved route")
         );
     }
 }

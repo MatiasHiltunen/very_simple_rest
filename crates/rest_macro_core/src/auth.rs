@@ -14,7 +14,7 @@ use sqlx::{AnyPool, Column, FromRow, Row, any::AnyRow};
 use std::collections::BTreeMap;
 use std::env;
 use std::future::{Ready, ready};
-use std::io::{Write, stdin, stdout};
+use std::io::{IsTerminal, Write, stdin, stdout};
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,6 +329,278 @@ fn optional_i64_claim_column(row: &AnyRow, column: &str) -> Result<Option<i64>, 
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdminClaimColumn {
+    column_name: String,
+    env_var: String,
+    required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdminClaimValue {
+    column_name: String,
+    value: i64,
+}
+
+async fn detect_auth_backend(pool: &AnyPool) -> Result<AuthDbBackend, sqlx::Error> {
+    let connection = pool.acquire().await?;
+    let backend_name = connection.backend_name().to_ascii_lowercase();
+    if backend_name.contains("postgres") {
+        Ok(AuthDbBackend::Postgres)
+    } else if backend_name.contains("mysql") {
+        Ok(AuthDbBackend::Mysql)
+    } else if backend_name.contains("sqlite") {
+        Ok(AuthDbBackend::Sqlite)
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "unsupported built-in auth backend `{backend_name}`"
+        )))
+    }
+}
+
+async fn discover_admin_claim_columns(
+    pool: &AnyPool,
+    backend: AuthDbBackend,
+) -> Result<Vec<AdminClaimColumn>, sqlx::Error> {
+    let rows = match backend {
+        AuthDbBackend::Sqlite => {
+            sqlx::query("PRAGMA table_info('user')")
+                .fetch_all(pool)
+                .await?
+        }
+        AuthDbBackend::Postgres => {
+            sqlx::query(
+                "SELECT column_name, data_type, is_nullable, column_default \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'user' \
+             ORDER BY ordinal_position",
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        AuthDbBackend::Mysql => {
+            sqlx::query(
+                "SELECT column_name, data_type, is_nullable, column_default \
+             FROM information_schema.columns \
+             WHERE table_schema = DATABASE() AND table_name = 'user' \
+             ORDER BY ordinal_position",
+            )
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    let mut columns = Vec::new();
+    for row in rows {
+        let Some(metadata) = admin_claim_column_from_row(&row, backend)? else {
+            continue;
+        };
+        columns.push(metadata);
+    }
+
+    Ok(columns)
+}
+
+fn admin_claim_column_from_row(
+    row: &AnyRow,
+    backend: AuthDbBackend,
+) -> Result<Option<AdminClaimColumn>, sqlx::Error> {
+    let (column_name, data_type, required) = match backend {
+        AuthDbBackend::Sqlite => {
+            let column_name: String = row.try_get("name")?;
+            let data_type: String = row
+                .try_get::<Option<String>, _>("type")?
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let notnull = row.try_get::<i64, _>("notnull")? != 0;
+            let default_value = row.try_get::<Option<String>, _>("dflt_value")?;
+            (column_name, data_type, notnull && default_value.is_none())
+        }
+        AuthDbBackend::Postgres | AuthDbBackend::Mysql => {
+            let column_name: String = row.try_get("column_name")?;
+            let data_type: String = row.try_get::<String, _>("data_type")?.to_ascii_lowercase();
+            let is_nullable = row.try_get::<String, _>("is_nullable")?;
+            let default_value = row.try_get::<Option<String>, _>("column_default")?;
+            (
+                column_name,
+                data_type,
+                is_nullable.eq_ignore_ascii_case("NO") && default_value.is_none(),
+            )
+        }
+    };
+
+    if !is_admin_claim_column_name(&column_name) || !is_integer_claim_type(&data_type) {
+        return Ok(None);
+    }
+
+    Ok(Some(AdminClaimColumn {
+        env_var: admin_claim_env_var(&column_name),
+        column_name,
+        required,
+    }))
+}
+
+fn is_admin_claim_column_name(column_name: &str) -> bool {
+    if matches!(column_name, "id" | "email" | "password_hash" | "role") {
+        return false;
+    }
+    if let Some(rest) = column_name.strip_prefix("claim_") {
+        return !rest.is_empty();
+    }
+
+    column_name.ends_with("_id") && column_name != "id"
+}
+
+fn is_integer_claim_type(data_type: &str) -> bool {
+    data_type.trim().to_ascii_lowercase().contains("int")
+}
+
+fn admin_claim_env_var(column_name: &str) -> String {
+    let mut env_var = String::from("ADMIN_");
+    for ch in column_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            env_var.push(ch.to_ascii_uppercase());
+        } else {
+            env_var.push('_');
+        }
+    }
+    env_var
+}
+
+fn resolve_admin_claim_values(
+    claim_columns: &[AdminClaimColumn],
+    interactive: bool,
+) -> Result<Vec<AdminClaimValue>, String> {
+    let mut values = Vec::new();
+
+    for column in claim_columns {
+        if let Some(value) = claim_value_from_env(column)? {
+            values.push(AdminClaimValue {
+                column_name: column.column_name.clone(),
+                value,
+            });
+            continue;
+        }
+
+        if interactive {
+            if let Some(value) = prompt_admin_claim_value(column)? {
+                values.push(AdminClaimValue {
+                    column_name: column.column_name.clone(),
+                    value,
+                });
+            }
+            continue;
+        }
+
+        if column.required {
+            return Err(format!(
+                "Missing required admin claim column `{}`. Set {} before starting the server.",
+                column.column_name, column.env_var
+            ));
+        }
+    }
+
+    Ok(values)
+}
+
+fn claim_value_from_env(column: &AdminClaimColumn) -> Result<Option<i64>, String> {
+    match std::env::var(&column.env_var) {
+        Ok(raw) if raw.trim().is_empty() => Ok(None),
+        Ok(raw) => raw.trim().parse::<i64>().map(Some).map_err(|_| {
+            format!(
+                "Environment variable {} must be a valid integer",
+                column.env_var
+            )
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!(
+            "Failed to read environment variable {}: {}",
+            column.env_var, error
+        )),
+    }
+}
+
+fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<i64>, String> {
+    let prompt = if column.required {
+        format!("{} (required admin claim column): ", column.column_name)
+    } else {
+        format!(
+            "{} (optional admin claim column, press Enter to skip): ",
+            column.column_name
+        )
+    };
+
+    print!("{prompt}");
+    stdout()
+        .flush()
+        .map_err(|error| format!("Failed to flush stdout: {error}"))?;
+
+    let mut value = String::new();
+    stdin()
+        .read_line(&mut value)
+        .map_err(|error| format!("Failed to read {}: {error}", column.column_name))?;
+
+    let value = value.trim();
+    if value.is_empty() {
+        if column.required {
+            return Err(format!("{} is required", column.column_name));
+        }
+        return Ok(None);
+    }
+
+    value
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| format!("{} must be a valid integer", column.column_name))
+}
+
+fn placeholder_for_backend(backend: AuthDbBackend, index: usize) -> String {
+    match backend {
+        AuthDbBackend::Postgres => format!("${index}"),
+        AuthDbBackend::Sqlite | AuthDbBackend::Mysql => "?".to_owned(),
+    }
+}
+
+async fn insert_admin_user(
+    pool: &AnyPool,
+    backend: AuthDbBackend,
+    email: &str,
+    password_hash: &str,
+    claim_values: &[AdminClaimValue],
+) -> Result<(), sqlx::Error> {
+    let mut columns = vec![
+        "email".to_owned(),
+        "password_hash".to_owned(),
+        "role".to_owned(),
+    ];
+    columns.extend(
+        claim_values
+            .iter()
+            .map(|claim| claim.column_name.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    let placeholders = (1..=columns.len())
+        .map(|index| placeholder_for_backend(backend, index))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "INSERT INTO user ({}) VALUES ({})",
+        columns.join(", "),
+        placeholders
+    );
+    let mut query = sqlx::query(&sql)
+        .bind(email)
+        .bind(password_hash)
+        .bind("admin");
+    for claim in claim_values {
+        query = query.bind(claim.value);
+    }
+    query.execute(pool).await?;
+    Ok(())
+}
+
 pub async fn me(user: UserContext) -> impl Responder {
     HttpResponse::Ok().json(user)
 }
@@ -388,13 +660,30 @@ pub async fn ensure_admin_exists(pool: &AnyPool) -> Result<bool, sqlx::Error> {
             return Ok(false);
         }
     };
+    let backend = match detect_auth_backend(pool).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            eprintln!("[ERROR] Failed to detect auth backend: {}", error);
+            return Err(error);
+        }
+    };
+    let interactive_claims = stdin().is_terminal() && stdout().is_terminal();
+    let claim_columns = match discover_admin_claim_columns(pool, backend).await {
+        Ok(columns) => columns,
+        Err(error) => {
+            eprintln!("[ERROR] Failed to inspect auth schema: {}", error);
+            return Err(error);
+        }
+    };
+    let claim_values = match resolve_admin_claim_values(&claim_columns, interactive_claims) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("[ERROR] {}", error);
+            return Ok(false);
+        }
+    };
 
-    let result = sqlx::query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
-        .bind(&email)
-        .bind(password_hash)
-        .bind("admin")
-        .execute(pool)
-        .await;
+    let result = insert_admin_user(pool, backend, &email, &password_hash, &claim_values).await;
 
     match result {
         Ok(_) => {
@@ -402,6 +691,14 @@ pub async fn ensure_admin_exists(pool: &AnyPool) -> Result<bool, sqlx::Error> {
             println!("--------------------------------------------");
             println!("🔐 Admin User Created 🔐");
             println!("Email: {}", email);
+            if !claim_values.is_empty() {
+                let rendered_claims = claim_values
+                    .iter()
+                    .map(|claim| format!("{}={}", claim.column_name, claim.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("Claims: {}", rendered_claims);
+            }
             println!("--------------------------------------------");
             Ok(true)
         }
@@ -479,7 +776,24 @@ pub fn auth_routes(cfg: &mut web::ServiceConfig, db: AnyPool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthDbBackend, auth_migration_sql};
+    use super::{AuthDbBackend, auth_migration_sql, ensure_admin_exists};
+    use sqlx::{AnyPool, Row};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_sqlite_url(prefix: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic enough")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vsr_auth_{prefix}_{nanos}.db"));
+        format!("sqlite:{}?mode=rwc", path.display())
+    }
 
     #[test]
     fn sqlite_auth_migration_uses_expected_schema() {
@@ -490,5 +804,107 @@ mod tests {
         assert!(sql.contains("password_hash TEXT NOT NULL"));
         assert!(sql.contains("role TEXT NOT NULL"));
         assert!(sql.contains("CREATE INDEX idx_user_role ON user (role);"));
+    }
+
+    #[actix_web::test]
+    async fn ensure_admin_exists_inserts_detected_claim_columns_from_environment() {
+        sqlx::any::install_default_drivers();
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+        unsafe {
+            std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+            std::env::set_var("ADMIN_PASSWORD", "password123");
+            std::env::set_var("ADMIN_TENANT_ID", "7");
+            std::env::set_var("ADMIN_CLAIM_WORKSPACE_ID", "42");
+        }
+
+        let database_url = unique_sqlite_url("ensure_admin_claims");
+        let pool = AnyPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        sqlx::query(
+            "CREATE TABLE user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tenant_id INTEGER,
+                claim_workspace_id INTEGER
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("user table should be created");
+
+        let created = ensure_admin_exists(&pool)
+            .await
+            .expect("ensure_admin_exists should not error");
+        assert!(created);
+
+        let row =
+            sqlx::query("SELECT tenant_id, claim_workspace_id FROM user WHERE role = 'admin'")
+                .fetch_one(&pool)
+                .await
+                .expect("admin row should exist");
+        let tenant_id: Option<i64> = row.try_get("tenant_id").expect("tenant_id should decode");
+        let workspace_id: Option<i64> = row
+            .try_get("claim_workspace_id")
+            .expect("workspace claim should decode");
+        assert_eq!(tenant_id, Some(7));
+        assert_eq!(workspace_id, Some(42));
+
+        unsafe {
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+            std::env::remove_var("ADMIN_TENANT_ID");
+            std::env::remove_var("ADMIN_CLAIM_WORKSPACE_ID");
+        }
+    }
+
+    #[actix_web::test]
+    async fn ensure_admin_exists_returns_false_when_required_claim_is_missing() {
+        sqlx::any::install_default_drivers();
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+        unsafe {
+            std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+            std::env::set_var("ADMIN_PASSWORD", "password123");
+            std::env::remove_var("ADMIN_TENANT_ID");
+        }
+
+        let database_url = unique_sqlite_url("ensure_admin_required_claim");
+        let pool = AnyPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        sqlx::query(
+            "CREATE TABLE user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tenant_id INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("user table should be created");
+
+        let created = ensure_admin_exists(&pool)
+            .await
+            .expect("ensure_admin_exists should not error");
+        assert!(!created);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user")
+            .fetch_one(&pool)
+            .await
+            .expect("row count should be queryable");
+        assert_eq!(count, 0);
+
+        unsafe {
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
     }
 }

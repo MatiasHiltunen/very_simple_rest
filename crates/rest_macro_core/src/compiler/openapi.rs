@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
-use super::model::{FieldSpec, GeneratedValue, ResourceSpec, ServiceSpec, is_optional_type};
+use super::model::{
+    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_optional_type,
+};
 
 #[derive(Clone, Debug)]
 pub struct OpenApiSpecOptions {
@@ -70,10 +72,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
             name.clone(),
             object_schema(&resource.fields.iter().collect::<Vec<_>>()),
         );
-        schemas.insert(
-            format!("{name}Create"),
-            object_schema(&create_payload_fields(resource)),
-        );
+        schemas.insert(format!("{name}Create"), create_payload_schema(resource));
         schemas.insert(
             format!("{name}Update"),
             object_schema(&update_payload_fields(resource)),
@@ -107,6 +106,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
 
     if options.include_builtin_auth {
         tags.push(json!({ "name": "Auth" }));
+        tags.push(json!({ "name": "Account" }));
         append_builtin_auth_components(&mut schemas, &mut paths);
     }
 
@@ -292,9 +292,9 @@ fn append_builtin_auth_components(
         "/auth/me".to_owned(),
         json!({
             "get": {
-                "tags": ["Auth"],
-                "summary": "Get the authenticated user context",
-                "operationId": "getAuthenticatedUser",
+                "tags": ["Account"],
+                "summary": "Get the authenticated account context",
+                "operationId": "getAuthenticatedAccount",
                 "security": bearer_security(),
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthMeResponse")),
@@ -430,7 +430,36 @@ fn object_schema(fields: &[&FieldSpec]) -> Value {
     schema
 }
 
+fn create_payload_schema(resource: &ResourceSpec) -> Value {
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+
+    for field in create_payload_fields(resource) {
+        let field_name = field.field.name();
+        properties.insert(
+            field_name.clone(),
+            field_schema_with_optional(field.field, field.allow_admin_override),
+        );
+        if !field.allow_admin_override && !is_optional_type(&field.field.ty) {
+            required.push(field_name);
+        }
+    }
+
+    let mut schema = json!({
+        "type": "object",
+        "properties": properties,
+    });
+    if !required.is_empty() {
+        schema["required"] = json!(required);
+    }
+    schema
+}
+
 fn field_schema(field: &FieldSpec) -> Value {
+    field_schema_with_optional(field, false)
+}
+
+fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value {
     let mut schema = match field.sql_type.as_str() {
         "INTEGER" => json!({
             "type": "integer",
@@ -456,24 +485,51 @@ fn field_schema(field: &FieldSpec) -> Value {
         schema["format"] = json!("date-time");
     }
 
-    if is_optional_type(&field.ty) {
+    if force_optional || is_optional_type(&field.ty) {
         schema["nullable"] = json!(true);
     }
 
     schema
 }
 
-fn create_payload_fields(resource: &ResourceSpec) -> Vec<&FieldSpec> {
+struct CreatePayloadField<'a> {
+    field: &'a FieldSpec,
+    allow_admin_override: bool,
+}
+
+fn create_payload_fields(resource: &ResourceSpec) -> Vec<CreatePayloadField<'_>> {
     resource
         .fields
         .iter()
-        .filter(|field| {
-            !field.generated.skip_insert()
-                && !resource
-                    .policies
-                    .create
-                    .iter()
-                    .any(|policy| policy.field == field.name())
+        .filter_map(|field| {
+            if field.generated.skip_insert() {
+                return None;
+            }
+
+            let controlled = resource
+                .policies
+                .create
+                .iter()
+                .any(|policy| policy.field == field.name());
+            let allow_admin_override = controlled
+                && resource.policies.admin_bypass
+                && matches!(
+                    resource
+                        .policies
+                        .create
+                        .iter()
+                        .find(|policy| policy.field == field.name())
+                        .map(|policy| &policy.source),
+                    Some(PolicyValueSource::Claim(_))
+                );
+            if controlled && !allow_admin_override {
+                return None;
+            }
+
+            Some(CreatePayloadField {
+                field,
+                allow_admin_override,
+            })
         })
         .collect()
 }
@@ -554,6 +610,12 @@ mod tests {
             .join(name)
     }
 
+    fn example_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(name)
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -628,6 +690,39 @@ mod tests {
     }
 
     #[test]
+    fn renders_admin_bypass_create_fields_for_swagger_experimentation() {
+        let service =
+            load_service_from_path(&example_path("fine_grained_policies/ops_control.eon"))
+                .expect("example should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Ops Control", "1.0.0", "/api").with_builtin_auth(true),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["components"]["schemas"]["WorkspaceCreate"]["properties"]["tenant_id"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkspaceCreate"]["properties"]["tenant_id"]["nullable"],
+            json!(true)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkspaceCreate"]["properties"]["owner_user_id"],
+            Value::Null
+        );
+        assert!(
+            document["components"]["schemas"]["WorkspaceCreate"]["required"]
+                .as_array()
+                .expect("required should be an array")
+                .iter()
+                .all(|entry| entry != "tenant_id")
+        );
+    }
+
+    #[test]
     fn renders_openapi_with_builtin_auth_routes_when_requested() {
         let service =
             load_service_from_path(&fixture_path("blog_api.eon")).expect("fixture should parse");
@@ -642,10 +737,18 @@ mod tests {
         assert!(document["paths"]["/auth/login"]["post"].is_object());
         assert!(document["paths"]["/auth/me"]["get"].is_object());
         assert!(document["components"]["schemas"]["AuthTokenResponse"].is_object());
+        assert_eq!(document["paths"]["/auth/me"]["get"]["tags"][0], "Account");
         assert!(document["paths"]["/auth/login"]["post"]["security"].is_null());
         assert_eq!(
             document["paths"]["/auth/me"]["get"]["security"][0]["bearerAuth"],
             json!([])
+        );
+        assert!(
+            document["tags"]
+                .as_array()
+                .expect("tags should be an array")
+                .iter()
+                .any(|tag| tag["name"] == "Account")
         );
     }
 }

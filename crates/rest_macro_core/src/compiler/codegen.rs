@@ -5,7 +5,8 @@ use quote::{format_ident, quote};
 use syn::Path;
 
 use super::model::{
-    GeneratedValue, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec, WriteModelStyle,
+    GeneratedValue, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile,
+    StaticMode, WriteModelStyle,
 };
 
 pub fn expand_resource_impl(
@@ -61,6 +62,62 @@ pub fn expand_service_module(
             #struct_ident::configure(cfg, db.clone());
         }
     });
+    let static_mounts = service.static_mounts.iter().map(|mount| {
+        let mount_path = Literal::string(&mount.mount_path);
+        let resolved_dir = Literal::string(&mount.resolved_dir);
+        let index_file = match mount.index_file.as_deref() {
+            Some(value) => {
+                let value = Literal::string(value);
+                quote!(Some(#value))
+            }
+            None => quote!(None),
+        };
+        let fallback_file = match mount.fallback_file.as_deref() {
+            Some(value) => {
+                let value = Literal::string(value);
+                quote!(Some(#value))
+            }
+            None => quote!(None),
+        };
+        let mode = match mount.mode {
+            StaticMode::Directory => {
+                quote!(#runtime_crate::core::static_files::StaticMode::Directory)
+            }
+            StaticMode::Spa => quote!(#runtime_crate::core::static_files::StaticMode::Spa),
+        };
+        let cache = match mount.cache {
+            StaticCacheProfile::NoStore => {
+                quote!(#runtime_crate::core::static_files::StaticCacheProfile::NoStore)
+            }
+            StaticCacheProfile::Revalidate => {
+                quote!(#runtime_crate::core::static_files::StaticCacheProfile::Revalidate)
+            }
+            StaticCacheProfile::Immutable => {
+                quote!(#runtime_crate::core::static_files::StaticCacheProfile::Immutable)
+            }
+        };
+
+        quote! {
+            #runtime_crate::core::static_files::StaticMount {
+                mount_path: #mount_path,
+                resolved_dir: #resolved_dir,
+                mode: #mode,
+                index_file: #index_file,
+                fallback_file: #fallback_file,
+                cache: #cache,
+            }
+        }
+    });
+    let configure_static_body = if service.static_mounts.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            let mounts = [
+                #(#static_mounts),*
+            ];
+            #runtime_crate::core::static_files::configure_static_mounts(cfg, &mounts);
+        }
+    };
 
     Ok(quote! {
         pub mod #module_ident {
@@ -73,6 +130,10 @@ pub fn expand_service_module(
 
             pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
                 #(#configure_calls)*
+            }
+
+            pub fn configure_static(cfg: &mut web::ServiceConfig) {
+                #configure_static_body
             }
         }
     })
@@ -91,8 +152,8 @@ fn resource_struct_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Toke
     });
 
     let create_fields = create_payload_fields(resource).into_iter().map(|field| {
-        let ident = &field.ident;
-        let ty = &field.ty;
+        let ident = &field.field.ident;
+        let ty = create_payload_field_ty(&field);
         quote! {
             pub #ident: #ty,
         }
@@ -194,6 +255,44 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             let value = policy_source_value(source);
             quote! {
                 q = q.bind(#value);
+            }
+        } else {
+            quote! {
+                q = q.bind(&item.#ident);
+            }
+        }
+    });
+    let bind_fields_insert_admin = insert_fields.iter().map(|field| {
+        let ident = &field.ident;
+        let field_name = field.name();
+        if let Some(source) = create_assignment_source(resource, &field_name) {
+            match source {
+                PolicyValueSource::Claim(_) => {
+                    let value = optional_policy_source_value(source);
+                    let field_name_lit = Literal::string(&field_name);
+                    quote! {
+                        match &item.#ident {
+                            Some(value) => {
+                                q = q.bind(value);
+                            }
+                            None => match #value {
+                                Some(value) => {
+                                    q = q.bind(value);
+                                }
+                                None => {
+                                    return HttpResponse::BadRequest()
+                                        .body(format!("Missing required create field `{}`", #field_name_lit));
+                                }
+                            },
+                        }
+                    }
+                }
+                PolicyValueSource::UserId => {
+                    let value = policy_source_value(source);
+                    quote! {
+                        q = q.bind(#value);
+                    }
+                }
             }
         } else {
             quote! {
@@ -305,13 +404,29 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             }
         }
     } else {
-        quote! {
-            let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-            let mut q = #runtime_crate::sqlx::query(&sql);
-            #(#bind_fields_insert)*
-            match q.execute(db.get_ref()).await {
-                Ok(_) => HttpResponse::Created().finish(),
-                Err(error) => HttpResponse::InternalServerError().body(error.to_string()),
+        if resource.policies.admin_bypass && resource.policies.create.iter().next().is_some() {
+            quote! {
+                let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
+                let mut q = #runtime_crate::sqlx::query(&sql);
+                if #is_admin {
+                    #(#bind_fields_insert_admin)*
+                } else {
+                    #(#bind_fields_insert)*
+                }
+                match q.execute(db.get_ref()).await {
+                    Ok(_) => HttpResponse::Created().finish(),
+                    Err(error) => HttpResponse::InternalServerError().body(error.to_string()),
+                }
+            }
+        } else {
+            quote! {
+                let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
+                let mut q = #runtime_crate::sqlx::query(&sql);
+                #(#bind_fields_insert)*
+                match q.execute(db.get_ref()).await {
+                    Ok(_) => HttpResponse::Created().finish(),
+                    Err(error) => HttpResponse::InternalServerError().body(error.to_string()),
+                }
             }
         }
     };
@@ -601,15 +716,46 @@ fn update_payload_type(resource: &ResourceSpec) -> TokenStream {
     }
 }
 
-fn create_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
+struct CreatePayloadField<'a> {
+    field: &'a super::model::FieldSpec,
+    allow_admin_override: bool,
+}
+
+fn create_payload_fields(resource: &ResourceSpec) -> Vec<CreatePayloadField<'_>> {
     resource
         .fields
         .iter()
-        .filter(|field| {
-            !field.generated.skip_insert()
-                && create_assignment_source(resource, &field.name()).is_none()
+        .filter_map(|field| {
+            if field.generated.skip_insert() {
+                return None;
+            }
+
+            let controlled = create_assignment_source(resource, &field.name()).is_some();
+            let allow_admin_override = controlled
+                && resource.policies.admin_bypass
+                && matches!(
+                    create_assignment_source(resource, &field.name()),
+                    Some(PolicyValueSource::Claim(_))
+                );
+            if controlled && !allow_admin_override {
+                return None;
+            }
+
+            Some(CreatePayloadField {
+                field,
+                allow_admin_override,
+            })
         })
         .collect()
+}
+
+fn create_payload_field_ty(field: &CreatePayloadField<'_>) -> syn::Type {
+    if field.allow_admin_override && !super::model::is_optional_type(&field.field.ty) {
+        let ty = &field.field.ty;
+        syn::parse_quote!(Option<#ty>)
+    } else {
+        field.field.ty.clone()
+    }
 }
 
 fn update_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
@@ -684,6 +830,16 @@ fn policy_source_value(source: &PolicyValueSource) -> TokenStream {
                     }
                 }
             }
+        }
+    }
+}
+
+fn optional_policy_source_value(source: &PolicyValueSource) -> TokenStream {
+    match source {
+        PolicyValueSource::UserId => quote!(Some(user.id)),
+        PolicyValueSource::Claim(name) => {
+            let claim_name = Literal::string(name);
+            quote!(user.claim_i64(#claim_name))
         }
     }
 }

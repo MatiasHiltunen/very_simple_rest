@@ -144,6 +144,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .uri("/api/workspace")
         .insert_header(("Authorization", format!("Bearer {}", owner_token.as_str())))
         .set_json(&ops_control_api::WorkspaceCreate {
+            tenant_id: None,
             slug: "north-platform".to_owned(),
             name: "North Platform".to_owned(),
             compliance_mode: "strict".to_owned(),
@@ -225,6 +226,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .uri("/api/project")
         .insert_header(("Authorization", format!("Bearer {}", owner_token.as_str())))
         .set_json(&ops_control_api::ProjectCreate {
+            tenant_id: None,
             workspace_id: workspace.id,
             code: "NRT".to_owned(),
             name: "North Runtime".to_owned(),
@@ -404,6 +406,72 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
             .await
             .expect("remaining rows should be queryable");
     assert_eq!(remaining_subscriptions, 0);
+}
+
+#[actix_web::test]
+async fn admin_bypass_create_allows_manual_tenant_assignment_without_claims() {
+    sqlx::any::install_default_drivers();
+
+    unsafe {
+        std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+    }
+
+    let database_url = unique_sqlite_url("fine_grained_admin_create");
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("database should connect");
+
+    sqlx::query(
+        "CREATE TABLE workspace (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id INTEGER NOT NULL,
+            owner_user_id INTEGER NOT NULL,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            compliance_mode TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("workspace table should be created");
+
+    let app = test::init_service(
+        App::new()
+            .service(scope("/api").configure(|cfg| ops_control_api::configure(cfg, pool.clone()))),
+    )
+    .await;
+
+    let admin_without_claim_token = issue_token(99, &["admin"], None);
+
+    let create_workspace = test::TestRequest::post()
+        .uri("/api/workspace")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", admin_without_claim_token.as_str()),
+        ))
+        .set_json(&ops_control_api::WorkspaceCreate {
+            tenant_id: Some(300),
+            slug: "manual-admin".to_owned(),
+            name: "Manual Admin".to_owned(),
+            compliance_mode: "strict".to_owned(),
+        })
+        .to_request();
+    let create_workspace_response = test::call_service(&app, create_workspace).await;
+    assert_eq!(create_workspace_response.status(), StatusCode::CREATED);
+
+    let workspace: DbWorkspace = sqlx::query_as(
+        "SELECT id, tenant_id, owner_user_id, slug, name, compliance_mode FROM workspace",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("workspace row should exist");
+    assert_eq!(workspace.tenant_id, 300);
+    assert_eq!(workspace.owner_user_id, 99);
+    assert_eq!(workspace.slug, "manual-admin");
 }
 
 fn issue_token(user_id: i64, roles: &[&str], tenant_id: Option<i64>) -> String {

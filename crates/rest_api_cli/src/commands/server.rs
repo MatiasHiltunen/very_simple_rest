@@ -181,6 +181,7 @@ fn emit_server_project_inner(
         &render_project_readme(&package_name, backend, with_auth),
     )?;
     write_file(&output_dir.join("openapi.json"), &openapi_json)?;
+    copy_configured_static_dirs(input, output_dir, &service)?;
     write_file(
         &output_dir.join("migrations/0001_service.sql"),
         &migration_sql,
@@ -201,6 +202,65 @@ fn emit_server_project_inner(
 
 fn write_file(path: &Path, contents: &str) -> Result<()> {
     fs::write(path, contents).map_err(Error::Io)
+}
+
+fn copy_configured_static_dirs(
+    input: &Path,
+    output_dir: &Path,
+    service: &ServiceSpec,
+) -> Result<()> {
+    if service.static_mounts.is_empty() {
+        return Ok(());
+    }
+
+    let service_root = input.parent().unwrap_or_else(|| Path::new("."));
+    let mut copied = Vec::<PathBuf>::new();
+    let mut mounts = service.static_mounts.iter().collect::<Vec<_>>();
+    mounts.sort_by_key(|mount| Path::new(&mount.source_dir).components().count());
+
+    for mount in mounts {
+        let relative_dir = PathBuf::from(&mount.source_dir);
+        if copied
+            .iter()
+            .any(|existing| relative_dir.starts_with(existing))
+        {
+            continue;
+        }
+
+        let source = service_root.join(&relative_dir);
+        let destination = output_dir.join(&relative_dir);
+        copy_dir_recursive(&source, &destination)?;
+        copied.push(relative_dir);
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).map_err(Error::Io)?;
+    for entry in fs::read_dir(source).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        let file_type = entry.file_type().map_err(Error::Io)?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+
+        if file_type.is_symlink() {
+            return Err(Error::Config(format!(
+                "static asset path contains a symlink and cannot be emitted safely: {}",
+                source_path.display()
+            )));
+        }
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent).map_err(Error::Io)?;
+            }
+            fs::copy(&source_path, &destination_path).map_err(Error::Io)?;
+        }
+    }
+    Ok(())
 }
 
 fn prepare_output_dir(path: &Path, force: bool) -> Result<()> {
@@ -411,6 +471,7 @@ async fn main() -> std::io::Result<()> {{
                 scope("/api")
 {auth_config}                    .configure(|cfg| {module_name}::configure(cfg, server_pool.clone()))
             )
+            .configure({module_name}::configure_static)
     }})
     .bind(&bind_addr)?;
 
@@ -423,7 +484,7 @@ async fn main() -> std::io::Result<()> {{
 
 fn render_env_example(backend: DbBackend, with_auth: bool) -> String {
     let auth_block = if with_auth {
-        "JWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n"
+        "JWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
     } else {
         "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n"
     };
@@ -437,12 +498,12 @@ fn render_env_example(backend: DbBackend, with_auth: bool) -> String {
 
 fn render_project_readme(package_name: &str, backend: DbBackend, with_auth: bool) -> String {
     let auth_note = if with_auth {
-        "The generated project includes built-in auth routes and `migrations/0000_auth.sql`.\n"
+        "The generated project includes built-in auth/account routes and `migrations/0000_auth.sql`.\n"
     } else {
-        "The generated project does not include built-in auth routes by default.\n"
+        "The generated project does not include built-in auth/account routes by default.\n"
     };
     let openapi_note = if with_auth {
-        "The OpenAPI document also includes the built-in auth routes.\n\n"
+        "The OpenAPI document also includes the built-in auth/account routes, with `/auth/me` grouped under `Account` in Swagger.\n\n"
     } else {
         "\n"
     };
@@ -621,6 +682,25 @@ mod tests {
         assert!(main_rs.contains("auth::auth_routes"));
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"/auth/login\""));
+        assert!(openapi.contains("\"Account\""));
+    }
+
+    #[test]
+    fn emit_server_project_copies_configured_static_directories() {
+        let root = test_root();
+        emit_server_project(
+            &fixture_path("static_site_api.eon"),
+            &root,
+            Some("static-site-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("server project should emit");
+
+        let main_rs = read_to_string(&root.join("src/main.rs"));
+        assert!(main_rs.contains(".configure(static_site_api::configure_static)"));
+        assert!(root.join("static_site/index.html").exists());
+        assert!(root.join("static_site/assets/app.js").exists());
     }
 
     #[test]

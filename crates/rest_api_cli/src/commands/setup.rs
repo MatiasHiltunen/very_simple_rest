@@ -1,4 +1,4 @@
-use crate::commands::admin::{create_admin, prompt_admin_credentials};
+use crate::commands::admin::{create_admin, create_admin_with_options, prompt_admin_credentials};
 use crate::commands::env::generate_env_template;
 use crate::commands::migrate::apply_auth_migration;
 use crate::error::Result;
@@ -60,14 +60,14 @@ pub async fn run_setup(database_url: &str, non_interactive: bool) -> Result<()> 
         if non_interactive {
             if let (Some(email), Some(password)) = (env_email, env_password) {
                 println!("Using admin credentials from environment variables");
-                create_admin(database_url, email, password).await?;
+                create_admin_with_options(database_url, email, password, false).await?;
             } else {
                 println!("{}", "Warning: Cannot create admin user in non-interactive mode without ADMIN_EMAIL and ADMIN_PASSWORD environment variables.".yellow());
             }
         } else {
             // In interactive mode, always prompt for credentials
             let (email, password) = prompt_admin_credentials().await?;
-            create_admin(database_url, email, password).await?;
+            create_admin_with_options(database_url, email, password, true).await?;
         }
     }
 
