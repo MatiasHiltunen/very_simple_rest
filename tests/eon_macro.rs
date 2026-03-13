@@ -3,6 +3,7 @@ use very_simple_rest::rest_api_from_eon;
 rest_api_from_eon!("tests/fixtures/blog_api.eon");
 rest_api_from_eon!("tests/fixtures/owned_api.eon");
 rest_api_from_eon!("tests/fixtures/tenant_api.eon");
+rest_api_from_eon!("tests/fixtures/paged_api.eon");
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 
 #[test]
@@ -101,4 +102,27 @@ fn eon_macro_claim_policies_trim_generated_dtos() {
 fn eon_macro_generates_static_configure_function() {
     let _configure_static: fn(&mut very_simple_rest::actix_web::web::ServiceConfig) =
         static_site_api::configure_static;
+}
+
+#[test]
+fn eon_macro_generates_list_query_and_response_types() {
+    let _query = paged_api::ItemListQuery {
+        limit: Some(10),
+        offset: Some(0),
+        sort: None,
+        order: None,
+        cursor: None,
+        filter_id: None,
+        filter_title: None,
+        filter_score: None,
+    };
+    let _response = paged_api::ItemListResponse {
+        items: Vec::new(),
+        total: 0,
+        count: 0,
+        limit: Some(2),
+        offset: 0,
+        next_offset: None,
+        next_cursor: None,
+    };
 }

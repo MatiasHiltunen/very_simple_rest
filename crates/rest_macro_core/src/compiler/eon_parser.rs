@@ -9,12 +9,12 @@ use proc_macro2::Span;
 use syn::{LitStr, Type};
 
 use super::model::{
-    DbBackend, FieldSpec, FieldValidation, GeneratedValue, NumericBound, PolicyAssignment,
-    PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
-    RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
-    WriteModelStyle, default_resource_module_ident, infer_generated_value, infer_sql_type,
-    sanitize_module_ident, sanitize_struct_ident, validate_field_validations, validate_relations,
-    validate_row_policies,
+    DbBackend, FieldSpec, FieldValidation, GeneratedValue, ListConfig, NumericBound,
+    PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec,
+    RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
+    StaticMountSpec, WriteModelStyle, default_resource_module_ident, infer_generated_value,
+    infer_sql_type, sanitize_module_ident, sanitize_struct_ident, validate_field_validations,
+    validate_list_config, validate_relations, validate_row_policies,
 };
 
 pub struct LoadedService {
@@ -64,7 +64,17 @@ struct ResourceDocument {
     roles: RoleRequirements,
     #[serde(default)]
     policies: RowPoliciesDocument,
+    #[serde(default)]
+    list: ListConfigDocument,
     fields: Vec<FieldDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ListConfigDocument {
+    #[serde(default)]
+    default_limit: Option<u32>,
+    #[serde(default)]
+    max_limit: Option<u32>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -323,6 +333,7 @@ fn build_resources(
             db,
             roles: resource.roles.with_legacy_defaults(),
             policies: parse_row_policies(resource.policies)?,
+            list: parse_list_config(resource.list),
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
         });
@@ -331,9 +342,17 @@ fn build_resources(
         validate_row_policies(&last.fields, &last.policies, Span::call_site())?;
         validate_relations(&last.fields, Span::call_site())?;
         validate_field_validations(&last.fields, Span::call_site())?;
+        validate_list_config(&last.list, Span::call_site())?;
     }
 
     Ok(result)
+}
+
+fn parse_list_config(document: ListConfigDocument) -> ListConfig {
+    ListConfig {
+        default_limit: document.default_limit,
+        max_limit: document.max_limit,
+    }
 }
 
 fn build_static_mounts(
@@ -1057,6 +1076,60 @@ mod tests {
             score.validation.maximum,
             Some(super::super::model::NumericBound::Integer(10))
         );
+    }
+
+    #[test]
+    fn parses_list_config_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    list: {
+                        default_limit: 25
+                        max_limit: 100
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        assert_eq!(resources[0].list.default_limit, Some(25));
+        assert_eq!(resources[0].list.max_limit, Some(100));
+    }
+
+    #[test]
+    fn rejects_invalid_list_config_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    list: {
+                        default_limit: 50
+                        max_limit: 10
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = match build_resources(document.db, document.resources) {
+            Ok(_) => panic!("invalid list config should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("default_limit"));
+        assert!(error.to_string().contains("max_limit"));
     }
 
     #[test]

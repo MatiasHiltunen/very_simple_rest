@@ -17,7 +17,7 @@ authorization, and relationship handling.
 - Field-level validation for generated `Create` / `Update` handlers and OpenAPI schemas
 - Stable JSON error responses for generated resource handlers
 - Typed list query params and paged response envelopes for generated collection routes (`limit`,
-  `offset`, `sort`, `order`, and `filter_<field>`)
+  `offset`, `cursor`, `sort`, `order`, and `filter_<field>`)
 - JWT-based authentication with role management
 - Role-Based Access Control (RBAC) for endpoint protection
 - Relationship handling with nested routes and configurable relation delete actions
@@ -90,7 +90,11 @@ Generated collection and nested collection routes also accept typed query parame
 pagination, sorting, and exact-match field filters. OpenAPI documents expose those parameters in
 `/docs`, and invalid values such as `limit=abc` or `sort=missing_field` resolve through the same
 JSON error envelope. Those list routes now return an envelope with `items`, `total`, `count`,
-`limit`, `offset`, and `next_offset` instead of a bare array.
+`limit`, `offset`, `next_offset`, and `next_cursor` instead of a bare array. They also support
+opaque cursor tokens for keyset pagination. You can configure per-resource page defaults and caps
+with `#[list(default_limit = 25, max_limit = 100)]` on derive-based resources or
+`list: { default_limit: 25 max_limit: 100 }` in `.eon`; oversized `limit` values are capped to
+`max_limit`.
 
 Generated REST resources do not perform runtime schema creation. For `.eon` services, use the
 `vsr migrate generate`, `vsr migrate check`, and `vsr migrate apply` commands to manage schema
@@ -153,9 +157,11 @@ pub mod auth {
 pub use actix_cors;
 pub use actix_files;
 pub use actix_web;
+pub use base64;
 pub use env_logger;
 pub use log;
 pub use serde;
+pub use serde_json;
 pub use sqlx;
 
 pub mod prelude {

@@ -474,17 +474,25 @@ fn list_query_parameters(
     resource: &ResourceSpec,
     parent_relation_field: Option<&str>,
 ) -> Vec<Value> {
+    let mut limit_schema = json!({
+        "type": "integer",
+        "format": "int64",
+        "minimum": 1
+    });
+    if let Some(default_limit) = resource.list.default_limit {
+        limit_schema["default"] = json!(default_limit);
+    }
+    if let Some(max_limit) = resource.list.max_limit {
+        limit_schema["maximum"] = json!(max_limit);
+    }
+
     let mut parameters = vec![
         json!({
             "name": "limit",
             "in": "query",
             "required": false,
             "description": "Maximum number of rows to return",
-            "schema": {
-                "type": "integer",
-                "format": "int64",
-                "minimum": 1
-            }
+            "schema": limit_schema
         }),
         json!({
             "name": "offset",
@@ -495,6 +503,15 @@ fn list_query_parameters(
                 "type": "integer",
                 "format": "int64",
                 "minimum": 0
+            }
+        }),
+        json!({
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor for keyset pagination. Cannot be combined with `offset`, `sort`, or `order`.",
+            "schema": {
+                "type": "string"
             }
         }),
         json!({
@@ -595,6 +612,10 @@ fn list_response_schema(resource: &ResourceSpec) -> Value {
                 "format": "int64",
                 "nullable": true,
                 "minimum": 0
+            },
+            "next_cursor": {
+                "type": "string",
+                "nullable": true
             }
         },
         "required": ["items", "total", "count", "offset"]
@@ -848,10 +869,14 @@ mod tests {
         );
         assert_eq!(
             document["paths"]["/tenant_post"]["get"]["parameters"][2]["name"],
+            "cursor"
+        );
+        assert_eq!(
+            document["paths"]["/tenant_post"]["get"]["parameters"][3]["name"],
             "sort"
         );
         assert_eq!(
-            document["paths"]["/tenant_post"]["get"]["parameters"][4]["name"],
+            document["paths"]["/tenant_post"]["get"]["parameters"][5]["name"],
             "filter_id"
         );
         assert_eq!(
@@ -861,6 +886,11 @@ mod tests {
         );
         assert_eq!(
             document["components"]["schemas"]["TenantPostListResponse"]["properties"]["next_offset"]
+                ["nullable"],
+            json!(true)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["TenantPostListResponse"]["properties"]["next_cursor"]
                 ["nullable"],
             json!(true)
         );
@@ -898,7 +928,11 @@ mod tests {
             "limit"
         );
         assert_eq!(
-            document["paths"]["/post/{parent_id}/comment"]["get"]["parameters"][5]["name"],
+            document["paths"]["/post/{parent_id}/comment"]["get"]["parameters"][3]["name"],
+            "cursor"
+        );
+        assert_eq!(
+            document["paths"]["/post/{parent_id}/comment"]["get"]["parameters"][6]["name"],
             "filter_id"
         );
         assert_eq!(
@@ -955,6 +989,7 @@ mod tests {
 
             #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
             #[rest_api(table = "post", id = "id", db = "sqlite")]
+            #[list(default_limit = 25, max_limit = 100)]
             struct Post {
                 id: Option<i64>,
                 #[validate(min_length = 3, max_length = 32)]
@@ -999,8 +1034,20 @@ mod tests {
             json!(1)
         );
         assert_eq!(
-            document["paths"]["/post"]["get"]["parameters"][2]["schema"]["enum"],
+            document["paths"]["/post"]["get"]["parameters"][2]["schema"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][3]["schema"]["enum"],
             json!(["id", "title", "score"])
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][0]["schema"]["default"],
+            json!(25)
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][0]["schema"]["maximum"],
+            json!(100)
         );
         assert_eq!(
             document["paths"]["/post"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
@@ -1012,7 +1059,11 @@ mod tests {
             json!("array")
         );
         assert_eq!(
-            document["paths"]["/post"]["get"]["parameters"][6]["schema"]["minimum"],
+            document["components"]["schemas"]["PostListResponse"]["properties"]["next_cursor"]["nullable"],
+            json!(true)
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][7]["schema"]["minimum"],
             json!(1)
         );
         assert_eq!(

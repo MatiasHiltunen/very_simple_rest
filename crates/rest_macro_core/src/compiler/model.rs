@@ -215,6 +215,12 @@ impl FieldValidation {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListConfig {
+    pub default_limit: Option<u32>,
+    pub max_limit: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum NumericBound {
     Integer(i64),
@@ -262,6 +268,7 @@ pub struct ResourceSpec {
     pub db: DbBackend,
     pub roles: RoleRequirements,
     pub policies: RowPolicies,
+    pub list: ListConfig,
     pub fields: Vec<FieldSpec>,
     pub write_style: WriteModelStyle,
 }
@@ -512,6 +519,30 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
                     ),
                 ));
             }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_list_config(list: &ListConfig, span: Span) -> syn::Result<()> {
+    if matches!(list.default_limit, Some(0)) {
+        return Err(syn::Error::new(
+            span,
+            "`default_limit` must be greater than 0",
+        ));
+    }
+
+    if matches!(list.max_limit, Some(0)) {
+        return Err(syn::Error::new(span, "`max_limit` must be greater than 0"));
+    }
+
+    if let (Some(default_limit), Some(max_limit)) = (list.default_limit, list.max_limit) {
+        if default_limit > max_limit {
+            return Err(syn::Error::new(
+                span,
+                "`default_limit` cannot be greater than `max_limit`",
+            ));
         }
     }
 

@@ -257,8 +257,8 @@ bearer auth, the `/api` server base URL, and optional built-in auth/account rout
 `--with-auth` is enabled. In Swagger, login and registration appear under `Auth`, while the
 current-user endpoint appears under `Account`. Generated server projects reuse the same document.
 Collection and nested collection routes also document their typed list query parameters and their
-paged response envelopes, including pagination, sorting, exact-match field filters, `total`, and
-`next_offset`.
+paged response envelopes, including pagination, sorting, cursor pagination, exact-match field
+filters, `total`, `next_offset`, and `next_cursor`.
 
 ## Static Files In `.eon`
 
@@ -541,8 +541,36 @@ The current resource-level envelope fields are:
 Generated collection routes also accept typed query parameters:
 
 - `limit` and `offset` for pagination
+- `cursor=<token>` for keyset pagination
 - `sort=<field>` and `order=asc|desc` for safe sorting
 - `filter_<field>=...` for exact-match filtering on generated resource fields
+
+Per-resource page defaults and caps can be configured from either generation path:
+
+```rust
+#[derive(RestApi)]
+#[list(default_limit = 25, max_limit = 100)]
+struct Post {
+    id: Option<i64>,
+    title: String,
+}
+```
+
+```eon
+resources: [
+    {
+        name: "Post"
+        list: {
+            default_limit: 25
+            max_limit: 100
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]
+```
 
 Collection responses now return a metadata envelope instead of a bare JSON array:
 
@@ -553,12 +581,16 @@ Collection responses now return a metadata envelope instead of a bare JSON array
   "count": 0,
   "limit": 20,
   "offset": 0,
-  "next_offset": null
+  "next_offset": null,
+  "next_cursor": null
 }
 ```
 
 Unknown query keys, invalid typed values, and unsupported combinations such as `offset` without
-`limit` return the same JSON error envelope with `invalid_query` or `invalid_pagination`.
+`limit` return the same JSON error envelope with `invalid_query` or `invalid_pagination`. When a
+resource has `max_limit` configured, oversized `limit` values are capped to that maximum rather
+than rejected. Cursor tokens are opaque, URL-safe strings; they cannot be combined with `offset`,
+`sort`, or `order`, because they already encode the current keyset position and sort direction.
 
 OpenAPI documents expose this as `ApiErrorResponse` and use it for generated `400`, `403`, `404`,
 and `500` resource responses where applicable. Built-in auth routes use the same envelope for

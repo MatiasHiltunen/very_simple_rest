@@ -235,6 +235,8 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     let bind_ident = list_bind_ident(resource);
     let response_ident = list_response_ident(resource);
     let plan_ident = list_plan_ident(resource);
+    let cursor_value_ident = list_cursor_value_ident(resource);
+    let cursor_payload_ident = list_cursor_payload_ident(resource);
     let struct_ident = &resource.struct_ident;
     let filter_fields = resource.fields.iter().map(|field| {
         let filter_ident = format_ident!("filter_{}", field.ident);
@@ -258,6 +260,20 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             Self::#variant_ident => #field_name,
         }
     });
+    let sort_variant_name = resource.fields.iter().map(|field| {
+        let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
+        let field_name = Literal::string(&field.name());
+        quote! {
+            Self::#variant_ident => #field_name,
+        }
+    });
+    let sort_variant_parse = resource.fields.iter().map(|field| {
+        let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
+        let field_name = Literal::string(&field.name());
+        quote! {
+            #field_name => Some(Self::#variant_ident),
+        }
+    });
 
     quote! {
         #[derive(Debug, Clone, #runtime_crate::serde::Deserialize, Default)]
@@ -267,6 +283,7 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             pub offset: Option<u32>,
             pub sort: Option<#sort_field_ident>,
             pub order: Option<#sort_order_ident>,
+            pub cursor: Option<String>,
             #(#filter_fields)*
         }
 
@@ -284,6 +301,21 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
                     Self::Desc => "DESC",
                 }
             }
+
+            fn as_str(&self) -> &'static str {
+                match self {
+                    Self::Asc => "asc",
+                    Self::Desc => "desc",
+                }
+            }
+
+            fn parse(value: &str) -> Option<Self> {
+                match value {
+                    "asc" => Some(Self::Asc),
+                    "desc" => Some(Self::Desc),
+                    _ => None,
+                }
+            }
         }
 
         #[derive(Debug, Clone, #runtime_crate::serde::Deserialize)]
@@ -297,6 +329,19 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
                     #(#sort_variant_sql)*
                 }
             }
+
+            fn as_name(&self) -> &'static str {
+                match self {
+                    #(#sort_variant_name)*
+                }
+            }
+
+            fn from_name(value: &str) -> Option<Self> {
+                match value {
+                    #(#sort_variant_parse)*
+                    _ => None,
+                }
+            }
         }
 
         #[derive(Debug, Clone)]
@@ -307,6 +352,22 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             Text(String),
         }
 
+        #[derive(Debug, Clone, #runtime_crate::serde::Serialize, #runtime_crate::serde::Deserialize)]
+        enum #cursor_value_ident {
+            Integer(i64),
+            Real(f64),
+            Boolean(bool),
+            Text(String),
+        }
+
+        #[derive(Debug, Clone, #runtime_crate::serde::Serialize, #runtime_crate::serde::Deserialize)]
+        struct #cursor_payload_ident {
+            sort: String,
+            order: String,
+            last_id: i64,
+            value: #cursor_value_ident,
+        }
+
         #[derive(Debug)]
         struct #plan_ident {
             select_sql: String,
@@ -315,6 +376,9 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             select_binds: Vec<#bind_ident>,
             limit: Option<u32>,
             offset: u32,
+            sort: #sort_field_ident,
+            order: #sort_order_ident,
+            cursor_mode: bool,
         }
 
         #[derive(Debug, Clone, #runtime_crate::serde::Serialize, #runtime_crate::serde::Deserialize)]
@@ -325,6 +389,7 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             pub limit: Option<u32>,
             pub offset: u32,
             pub next_offset: Option<u32>,
+            pub next_cursor: Option<String>,
         }
     }
 }
@@ -339,6 +404,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     let list_bind_ty = list_bind_type(resource);
     let list_plan_ty = list_plan_type(resource);
     let list_response_ty = list_response_type(resource);
+    let default_limit_tokens = option_u32_tokens(resource.list.default_limit);
+    let max_limit_tokens = option_u32_tokens(resource.list.max_limit);
     let create_check = role_guard(runtime_crate, resource.roles.create.as_deref());
     let read_check = role_guard(runtime_crate, resource.roles.read.as_deref());
     let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
@@ -444,6 +511,187 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     let query_filter_conditions = list_query_condition_tokens(resource);
     let list_bind_matches = list_bind_match_tokens(resource, "q");
     let count_bind_matches = list_bind_match_tokens(resource, "count_query");
+    let sort_field_ty = {
+        let ident = list_sort_field_ident(resource);
+        quote!(#ident)
+    };
+    let sort_order_ty = {
+        let ident = list_sort_order_ident(resource);
+        quote!(#ident)
+    };
+    let cursor_value_ty = {
+        let ident = list_cursor_value_ident(resource);
+        quote!(#ident)
+    };
+    let cursor_payload_ty = {
+        let ident = list_cursor_payload_ident(resource);
+        quote!(#ident)
+    };
+    let id_field_spec = resource
+        .find_field(id_field)
+        .expect("resource id field should exist");
+    let id_field_ident = &id_field_spec.ident;
+    let id_field_name_lit = Literal::string(id_field);
+    let cursor_id_for_item_body = if super::model::is_optional_type(&id_field_spec.ty) {
+        quote! {
+            match item.#id_field_ident {
+                Some(value) => Ok(value as i64),
+                None => Err(#runtime_crate::core::errors::internal_error(
+                    format!("Cannot build cursor for `{}` without a persisted id", #id_field_name_lit),
+                )),
+            }
+        }
+    } else {
+        quote! {
+            Ok(item.#id_field_ident as i64)
+        }
+    };
+    let default_sort_variant =
+        super::model::sanitize_struct_ident(&id_field_spec.name(), id_field_spec.ident.span());
+    let cursor_support_arms = resource.fields.iter().map(|field| {
+        let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
+        let supported =
+            field.name() == resource.id_field || !super::model::is_optional_type(&field.ty);
+        quote! {
+            #sort_field_ty::#variant_ident => #supported,
+        }
+    });
+    let cursor_value_for_item_arms = resource.fields.iter().map(|field| {
+        let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
+        let ident = &field.ident;
+        let field_name_lit = Literal::string(&field.name());
+        if field.name() == resource.id_field {
+            if super::model::is_optional_type(&field.ty) {
+                quote! {
+                    #sort_field_ty::#variant_ident => match item.#ident {
+                        Some(value) => Ok(#cursor_value_ty::Integer(value as i64)),
+                        None => Err(#runtime_crate::core::errors::internal_error(
+                            format!("Cannot build cursor for `{}` without a persisted id", #field_name_lit),
+                        )),
+                    },
+                }
+            } else {
+                quote! {
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(item.#ident as i64)),
+                }
+            }
+        } else if super::model::is_optional_type(&field.ty) {
+            quote! {
+                #sort_field_ty::#variant_ident => Err(#runtime_crate::core::errors::bad_request(
+                    "invalid_cursor",
+                    format!("Cursor pagination does not support nullable sort field `{}`", #field_name_lit),
+                )),
+            }
+        } else {
+            match field.sql_type.as_str() {
+                "INTEGER" => quote! {
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(item.#ident as i64)),
+                },
+                "REAL" => quote! {
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Real(item.#ident as f64)),
+                },
+                "BOOLEAN" => quote! {
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Boolean(item.#ident)),
+                },
+                _ => quote! {
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Text(item.#ident.clone())),
+                },
+            }
+        }
+    });
+    let cursor_condition_arms = resource.fields.iter().map(|field| {
+        let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
+        let field_name_lit = Literal::string(&field.name());
+        if field.name() == resource.id_field {
+            quote! {
+                #sort_field_ty::#variant_ident => match &cursor_payload.value {
+                    #cursor_value_ty::Integer(_) => {
+                        let placeholder = Self::list_placeholder(
+                            filter_binds.len() + select_only_binds.len() + 1
+                        );
+                        select_only_conditions.push(format!(
+                            "{} {} {}",
+                            #field_name_lit,
+                            comparator,
+                            placeholder
+                        ));
+                        select_only_binds.push(#list_bind_ty::Integer(cursor_payload.last_id));
+                    }
+                    _ => {
+                        return Err(#runtime_crate::core::errors::bad_request(
+                            "invalid_cursor",
+                            "Cursor does not match the current sort field",
+                        ));
+                    }
+                },
+            }
+        } else if super::model::is_optional_type(&field.ty) {
+            quote! {
+                #sort_field_ty::#variant_ident => {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        format!("Cursor pagination does not support nullable sort field `{}`", #field_name_lit),
+                    ));
+                }
+            }
+        } else {
+            let bind_push = match field.sql_type.as_str() {
+                "INTEGER" => quote! {
+                    #cursor_value_ty::Integer(value) => {
+                        select_only_binds.push(#list_bind_ty::Integer(*value));
+                        select_only_binds.push(#list_bind_ty::Integer(*value));
+                    }
+                },
+                "REAL" => quote! {
+                    #cursor_value_ty::Real(value) => {
+                        select_only_binds.push(#list_bind_ty::Real(*value));
+                        select_only_binds.push(#list_bind_ty::Real(*value));
+                    }
+                },
+                "BOOLEAN" => quote! {
+                    #cursor_value_ty::Boolean(value) => {
+                        select_only_binds.push(#list_bind_ty::Boolean(*value));
+                        select_only_binds.push(#list_bind_ty::Boolean(*value));
+                    }
+                },
+                _ => quote! {
+                    #cursor_value_ty::Text(value) => {
+                        select_only_binds.push(#list_bind_ty::Text(value.clone()));
+                        select_only_binds.push(#list_bind_ty::Text(value.clone()));
+                    }
+                },
+            };
+            quote! {
+                #sort_field_ty::#variant_ident => {
+                    let first_index = filter_binds.len() + select_only_binds.len() + 1;
+                    let first = Self::list_placeholder(first_index);
+                    let second = Self::list_placeholder(first_index + 1);
+                    let third = Self::list_placeholder(first_index + 2);
+                    select_only_conditions.push(format!(
+                        "(({} {} {}) OR ({} = {} AND {} {} {}))",
+                        #field_name_lit,
+                        comparator,
+                        first,
+                        #field_name_lit,
+                        second,
+                        #id_field_name_lit,
+                        comparator,
+                        third
+                    ));
+                    match &cursor_payload.value {
+                        #bind_push
+                        _ => {
+                            return Err(#runtime_crate::core::errors::bad_request(
+                                "invalid_cursor",
+                                "Cursor does not match the current sort field",
+                            ));
+                        }
+                    }
+                    select_only_binds.push(#list_bind_ty::Integer(cursor_payload.last_id));
+                }
+            }
+        }
+    });
 
     let get_one_body = if resource.policies.read.is_empty() {
         let id_placeholder = resource.db.placeholder(1);
@@ -676,8 +924,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 };
                 let mut count_query =
                     #runtime_crate::sqlx::query_scalar::<_, i64>(&plan.count_sql);
-                for bind in plan.filter_binds {
-                    count_query = match bind {
+                for bind in &plan.filter_binds {
+                    count_query = match bind.clone() {
                         #(#count_bind_matches)*
                     };
                 }
@@ -686,29 +934,16 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
                 };
                 let mut q = #runtime_crate::sqlx::query_as::<_, Self>(&plan.select_sql);
-                for bind in plan.select_binds {
-                    q = match bind {
+                for bind in &plan.select_binds {
+                    q = match bind.clone() {
                         #(#list_bind_matches)*
                     };
                 }
                 match q.fetch_all(db.get_ref()).await {
-                    Ok(items) => {
-                        let count = items.len();
-                        let next_offset = match plan.limit {
-                            Some(limit) if (plan.offset as i64) + (count as i64) < total => {
-                                Some(plan.offset + count as u32)
-                            }
-                            _ => None,
-                        };
-                        HttpResponse::Ok().json(#list_response_ty {
-                            items,
-                            total,
-                            count,
-                            limit: plan.limit,
-                            offset: plan.offset,
-                            next_offset,
-                        })
-                    }
+                    Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                        Ok(response) => HttpResponse::Ok().json(response),
+                        Err(response) => response,
+                    },
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
@@ -744,6 +979,64 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 #list_placeholder_body
             }
 
+            fn sort_supports_cursor(sort: &#sort_field_ty) -> bool {
+                match sort {
+                    #(#cursor_support_arms)*
+                }
+            }
+
+            fn cursor_id_for_item(item: &Self) -> Result<i64, HttpResponse> {
+                #cursor_id_for_item_body
+            }
+
+            fn cursor_value_for_item(
+                item: &Self,
+                sort: &#sort_field_ty,
+            ) -> Result<#cursor_value_ty, HttpResponse> {
+                match sort {
+                    #(#cursor_value_for_item_arms)*
+                }
+            }
+
+            fn encode_cursor(
+                sort: &#sort_field_ty,
+                order: &#sort_order_ty,
+                item: &Self,
+            ) -> Result<String, HttpResponse> {
+                let payload = #cursor_payload_ty {
+                    sort: sort.as_name().to_owned(),
+                    order: order.as_str().to_owned(),
+                    last_id: Self::cursor_id_for_item(item)?,
+                    value: Self::cursor_value_for_item(item, sort)?,
+                };
+                let json = #runtime_crate::serde_json::to_vec(&payload).map_err(|error| {
+                    #runtime_crate::core::errors::internal_error(error.to_string())
+                })?;
+                Ok(#runtime_crate::base64::Engine::encode(
+                    &#runtime_crate::base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    json,
+                ))
+            }
+
+            fn decode_cursor(value: &str) -> Result<#cursor_payload_ty, HttpResponse> {
+                let bytes = #runtime_crate::base64::Engine::decode(
+                    &#runtime_crate::base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    value,
+                )
+                .map_err(|_| {
+                    #runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        "Cursor is not valid",
+                    )
+                })?;
+                #runtime_crate::serde_json::from_slice::<#cursor_payload_ty>(&bytes).map_err(|_| {
+                    #runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        "Cursor is not valid",
+                    )
+                })
+            }
+
             fn build_list_plan(
                 query: &#list_query_ty,
                 user: &#runtime_crate::core::auth::UserContext,
@@ -753,8 +1046,94 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 let mut count_sql = format!("SELECT COUNT(*) FROM {}", #table_name);
                 let mut conditions: Vec<String> = Vec::new();
                 let mut filter_binds: Vec<#list_bind_ty> = Vec::new();
+                let mut select_only_conditions: Vec<String> = Vec::new();
+                let mut select_only_binds: Vec<#list_bind_ty> = Vec::new();
                 let is_admin = #is_admin;
+                let requested_limit = query.limit.or(#default_limit_tokens);
+                let effective_limit = match (requested_limit, #max_limit_tokens) {
+                    (Some(limit), Some(max_limit)) => {
+                        if limit == 0 {
+                            return Err(#runtime_crate::core::errors::bad_request(
+                                "invalid_pagination",
+                                "`limit` must be greater than 0",
+                            ));
+                        }
+                        Some(limit.min(max_limit))
+                    }
+                    (Some(limit), None) => {
+                        if limit == 0 {
+                            return Err(#runtime_crate::core::errors::bad_request(
+                                "invalid_pagination",
+                                "`limit` must be greater than 0",
+                            ));
+                        }
+                        Some(limit)
+                    }
+                    (None, _) => None,
+                };
                 let offset = query.offset.unwrap_or(0);
+                let cursor_payload = match &query.cursor {
+                    Some(value) => Some(Self::decode_cursor(value)?),
+                    None => None,
+                };
+                if query.cursor.is_some() && query.offset.is_some() {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        "`cursor` cannot be combined with `offset`",
+                    ));
+                }
+                if query.cursor.is_some() && (query.sort.is_some() || query.order.is_some()) {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        "`cursor` cannot be combined with `sort` or `order`",
+                    ));
+                }
+                let (sort, order, cursor_mode) = if let Some(cursor_payload) = &cursor_payload {
+                    let sort = #sort_field_ty::from_name(&cursor_payload.sort).ok_or_else(|| {
+                        #runtime_crate::core::errors::bad_request(
+                            "invalid_cursor",
+                            "Cursor references an unknown sort field",
+                        )
+                    })?;
+                    let order = #sort_order_ty::parse(&cursor_payload.order).ok_or_else(|| {
+                        #runtime_crate::core::errors::bad_request(
+                            "invalid_cursor",
+                            "Cursor references an unknown sort order",
+                        )
+                    })?;
+                    (sort, order, true)
+                } else {
+                    match (&query.sort, &query.order) {
+                        (Some(sort), Some(order)) => (sort.clone(), order.clone(), false),
+                        (Some(sort), None) => (sort.clone(), #sort_order_ty::Asc, false),
+                        (None, Some(_)) => {
+                            return Err(#runtime_crate::core::errors::bad_request(
+                                "invalid_sort",
+                                "`order` requires `sort`",
+                            ));
+                        }
+                        (None, None) => (
+                            #sort_field_ty::#default_sort_variant,
+                            #sort_order_ty::Asc,
+                            false,
+                        ),
+                    }
+                };
+                if cursor_mode && effective_limit.is_none() {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        "`cursor` requires `limit` or a configured `default_limit`",
+                    ));
+                }
+                if cursor_mode && !Self::sort_supports_cursor(&sort) {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        format!(
+                            "Cursor pagination does not support sort field `{}`",
+                            sort.as_name()
+                        ),
+                    ));
+                }
 
                 if let Some((field_name, value)) = parent_filter {
                     conditions.push(format!(
@@ -771,60 +1150,72 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
 
                 #(#query_filter_conditions)*
 
+                if let Some(cursor_payload) = &cursor_payload {
+                    let comparator = if matches!(order, #sort_order_ty::Asc) {
+                        ">"
+                    } else {
+                        "<"
+                    };
+                    match &sort {
+                        #(#cursor_condition_arms)*
+                    }
+                }
+
                 if !conditions.is_empty() {
                     let where_sql = conditions.join(" AND ");
-                    select_sql.push_str(" WHERE ");
-                    select_sql.push_str(&where_sql);
                     count_sql.push_str(" WHERE ");
                     count_sql.push_str(&where_sql);
                 }
 
-                match (&query.sort, &query.order) {
-                    (Some(sort), Some(order)) => {
-                        select_sql.push_str(" ORDER BY ");
-                        select_sql.push_str(sort.as_sql());
-                        select_sql.push(' ');
-                        select_sql.push_str(order.as_sql());
-                    }
-                    (Some(sort), None) => {
-                        select_sql.push_str(" ORDER BY ");
-                        select_sql.push_str(sort.as_sql());
-                        select_sql.push_str(" ASC");
-                    }
-                    (None, Some(_)) => {
-                        return Err(#runtime_crate::core::errors::bad_request(
-                            "invalid_sort",
-                            "`order` requires `sort`",
-                        ));
-                    }
-                    (None, None) => {}
+                let mut select_conditions = conditions.clone();
+                select_conditions.extend(select_only_conditions);
+                if !select_conditions.is_empty() {
+                    let where_sql = select_conditions.join(" AND ");
+                    select_sql.push_str(" WHERE ");
+                    select_sql.push_str(&where_sql);
                 }
 
-                if let Some(limit) = query.limit {
-                    if limit == 0 {
-                        return Err(#runtime_crate::core::errors::bad_request(
-                            "invalid_pagination",
-                            "`limit` must be greater than 0",
-                        ));
+                select_sql.push_str(" ORDER BY ");
+                select_sql.push_str(sort.as_sql());
+                select_sql.push(' ');
+                select_sql.push_str(order.as_sql());
+                if sort.as_name() != #id_field_name_lit {
+                    select_sql.push_str(", ");
+                    select_sql.push_str(#id_field_name_lit);
+                    select_sql.push(' ');
+                    select_sql.push_str(order.as_sql());
+                }
+
+                let query_limit = effective_limit.map(|limit| {
+                    if cursor_mode {
+                        limit.saturating_add(1)
+                    } else {
+                        limit
                     }
+                });
+
+                if query_limit.is_some() {
                     select_sql.push_str(" LIMIT ");
-                    select_sql.push_str(&Self::list_placeholder(filter_binds.len() + 1));
+                    select_sql.push_str(&Self::list_placeholder(
+                        filter_binds.len() + select_only_binds.len() + 1
+                    ));
                 }
 
                 if let Some(offset) = query.offset {
-                    if query.limit.is_none() {
+                    if effective_limit.is_none() {
                         return Err(#runtime_crate::core::errors::bad_request(
                             "invalid_pagination",
                             "`offset` requires `limit`",
                         ));
                     }
                     select_sql.push_str(" OFFSET ");
-                    let placeholder_index = filter_binds.len() + 2;
+                    let placeholder_index = filter_binds.len() + select_only_binds.len() + 2;
                     select_sql.push_str(&Self::list_placeholder(placeholder_index));
                 }
 
                 let mut select_binds = filter_binds.clone();
-                if let Some(limit) = query.limit {
+                select_binds.extend(select_only_binds);
+                if let Some(limit) = query_limit {
                     select_binds.push(#list_bind_ty::Integer(limit as i64));
                 }
                 if query.offset.is_some() {
@@ -836,8 +1227,60 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     count_sql,
                     filter_binds,
                     select_binds,
-                    limit: query.limit,
+                    limit: effective_limit,
                     offset,
+                    sort,
+                    order,
+                    cursor_mode,
+                })
+            }
+
+            fn finalize_list_response(
+                plan: #list_plan_ty,
+                total: i64,
+                mut items: Vec<Self>,
+            ) -> Result<#list_response_ty, HttpResponse> {
+                let mut has_more = false;
+                if plan.cursor_mode {
+                    if let Some(limit) = plan.limit {
+                        if items.len() > limit as usize {
+                            has_more = true;
+                            items.pop();
+                        }
+                    }
+                }
+
+                let count = items.len();
+                if !plan.cursor_mode {
+                    has_more = match plan.limit {
+                        Some(_) => (plan.offset as i64) + (count as i64) < total,
+                        None => false,
+                    };
+                }
+
+                let next_offset = if !plan.cursor_mode && has_more {
+                    Some(plan.offset + count as u32)
+                } else {
+                    None
+                };
+
+                let next_cursor = if has_more && Self::sort_supports_cursor(&plan.sort) {
+                    match items.last() {
+                        Some(item) => Some(Self::encode_cursor(&plan.sort, &plan.order, item)?),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+
+                Ok(#list_response_ty {
+                    items,
+                    total,
+                    count,
+                    limit: plan.limit,
+                    offset: plan.offset,
+                    next_offset,
+                    next_cursor,
                 })
             }
 
@@ -854,8 +1297,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 };
                 let mut count_query =
                     #runtime_crate::sqlx::query_scalar::<_, i64>(&plan.count_sql);
-                for bind in plan.filter_binds {
-                    count_query = match bind {
+                for bind in &plan.filter_binds {
+                    count_query = match bind.clone() {
                         #(#count_bind_matches)*
                     };
                 }
@@ -864,29 +1307,16 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
                 };
                 let mut q = #runtime_crate::sqlx::query_as::<_, Self>(&plan.select_sql);
-                for bind in plan.select_binds {
-                    q = match bind {
+                for bind in &plan.select_binds {
+                    q = match bind.clone() {
                         #(#list_bind_matches)*
                     };
                 }
                 match q.fetch_all(db.get_ref()).await {
-                    Ok(items) => {
-                        let count = items.len();
-                        let next_offset = match plan.limit {
-                            Some(limit) if (plan.offset as i64) + (count as i64) < total => {
-                                Some(plan.offset + count as u32)
-                            }
-                            _ => None,
-                        };
-                        HttpResponse::Ok().json(#list_response_ty {
-                            items,
-                            total,
-                            count,
-                            limit: plan.limit,
-                            offset: plan.offset,
-                            next_offset,
-                        })
-                    }
+                    Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                        Ok(response) => HttpResponse::Ok().json(response),
+                        Err(response) => response,
+                    },
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
@@ -1038,6 +1468,16 @@ fn list_bind_type(resource: &ResourceSpec) -> TokenStream {
     quote!(#ident)
 }
 
+fn option_u32_tokens(value: Option<u32>) -> TokenStream {
+    match value {
+        Some(value) => {
+            let value = Literal::u32_unsuffixed(value);
+            quote!(Some(#value))
+        }
+        None => quote!(None),
+    }
+}
+
 fn list_plan_ident(resource: &ResourceSpec) -> syn::Ident {
     format_ident!("{}ListQueryPlan", resource.struct_ident)
 }
@@ -1054,6 +1494,14 @@ fn list_response_ident(resource: &ResourceSpec) -> syn::Ident {
 fn list_response_type(resource: &ResourceSpec) -> TokenStream {
     let ident = list_response_ident(resource);
     quote!(#ident)
+}
+
+fn list_cursor_value_ident(resource: &ResourceSpec) -> syn::Ident {
+    format_ident!("{}CursorValue", resource.struct_ident)
+}
+
+fn list_cursor_payload_ident(resource: &ResourceSpec) -> syn::Ident {
+    format_ident!("{}CursorPayload", resource.struct_ident)
 }
 
 fn list_filter_field_ty(field: &super::model::FieldSpec) -> syn::Type {

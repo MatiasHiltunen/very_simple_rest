@@ -1,0 +1,15 @@
+module: "paged_api"
+resources: [
+    {
+        name: "Item"
+        list: {
+            default_limit: 2
+            max_limit: 3
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "score", type: I64 }
+        ]
+    }
+]

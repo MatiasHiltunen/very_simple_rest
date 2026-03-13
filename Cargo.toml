@@ -11,6 +11,7 @@ actix-web = "4"
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8.3", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros", "chrono"] }
 serde_json = "1.0"
+base64 = "0.22"
 jsonwebtoken = "9"
 bcrypt = "0.17"
 chrono = "0.4"
@@ -60,6 +61,8 @@ serde.workspace = true
 sqlx.workspace = true
 rest_macro = { workspace = true }
 rest_macro_core = { workspace = true }
+serde_json.workspace = true
+base64.workspace = true
 # Additional dependencies required by the example
 log.workspace = true
 env_logger.workspace = true

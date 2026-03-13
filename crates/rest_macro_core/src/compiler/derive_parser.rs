@@ -3,10 +3,11 @@ use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
-    DbBackend, FieldSpec, FieldValidation, NumericBound, PolicyAssignment, PolicyFilter,
-    PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies,
-    RowPolicyKind, WriteModelStyle, default_resource_module_ident, infer_generated_value,
-    infer_sql_type, validate_field_validations, validate_relations, validate_row_policies,
+    DbBackend, FieldSpec, FieldValidation, ListConfig, NumericBound, PolicyAssignment,
+    PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
+    RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
+    validate_relations, validate_row_policies,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -16,6 +17,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
     let mut db = DbBackend::Sqlite;
     let mut roles = RoleRequirements::default();
     let mut policies = RowPolicies::default();
+    let mut list = ListConfig::default();
 
     for attr in &input.attrs {
         if attr.path().is_ident("rest_api") {
@@ -94,6 +96,25 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
                 }
                 Ok(())
             })?;
+        } else if attr.path().is_ident("list") {
+            attr.parse_nested_meta(|meta| {
+                let key = meta
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| meta.error("unsupported list key"))?
+                    .to_string();
+                let lit = meta.value()?.parse::<Lit>()?;
+                match (key.as_str(), lit) {
+                    ("default_limit", Lit::Int(value)) => {
+                        list.default_limit = Some(parse_u32_literal(&value)?);
+                    }
+                    ("max_limit", Lit::Int(value)) => {
+                        list.max_limit = Some(parse_u32_literal(&value)?);
+                    }
+                    _ => return Err(meta.error("list values must be integer literals")),
+                }
+                Ok(())
+            })?;
         }
     }
 
@@ -156,6 +177,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
     validate_row_policies(&parsed_fields, &policies, struct_ident.span())?;
     validate_relations(&parsed_fields, struct_ident.span())?;
     validate_field_validations(&parsed_fields, struct_ident.span())?;
+    validate_list_config(&list, struct_ident.span())?;
 
     Ok(ResourceSpec {
         struct_ident: struct_ident.clone(),
@@ -165,6 +187,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         db,
         roles: roles.with_legacy_defaults(),
         policies,
+        list,
         fields: parsed_fields,
         write_style: WriteModelStyle::ExistingStructWithDtos,
     })
@@ -418,6 +441,11 @@ fn parse_policy_bool(lit: Lit) -> syn::Result<bool> {
     }
 }
 
+fn parse_u32_literal(lit: &syn::LitInt) -> syn::Result<u32> {
+    lit.base10_parse::<u32>()
+        .map_err(|_| syn::Error::new(lit.span(), "expected a positive integer that fits in u32"))
+}
+
 fn parse_filter_policies(value: &str, span: proc_macro2::Span) -> syn::Result<Vec<PolicyFilter>> {
     split_policy_entries(value, span)?
         .into_iter()
@@ -651,6 +679,41 @@ mod tests {
             score.validation.maximum,
             Some(super::super::model::NumericBound::Integer(10))
         );
+    }
+
+    #[test]
+    fn parses_list_config_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[list(default_limit = 25, max_limit = 100)]
+            struct Post {
+                id: Option<i64>,
+                title: String,
+            }
+        };
+
+        let resource = parse_derive_input(input).expect("list config should parse");
+        assert_eq!(resource.list.default_limit, Some(25));
+        assert_eq!(resource.list.max_limit, Some(100));
+    }
+
+    #[test]
+    fn rejects_invalid_list_config_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[list(default_limit = 50, max_limit = 10)]
+            struct Post {
+                id: Option<i64>,
+                title: String,
+            }
+        };
+
+        let error = match parse_derive_input(input) {
+            Ok(_) => panic!("invalid list config should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("default_limit"));
+        assert!(error.to_string().contains("max_limit"));
     }
 
     #[test]
