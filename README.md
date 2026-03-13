@@ -14,6 +14,7 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 - **Role-Based Access Control**: Declarative protection for your endpoints with role requirements
 - **Database Agnostic**: Currently defaults to SQLite, with plans to support all SQLx targets
 - **Relationship Handling**: Define foreign keys and nested routes between resources
+- **Referential Actions**: Configure relation delete behavior with `Cascade`, `Restrict`, `SetNull`, or `NoAction`
 
 ## Installation
 
@@ -350,7 +351,8 @@ required backfilled columns, or new relation columns. Those still require a manu
 
 For live databases, `vsr migrate inspect` compares the current schema to a `.eon` file, a Rust
 source file, or a Rust source directory and reports missing tables, missing columns, missing
-indexes, type/nullability mismatches, and missing timestamp defaults.
+indexes, foreign-key target drift, `ON DELETE` drift, type/nullability mismatches, and missing
+timestamp defaults.
 
 For a larger SQLite benchmark fixture with deep relations and a deterministic seed script, see
 `examples/sqlite_bench/`.
@@ -428,11 +430,25 @@ carry the relevant columns.
 Define relationships between entities:
 
 ```rust
-#[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
+#[relation(
+    foreign_key = "post_id",
+    references = "post.id",
+    nested_route = "true",
+    on_delete = "cascade"
+)]
 pub post_id: i64,
 ```
 
 This generates nested routes like `/api/post/{post_id}/comment` automatically.
+
+Relation delete behavior is schema-driven and ends up in the generated foreign key:
+
+- `Cascade`
+- `Restrict`
+- `SetNull`
+- `NoAction`
+
+`SetNull` is only allowed on nullable foreign-key fields.
 
 ## EON Service Macro
 
@@ -495,6 +511,27 @@ resources: [
         ]
     }
 ]
+```
+
+Relations in `.eon` support the same delete actions:
+
+```eon
+{
+    name: "Comment"
+    fields: [
+        { name: "id", type: I64 }
+        {
+            name: "post_id"
+            type: I64
+            relation: {
+                references: "post.id"
+                nested_route: true
+                on_delete: Cascade
+            }
+        }
+        { name: "body", type: String }
+    ]
+}
 ```
 
 This generates:

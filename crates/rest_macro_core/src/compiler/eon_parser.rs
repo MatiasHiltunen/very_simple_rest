@@ -10,10 +10,10 @@ use syn::{LitStr, Type};
 
 use super::model::{
     DbBackend, FieldSpec, GeneratedValue, PolicyAssignment, PolicyFilter, PolicyValueSource,
-    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile,
-    StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
-    infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
-    validate_row_policies,
+    ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
+    default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
+    sanitize_struct_ident, validate_relations, validate_row_policies,
 };
 
 pub struct LoadedService {
@@ -128,6 +128,8 @@ struct FieldDocument {
 #[derive(serde::Deserialize)]
 struct RelationDocument {
     references: String,
+    #[serde(default)]
+    on_delete: Option<String>,
     #[serde(default)]
     nested_route: bool,
 }
@@ -303,6 +305,7 @@ fn build_resources(
 
         let last = result.last().expect("just pushed resource");
         validate_row_policies(&last.fields, &last.policies, Span::call_site())?;
+        validate_relations(&last.fields, Span::call_site())?;
     }
 
     Ok(result)
@@ -585,11 +588,27 @@ fn parse_relation_document(
         ));
     }
 
+    let on_delete = relation
+        .on_delete
+        .as_deref()
+        .map(parse_referential_action)
+        .transpose()?;
+
     Ok(super::model::RelationSpec {
         foreign_key: field_name.to_owned(),
         references_table: references_table.to_owned(),
         references_field: references_field.to_owned(),
+        on_delete,
         nested_route: relation.nested_route,
+    })
+}
+
+fn parse_referential_action(value: &str) -> syn::Result<ReferentialAction> {
+    ReferentialAction::parse(value).ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            "relation on_delete must be Cascade, Restrict, SetNull, or NoAction",
+        )
     })
 }
 
@@ -912,6 +931,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_relation_on_delete_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Comment"
+                    fields: [
+                        { name: "id", type: I64 }
+                        {
+                            name: "post_id"
+                            type: I64
+                            relation: {
+                                references: "post.id"
+                                nested_route: true
+                                on_delete: Cascade
+                            }
+                        }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let relation = resources[0]
+            .find_field("post_id")
+            .and_then(|field| field.relation.as_ref())
+            .expect("relation should exist");
+        assert_eq!(
+            relation.on_delete,
+            Some(super::super::model::ReferentialAction::Cascade)
+        );
+    }
+
+    #[test]
     fn rejects_unknown_row_policy_kind_from_eon() {
         let document = parse_document(
             r#"
@@ -963,6 +1018,37 @@ mod tests {
         };
         assert!(error.to_string().contains("user.id"));
         assert!(error.to_string().contains("claim.<name>"));
+    }
+
+    #[test]
+    fn rejects_set_null_on_non_nullable_relation_field() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Comment"
+                    fields: [
+                        { name: "id", type: I64 }
+                        {
+                            name: "post_id"
+                            type: I64
+                            relation: {
+                                references: "post.id"
+                                on_delete: SetNull
+                            }
+                        }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = match build_resources(document.db, document.resources) {
+            Ok(_) => panic!("invalid relation should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("SetNull"));
+        assert!(error.to_string().contains("not nullable"));
     }
 
     #[test]

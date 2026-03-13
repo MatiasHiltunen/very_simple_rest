@@ -284,6 +284,45 @@ pub async fn inspect_live_schema(
                     field_name, resource.table_name
                 ));
             }
+
+            if let Some(relation) = &field.relation {
+                let Some(live_relation) = live.relations.get(&field_name) else {
+                    issues.push(format!(
+                        "missing foreign key for column `{}` on `{}`",
+                        field_name, resource.table_name
+                    ));
+                    continue;
+                };
+
+                if live_relation.references_table != relation.references_table
+                    || live_relation.references_field != relation.references_field
+                {
+                    issues.push(format!(
+                        "foreign key `{}` on `{}` points to `{}.{}` but `{}.{}` was expected",
+                        field_name,
+                        resource.table_name,
+                        live_relation.references_table,
+                        live_relation.references_field,
+                        relation.references_table,
+                        relation.references_field
+                    ));
+                }
+
+                if !relation_delete_action_matches(
+                    relation.on_delete,
+                    live_relation.on_delete.as_deref(),
+                ) {
+                    let actual = live_relation.on_delete.as_deref().unwrap_or("DEFAULT");
+                    let expected = relation
+                        .on_delete
+                        .map(|action| action.sql())
+                        .unwrap_or("DEFAULT");
+                    issues.push(format!(
+                        "foreign key `{}` on `{}` has ON DELETE `{}` but `{}` was expected",
+                        field_name, resource.table_name, actual, expected
+                    ));
+                }
+            }
         }
 
         for index in required_index_names(resource) {
@@ -451,6 +490,32 @@ async fn inspect_sqlite_table(pool: &AnyPool, table: &str) -> Result<Option<Live
         }
     }
 
+    let foreign_keys = sqlx::query(&format!(
+        "PRAGMA foreign_key_list({})",
+        quote_sqlite_ident(table)
+    ))
+    .fetch_all(pool)
+    .await
+    .context("failed to inspect sqlite foreign keys")?;
+    for row in foreign_keys {
+        let seq: i64 = row.try_get("seq")?;
+        if seq != 0 {
+            continue;
+        }
+
+        let column: String = row.try_get("from")?;
+        schema.relations.insert(
+            column,
+            LiveRelationSchema {
+                references_table: row.try_get("table")?,
+                references_field: row.try_get("to")?,
+                on_delete: normalize_live_delete_rule(Some(
+                    &row.try_get::<String, _>("on_delete")?,
+                )),
+            },
+        );
+    }
+
     Ok(Some(schema))
 }
 
@@ -516,6 +581,55 @@ async fn inspect_postgres_table(pool: &AnyPool, table: &str) -> Result<Option<Li
         schema.indexes.insert(row.get::<String, _>("indexname"));
     }
 
+    let relations = sqlx::query(
+        "SELECT
+             child_attr.attname AS column_name,
+             parent_table.relname AS referenced_table,
+             parent_attr.attname AS referenced_column,
+             CASE constraint.confdeltype
+                 WHEN 'a' THEN 'NO ACTION'
+                 WHEN 'r' THEN 'RESTRICT'
+                 WHEN 'c' THEN 'CASCADE'
+                 WHEN 'n' THEN 'SET NULL'
+                 WHEN 'd' THEN 'SET DEFAULT'
+             END AS delete_rule
+         FROM pg_constraint constraint
+         JOIN pg_class child_table
+           ON child_table.oid = constraint.conrelid
+         JOIN pg_namespace child_namespace
+           ON child_namespace.oid = child_table.relnamespace
+         JOIN pg_class parent_table
+           ON parent_table.oid = constraint.confrelid
+         JOIN LATERAL unnest(constraint.conkey) WITH ORDINALITY AS child_cols(attnum, ord)
+           ON true
+         JOIN LATERAL unnest(constraint.confkey) WITH ORDINALITY AS parent_cols(attnum, ord)
+           ON parent_cols.ord = child_cols.ord
+         JOIN pg_attribute child_attr
+           ON child_attr.attrelid = child_table.oid AND child_attr.attnum = child_cols.attnum
+         JOIN pg_attribute parent_attr
+           ON parent_attr.attrelid = parent_table.oid AND parent_attr.attnum = parent_cols.attnum
+         WHERE constraint.contype = 'f'
+           AND child_namespace.nspname = current_schema()
+           AND child_table.relname = $1",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .context("failed to inspect postgres foreign keys")?;
+    for row in relations {
+        let column: String = row.try_get("column_name")?;
+        schema.relations.insert(
+            column,
+            LiveRelationSchema {
+                references_table: row.try_get("referenced_table")?,
+                references_field: row.try_get("referenced_column")?,
+                on_delete: normalize_live_delete_rule(
+                    row.try_get::<Option<String>, _>("delete_rule")?.as_deref(),
+                ),
+            },
+        );
+    }
+
     Ok(Some(schema))
 }
 
@@ -569,6 +683,38 @@ async fn inspect_mysql_table(pool: &AnyPool, table: &str) -> Result<Option<LiveT
         schema.indexes.insert(row.get::<String, _>("index_name"));
     }
 
+    let relations = sqlx::query(
+        "SELECT
+             kcu.column_name,
+             kcu.referenced_table_name,
+             kcu.referenced_column_name,
+             rc.delete_rule
+         FROM information_schema.key_column_usage kcu
+         JOIN information_schema.referential_constraints rc
+           ON rc.constraint_schema = kcu.constraint_schema
+          AND rc.constraint_name = kcu.constraint_name
+         WHERE kcu.table_schema = DATABASE()
+           AND kcu.table_name = ?
+           AND kcu.referenced_table_name IS NOT NULL",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .context("failed to inspect mysql foreign keys")?;
+    for row in relations {
+        let column: String = row.try_get("column_name")?;
+        schema.relations.insert(
+            column,
+            LiveRelationSchema {
+                references_table: row.try_get("referenced_table_name")?,
+                references_field: row.try_get("referenced_column_name")?,
+                on_delete: normalize_live_delete_rule(
+                    row.try_get::<Option<String>, _>("delete_rule")?.as_deref(),
+                ),
+            },
+        );
+    }
+
     Ok(Some(schema))
 }
 
@@ -605,6 +751,27 @@ fn default_is_current_timestamp(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_live_delete_rule(value: Option<&str>) -> Option<String> {
+    value.and_then(|value| {
+        let normalized = value.trim().replace('_', " ").to_ascii_uppercase();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    })
+}
+
+fn relation_delete_action_matches(
+    expected: Option<compiler::ReferentialAction>,
+    actual: Option<&str>,
+) -> bool {
+    match expected {
+        Some(expected) => actual == Some(expected.sql()),
+        None => matches!(actual, None | Some("NO ACTION") | Some("RESTRICT")),
+    }
+}
+
 fn quote_sqlite_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -613,6 +780,7 @@ fn quote_sqlite_ident(ident: &str) -> String {
 struct LiveTableSchema {
     columns: HashMap<String, LiveColumnSchema>,
     indexes: BTreeSet<String>,
+    relations: HashMap<String, LiveRelationSchema>,
 }
 
 struct LiveColumnSchema {
@@ -620,6 +788,12 @@ struct LiveColumnSchema {
     nullable: bool,
     primary_key: bool,
     default_current_timestamp: bool,
+}
+
+struct LiveRelationSchema {
+    references_table: String,
+    references_field: String,
+    on_delete: Option<String>,
 }
 
 fn migration_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -976,5 +1150,83 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("missing column `subtitle`"));
         assert!(message.contains("missing table `audit_log`"));
+    }
+
+    #[tokio::test]
+    async fn inspect_live_schema_accepts_matching_sqlite_relation_actions() {
+        sqlx::any::install_default_drivers();
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_inspect_live_rel_match_{stamp}"));
+        let schema = root.join("cascade_api.eon");
+        let migrations = root.join("migrations");
+        let output = migrations.join("0001_cascade.sql");
+        let database_path = root.join("app.db");
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+
+        std::fs::create_dir_all(&migrations).expect("temp dir should exist");
+        std::fs::copy(fixtures.join("cascade_api.eon"), &schema).expect("schema should copy");
+
+        super::generate_migration(&schema, &output, false).expect("migration should generate");
+        apply_migrations(&database_url, &migrations)
+            .await
+            .expect("migration should apply");
+
+        inspect_live_schema(&database_url, &schema, &[])
+            .await
+            .expect("live schema should match");
+    }
+
+    #[tokio::test]
+    async fn inspect_live_schema_reports_relation_delete_drift() {
+        sqlx::any::install_default_drivers();
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_inspect_live_rel_drift_{stamp}"));
+        let schema = root.join("cascade_api.eon");
+        let database_path = root.join("app.db");
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+
+        std::fs::create_dir_all(&root).expect("temp dir should exist");
+        std::fs::copy(fixtures.join("cascade_api.eon"), &schema).expect("schema should copy");
+
+        let pool = sqlx::AnyPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE parent (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL
+            );
+
+            CREATE TABLE child (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                FOREIGN KEY (parent_id) REFERENCES parent(id)
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("schema should apply");
+
+        let error = inspect_live_schema(&database_url, &schema, &[])
+            .await
+            .expect_err("live relation drift should be reported");
+        let message = error.to_string();
+        assert!(message.contains("foreign key `parent_id` on `child` has ON DELETE `NO ACTION`"));
+        assert!(message.contains("`CASCADE` was expected"));
     }
 }

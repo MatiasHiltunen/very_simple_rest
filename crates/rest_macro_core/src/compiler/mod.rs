@@ -11,8 +11,8 @@ use std::path::Path as FsPath;
 use syn::{DeriveInput, LitStr, Path};
 
 pub use model::{
-    DbBackend, GeneratedValue, RelationSpec, ResourceSpec, RoleRequirements, RowPolicies,
-    ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, is_optional_type,
+    DbBackend, GeneratedValue, ReferentialAction, RelationSpec, ResourceSpec, RoleRequirements,
+    RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, is_optional_type,
 };
 pub use openapi::OpenApiSpecOptions;
 

@@ -164,7 +164,39 @@ pub struct RelationSpec {
     pub references_table: String,
     pub references_field: String,
     #[serde(default)]
+    pub on_delete: Option<ReferentialAction>,
+    #[serde(default)]
     pub nested_route: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ReferentialAction {
+    Cascade,
+    Restrict,
+    SetNull,
+    NoAction,
+}
+
+impl ReferentialAction {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cascade" => Some(Self::Cascade),
+            "restrict" => Some(Self::Restrict),
+            "set_null" | "setnull" | "set-null" => Some(Self::SetNull),
+            "no_action" | "noaction" | "no-action" => Some(Self::NoAction),
+            _ => None,
+        }
+    }
+
+    pub fn sql(self) -> &'static str {
+        match self {
+            Self::Cascade => "CASCADE",
+            Self::Restrict => "RESTRICT",
+            Self::SetNull => "SET NULL",
+            Self::NoAction => "NO ACTION",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,6 +352,26 @@ pub fn validate_row_policies(
     validate_policy_assignments(fields, "create", &policies.create, span)?;
     validate_policy_filters(fields, "update", &policies.update, span)?;
     validate_policy_filters(fields, "delete", &policies.delete, span)
+}
+
+pub fn validate_relations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
+    for field in fields {
+        let Some(relation) = &field.relation else {
+            continue;
+        };
+
+        if relation.on_delete == Some(ReferentialAction::SetNull) && !is_optional_type(&field.ty) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "relation field `{}` uses `on_delete = SetNull` but is not nullable",
+                    field.name()
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_policy_filters(

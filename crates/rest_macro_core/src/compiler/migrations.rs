@@ -145,11 +145,16 @@ fn render_create_table_sql(resource: &ResourceSpec) -> String {
 
     definitions.extend(resource.fields.iter().filter_map(|field| {
         field.relation.as_ref().map(|relation| {
+            let on_delete = relation
+                .on_delete
+                .map(|action| format!(" ON DELETE {}", action.sql()))
+                .unwrap_or_default();
             format!(
-                "FOREIGN KEY ({}) REFERENCES {}({})",
+                "FOREIGN KEY ({}) REFERENCES {}({}){}",
                 field.name(),
                 relation.references_table,
-                relation.references_field
+                relation.references_field,
+                on_delete
             )
         })
     }));
@@ -414,6 +419,16 @@ mod tests {
 
         assert!(sql.contains("CREATE INDEX idx_tenant_post_user_id ON tenant_post (user_id);"));
         assert!(sql.contains("CREATE INDEX idx_tenant_post_tenant_id ON tenant_post (tenant_id);"));
+    }
+
+    #[test]
+    fn migration_sql_renders_on_delete_action_for_relations() {
+        let loaded =
+            load_service_from_path(&fixture_path("cascade_api.eon")).expect("fixture should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE"));
     }
 
     #[test]

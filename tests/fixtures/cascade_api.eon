@@ -1,0 +1,26 @@
+module: "cascade_api"
+resources: [
+    {
+        name: "Parent"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "name", type: String }
+        ]
+    }
+    {
+        name: "Child"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "parent_id"
+                type: I64
+                relation: {
+                    references: "parent.id"
+                    nested_route: true
+                    on_delete: Cascade
+                }
+            }
+            { name: "name", type: String }
+        ]
+    }
+]

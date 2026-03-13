@@ -16,7 +16,7 @@ authorization, and relationship handling.
 - Explicit SQL migration generation for `.eon` services
 - JWT-based authentication with role management
 - Role-Based Access Control (RBAC) for endpoint protection
-- Relationship handling with nested routes
+- Relationship handling with nested routes and configurable relation delete actions
 - Support for SQLite, PostgreSQL, and MySQL (via feature flags)
 
 ## Quick Start
@@ -66,7 +66,8 @@ The crate also exposes `rest_api_from_eon!` and `rest_api_eon!` for compile-time
 minimal `.eon` service definitions. The generated module includes resource structs, `Create` and
 `Update` DTOs, a module-level `configure` function, a matching `configure_static` hook for
 service-level static mounts, and optional portable row policies based on `user.id` and JWT
-claims.
+claims. Relations can also declare `on_delete` as `Cascade`, `Restrict`, `SetNull`, or
+`NoAction`; `SetNull` is rejected on non-nullable foreign-key fields.
 
 Generated REST resources do not perform runtime schema creation. For `.eon` services, use the
 `vsr migrate generate`, `vsr migrate check`, and `vsr migrate apply` commands to manage schema
@@ -97,7 +98,8 @@ For additive evolution between schema versions, `vsr migrate diff` emits only ne
 indexes, and safe nullable/defaulted columns; destructive changes remain manual by design.
 
 For live drift checks, `vsr migrate inspect` compares the current database to a schema source and
-reports mismatches without generating SQL.
+reports mismatches in columns, indexes, foreign keys, and `ON DELETE` actions without generating
+SQL.
 
 ## JWT Secret Configuration
 

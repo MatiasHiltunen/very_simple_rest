@@ -3,9 +3,10 @@ use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
-    DbBackend, FieldSpec, PolicyAssignment, PolicyFilter, PolicyValueSource, ResourceSpec,
-    RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
-    infer_generated_value, infer_sql_type, validate_row_policies,
+    DbBackend, FieldSpec, PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction,
+    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle,
+    default_resource_module_ident, infer_generated_value, infer_sql_type, validate_relations,
+    validate_row_policies,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -151,6 +152,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         ));
     }
     validate_row_policies(&parsed_fields, &policies, struct_ident.span())?;
+    validate_relations(&parsed_fields, struct_ident.span())?;
 
     Ok(ResourceSpec {
         struct_ident: struct_ident.clone(),
@@ -178,6 +180,7 @@ fn parse_relation(
 
         let mut foreign_key = field_name.to_owned();
         let mut references = None;
+        let mut on_delete = None;
         let mut nested_route = false;
 
         attr.parse_nested_meta(|meta| {
@@ -191,6 +194,9 @@ fn parse_relation(
             match (key.as_str(), lit) {
                 ("foreign_key", Lit::Str(value)) => foreign_key = value.value(),
                 ("references", Lit::Str(value)) => references = Some(value.value()),
+                ("on_delete", Lit::Str(value)) => {
+                    on_delete = Some(parse_referential_action(&value.value(), value.span())?);
+                }
                 ("nested_route", Lit::Bool(value)) => nested_route = value.value(),
                 ("nested_route", Lit::Str(value)) => {
                     nested_route = value.value().parse::<bool>().map_err(|_| {
@@ -216,6 +222,7 @@ fn parse_relation(
             foreign_key,
             references_table,
             references_field,
+            on_delete,
             nested_route,
         });
     }
@@ -254,6 +261,18 @@ fn parse_db_backend(value: &str, span: proc_macro2::Span) -> syn::Result<DbBacke
             "db must be one of: sqlite, postgres, mysql",
         )),
     }
+}
+
+fn parse_referential_action(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<ReferentialAction> {
+    ReferentialAction::parse(value).ok_or_else(|| {
+        syn::Error::new(
+            span,
+            "relation on_delete must be Cascade, Restrict, SetNull, or NoAction",
+        )
+    })
 }
 
 fn expect_policy_string(span: proc_macro2::Span, lit: Lit) -> syn::Result<syn::LitStr> {
@@ -462,5 +481,46 @@ mod tests {
             super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
         );
         assert_eq!(resource.policies.create.len(), 2);
+    }
+
+    #[test]
+    fn parses_relation_on_delete_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            struct Comment {
+                id: Option<i64>,
+                #[relation(references = "post.id", nested_route = true, on_delete = "cascade")]
+                post_id: i64,
+            }
+        };
+
+        let resource = parse_derive_input(input).expect("relation should parse");
+        let relation = resource
+            .find_field("post_id")
+            .and_then(|field| field.relation.as_ref())
+            .expect("relation should exist");
+        assert_eq!(
+            relation.on_delete,
+            Some(super::super::model::ReferentialAction::Cascade)
+        );
+    }
+
+    #[test]
+    fn rejects_set_null_on_non_nullable_relation_field() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            struct Comment {
+                id: Option<i64>,
+                #[relation(references = "post.id", on_delete = "set_null")]
+                post_id: i64,
+            }
+        };
+
+        let error = match parse_derive_input(input) {
+            Ok(_) => panic!("invalid relation should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("SetNull"));
+        assert!(error.to_string().contains("not nullable"));
     }
 }
