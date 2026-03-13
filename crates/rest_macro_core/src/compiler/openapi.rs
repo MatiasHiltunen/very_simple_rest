@@ -66,6 +66,8 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         })
         .collect::<Vec<_>>();
 
+    schemas.insert("ApiErrorResponse".to_owned(), api_error_schema());
+
     for resource in &service.resources {
         let name = resource_name(resource);
         schemas.insert(
@@ -76,6 +78,10 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         schemas.insert(
             format!("{name}Update"),
             object_schema(&update_payload_fields(resource)),
+        );
+        schemas.insert(
+            format!("{name}ListResponse"),
+            list_response_schema(resource),
         );
 
         paths.insert(
@@ -142,6 +148,7 @@ fn collection_path_item(resource: &ResourceSpec) -> Value {
             "tags": [resource_name(resource)],
             "summary": format!("List {}", resource_name(resource)),
             "operationId": format!("list{}", resource_name(resource)),
+            "parameters": list_query_parameters(resource, None),
             "security": bearer_security(),
             "responses": list_responses(resource),
         },
@@ -151,7 +158,7 @@ fn collection_path_item(resource: &ResourceSpec) -> Value {
             "operationId": format!("create{}", resource_name(resource)),
             "security": bearer_security(),
             "requestBody": json_request_body(format!("{}Create", resource_name(resource))),
-            "responses": write_responses("Created"),
+            "responses": create_responses(),
         },
     })
 }
@@ -175,7 +182,7 @@ fn item_path_item(resource: &ResourceSpec) -> Value {
             "parameters": [id_parameter.clone()],
             "security": bearer_security(),
             "requestBody": json_request_body(format!("{}Update", resource_name(resource))),
-            "responses": write_responses("Updated"),
+            "responses": update_responses(),
         },
         "delete": {
             "tags": [resource_name(resource)],
@@ -183,7 +190,7 @@ fn item_path_item(resource: &ResourceSpec) -> Value {
             "operationId": format!("delete{}", resource_name(resource)),
             "parameters": [id_parameter],
             "security": bearer_security(),
-            "responses": write_responses("Deleted"),
+            "responses": delete_responses(),
         },
     })
 }
@@ -193,14 +200,16 @@ fn nested_collection_path_item(
     parent_table: &str,
     relation_field: &str,
 ) -> Value {
+    let mut parameters = vec![id_parameter("parent_id", relation_field)];
+    parameters.extend(list_query_parameters(resource, Some(relation_field)));
     json!({
         "get": {
             "tags": [resource_name(resource)],
             "summary": format!("List {} by {}", resource_name(resource), parent_table),
             "operationId": format!("list{}By{}", resource_name(resource), parent_table.to_case(CaseKind::Pascal)),
-            "parameters": [id_parameter("parent_id", relation_field)],
+            "parameters": parameters,
             "security": bearer_security(),
-            "responses": list_responses(resource),
+            "responses": nested_list_responses(resource),
         }
     })
 }
@@ -267,7 +276,11 @@ fn append_builtin_auth_components(
                 "requestBody": json_request_body("RegisterInput"),
                 "responses": {
                     "201": plain_response("Created"),
-                    "500": plain_response("Internal server error")
+                    "400": api_error_response("Invalid request body"),
+                    "413": api_error_response("Payload too large"),
+                    "415": api_error_response("Unsupported media type"),
+                    "409": api_error_response("Email already exists"),
+                    "500": api_error_response("Internal server error")
                 }
             }
         }),
@@ -282,8 +295,11 @@ fn append_builtin_auth_components(
                 "requestBody": json_request_body("LoginInput"),
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthTokenResponse")),
-                    "401": plain_response("Invalid credentials"),
-                    "500": plain_response("Internal server error")
+                    "400": api_error_response("Invalid request body"),
+                    "413": api_error_response("Payload too large"),
+                    "415": api_error_response("Unsupported media type"),
+                    "401": api_error_response("Invalid credentials"),
+                    "500": api_error_response("Internal server error")
                 }
             }
         }),
@@ -298,7 +314,7 @@ fn append_builtin_auth_components(
                 "security": bearer_security(),
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthMeResponse")),
-                    "401": plain_response("Authentication required")
+                    "401": api_error_response("Authentication required")
                 }
             }
         }),
@@ -311,15 +327,13 @@ fn list_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Value> {
             "200",
             json_response(
                 "OK",
-                json!({
-                    "type": "array",
-                    "items": schema_ref(resource_name(resource)),
-                }),
+                schema_ref(format!("{}ListResponse", resource_name(resource))),
             ),
         ),
+        ("400", api_error_response("Invalid query parameters")),
         ("401", plain_response("Authentication required")),
-        ("403", plain_response("Forbidden")),
-        ("500", plain_response("Internal server error")),
+        ("403", api_error_response("Forbidden")),
+        ("500", api_error_response("Internal server error")),
     ])
 }
 
@@ -329,27 +343,59 @@ fn get_one_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Value> {
             "200",
             json_response("OK", schema_ref(resource_name(resource))),
         ),
+        ("400", api_error_response("Invalid path parameters")),
         ("401", plain_response("Authentication required")),
-        ("403", plain_response("Forbidden")),
-        ("404", plain_response("Not found")),
-        ("500", plain_response("Internal server error")),
+        ("403", api_error_response("Forbidden")),
+        ("404", api_error_response("Not found")),
+        ("500", api_error_response("Internal server error")),
     ])
 }
 
-fn write_responses(success_description: &'static str) -> BTreeMap<&'static str, Value> {
+fn nested_list_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Value> {
+    let mut responses = list_responses(resource);
+    responses.insert("400", api_error_response("Invalid path parameters"));
+    responses
+}
+
+fn create_responses() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
+        ("201", plain_response("Created")),
         (
-            if success_description == "Created" {
-                "201"
-            } else {
-                "200"
-            },
-            plain_response(success_description),
+            "400",
+            api_error_response("Invalid request body or validation error"),
         ),
+        ("413", api_error_response("Payload too large")),
+        ("415", api_error_response("Unsupported media type")),
         ("401", plain_response("Authentication required")),
-        ("403", plain_response("Forbidden")),
-        ("404", plain_response("Not found")),
-        ("500", plain_response("Internal server error")),
+        ("403", api_error_response("Forbidden")),
+        ("500", api_error_response("Internal server error")),
+    ])
+}
+
+fn update_responses() -> BTreeMap<&'static str, Value> {
+    BTreeMap::from([
+        ("200", plain_response("Updated")),
+        (
+            "400",
+            api_error_response("Invalid request body or validation error"),
+        ),
+        ("413", api_error_response("Payload too large")),
+        ("415", api_error_response("Unsupported media type")),
+        ("401", plain_response("Authentication required")),
+        ("403", api_error_response("Forbidden")),
+        ("404", api_error_response("Not found")),
+        ("500", api_error_response("Internal server error")),
+    ])
+}
+
+fn delete_responses() -> BTreeMap<&'static str, Value> {
+    BTreeMap::from([
+        ("200", plain_response("Deleted")),
+        ("400", api_error_response("Invalid path parameters")),
+        ("401", plain_response("Authentication required")),
+        ("403", api_error_response("Forbidden")),
+        ("404", api_error_response("Not found")),
+        ("500", api_error_response("Internal server error")),
     ])
 }
 
@@ -381,6 +427,22 @@ fn plain_response(description: &'static str) -> Value {
     })
 }
 
+fn api_error_response(description: &'static str) -> Value {
+    json_response(description, schema_ref("ApiErrorResponse"))
+}
+
+fn api_error_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "field": { "type": "string", "nullable": true }
+        },
+        "required": ["code", "message"]
+    })
+}
+
 fn bearer_security() -> Value {
     json!([
         {
@@ -408,6 +470,76 @@ fn id_parameter(name: &str, description: &str) -> Value {
     })
 }
 
+fn list_query_parameters(
+    resource: &ResourceSpec,
+    parent_relation_field: Option<&str>,
+) -> Vec<Value> {
+    let mut parameters = vec![
+        json!({
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of rows to return",
+            "schema": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 1
+            }
+        }),
+        json!({
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Rows to skip before returning results. Requires `limit`.",
+            "schema": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+            }
+        }),
+        json!({
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "Field to sort by",
+            "schema": {
+                "type": "string",
+                "enum": resource.fields.iter().map(|field| field.name()).collect::<Vec<_>>()
+            }
+        }),
+        json!({
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "Sort direction. Requires `sort`.",
+            "schema": {
+                "type": "string",
+                "enum": ["asc", "desc"]
+            }
+        }),
+    ];
+
+    for field in &resource.fields {
+        let field_name = field.name();
+        let description = if parent_relation_field == Some(field_name.as_str()) {
+            format!(
+                "Exact-match filter for `{field_name}`. Nested route parent filtering is applied automatically."
+            )
+        } else {
+            format!("Exact-match filter for `{field_name}`")
+        };
+        parameters.push(json!({
+            "name": format!("filter_{field_name}"),
+            "in": "query",
+            "required": false,
+            "description": description,
+            "schema": query_parameter_schema(field),
+        }));
+    }
+
+    parameters
+}
+
 fn object_schema(fields: &[&FieldSpec]) -> Value {
     let mut properties = Map::new();
     let mut required = Vec::new();
@@ -428,6 +560,45 @@ fn object_schema(fields: &[&FieldSpec]) -> Value {
         schema["required"] = json!(required);
     }
     schema
+}
+
+fn list_response_schema(resource: &ResourceSpec) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": schema_ref(resource_name(resource)),
+            },
+            "total": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+            },
+            "count": {
+                "type": "integer",
+                "minimum": 0
+            },
+            "limit": {
+                "type": "integer",
+                "format": "int64",
+                "nullable": true,
+                "minimum": 1
+            },
+            "offset": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+            },
+            "next_offset": {
+                "type": "integer",
+                "format": "int64",
+                "nullable": true,
+                "minimum": 0
+            }
+        },
+        "required": ["items", "total", "count", "offset"]
+    })
 }
 
 fn create_payload_schema(resource: &ResourceSpec) -> Value {
@@ -457,6 +628,14 @@ fn create_payload_schema(resource: &ResourceSpec) -> Value {
 
 fn field_schema(field: &FieldSpec) -> Value {
     field_schema_with_optional(field, false)
+}
+
+fn query_parameter_schema(field: &FieldSpec) -> Value {
+    let mut schema = field_schema_with_optional(field, false);
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("nullable");
+    }
+    schema
 }
 
 fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value {
@@ -489,7 +668,31 @@ fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value 
         schema["nullable"] = json!(true);
     }
 
+    apply_field_validation_schema(field, &mut schema);
+
     schema
+}
+
+fn apply_field_validation_schema(field: &FieldSpec, schema: &mut Value) {
+    if let Some(min_length) = field.validation.min_length {
+        schema["minLength"] = json!(min_length);
+    }
+    if let Some(max_length) = field.validation.max_length {
+        schema["maxLength"] = json!(max_length);
+    }
+    if let Some(minimum) = &field.validation.minimum {
+        schema["minimum"] = numeric_bound_json(minimum);
+    }
+    if let Some(maximum) = &field.validation.maximum {
+        schema["maximum"] = numeric_bound_json(maximum);
+    }
+}
+
+fn numeric_bound_json(bound: &super::model::NumericBound) -> Value {
+    match bound {
+        super::model::NumericBound::Integer(value) => json!(value),
+        super::model::NumericBound::Float(value) => json!(value),
+    }
 }
 
 struct CreatePayloadField<'a> {
@@ -640,6 +843,28 @@ mod tests {
         assert!(document["paths"]["/tenant_post"].is_object());
         assert!(document["paths"]["/tenant_post/{id}"].is_object());
         assert_eq!(
+            document["paths"]["/tenant_post"]["get"]["parameters"][0]["name"],
+            "limit"
+        );
+        assert_eq!(
+            document["paths"]["/tenant_post"]["get"]["parameters"][2]["name"],
+            "sort"
+        );
+        assert_eq!(
+            document["paths"]["/tenant_post"]["get"]["parameters"][4]["name"],
+            "filter_id"
+        );
+        assert_eq!(
+            document["paths"]["/tenant_post"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/TenantPostListResponse"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["TenantPostListResponse"]["properties"]["next_offset"]
+                ["nullable"],
+            json!(true)
+        );
+        assert_eq!(
             document["paths"]["/tenant_post"]["get"]["security"][0]["bearerAuth"],
             json!([])
         );
@@ -650,6 +875,36 @@ mod tests {
         assert!(
             document["components"]["schemas"]["TenantPostCreate"]["properties"]["user_id"]
                 .is_null()
+        );
+    }
+
+    #[test]
+    fn renders_openapi_nested_collection_query_parameters() {
+        let service =
+            load_service_from_path(&fixture_path("blog_api.eon")).expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Blog API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["paths"]["/post/{parent_id}/comment"]["get"]["parameters"][0]["name"],
+            "parent_id"
+        );
+        assert_eq!(
+            document["paths"]["/post/{parent_id}/comment"]["get"]["parameters"][1]["name"],
+            "limit"
+        );
+        assert_eq!(
+            document["paths"]["/post/{parent_id}/comment"]["get"]["parameters"][5]["name"],
+            "filter_id"
+        );
+        assert_eq!(
+            document["paths"]["/post/{parent_id}/comment"]["get"]["responses"]["400"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/ApiErrorResponse"
         );
     }
 
@@ -687,6 +942,93 @@ mod tests {
         );
         assert!(document["paths"]["/post"]["get"].is_object());
         assert!(document["paths"]["/post/{id}"]["put"].is_object());
+    }
+
+    #[test]
+    fn renders_openapi_validation_keywords_for_fields() {
+        let root = temp_root("derive_openapi_validation");
+        fs::create_dir_all(&root).expect("temp dir should exist");
+        fs::write(
+            root.join("main.rs"),
+            r#"
+            use very_simple_rest::prelude::*;
+
+            #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+            #[rest_api(table = "post", id = "id", db = "sqlite")]
+            struct Post {
+                id: Option<i64>,
+                #[validate(min_length = 3, max_length = 32)]
+                title: String,
+                #[validate(minimum = 1, maximum = 10)]
+                score: i64,
+            }
+            "#,
+        )
+        .expect("main file should be written");
+
+        let service = load_derive_service_from_path(&root).expect("derive service should load");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Validated API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["title"]["minLength"],
+            json!(3)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["title"]["maxLength"],
+            json!(32)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["score"]["minimum"],
+            json!(1)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["score"]["maximum"],
+            json!(10)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["PostCreate"]["properties"]["title"]["minLength"],
+            json!(3)
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][0]["schema"]["minimum"],
+            json!(1)
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][2]["schema"]["enum"],
+            json!(["id", "title", "score"])
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            "#/components/schemas/PostListResponse"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["PostListResponse"]["properties"]["items"]["type"],
+            json!("array")
+        );
+        assert_eq!(
+            document["paths"]["/post"]["get"]["parameters"][6]["schema"]["minimum"],
+            json!(1)
+        );
+        assert_eq!(
+            document["paths"]["/post"]["post"]["responses"]["400"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            "#/components/schemas/ApiErrorResponse"
+        );
+        assert_eq!(
+            document["paths"]["/post/{id}"]["get"]["responses"]["400"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/ApiErrorResponse"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ApiErrorResponse"]["properties"]["field"]["nullable"],
+            json!(true)
+        );
     }
 
     #[test]
@@ -737,11 +1079,27 @@ mod tests {
         assert!(document["paths"]["/auth/login"]["post"].is_object());
         assert!(document["paths"]["/auth/me"]["get"].is_object());
         assert!(document["components"]["schemas"]["AuthTokenResponse"].is_object());
+        assert!(document["components"]["schemas"]["ApiErrorResponse"].is_object());
         assert_eq!(document["paths"]["/auth/me"]["get"]["tags"][0], "Account");
         assert!(document["paths"]["/auth/login"]["post"]["security"].is_null());
         assert_eq!(
             document["paths"]["/auth/me"]["get"]["security"][0]["bearerAuth"],
             json!([])
+        );
+        assert_eq!(
+            document["paths"]["/auth/login"]["post"]["responses"]["401"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/ApiErrorResponse"
+        );
+        assert_eq!(
+            document["paths"]["/auth/login"]["post"]["responses"]["400"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/ApiErrorResponse"
+        );
+        assert_eq!(
+            document["paths"]["/auth/register"]["post"]["responses"]["409"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/ApiErrorResponse"
         );
         assert!(
             document["tags"]

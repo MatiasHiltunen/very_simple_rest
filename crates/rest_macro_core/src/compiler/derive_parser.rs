@@ -3,10 +3,10 @@ use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
-    DbBackend, FieldSpec, PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction,
-    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle,
-    default_resource_module_ident, infer_generated_value, infer_sql_type, validate_relations,
-    validate_row_policies,
+    DbBackend, FieldSpec, FieldValidation, NumericBound, PolicyAssignment, PolicyFilter,
+    PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies,
+    RowPolicyKind, WriteModelStyle, default_resource_module_ident, infer_generated_value,
+    infer_sql_type, validate_field_validations, validate_relations, validate_row_policies,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -132,6 +132,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         }
 
         let relation = parse_relation(field_name.as_str(), &field.attrs)?;
+        let validation = parse_validation(&field.attrs)?;
         let is_id = field_name == id_field;
         let generated = infer_generated_value(&field_name, is_id);
 
@@ -141,6 +142,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
             sql_type: infer_sql_type(&field.ty),
             is_id,
             generated,
+            validation,
             relation,
         });
     }
@@ -153,6 +155,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
     }
     validate_row_policies(&parsed_fields, &policies, struct_ident.span())?;
     validate_relations(&parsed_fields, struct_ident.span())?;
+    validate_field_validations(&parsed_fields, struct_ident.span())?;
 
     Ok(ResourceSpec {
         struct_ident: struct_ident.clone(),
@@ -178,7 +181,6 @@ fn parse_relation(
             continue;
         }
 
-        let mut foreign_key = field_name.to_owned();
         let mut references = None;
         let mut on_delete = None;
         let mut nested_route = false;
@@ -192,7 +194,18 @@ fn parse_relation(
             let lit = meta.value()?.parse::<Lit>()?;
 
             match (key.as_str(), lit) {
-                ("foreign_key", Lit::Str(value)) => foreign_key = value.value(),
+                ("foreign_key", Lit::Str(value)) => {
+                    let configured = value.value();
+                    if configured != field_name {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            format!(
+                                "custom relation foreign_key overrides are not supported; field `{}` must map to its own column name",
+                                field_name
+                            ),
+                        ));
+                    }
+                }
                 ("references", Lit::Str(value)) => references = Some(value.value()),
                 ("on_delete", Lit::Str(value)) => {
                     on_delete = Some(parse_referential_action(&value.value(), value.span())?);
@@ -219,7 +232,6 @@ fn parse_relation(
             parse_reference_target(&references, attr.span())?;
 
         relation = Some(super::model::RelationSpec {
-            foreign_key,
             references_table,
             references_field,
             on_delete,
@@ -228,6 +240,61 @@ fn parse_relation(
     }
 
     Ok(relation)
+}
+
+fn parse_validation(attrs: &[syn::Attribute]) -> syn::Result<FieldValidation> {
+    let mut validation = FieldValidation::default();
+
+    for attr in attrs {
+        if !attr.path().is_ident("validate") {
+            continue;
+        }
+
+        attr.parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .ok_or_else(|| meta.error("unsupported validate key"))?
+                .to_string();
+            let lit = meta.value()?.parse::<Lit>()?;
+
+            match key.as_str() {
+                "min_length" => {
+                    validation.min_length = Some(parse_length_value(
+                        validation.min_length,
+                        lit,
+                        "min_length",
+                    )?);
+                }
+                "max_length" => {
+                    validation.max_length = Some(parse_length_value(
+                        validation.max_length,
+                        lit,
+                        "max_length",
+                    )?);
+                }
+                "minimum" => {
+                    validation.minimum = Some(parse_numeric_value(
+                        validation.minimum.as_ref(),
+                        lit,
+                        "minimum",
+                    )?);
+                }
+                "maximum" => {
+                    validation.maximum = Some(parse_numeric_value(
+                        validation.maximum.as_ref(),
+                        lit,
+                        "maximum",
+                    )?);
+                }
+                _ => return Err(meta.error("unsupported validate key")),
+            }
+
+            Ok(())
+        })?;
+    }
+
+    Ok(validation)
 }
 
 fn parse_reference_target(value: &str, span: proc_macro2::Span) -> syn::Result<(String, String)> {
@@ -259,6 +326,58 @@ fn parse_db_backend(value: &str, span: proc_macro2::Span) -> syn::Result<DbBacke
         _ => Err(syn::Error::new(
             span,
             "db must be one of: sqlite, postgres, mysql",
+        )),
+    }
+}
+
+fn parse_length_value(existing: Option<usize>, lit: Lit, label: &str) -> syn::Result<usize> {
+    let span = lit.span();
+    if existing.is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!("duplicate `{label}` validation"),
+        ));
+    }
+
+    match lit {
+        Lit::Int(value) => value.base10_parse::<usize>().map_err(|_| {
+            syn::Error::new(
+                value.span(),
+                format!("`{label}` must be a non-negative integer"),
+            )
+        }),
+        _ => Err(syn::Error::new(
+            span,
+            format!("`{label}` must be an integer literal"),
+        )),
+    }
+}
+
+fn parse_numeric_value(
+    existing: Option<&NumericBound>,
+    lit: Lit,
+    label: &str,
+) -> syn::Result<NumericBound> {
+    let span = lit.span();
+    if existing.is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!("duplicate `{label}` validation"),
+        ));
+    }
+
+    match lit {
+        Lit::Int(value) => value
+            .base10_parse::<i64>()
+            .map(NumericBound::Integer)
+            .map_err(|_| syn::Error::new(value.span(), format!("`{label}` must fit within `i64`"))),
+        Lit::Float(value) => value
+            .base10_parse::<f64>()
+            .map(NumericBound::Float)
+            .map_err(|_| syn::Error::new(value.span(), format!("invalid `{label}` value"))),
+        _ => Err(syn::Error::new(
+            span,
+            format!("`{label}` must be a numeric literal"),
         )),
     }
 }
@@ -506,6 +625,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_field_validation_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            struct Post {
+                id: Option<i64>,
+                #[validate(min_length = 3, max_length = 32)]
+                title: String,
+                #[validate(minimum = 1, maximum = 10)]
+                score: i64,
+            }
+        };
+
+        let resource = parse_derive_input(input).expect("validation should parse");
+        let title = resource.find_field("title").expect("title should exist");
+        assert_eq!(title.validation.min_length, Some(3));
+        assert_eq!(title.validation.max_length, Some(32));
+
+        let score = resource.find_field("score").expect("score should exist");
+        assert_eq!(
+            score.validation.minimum,
+            Some(super::super::model::NumericBound::Integer(1))
+        );
+        assert_eq!(
+            score.validation.maximum,
+            Some(super::super::model::NumericBound::Integer(10))
+        );
+    }
+
+    #[test]
     fn rejects_set_null_on_non_nullable_relation_field() {
         let input: DeriveInput = syn::parse_quote! {
             #[derive(RestApi)]
@@ -522,5 +670,48 @@ mod tests {
         };
         assert!(error.to_string().contains("SetNull"));
         assert!(error.to_string().contains("not nullable"));
+    }
+
+    #[test]
+    fn rejects_invalid_field_validation_for_string_field() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            struct Post {
+                id: Option<i64>,
+                #[validate(minimum = 1)]
+                title: String,
+            }
+        };
+
+        let error = match parse_derive_input(input) {
+            Ok(_) => panic!("invalid validation should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("title"));
+        assert!(error.to_string().contains("min_length"));
+        assert!(error.to_string().contains("max_length"));
+    }
+
+    #[test]
+    fn rejects_custom_relation_foreign_key_override() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            struct Comment {
+                id: Option<i64>,
+                #[relation(foreign_key = "post_fk", references = "post.id")]
+                post_id: i64,
+            }
+        };
+
+        let error = match parse_derive_input(input) {
+            Ok(_) => panic!("custom foreign key override should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("foreign_key overrides are not supported")
+        );
+        assert!(error.to_string().contains("post_id"));
     }
 }

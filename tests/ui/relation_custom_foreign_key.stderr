@@ -1,0 +1,5 @@
+error: custom relation foreign_key overrides are not supported; field `post_id` must map to its own column name
+ --> tests/ui/relation_custom_foreign_key.rs:8:30
+  |
+8 |     #[relation(foreign_key = "post_fk", references = "post.id")]
+  |                              ^^^^^^^^^

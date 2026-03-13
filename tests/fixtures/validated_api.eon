@@ -1,0 +1,25 @@
+module: "validated_api"
+resources: [
+    {
+        name: "Widget"
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "title"
+                type: String
+                validate: {
+                    min_length: 3
+                    max_length: 10
+                }
+            }
+            {
+                name: "score"
+                type: I64
+                validate: {
+                    minimum: 1
+                    maximum: 10
+                }
+            }
+        ]
+    }
+]

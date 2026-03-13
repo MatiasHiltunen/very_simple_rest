@@ -17,6 +17,8 @@ use std::future::{Ready, ready};
 use std::io::{IsTerminal, Write, stdin, stdout};
 use std::sync::OnceLock;
 
+use crate::errors;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthDbBackend {
     Sqlite,
@@ -145,7 +147,7 @@ impl FromRequest for UserContext {
     type Future = Ready<Result<Self, Self::Error>>;
 
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        use actix_web::{error::ErrorUnauthorized, http::header};
+        use actix_web::http::header;
 
         let token = req
             .headers()
@@ -168,11 +170,19 @@ impl FromRequest for UserContext {
                         claims: claims.extra,
                     }));
                 }
-                Err(_) => return ready(Err(ErrorUnauthorized("Invalid token"))),
+                Err(_) => {
+                    return ready(Err(errors::into_actix_error(errors::unauthorized(
+                        "invalid_token",
+                        "Invalid token",
+                    ))));
+                }
             }
         }
 
-        ready(Err(ErrorUnauthorized("Missing token")))
+        ready(Err(errors::into_actix_error(errors::unauthorized(
+            "missing_token",
+            "Missing token",
+        ))))
     }
 }
 
@@ -206,7 +216,7 @@ struct AuthenticatedUser {
 pub async fn register(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -> impl Responder {
     let password_hash = match hash(&input.password, 12) {
         Ok(h) => h,
-        Err(_) => return HttpResponse::InternalServerError().body("Hashing error"),
+        Err(_) => return errors::internal_error("Hashing error"),
     };
 
     let result = sqlx::query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
@@ -218,15 +228,18 @@ pub async fn register(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -
 
     match result {
         Ok(_) => HttpResponse::Created().finish(),
-        Err(e) => HttpResponse::InternalServerError().body(format!("DB error: {}", e)),
+        Err(error) if is_unique_violation(&error) => {
+            errors::conflict("duplicate_email", "A user with that email already exists")
+        }
+        Err(_) => errors::internal_error("Database error"),
     }
 }
 
 pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl Responder {
     let user = match load_authenticated_user(db.get_ref(), &input.email).await {
         Ok(Some(user)) => user,
-        Ok(None) => return HttpResponse::Unauthorized().body("Invalid credentials"),
-        Err(_) => return HttpResponse::InternalServerError().body("DB error"),
+        Ok(None) => return errors::unauthorized("invalid_credentials", "Invalid credentials"),
+        Err(_) => return errors::internal_error("Database error"),
     };
 
     if verify(&input.password, &user.password_hash).unwrap_or(false) {
@@ -243,11 +256,18 @@ pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl
             &EncodingKey::from_secret(get_jwt_secret()),
         ) {
             Ok(token) => HttpResponse::Ok().json(serde_json::json!({ "token": token })),
-            Err(_) => HttpResponse::InternalServerError().body("Token generation failed"),
+            Err(_) => errors::internal_error("Token generation failed"),
         }
     } else {
-        HttpResponse::Unauthorized().body("Invalid credentials")
+        errors::unauthorized("invalid_credentials", "Invalid credentials")
     }
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .map(sqlx::error::DatabaseError::is_unique_violation)
+        .unwrap_or(false)
 }
 
 async fn load_authenticated_user(
@@ -767,6 +787,7 @@ fn create_default_admin() -> (String, String) {
 
 pub fn auth_routes(cfg: &mut web::ServiceConfig, db: AnyPool) {
     let db = web::Data::new(db);
+    errors::configure_extractor_errors(cfg);
     cfg.app_data(db.clone());
 
     cfg.route("/auth/register", web::post().to(register));

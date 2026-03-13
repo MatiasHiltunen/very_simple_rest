@@ -160,7 +160,6 @@ impl RowPolicies {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
 pub struct RelationSpec {
-    pub foreign_key: String,
     pub references_table: String,
     pub references_field: String,
     #[serde(default)]
@@ -199,6 +198,38 @@ impl ReferentialAction {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FieldValidation {
+    pub min_length: Option<usize>,
+    pub max_length: Option<usize>,
+    pub minimum: Option<NumericBound>,
+    pub maximum: Option<NumericBound>,
+}
+
+impl FieldValidation {
+    pub fn is_empty(&self) -> bool {
+        self.min_length.is_none()
+            && self.max_length.is_none()
+            && self.minimum.is_none()
+            && self.maximum.is_none()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NumericBound {
+    Integer(i64),
+    Float(f64),
+}
+
+impl NumericBound {
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            Self::Integer(value) => *value as f64,
+            Self::Float(value) => *value,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriteModelStyle {
     ExistingStructWithDtos,
@@ -212,6 +243,7 @@ pub struct FieldSpec {
     pub sql_type: String,
     pub is_id: bool,
     pub generated: GeneratedValue,
+    pub validation: FieldValidation,
     pub relation: Option<RelationSpec>,
 }
 
@@ -368,6 +400,118 @@ pub fn validate_relations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
                     field.name()
                 ),
             ));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
+    for field in fields {
+        let validation = &field.validation;
+        if validation.is_empty() {
+            continue;
+        }
+
+        if let (Some(min), Some(max)) = (validation.min_length, validation.max_length) {
+            if min > max {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "field `{}` has `min_length` greater than `max_length`",
+                        field.name()
+                    ),
+                ));
+            }
+        }
+
+        match field.sql_type.as_str() {
+            "TEXT" => {
+                if validation.minimum.is_some() || validation.maximum.is_some() {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "field `{}` only supports `min_length` and `max_length` validation",
+                            field.name()
+                        ),
+                    ));
+                }
+            }
+            "INTEGER" => {
+                if validation.min_length.is_some() || validation.max_length.is_some() {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "field `{}` only supports `minimum` and `maximum` validation",
+                            field.name()
+                        ),
+                    ));
+                }
+
+                if !matches!(
+                    (&validation.minimum, &validation.maximum),
+                    (
+                        None | Some(NumericBound::Integer(_)),
+                        None | Some(NumericBound::Integer(_))
+                    )
+                ) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "integer field `{}` requires integer `minimum` and `maximum` values",
+                            field.name()
+                        ),
+                    ));
+                }
+
+                if let (
+                    Some(NumericBound::Integer(minimum)),
+                    Some(NumericBound::Integer(maximum)),
+                ) = (&validation.minimum, &validation.maximum)
+                {
+                    if minimum > maximum {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "field `{}` has `minimum` greater than `maximum`",
+                                field.name()
+                            ),
+                        ));
+                    }
+                }
+            }
+            "REAL" => {
+                if validation.min_length.is_some() || validation.max_length.is_some() {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "field `{}` only supports `minimum` and `maximum` validation",
+                            field.name()
+                        ),
+                    ));
+                }
+
+                if let (Some(minimum), Some(maximum)) = (&validation.minimum, &validation.maximum) {
+                    if minimum.as_f64() > maximum.as_f64() {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "field `{}` has `minimum` greater than `maximum`",
+                                field.name()
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "field `{}` does not support validation constraints",
+                        field.name()
+                    ),
+                ));
+            }
         }
     }
 

@@ -9,11 +9,12 @@ use proc_macro2::Span;
 use syn::{LitStr, Type};
 
 use super::model::{
-    DbBackend, FieldSpec, GeneratedValue, PolicyAssignment, PolicyFilter, PolicyValueSource,
-    ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
-    StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
-    default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
-    sanitize_struct_ident, validate_relations, validate_row_policies,
+    DbBackend, FieldSpec, FieldValidation, GeneratedValue, NumericBound, PolicyAssignment,
+    PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
+    RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
+    WriteModelStyle, default_resource_module_ident, infer_generated_value, infer_sql_type,
+    sanitize_module_ident, sanitize_struct_ident, validate_field_validations, validate_relations,
+    validate_row_policies,
 };
 
 pub struct LoadedService {
@@ -123,6 +124,8 @@ struct FieldDocument {
     generated: GeneratedValue,
     #[serde(default)]
     relation: Option<RelationDocument>,
+    #[serde(default)]
+    validate: Option<FieldValidationDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -132,6 +135,25 @@ struct RelationDocument {
     on_delete: Option<String>,
     #[serde(default)]
     nested_route: bool,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct FieldValidationDocument {
+    #[serde(default)]
+    min_length: Option<usize>,
+    #[serde(default)]
+    max_length: Option<usize>,
+    #[serde(default)]
+    minimum: Option<NumericBoundDocument>,
+    #[serde(default)]
+    maximum: Option<NumericBoundDocument>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum NumericBoundDocument {
+    Integer(i64),
+    Float(f64),
 }
 
 #[derive(serde::Deserialize)]
@@ -265,9 +287,10 @@ fn build_resources(
             let sql_type = infer_sql_type(&ty);
 
             let relation = match field.relation {
-                Some(relation) => Some(parse_relation_document(&field.name, relation)?),
+                Some(relation) => Some(parse_relation_document(relation)?),
                 None => None,
             };
+            let validation = parse_field_validation_document(field.validate);
 
             fields.push(FieldSpec {
                 ident: syn::parse_str(&field.name).map_err(|_| {
@@ -280,6 +303,7 @@ fn build_resources(
                 sql_type,
                 is_id,
                 generated,
+                validation,
                 relation,
             });
         }
@@ -306,6 +330,7 @@ fn build_resources(
         let last = result.last().expect("just pushed resource");
         validate_row_policies(&last.fields, &last.policies, Span::call_site())?;
         validate_relations(&last.fields, Span::call_site())?;
+        validate_field_validations(&last.fields, Span::call_site())?;
     }
 
     Ok(result)
@@ -557,10 +582,7 @@ impl ScalarType {
     }
 }
 
-fn parse_relation_document(
-    field_name: &str,
-    relation: RelationDocument,
-) -> syn::Result<super::model::RelationSpec> {
+fn parse_relation_document(relation: RelationDocument) -> syn::Result<super::model::RelationSpec> {
     let mut parts = relation.references.split('.');
     let references_table = parts
         .next()
@@ -595,7 +617,6 @@ fn parse_relation_document(
         .transpose()?;
 
     Ok(super::model::RelationSpec {
-        foreign_key: field_name.to_owned(),
         references_table: references_table.to_owned(),
         references_field: references_field.to_owned(),
         on_delete,
@@ -610,6 +631,26 @@ fn parse_referential_action(value: &str) -> syn::Result<ReferentialAction> {
             "relation on_delete must be Cascade, Restrict, SetNull, or NoAction",
         )
     })
+}
+
+fn parse_field_validation_document(document: Option<FieldValidationDocument>) -> FieldValidation {
+    let Some(document) = document else {
+        return FieldValidation::default();
+    };
+
+    FieldValidation {
+        min_length: document.min_length,
+        max_length: document.max_length,
+        minimum: document.minimum.map(parse_numeric_bound_document),
+        maximum: document.maximum.map(parse_numeric_bound_document),
+    }
+}
+
+fn parse_numeric_bound_document(bound: NumericBoundDocument) -> NumericBound {
+    match bound {
+        NumericBoundDocument::Integer(value) => NumericBound::Integer(value),
+        NumericBoundDocument::Float(value) => NumericBound::Float(value),
+    }
 }
 
 fn parse_row_policies(policies: RowPoliciesDocument) -> syn::Result<RowPolicies> {
@@ -967,6 +1008,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_field_validation_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                        {
+                            name: "title"
+                            type: String
+                            validate: {
+                                min_length: 3
+                                max_length: 32
+                            }
+                        }
+                        {
+                            name: "score"
+                            type: I64
+                            validate: {
+                                minimum: 1
+                                maximum: 10
+                            }
+                        }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let title = resources[0]
+            .find_field("title")
+            .expect("title should exist");
+        assert_eq!(title.validation.min_length, Some(3));
+        assert_eq!(title.validation.max_length, Some(32));
+
+        let score = resources[0]
+            .find_field("score")
+            .expect("score should exist");
+        assert_eq!(
+            score.validation.minimum,
+            Some(super::super::model::NumericBound::Integer(1))
+        );
+        assert_eq!(
+            score.validation.maximum,
+            Some(super::super::model::NumericBound::Integer(10))
+        );
+    }
+
+    #[test]
     fn rejects_unknown_row_policy_kind_from_eon() {
         let document = parse_document(
             r#"
@@ -1049,6 +1142,36 @@ mod tests {
         };
         assert!(error.to_string().contains("SetNull"));
         assert!(error.to_string().contains("not nullable"));
+    }
+
+    #[test]
+    fn rejects_invalid_field_validation_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                        {
+                            name: "published"
+                            type: Bool
+                            validate: {
+                                minimum: 1
+                            }
+                        }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = match build_resources(document.db, document.resources) {
+            Ok(_) => panic!("invalid validation should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("published"));
+        assert!(error.to_string().contains("does not support validation"));
     }
 
     #[test]

@@ -153,9 +153,11 @@ async fn tenant_claim_policy_scopes_access_without_native_rls() {
             format!("Bearer {}", tenant1_user_token.as_str()),
         ))
         .to_request();
-    let tenant1_posts: Vec<TenantPost> = test::call_and_read_body_json(&app, tenant1_list).await;
-    assert_eq!(tenant1_posts.len(), 1);
-    assert!(tenant1_posts.iter().all(|post| post.tenant_id == 1));
+    let tenant1_posts: TenantPostListResponse =
+        test::call_and_read_body_json(&app, tenant1_list).await;
+    assert_eq!(tenant1_posts.total, 1);
+    assert_eq!(tenant1_posts.count, 1);
+    assert!(tenant1_posts.items.iter().all(|post| post.tenant_id == 1));
 
     let tenant2_admin_list = test::TestRequest::get()
         .uri("/api/tenant_post")
@@ -164,10 +166,16 @@ async fn tenant_claim_policy_scopes_access_without_native_rls() {
             format!("Bearer {}", tenant2_admin_token.as_str()),
         ))
         .to_request();
-    let tenant2_admin_posts: Vec<TenantPost> =
+    let tenant2_admin_posts: TenantPostListResponse =
         test::call_and_read_body_json(&app, tenant2_admin_list).await;
-    assert_eq!(tenant2_admin_posts.len(), 1);
-    assert!(tenant2_admin_posts.iter().all(|post| post.tenant_id == 2));
+    assert_eq!(tenant2_admin_posts.total, 1);
+    assert_eq!(tenant2_admin_posts.count, 1);
+    assert!(
+        tenant2_admin_posts
+            .items
+            .iter()
+            .all(|post| post.tenant_id == 2)
+    );
 
     let tenant1_id = created_posts[0].id;
     let tenant2_admin_get = test::TestRequest::get()
@@ -393,8 +401,10 @@ async fn auth_login_emits_tenant_claims_for_row_policies() {
         .uri("/api/tenant_post")
         .insert_header(("Authorization", format!("Bearer {}", bob_token.as_str())))
         .to_request();
-    let bob_posts: Vec<TenantPost> = test::call_and_read_body_json(&app, bob_list).await;
-    assert!(bob_posts.is_empty());
+    let bob_posts: TenantPostListResponse = test::call_and_read_body_json(&app, bob_list).await;
+    assert_eq!(bob_posts.total, 0);
+    assert_eq!(bob_posts.count, 0);
+    assert!(bob_posts.items.is_empty());
 }
 
 #[actix_web::test]

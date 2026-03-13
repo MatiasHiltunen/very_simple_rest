@@ -253,24 +253,35 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
         .uri("/api/owned_post")
         .insert_header(("Authorization", format!("Bearer {}", alice_token.as_str())))
         .to_request();
-    let alice_posts: Vec<OwnedPost> = test::call_and_read_body_json(&app, alice_list_request).await;
-    assert_eq!(alice_posts.len(), 2);
-    assert!(alice_posts.iter().all(|post| post.user_id == alice_id));
+    let alice_posts: OwnedPostListResponse =
+        test::call_and_read_body_json(&app, alice_list_request).await;
+    assert_eq!(alice_posts.total, 2);
+    assert_eq!(alice_posts.count, 2);
+    assert!(
+        alice_posts
+            .items
+            .iter()
+            .all(|post| post.user_id == alice_id)
+    );
 
     let bob_list_request = test::TestRequest::get()
         .uri("/api/owned_post")
         .insert_header(("Authorization", format!("Bearer {}", bob_token.as_str())))
         .to_request();
-    let bob_posts: Vec<OwnedPost> = test::call_and_read_body_json(&app, bob_list_request).await;
-    assert_eq!(bob_posts.len(), 1);
-    assert!(bob_posts.iter().all(|post| post.user_id == bob_id));
+    let bob_posts: OwnedPostListResponse =
+        test::call_and_read_body_json(&app, bob_list_request).await;
+    assert_eq!(bob_posts.total, 1);
+    assert_eq!(bob_posts.count, 1);
+    assert!(bob_posts.items.iter().all(|post| post.user_id == bob_id));
 
     let admin_list_request = test::TestRequest::get()
         .uri("/api/owned_post")
         .insert_header(("Authorization", format!("Bearer {}", admin_token.as_str())))
         .to_request();
-    let admin_posts: Vec<OwnedPost> = test::call_and_read_body_json(&app, admin_list_request).await;
-    assert_eq!(admin_posts.len(), 3);
+    let admin_posts: OwnedPostListResponse =
+        test::call_and_read_body_json(&app, admin_list_request).await;
+    assert_eq!(admin_posts.total, 3);
+    assert_eq!(admin_posts.count, 3);
 
     let bob_get_request = test::TestRequest::get()
         .uri(&format!("/api/owned_post/{alice_first_id}"))

@@ -14,6 +14,10 @@ authorization, and relationship handling.
 - Zero-boilerplate REST APIs with a single derive macro
 - Typed `Create` / `Update` DTO generation for derive and `.eon` resources
 - Explicit SQL migration generation for `.eon` services
+- Field-level validation for generated `Create` / `Update` handlers and OpenAPI schemas
+- Stable JSON error responses for generated resource handlers
+- Typed list query params and paged response envelopes for generated collection routes (`limit`,
+  `offset`, `sort`, `order`, and `filter_<field>`)
 - JWT-based authentication with role management
 - Role-Based Access Control (RBAC) for endpoint protection
 - Relationship handling with nested routes and configurable relation delete actions
@@ -67,7 +71,26 @@ minimal `.eon` service definitions. The generated module includes resource struc
 `Update` DTOs, a module-level `configure` function, a matching `configure_static` hook for
 service-level static mounts, and optional portable row policies based on `user.id` and JWT
 claims. Relations can also declare `on_delete` as `Cascade`, `Restrict`, `SetNull`, or
-`NoAction`; `SetNull` is rejected on non-nullable foreign-key fields.
+`NoAction`; `SetNull` is rejected on non-nullable foreign-key fields. Custom relation column
+renames are not supported; relation fields map to columns with the same name.
+
+Field validations can be declared with `#[validate(...)]` on derive-based resources or
+`validate: { ... }` in `.eon` fields. The current supported keys are `min_length`,
+`max_length`, `minimum`, and `maximum`, and the generated OpenAPI schema mirrors them as
+`minLength`, `maxLength`, `minimum`, and `maximum`.
+
+Generated resource handlers also use a stable JSON error body with `code`, `message`, and an
+optional `field`. OpenAPI documents expose this schema as `ApiErrorResponse` for generated
+resource `400`, `403`, `404`, and `500` responses. Built-in auth routes also use the same JSON
+envelope for invalid credentials, duplicate registration, malformed JSON bodies, and missing or
+invalid bearer tokens. Path and query extraction failures now also map to the same envelope with
+codes such as `invalid_path` and `invalid_query`.
+
+Generated collection and nested collection routes also accept typed query parameters for
+pagination, sorting, and exact-match field filters. OpenAPI documents expose those parameters in
+`/docs`, and invalid values such as `limit=abc` or `sort=missing_field` resolve through the same
+JSON error envelope. Those list routes now return an envelope with `items`, `total`, `count`,
+`limit`, `offset`, and `next_offset` instead of a bare array.
 
 Generated REST resources do not perform runtime schema creation. For `.eon` services, use the
 `vsr migrate generate`, `vsr migrate check`, and `vsr migrate apply` commands to manage schema

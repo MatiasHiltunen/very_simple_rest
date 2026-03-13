@@ -10,6 +10,9 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 - **Typed write DTOs**: The derive macro and `.eon` macro both generate `Create` and `Update` payload types
 - **Compile-time `.eon` services**: Generate strongly typed resources and DTOs from a minimal `.eon` service file
 - **Migration generation**: Generate explicit SQL migrations from `.eon` service definitions
+- **Field validation**: Enforce string length and numeric range constraints in generated handlers and OpenAPI
+- **Stable error envelope**: Generated resource handlers return JSON errors with `code`, `message`, and optional `field`
+- **Typed list queries**: Generated collection routes support typed `limit`, `offset`, `sort`, `order`, exact-match `filter_<field>` params, and paged response envelopes
 - **Built-in authentication**: JWT-based authentication with role management
 - **Role-Based Access Control**: Declarative protection for your endpoints with role requirements
 - **Database Agnostic**: Currently defaults to SQLite, with plans to support all SQLx targets
@@ -64,7 +67,7 @@ pub struct Comment {
     pub id: Option<i64>,
     pub title: String,
     pub content: String,
-    #[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
+    #[relation(references = "post.id", nested_route = "true")]
     pub post_id: i64,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -114,6 +117,16 @@ The library provides these authentication endpoints out of the box:
 - **POST /api/auth/register** - Register a new user
 - **POST /api/auth/login** - Login and get a JWT token
 - **GET /api/auth/me** - Get information about the authenticated account
+
+Built-in auth failures now also use the shared JSON error envelope. For example, invalid login
+returns:
+
+```json
+{
+  "code": "invalid_credentials",
+  "message": "Invalid credentials"
+}
+```
 
 When you create built-in admin users through `vsr create-admin` or `vsr setup`, the CLI now
 inspects the live `user` table and also populates numeric claim columns such as `tenant_id`,
@@ -243,6 +256,9 @@ The current generator covers generated resource routes, DTO schemas, nested coll
 bearer auth, the `/api` server base URL, and optional built-in auth/account routes when
 `--with-auth` is enabled. In Swagger, login and registration appear under `Auth`, while the
 current-user endpoint appears under `Account`. Generated server projects reuse the same document.
+Collection and nested collection routes also document their typed list query parameters and their
+paged response envelopes, including pagination, sorting, exact-match field filters, `total`, and
+`next_offset`.
 
 ## Static Files In `.eon`
 
@@ -431,7 +447,6 @@ Define relationships between entities:
 
 ```rust
 #[relation(
-    foreign_key = "post_id",
     references = "post.id",
     nested_route = "true",
     on_delete = "cascade"
@@ -449,6 +464,119 @@ Relation delete behavior is schema-driven and ends up in the generated foreign k
 - `NoAction`
 
 `SetNull` is only allowed on nullable foreign-key fields.
+
+Custom relation column renames are not supported. The Rust field name is the database column name.
+
+## Validation
+
+Generated `Create` and `Update` handlers can enforce field-level validation before SQL execution.
+
+Derive example:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
+pub struct Post {
+    pub id: Option<i64>,
+    #[validate(min_length = 3, max_length = 120)]
+    pub title: String,
+    #[validate(minimum = 1, maximum = 10)]
+    pub score: i64,
+}
+```
+
+`.eon` example:
+
+```eon
+{
+    name: "Post"
+    fields: [
+        { name: "id", type: I64 }
+        {
+            name: "title"
+            type: String
+            validate: {
+                min_length: 3
+                max_length: 120
+            }
+        }
+        {
+            name: "score"
+            type: I64
+            validate: {
+                minimum: 1
+                maximum: 10
+            }
+        }
+    ]
+}
+```
+
+Supported constraints:
+
+- `min_length` and `max_length` for string-like fields
+- `minimum` and `maximum` for integer and floating-point fields
+
+These constraints are reflected in generated OpenAPI schemas as `minLength`, `maxLength`,
+`minimum`, and `maximum`.
+
+## Error Responses
+
+Generated resource handlers now use a stable JSON error body for validation and common CRUD
+failures:
+
+```json
+{
+  "code": "validation_error",
+  "message": "Field `title` must have at least 3 characters",
+  "field": "title"
+}
+```
+
+The current resource-level envelope fields are:
+
+- `code`
+- `message`
+- `field` for field-specific validation failures
+
+Generated collection routes also accept typed query parameters:
+
+- `limit` and `offset` for pagination
+- `sort=<field>` and `order=asc|desc` for safe sorting
+- `filter_<field>=...` for exact-match filtering on generated resource fields
+
+Collection responses now return a metadata envelope instead of a bare JSON array:
+
+```json
+{
+  "items": [],
+  "total": 0,
+  "count": 0,
+  "limit": 20,
+  "offset": 0,
+  "next_offset": null
+}
+```
+
+Unknown query keys, invalid typed values, and unsupported combinations such as `offset` without
+`limit` return the same JSON error envelope with `invalid_query` or `invalid_pagination`.
+
+OpenAPI documents expose this as `ApiErrorResponse` and use it for generated `400`, `403`, `404`,
+and `500` resource responses where applicable. Built-in auth routes use the same envelope for
+login failures, duplicate registration, and token/authentication failures.
+
+Malformed JSON bodies now also use the same envelope, for example:
+
+```json
+{
+  "code": "invalid_json",
+  "message": "Request body is not valid JSON"
+}
+```
+
+Invalid path and query parsing now use the same contract too, with codes like:
+
+- `invalid_path`
+- `invalid_query`
 
 ## EON Service Macro
 

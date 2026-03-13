@@ -168,10 +168,11 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .uri("/api/workspace")
         .insert_header(("Authorization", format!("Bearer {}", peer_token.as_str())))
         .to_request();
-    let peer_workspaces: Vec<ops_control_api::Workspace> =
+    let peer_workspaces: ops_control_api::WorkspaceListResponse =
         test::call_and_read_body_json(&app, peer_list_request).await;
-    assert_eq!(peer_workspaces.len(), 1);
-    assert_eq!(peer_workspaces[0].id, Some(workspace.id));
+    assert_eq!(peer_workspaces.total, 1);
+    assert_eq!(peer_workspaces.count, 1);
+    assert_eq!(peer_workspaces.items[0].id, Some(workspace.id));
 
     let other_tenant_list_request = test::TestRequest::get()
         .uri("/api/workspace")
@@ -180,9 +181,10 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
             format!("Bearer {}", other_tenant_token.as_str()),
         ))
         .to_request();
-    let other_tenant_workspaces: Vec<ops_control_api::Workspace> =
+    let other_tenant_workspaces: ops_control_api::WorkspaceListResponse =
         test::call_and_read_body_json(&app, other_tenant_list_request).await;
-    assert!(other_tenant_workspaces.is_empty());
+    assert_eq!(other_tenant_workspaces.total, 0);
+    assert!(other_tenant_workspaces.items.is_empty());
 
     let peer_update_request = test::TestRequest::put()
         .uri(&format!("/api/workspace/{}", workspace.id))
@@ -253,10 +255,11 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .uri(&format!("/api/workspace/{}/project", workspace.id))
         .insert_header(("Authorization", format!("Bearer {}", peer_token.as_str())))
         .to_request();
-    let nested_projects: Vec<ops_control_api::Project> =
+    let nested_projects: ops_control_api::ProjectListResponse =
         test::call_and_read_body_json(&app, nested_project_request).await;
-    assert_eq!(nested_projects.len(), 1);
-    assert_eq!(nested_projects[0].id, Some(project.id));
+    assert_eq!(nested_projects.total, 1);
+    assert_eq!(nested_projects.count, 1);
+    assert_eq!(nested_projects.items[0].id, Some(project.id));
 
     let other_tenant_nested_request = test::TestRequest::get()
         .uri(&format!("/api/workspace/{}/project", workspace.id))
@@ -265,9 +268,10 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
             format!("Bearer {}", other_tenant_token.as_str()),
         ))
         .to_request();
-    let other_tenant_nested_projects: Vec<ops_control_api::Project> =
+    let other_tenant_nested_projects: ops_control_api::ProjectListResponse =
         test::call_and_read_body_json(&app, other_tenant_nested_request).await;
-    assert!(other_tenant_nested_projects.is_empty());
+    assert_eq!(other_tenant_nested_projects.total, 0);
+    assert!(other_tenant_nested_projects.items.is_empty());
 
     let create_subscription = test::TestRequest::post()
         .uri("/api/on_call_subscription")
@@ -297,18 +301,20 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         .uri("/api/on_call_subscription")
         .insert_header(("Authorization", format!("Bearer {}", owner_token.as_str())))
         .to_request();
-    let owner_subscriptions: Vec<ops_control_api::OnCallSubscription> =
+    let owner_subscriptions: ops_control_api::OnCallSubscriptionListResponse =
         test::call_and_read_body_json(&app, owner_subscription_request).await;
-    assert_eq!(owner_subscriptions.len(), 1);
-    assert_eq!(owner_subscriptions[0].id, Some(subscription.id));
+    assert_eq!(owner_subscriptions.total, 1);
+    assert_eq!(owner_subscriptions.count, 1);
+    assert_eq!(owner_subscriptions.items[0].id, Some(subscription.id));
 
     let peer_subscription_request = test::TestRequest::get()
         .uri("/api/on_call_subscription")
         .insert_header(("Authorization", format!("Bearer {}", peer_token.as_str())))
         .to_request();
-    let peer_subscriptions: Vec<ops_control_api::OnCallSubscription> =
+    let peer_subscriptions: ops_control_api::OnCallSubscriptionListResponse =
         test::call_and_read_body_json(&app, peer_subscription_request).await;
-    assert!(peer_subscriptions.is_empty());
+    assert_eq!(peer_subscriptions.total, 0);
+    assert!(peer_subscriptions.items.is_empty());
 
     let admin_subscription_request = test::TestRequest::get()
         .uri("/api/on_call_subscription")
@@ -317,9 +323,10 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
             format!("Bearer {}", same_tenant_admin_token.as_str()),
         ))
         .to_request();
-    let admin_subscriptions: Vec<ops_control_api::OnCallSubscription> =
+    let admin_subscriptions: ops_control_api::OnCallSubscriptionListResponse =
         test::call_and_read_body_json(&app, admin_subscription_request).await;
-    assert!(admin_subscriptions.is_empty());
+    assert_eq!(admin_subscriptions.total, 0);
+    assert!(admin_subscriptions.items.is_empty());
 
     let cross_tenant_admin_workspace_get = test::TestRequest::get()
         .uri(&format!("/api/workspace/{}", workspace.id))
