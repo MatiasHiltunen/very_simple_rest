@@ -10,6 +10,7 @@ default = []
 codegen = ["dep:eon", "dep:heck", "dep:proc-macro2", "dep:quote", "dep:syn"]
 
 [dependencies]
+actix-cors.workspace = true
 actix-web.workspace = true
 actix-files.workspace = true
 serde.workspace = true

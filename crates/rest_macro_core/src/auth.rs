@@ -11,13 +11,41 @@ use rpassword;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{AnyPool, Column, FromRow, Row, any::AnyRow};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::future::{Ready, ready};
 use std::io::{IsTerminal, Write, stdin, stdout};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant};
 
-use crate::errors;
+use crate::{
+    errors,
+    security::{RateLimitRule, SecurityConfig, request_client_ip},
+};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default = "default_access_token_ttl_seconds")]
+    pub access_token_ttl_seconds: i64,
+}
+
+impl Default for AuthSettings {
+    fn default() -> Self {
+        Self {
+            issuer: None,
+            audience: None,
+            access_token_ttl_seconds: default_access_token_ttl_seconds(),
+        }
+    }
+}
+
+const fn default_access_token_ttl_seconds() -> i64 {
+    24 * 60 * 60
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthDbBackend {
@@ -123,6 +151,10 @@ fn get_jwt_secret() -> &'static [u8] {
 struct Claims {
     sub: i64,
     roles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iss: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aud: Option<String>,
     exp: usize,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -157,10 +189,11 @@ impl FromRequest for UserContext {
             .map(|s| s.to_string());
 
         if let Some(token) = token {
+            let settings = auth_settings_from_request(req);
             match decode::<Claims>(
                 &token,
                 &DecodingKey::from_secret(get_jwt_secret()),
-                &Validation::default(),
+                &validation_for_settings(&settings),
             ) {
                 Ok(data) => {
                     let claims = data.claims;
@@ -213,7 +246,31 @@ struct AuthenticatedUser {
     claims: BTreeMap<String, Value>,
 }
 
+#[derive(Default)]
+struct AuthRateLimiter {
+    entries: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+#[derive(Clone, Copy)]
+enum AuthRateLimitScope {
+    Login,
+    Register,
+}
+
+impl AuthRateLimitScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Login => "login",
+            Self::Register => "register",
+        }
+    }
+}
+
 pub async fn register(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -> impl Responder {
+    register_inner(input, db).await
+}
+
+async fn register_inner(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -> HttpResponse {
     let password_hash = match hash(&input.password, 12) {
         Ok(h) => h,
         Err(_) => return errors::internal_error("Hashing error"),
@@ -235,7 +292,26 @@ pub async fn register(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -
     }
 }
 
+pub async fn register_with_request(
+    req: HttpRequest,
+    input: web::Json<RegisterInput>,
+    db: web::Data<AnyPool>,
+) -> impl Responder {
+    if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Register) {
+        return response;
+    }
+    register_inner(input, db).await
+}
+
 pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl Responder {
+    login_with_settings(input, db, AuthSettings::default()).await
+}
+
+async fn login_with_settings(
+    input: web::Json<LoginInput>,
+    db: web::Data<AnyPool>,
+    settings: AuthSettings,
+) -> HttpResponse {
     let user = match load_authenticated_user(db.get_ref(), &input.email).await {
         Ok(Some(user)) => user,
         Ok(None) => return errors::unauthorized("invalid_credentials", "Invalid credentials"),
@@ -246,7 +322,10 @@ pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl
         let claims = Claims {
             sub: user.id,
             roles: vec![user.role.clone()],
-            exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
+            iss: settings.issuer.clone(),
+            aud: settings.audience.clone(),
+            exp: (Utc::now() + Duration::seconds(settings.access_token_ttl_seconds)).timestamp()
+                as usize,
             extra: user.claims,
         };
 
@@ -261,6 +340,18 @@ pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl
     } else {
         errors::unauthorized("invalid_credentials", "Invalid credentials")
     }
+}
+
+pub async fn login_with_request(
+    req: HttpRequest,
+    input: web::Json<LoginInput>,
+    db: web::Data<AnyPool>,
+) -> impl Responder {
+    if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Login) {
+        return response;
+    }
+    let settings = auth_settings_from_request(&req);
+    login_with_settings(input, db, settings).await
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -786,13 +877,122 @@ fn create_default_admin() -> (String, String) {
 }
 
 pub fn auth_routes(cfg: &mut web::ServiceConfig, db: AnyPool) {
+    auth_routes_with_settings(cfg, db, AuthSettings::default());
+}
+
+pub fn auth_routes_with_settings(
+    cfg: &mut web::ServiceConfig,
+    db: AnyPool,
+    settings: AuthSettings,
+) {
     let db = web::Data::new(db);
+    let settings = web::Data::new(settings);
+    let limiter = web::Data::new(AuthRateLimiter::default());
     errors::configure_extractor_errors(cfg);
     cfg.app_data(db.clone());
+    cfg.app_data(settings.clone());
+    cfg.app_data(limiter);
 
-    cfg.route("/auth/register", web::post().to(register));
-    cfg.route("/auth/login", web::post().to(login));
+    cfg.route("/auth/register", web::post().to(register_with_request));
+    cfg.route("/auth/login", web::post().to(login_with_request));
     cfg.route("/auth/me", web::get().to(me));
+}
+
+fn auth_settings_from_request(req: &HttpRequest) -> AuthSettings {
+    req.app_data::<web::Data<AuthSettings>>()
+        .map(|settings| settings.get_ref().clone())
+        .unwrap_or_default()
+}
+
+fn security_from_request(req: &HttpRequest) -> SecurityConfig {
+    req.app_data::<web::Data<SecurityConfig>>()
+        .map(|security| security.get_ref().clone())
+        .unwrap_or_else(|| {
+            let mut security = SecurityConfig::default();
+            security.auth = auth_settings_from_request(req);
+            security
+        })
+}
+
+fn enforce_auth_rate_limit(req: &HttpRequest, scope: AuthRateLimitScope) -> Option<HttpResponse> {
+    let security = security_from_request(req);
+    let rule = match scope {
+        AuthRateLimitScope::Login => security.rate_limits.login,
+        AuthRateLimitScope::Register => security.rate_limits.register,
+    }?;
+
+    let limiter = req.app_data::<web::Data<AuthRateLimiter>>()?;
+    let client_ip = request_client_ip(req, &security)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let key = format!("{}:{client_ip}", scope.as_str());
+    let retry_after = limiter.check(&key, rule)?;
+
+    let mut response = errors::too_many_requests(
+        "rate_limited",
+        format!("Too many {} attempts. Try again later.", scope.as_str()),
+    );
+    if let Ok(value) = actix_web::http::header::HeaderValue::from_str(&retry_after.to_string()) {
+        response
+            .headers_mut()
+            .insert(actix_web::http::header::RETRY_AFTER, value);
+    }
+    Some(response)
+}
+
+fn validation_for_settings(settings: &AuthSettings) -> Validation {
+    let mut validation = Validation::default();
+    let mut required = vec!["exp"];
+
+    if let Some(audience) = &settings.audience {
+        validation.set_audience(&[audience.as_str()]);
+        required.push("aud");
+    } else {
+        validation.validate_aud = false;
+    }
+
+    if let Some(issuer) = &settings.issuer {
+        validation.set_issuer(&[issuer.as_str()]);
+        required.push("iss");
+    }
+
+    validation.set_required_spec_claims(&required);
+    validation
+}
+
+impl AuthRateLimiter {
+    fn check(&self, key: &str, rule: RateLimitRule) -> Option<u64> {
+        let now = Instant::now();
+        let window = StdDuration::from_secs(rule.window_seconds);
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let entry = entries.entry(key.to_owned()).or_default();
+
+        while entry
+            .front()
+            .is_some_and(|instant| now.duration_since(*instant) >= window)
+        {
+            entry.pop_front();
+        }
+
+        if entry.len() >= rule.requests as usize {
+            let retry_after = entry
+                .front()
+                .map(|oldest| {
+                    window
+                        .saturating_sub(now.duration_since(*oldest))
+                        .as_secs()
+                        .max(1)
+                })
+                .unwrap_or(rule.window_seconds);
+            return Some(retry_after);
+        }
+
+        entry.push_back(now);
+        None
+    }
 }
 
 #[cfg(test)]

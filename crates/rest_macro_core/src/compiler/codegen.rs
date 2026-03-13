@@ -8,6 +8,7 @@ use super::model::{
     GeneratedValue, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile,
     StaticMode, WriteModelStyle,
 };
+use crate::security::{FrameOptions, ReferrerPolicy};
 
 pub fn expand_resource_impl(
     resource: &ResourceSpec,
@@ -118,6 +119,7 @@ pub fn expand_service_module(
             #runtime_crate::core::static_files::configure_static_mounts(cfg, &mounts);
         }
     };
+    let security = security_tokens(service, runtime_crate);
 
     Ok(quote! {
         pub mod #module_ident {
@@ -130,13 +132,173 @@ pub fn expand_service_module(
 
             pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
                 #(#configure_calls)*
+                configure_security(cfg);
             }
 
             pub fn configure_static(cfg: &mut web::ServiceConfig) {
                 #configure_static_body
             }
+
+            pub fn security() -> #runtime_crate::core::security::SecurityConfig {
+                #security
+            }
+
+            pub fn configure_security(cfg: &mut web::ServiceConfig) {
+                let security = security();
+                #runtime_crate::core::security::configure_scope_security(cfg, &security);
+            }
         }
     })
+}
+
+fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    let security = &service.security;
+    let json_max_bytes = option_usize_tokens(security.requests.json_max_bytes);
+    let cors_origins = vec_string_tokens(&security.cors.origins);
+    let cors_origins_env = option_string_tokens(security.cors.origins_env.as_deref());
+    let cors_allow_methods = vec_string_tokens(&security.cors.allow_methods);
+    let cors_allow_headers = vec_string_tokens(&security.cors.allow_headers);
+    let cors_expose_headers = vec_string_tokens(&security.cors.expose_headers);
+    let cors_max_age_seconds = option_usize_tokens(security.cors.max_age_seconds);
+    let cors_allow_credentials = security.cors.allow_credentials;
+    let trusted_proxy_ips = vec_string_tokens(&security.trusted_proxies.proxies);
+    let trusted_proxy_ips_env =
+        option_string_tokens(security.trusted_proxies.proxies_env.as_deref());
+    let login_rate_limit = option_rate_limit_tokens(security.rate_limits.login, runtime_crate);
+    let register_rate_limit =
+        option_rate_limit_tokens(security.rate_limits.register, runtime_crate);
+    let frame_options = match security.headers.frame_options {
+        Some(FrameOptions::Deny) => {
+            quote!(Some(#runtime_crate::core::security::FrameOptions::Deny))
+        }
+        Some(FrameOptions::SameOrigin) => {
+            quote!(Some(#runtime_crate::core::security::FrameOptions::SameOrigin))
+        }
+        None => quote!(None),
+    };
+    let referrer_policy = match security.headers.referrer_policy {
+        Some(ReferrerPolicy::NoReferrer) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::NoReferrer))
+        }
+        Some(ReferrerPolicy::SameOrigin) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::SameOrigin))
+        }
+        Some(ReferrerPolicy::StrictOriginWhenCrossOrigin) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::StrictOriginWhenCrossOrigin))
+        }
+        Some(ReferrerPolicy::NoReferrerWhenDowngrade) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::NoReferrerWhenDowngrade))
+        }
+        Some(ReferrerPolicy::Origin) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::Origin))
+        }
+        Some(ReferrerPolicy::OriginWhenCrossOrigin) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::OriginWhenCrossOrigin))
+        }
+        Some(ReferrerPolicy::UnsafeUrl) => {
+            quote!(Some(#runtime_crate::core::security::ReferrerPolicy::UnsafeUrl))
+        }
+        None => quote!(None),
+    };
+    let hsts = if let Some(hsts) = &security.headers.hsts {
+        let max_age_seconds = Literal::u64_unsuffixed(hsts.max_age_seconds);
+        let include_subdomains = hsts.include_subdomains;
+        quote! {
+            Some(#runtime_crate::core::security::Hsts {
+                max_age_seconds: #max_age_seconds,
+                include_subdomains: #include_subdomains,
+            })
+        }
+    } else {
+        quote!(None)
+    };
+    let issuer = option_string_tokens(security.auth.issuer.as_deref());
+    let audience = option_string_tokens(security.auth.audience.as_deref());
+    let access_token_ttl_seconds = Literal::i64_unsuffixed(security.auth.access_token_ttl_seconds);
+    let content_type_options = security.headers.content_type_options;
+
+    quote! {
+        #runtime_crate::core::security::SecurityConfig {
+            requests: #runtime_crate::core::security::RequestSecurity {
+                json_max_bytes: #json_max_bytes,
+            },
+            cors: #runtime_crate::core::security::CorsSecurity {
+                origins: #cors_origins,
+                origins_env: #cors_origins_env,
+                allow_credentials: #cors_allow_credentials,
+                allow_methods: #cors_allow_methods,
+                allow_headers: #cors_allow_headers,
+                expose_headers: #cors_expose_headers,
+                max_age_seconds: #cors_max_age_seconds,
+            },
+            trusted_proxies: #runtime_crate::core::security::TrustedProxySecurity {
+                proxies: #trusted_proxy_ips,
+                proxies_env: #trusted_proxy_ips_env,
+            },
+            rate_limits: #runtime_crate::core::security::RateLimitSecurity {
+                login: #login_rate_limit,
+                register: #register_rate_limit,
+            },
+            headers: #runtime_crate::core::security::HeaderSecurity {
+                frame_options: #frame_options,
+                content_type_options: #content_type_options,
+                referrer_policy: #referrer_policy,
+                hsts: #hsts,
+            },
+            auth: #runtime_crate::core::auth::AuthSettings {
+                issuer: #issuer,
+                audience: #audience,
+                access_token_ttl_seconds: #access_token_ttl_seconds,
+            },
+        }
+    }
+}
+
+fn option_string_tokens(value: Option<&str>) -> TokenStream {
+    match value {
+        Some(value) => {
+            let value = Literal::string(value);
+            quote!(Some(#value.to_owned()))
+        }
+        None => quote!(None),
+    }
+}
+
+fn option_usize_tokens(value: Option<usize>) -> TokenStream {
+    match value {
+        Some(value) => {
+            let value = Literal::usize_unsuffixed(value);
+            quote!(Some(#value))
+        }
+        None => quote!(None),
+    }
+}
+
+fn vec_string_tokens(values: &[String]) -> TokenStream {
+    let values = values.iter().map(|value| {
+        let value = Literal::string(value);
+        quote!(#value.to_owned())
+    });
+    quote!(vec![#(#values),*])
+}
+
+fn option_rate_limit_tokens(
+    value: Option<crate::security::RateLimitRule>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        Some(value) => {
+            let requests = Literal::u32_unsuffixed(value.requests);
+            let window_seconds = Literal::u64_unsuffixed(value.window_seconds);
+            quote! {
+                Some(#runtime_crate::core::security::RateLimitRule {
+                    requests: #requests,
+                    window_seconds: #window_seconds,
+                })
+            }
+        }
+        None => quote!(None),
+    }
 }
 
 fn resource_struct_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {

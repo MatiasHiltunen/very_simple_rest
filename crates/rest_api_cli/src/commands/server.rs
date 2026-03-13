@@ -389,7 +389,7 @@ fn render_main_rs(
 ) -> String {
     let default_database_url = default_database_url(backend);
     let auth_config = if with_auth {
-        "                    .configure(|cfg| auth::auth_routes(cfg, server_pool.clone()))\n"
+        "                    .configure(|cfg| auth::auth_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
     } else {
         ""
     };
@@ -461,10 +461,14 @@ async fn main() -> std::io::Result<()> {{
         .await
         .map_err(|error| std::io::Error::other(format!("database connection failed: {{error}}")))?;
 
+    let api_security = {module_name}::security();
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {{
+        let api_security = api_security.clone();
         App::new()
             .wrap(Logger::default())
+            .wrap(very_simple_rest::core::security::cors_middleware(&api_security))
+            .wrap(very_simple_rest::core::security::security_headers_middleware(&api_security))
             .route("/openapi.json", web::get().to(openapi_spec))
             .route("/docs", web::get().to(swagger_ui))
             .service(
@@ -647,7 +651,10 @@ mod tests {
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("rest_api_from_eon!(\"blog_api.eon\")"));
+        assert!(main_rs.contains("blog_api::security()"));
         assert!(main_rs.contains("blog_api::configure"));
+        assert!(main_rs.contains("cors_middleware"));
+        assert!(main_rs.contains("security_headers_middleware"));
         assert!(main_rs.contains(".route(\"/openapi.json\""));
         assert!(main_rs.contains(".route(\"/docs\""));
 
@@ -679,7 +686,7 @@ mod tests {
 
         assert!(root.join("migrations/0000_auth.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("auth::auth_routes"));
+        assert!(main_rs.contains("auth::auth_routes_with_settings"));
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"/auth/login\""));
         assert!(openapi.contains("\"Account\""));

@@ -1,8 +1,11 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, net::IpAddr, str::FromStr};
 
+use actix_web::http::{Method, Uri, header::HeaderName};
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use syn::{Ident, Type};
+
+use crate::security::SecurityConfig;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 pub enum DbBackend {
@@ -302,6 +305,7 @@ pub struct ServiceSpec {
     pub module_ident: Ident,
     pub resources: Vec<ResourceSpec>,
     pub static_mounts: Vec<StaticMountSpec>,
+    pub security: SecurityConfig,
 }
 
 impl ResourceSpec {
@@ -544,6 +548,141 @@ pub fn validate_list_config(list: &ListConfig, span: Span) -> syn::Result<()> {
                 "`default_limit` cannot be greater than `max_limit`",
             ));
         }
+    }
+
+    Ok(())
+}
+
+pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::Result<()> {
+    if matches!(security.requests.json_max_bytes, Some(0)) {
+        return Err(syn::Error::new(
+            span,
+            "`security.requests.json_max_bytes` must be greater than 0",
+        ));
+    }
+
+    if let Some(hsts) = &security.headers.hsts {
+        if hsts.max_age_seconds == 0 {
+            return Err(syn::Error::new(
+                span,
+                "`security.headers.hsts.max_age_seconds` must be greater than 0",
+            ));
+        }
+    }
+
+    if security.auth.access_token_ttl_seconds <= 0 {
+        return Err(syn::Error::new(
+            span,
+            "`security.auth.access_token_ttl_seconds` must be greater than 0",
+        ));
+    }
+
+    if matches!(security.cors.max_age_seconds, Some(0)) {
+        return Err(syn::Error::new(
+            span,
+            "`security.cors.max_age_seconds` must be greater than 0",
+        ));
+    }
+
+    if matches!(security.cors.origins_env.as_deref(), Some("")) {
+        return Err(syn::Error::new(
+            span,
+            "`security.cors.origins_env` cannot be empty",
+        ));
+    }
+
+    let wildcard_origin = security.cors.origins.iter().any(|origin| origin == "*");
+    if wildcard_origin && security.cors.allow_credentials {
+        return Err(syn::Error::new(
+            span,
+            "`security.cors.allow_credentials` cannot be combined with wildcard `*` origins",
+        ));
+    }
+
+    for origin in &security.cors.origins {
+        if origin == "*" {
+            continue;
+        }
+        Uri::try_from(origin.as_str()).map_err(|_| {
+            syn::Error::new(
+                span,
+                format!("`security.cors.origins` contains invalid origin `{origin}`"),
+            )
+        })?;
+    }
+
+    for method in &security.cors.allow_methods {
+        if method == "*" {
+            continue;
+        }
+        Method::from_bytes(method.as_bytes()).map_err(|_| {
+            syn::Error::new(
+                span,
+                format!("`security.cors.allow_methods` contains invalid method `{method}`"),
+            )
+        })?;
+    }
+
+    for header in security
+        .cors
+        .allow_headers
+        .iter()
+        .chain(security.cors.expose_headers.iter())
+    {
+        if header == "*" {
+            continue;
+        }
+        HeaderName::try_from(header.as_str()).map_err(|_| {
+            syn::Error::new(
+                span,
+                format!("`security.cors` contains invalid header name `{header}`"),
+            )
+        })?;
+    }
+
+    if matches!(security.trusted_proxies.proxies_env.as_deref(), Some("")) {
+        return Err(syn::Error::new(
+            span,
+            "`security.trusted_proxies.proxies_env` cannot be empty",
+        ));
+    }
+
+    for proxy in &security.trusted_proxies.proxies {
+        IpAddr::from_str(proxy).map_err(|_| {
+            syn::Error::new(
+                span,
+                format!("`security.trusted_proxies.proxies` contains invalid IP `{proxy}`"),
+            )
+        })?;
+    }
+
+    validate_rate_limit_rule("login", security.rate_limits.login, span)?;
+    validate_rate_limit_rule("register", security.rate_limits.register, span)?;
+
+    Ok(())
+}
+
+fn validate_rate_limit_rule(
+    scope: &str,
+    rule: Option<crate::security::RateLimitRule>,
+    span: Span,
+) -> syn::Result<()> {
+    let Some(rule) = rule else {
+        return Ok(());
+    };
+
+    if rule.requests == 0 {
+        return Err(syn::Error::new(
+            span,
+            format!("`security.rate_limits.{scope}.requests` must be greater than 0"),
+        ));
+    }
+
+    if rule.window_seconds == 0 {
+        return Err(syn::Error::new(
+            span,
+            format!("`security.rate_limits.{scope}.window_seconds` must be greater than 0"),
+        ));
     }
 
     Ok(())

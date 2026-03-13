@@ -50,6 +50,10 @@ pub fn conflict(code: &'static str, message: impl Into<String>) -> HttpResponse 
     error_response(StatusCode::CONFLICT, code, message)
 }
 
+pub fn too_many_requests(code: &'static str, message: impl Into<String>) -> HttpResponse {
+    error_response(StatusCode::TOO_MANY_REQUESTS, code, message)
+}
+
 pub fn not_found(message: impl Into<String>) -> HttpResponse {
     error_response(StatusCode::NOT_FOUND, "not_found", message)
 }
@@ -62,9 +66,12 @@ pub fn into_actix_error(response: HttpResponse) -> actix_web::Error {
     actix_web::error::InternalError::from_response("", response).into()
 }
 
-pub fn json_error_config() -> JsonConfig {
-    web::JsonConfig::default()
-        .error_handler(|error, _request| into_actix_error(json_payload_error_response(&error)))
+pub fn json_error_config(max_size: Option<usize>) -> JsonConfig {
+    let mut config = web::JsonConfig::default();
+    if let Some(max_size) = max_size {
+        config = config.limit(max_size);
+    }
+    config.error_handler(|error, _request| into_actix_error(json_payload_error_response(&error)))
 }
 
 pub fn path_error_config() -> PathConfig {
@@ -78,7 +85,14 @@ pub fn query_error_config() -> QueryConfig {
 }
 
 pub fn configure_extractor_errors(cfg: &mut web::ServiceConfig) {
-    cfg.app_data(json_error_config());
+    configure_extractor_errors_with_limit(cfg, None);
+}
+
+pub fn configure_extractor_errors_with_limit(
+    cfg: &mut web::ServiceConfig,
+    json_max_bytes: Option<usize>,
+) {
+    cfg.app_data(json_error_config(json_max_bytes));
     cfg.app_data(path_error_config());
     cfg.app_data(query_error_config());
 }

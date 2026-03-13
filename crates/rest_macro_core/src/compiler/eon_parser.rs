@@ -14,7 +14,14 @@ use super::model::{
     RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
     StaticMountSpec, WriteModelStyle, default_resource_module_ident, infer_generated_value,
     infer_sql_type, sanitize_module_ident, sanitize_struct_ident, validate_field_validations,
-    validate_list_config, validate_relations, validate_row_policies,
+    validate_list_config, validate_relations, validate_row_policies, validate_security_config,
+};
+use crate::{
+    auth::AuthSettings,
+    security::{
+        CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
+        ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
+    },
 };
 
 pub struct LoadedService {
@@ -30,7 +37,100 @@ struct ServiceDocument {
     db: DbBackend,
     #[serde(default, rename = "static")]
     static_config: Option<StaticConfigDocument>,
+    #[serde(default)]
+    security: SecurityDocument,
     resources: Vec<ResourceDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SecurityDocument {
+    #[serde(default)]
+    requests: Option<RequestSecurityDocument>,
+    #[serde(default)]
+    cors: Option<CorsSecurityDocument>,
+    #[serde(default)]
+    trusted_proxies: Option<TrustedProxiesDocument>,
+    #[serde(default)]
+    rate_limits: Option<RateLimitsDocument>,
+    #[serde(default)]
+    headers: Option<HeaderSecurityDocument>,
+    #[serde(default)]
+    auth: Option<AuthSecurityDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct RequestSecurityDocument {
+    #[serde(default)]
+    json_max_bytes: Option<usize>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct CorsSecurityDocument {
+    #[serde(default)]
+    origins: Vec<String>,
+    #[serde(default)]
+    origins_env: Option<String>,
+    #[serde(default)]
+    allow_credentials: Option<bool>,
+    #[serde(default)]
+    allow_methods: Vec<String>,
+    #[serde(default)]
+    allow_headers: Vec<String>,
+    #[serde(default)]
+    expose_headers: Vec<String>,
+    #[serde(default)]
+    max_age_seconds: Option<usize>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TrustedProxiesDocument {
+    #[serde(default)]
+    proxies: Vec<String>,
+    #[serde(default)]
+    proxies_env: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct RateLimitsDocument {
+    #[serde(default)]
+    login: Option<RateLimitRuleDocument>,
+    #[serde(default)]
+    register: Option<RateLimitRuleDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct RateLimitRuleDocument {
+    requests: u32,
+    window_seconds: u64,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct HeaderSecurityDocument {
+    #[serde(default)]
+    frame_options: Option<String>,
+    #[serde(default)]
+    content_type_options: Option<bool>,
+    #[serde(default)]
+    referrer_policy: Option<String>,
+    #[serde(default)]
+    hsts: Option<HstsDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct HstsDocument {
+    max_age_seconds: u64,
+    #[serde(default)]
+    include_subdomains: bool,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthSecurityDocument {
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    access_token_ttl_seconds: Option<i64>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -229,6 +329,8 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let static_mounts = build_static_mounts(&service_root, document.static_config)?;
+    let security = parse_security_document(document.security, span)?;
+    validate_security_config(&security, span)?;
 
     let resources = build_resources(document.db, document.resources)?;
     if resources.is_empty() {
@@ -243,6 +345,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             module_ident,
             resources,
             static_mounts,
+            security,
         },
         include_path,
     })
@@ -352,6 +455,128 @@ fn parse_list_config(document: ListConfigDocument) -> ListConfig {
     ListConfig {
         default_limit: document.default_limit,
         max_limit: document.max_limit,
+    }
+}
+
+fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Result<SecurityConfig> {
+    let requests = document
+        .requests
+        .map(|requests| RequestSecurity {
+            json_max_bytes: requests.json_max_bytes,
+        })
+        .unwrap_or_default();
+
+    let headers = if let Some(headers) = document.headers {
+        HeaderSecurity {
+            frame_options: match headers.frame_options.as_deref() {
+                Some(value) => Some(parse_frame_options(value).ok_or_else(|| {
+                    syn::Error::new(
+                        span,
+                        format!("unsupported `security.headers.frame_options` value `{value}`"),
+                    )
+                })?),
+                None => None,
+            },
+            content_type_options: headers.content_type_options.unwrap_or(false),
+            referrer_policy: match headers.referrer_policy.as_deref() {
+                Some(value) => Some(parse_referrer_policy(value).ok_or_else(|| {
+                    syn::Error::new(
+                        span,
+                        format!("unsupported `security.headers.referrer_policy` value `{value}`"),
+                    )
+                })?),
+                None => None,
+            },
+            hsts: headers.hsts.map(|hsts| Hsts {
+                max_age_seconds: hsts.max_age_seconds,
+                include_subdomains: hsts.include_subdomains,
+            }),
+        }
+    } else {
+        HeaderSecurity::default()
+    };
+
+    let cors = document
+        .cors
+        .map(|cors| CorsSecurity {
+            origins: cors.origins,
+            origins_env: cors.origins_env,
+            allow_credentials: cors.allow_credentials.unwrap_or(false),
+            allow_methods: cors.allow_methods,
+            allow_headers: cors.allow_headers,
+            expose_headers: cors.expose_headers,
+            max_age_seconds: cors.max_age_seconds,
+        })
+        .unwrap_or_default();
+
+    let trusted_proxies = document
+        .trusted_proxies
+        .map(|trusted_proxies| TrustedProxySecurity {
+            proxies: trusted_proxies.proxies,
+            proxies_env: trusted_proxies.proxies_env,
+        })
+        .unwrap_or_default();
+
+    let rate_limits = document
+        .rate_limits
+        .map(|rate_limits| RateLimitSecurity {
+            login: rate_limits.login.map(parse_rate_limit_rule_document),
+            register: rate_limits.register.map(parse_rate_limit_rule_document),
+        })
+        .unwrap_or_default();
+
+    let auth = document
+        .auth
+        .map(|auth| AuthSettings {
+            issuer: auth.issuer,
+            audience: auth.audience,
+            access_token_ttl_seconds: auth
+                .access_token_ttl_seconds
+                .unwrap_or(AuthSettings::default().access_token_ttl_seconds),
+        })
+        .unwrap_or_default();
+
+    Ok(SecurityConfig {
+        requests,
+        cors,
+        trusted_proxies,
+        rate_limits,
+        headers,
+        auth,
+    })
+}
+
+fn parse_rate_limit_rule_document(document: RateLimitRuleDocument) -> RateLimitRule {
+    RateLimitRule {
+        requests: document.requests,
+        window_seconds: document.window_seconds,
+    }
+}
+
+fn parse_frame_options(value: &str) -> Option<FrameOptions> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "deny" => Some(FrameOptions::Deny),
+        "same_origin" | "same-origin" | "sameorigin" => Some(FrameOptions::SameOrigin),
+        _ => None,
+    }
+}
+
+fn parse_referrer_policy(value: &str) -> Option<ReferrerPolicy> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "no_referrer" | "no-referrer" => Some(ReferrerPolicy::NoReferrer),
+        "same_origin" | "same-origin" => Some(ReferrerPolicy::SameOrigin),
+        "strict_origin_when_cross_origin"
+        | "strict-origin-when-cross-origin"
+        | "strictoriginwhencrossorigin" => Some(ReferrerPolicy::StrictOriginWhenCrossOrigin),
+        "no_referrer_when_downgrade" | "no-referrer-when-downgrade" | "noreferrerwhendowngrade" => {
+            Some(ReferrerPolicy::NoReferrerWhenDowngrade)
+        }
+        "origin" => Some(ReferrerPolicy::Origin),
+        "origin_when_cross_origin" | "origin-when-cross-origin" | "originwhencrossorigin" => {
+            Some(ReferrerPolicy::OriginWhenCrossOrigin)
+        }
+        "unsafe_url" | "unsafe-url" | "unsafeurl" => Some(ReferrerPolicy::UnsafeUrl),
+        _ => None,
     }
 }
 
@@ -936,6 +1161,7 @@ mod tests {
                 resources: build_resources(document.db, document.resources)
                     .expect("resources should build"),
                 static_mounts: Vec::new(),
+                security: SecurityConfig::default(),
             },
             include_path: path.value(),
         };
@@ -988,6 +1214,216 @@ mod tests {
             super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
         );
         assert_eq!(resource.policies.create.len(), 2);
+    }
+
+    #[test]
+    fn parses_security_config_from_eon() {
+        let document = parse_document(
+            r#"
+            security: {
+                requests: { json_max_bytes: 128 }
+                cors: {
+                    origins: ["http://localhost:3000"]
+                    origins_env: "CORS_ORIGINS"
+                    allow_credentials: true
+                    allow_methods: ["GET", "POST", "OPTIONS"]
+                    allow_headers: ["authorization", "content-type"]
+                    expose_headers: ["x-total-count"]
+                    max_age_seconds: 600
+                }
+                trusted_proxies: {
+                    proxies: ["127.0.0.1", "::1"]
+                    proxies_env: "TRUSTED_PROXIES"
+                }
+                rate_limits: {
+                    login: { requests: 2, window_seconds: 60 }
+                    register: { requests: 3, window_seconds: 120 }
+                }
+                headers: {
+                    frame_options: Deny
+                    content_type_options: true
+                    referrer_policy: StrictOriginWhenCrossOrigin
+                    hsts: {
+                        max_age_seconds: 3600
+                        include_subdomains: true
+                    }
+                }
+                auth: {
+                    issuer: "issuer"
+                    audience: "audience"
+                    access_token_ttl_seconds: 600
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+
+        assert_eq!(security.requests.json_max_bytes, Some(128));
+        assert_eq!(
+            security.cors.origins,
+            vec!["http://localhost:3000".to_owned()]
+        );
+        assert_eq!(security.cors.origins_env.as_deref(), Some("CORS_ORIGINS"));
+        assert!(security.cors.allow_credentials);
+        assert_eq!(
+            security.cors.allow_methods,
+            vec!["GET".to_owned(), "POST".to_owned(), "OPTIONS".to_owned()]
+        );
+        assert_eq!(
+            security.cors.allow_headers,
+            vec!["authorization".to_owned(), "content-type".to_owned()]
+        );
+        assert_eq!(
+            security.cors.expose_headers,
+            vec!["x-total-count".to_owned()]
+        );
+        assert_eq!(security.cors.max_age_seconds, Some(600));
+        assert_eq!(
+            security.trusted_proxies.proxies,
+            vec!["127.0.0.1".to_owned(), "::1".to_owned()]
+        );
+        assert_eq!(
+            security.trusted_proxies.proxies_env.as_deref(),
+            Some("TRUSTED_PROXIES")
+        );
+        assert_eq!(
+            security.rate_limits.login,
+            Some(RateLimitRule {
+                requests: 2,
+                window_seconds: 60,
+            })
+        );
+        assert_eq!(
+            security.rate_limits.register,
+            Some(RateLimitRule {
+                requests: 3,
+                window_seconds: 120,
+            })
+        );
+        assert_eq!(security.auth.issuer.as_deref(), Some("issuer"));
+        assert_eq!(security.auth.audience.as_deref(), Some("audience"));
+        assert_eq!(security.auth.access_token_ttl_seconds, 600);
+        assert_eq!(security.headers.frame_options, Some(FrameOptions::Deny));
+        assert_eq!(
+            security.headers.referrer_policy,
+            Some(ReferrerPolicy::StrictOriginWhenCrossOrigin)
+        );
+        assert!(security.headers.content_type_options);
+        assert_eq!(
+            security.headers.hsts,
+            Some(Hsts {
+                max_age_seconds: 3600,
+                include_subdomains: true,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_security_header_values() {
+        let document = parse_document(
+            r#"
+            security: {
+                headers: { frame_options: "maybe" }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let error = parse_security_document(document.security, Span::call_site())
+            .expect_err("unknown frame_options should fail");
+        assert!(error.to_string().contains("security.headers.frame_options"));
+    }
+
+    #[test]
+    fn rejects_invalid_cors_method_values() {
+        let document = parse_document(
+            r#"
+            security: {
+                cors: { allow_methods: ["NOT A METHOD"] }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+        let error = validate_security_config(&security, Span::call_site())
+            .expect_err("invalid cors method should fail validation");
+        assert!(error.to_string().contains("security.cors.allow_methods"));
+    }
+
+    #[test]
+    fn rejects_invalid_trusted_proxy_values() {
+        let document = parse_document(
+            r#"
+            security: {
+                trusted_proxies: { proxies: ["not-an-ip"] }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+        let error = validate_security_config(&security, Span::call_site())
+            .expect_err("invalid trusted proxy should fail validation");
+        assert!(
+            error
+                .to_string()
+                .contains("security.trusted_proxies.proxies")
+        );
+    }
+
+    #[test]
+    fn rejects_zero_rate_limit_values() {
+        let document = parse_document(
+            r#"
+            security: {
+                rate_limits: {
+                    login: { requests: 0, window_seconds: 60 }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+        let error = validate_security_config(&security, Span::call_site())
+            .expect_err("zero rate limit should fail validation");
+        assert!(
+            error
+                .to_string()
+                .contains("security.rate_limits.login.requests")
+        );
     }
 
     #[test]

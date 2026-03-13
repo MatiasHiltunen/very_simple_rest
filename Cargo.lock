@@ -2217,6 +2217,7 @@ dependencies = [
 name = "rest_macro_core"
 version = "0.1.0"
 dependencies = [
+ "actix-cors",
  "actix-files",
  "actix-web",
  "bcrypt",

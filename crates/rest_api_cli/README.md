@@ -85,7 +85,10 @@ built-in auth migration owns that table.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and Swagger UI at `/docs`.
 When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
-the generated project and wires the generated server to serve them.
+the generated project and wires the generated server to serve them. When a `.eon` service defines
+`security`, the emitted server also applies the compiled JSON body limit, CORS policy,
+trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings
+automatically.
 
 ### OpenAPI Generation
 
@@ -142,6 +145,53 @@ Supported options:
 
 The loader rejects mounts that escape the `.eon` root or conflict with reserved routes such as
 `/api`, `/auth`, `/docs`, and `/openapi.json`.
+
+### Security In `.eon`
+
+Bare `.eon` services can also define service-level security defaults:
+
+```eon
+security: {
+    requests: { json_max_bytes: 1048576 }
+    cors: {
+        origins: ["http://localhost:3000"]
+        origins_env: "CORS_ORIGINS"
+        allow_credentials: true
+        allow_methods: ["GET", "POST", "OPTIONS"]
+        allow_headers: ["authorization", "content-type"]
+    }
+    trusted_proxies: {
+        proxies: ["127.0.0.1", "::1"]
+        proxies_env: "TRUSTED_PROXIES"
+    }
+    rate_limits: {
+        login: { requests: 10, window_seconds: 60 }
+        register: { requests: 5, window_seconds: 300 }
+    }
+    headers: {
+        frame_options: Deny
+        content_type_options: true
+        referrer_policy: StrictOriginWhenCrossOrigin
+    }
+    auth: {
+        issuer: "very_simple_rest"
+        audience: "public-api"
+        access_token_ttl_seconds: 3600
+    }
+}
+```
+
+This config currently controls:
+
+- JSON body size limits for generated resource and built-in auth routes
+- CORS origins, headers, methods, credentials, and preflight caching on the emitted server
+- trusted-proxy IP handling for forwarded client addresses
+- in-memory built-in auth login and registration rate limits
+- security response headers on the emitted server
+- built-in auth JWT `iss`, `aud`, and token TTL defaults
+
+Secrets such as `JWT_SECRET` remain environment-driven. The current auth rate limiter is
+process-local rather than distributed.
 
 ### Create Admin
 

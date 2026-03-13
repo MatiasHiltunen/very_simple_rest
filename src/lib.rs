@@ -111,6 +111,12 @@ directories are resolved relative to the `.eon` file, reserved routes like `/api
 cannot be shadowed, and `vsr server emit` copies the declared static directories into the emitted
 project automatically.
 
+`.eon` services can also define service-level `security` defaults for JSON body limits, CORS,
+trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings.
+Generated modules expose those settings through `module::security()` and
+`module::configure_security(...)`, while secrets such as `JWT_SECRET` still belong in the
+environment.
+
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
 the `/auth/register` and `/auth/login` routes in a fresh database.
 
@@ -149,8 +155,8 @@ pub use rest_macro_core as core;
 
 pub mod auth {
     pub use rest_macro_core::auth::{
-        LoginInput, RegisterInput, User, UserContext, auth_routes, ensure_admin_exists, login, me,
-        register,
+        AuthSettings, LoginInput, RegisterInput, User, UserContext, auth_routes,
+        auth_routes_with_settings, ensure_admin_exists, login, login_with_request, me, register,
     };
 }
 
@@ -166,7 +172,7 @@ pub use sqlx;
 
 pub mod prelude {
     pub use crate::auth;
-    pub use crate::auth::UserContext;
+    pub use crate::auth::{AuthSettings, UserContext};
     pub use crate::core;
     pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 

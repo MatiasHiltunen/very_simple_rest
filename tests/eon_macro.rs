@@ -4,6 +4,7 @@ rest_api_from_eon!("tests/fixtures/blog_api.eon");
 rest_api_from_eon!("tests/fixtures/owned_api.eon");
 rest_api_from_eon!("tests/fixtures/tenant_api.eon");
 rest_api_from_eon!("tests/fixtures/paged_api.eon");
+rest_api_from_eon!("tests/fixtures/security_api.eon");
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 
 #[test]
@@ -102,6 +103,52 @@ fn eon_macro_claim_policies_trim_generated_dtos() {
 fn eon_macro_generates_static_configure_function() {
     let _configure_static: fn(&mut very_simple_rest::actix_web::web::ServiceConfig) =
         static_site_api::configure_static;
+}
+
+#[test]
+fn eon_macro_generates_security_config_function() {
+    let _configure_security: fn(&mut very_simple_rest::actix_web::web::ServiceConfig) =
+        security_api::configure_security;
+    let security = security_api::security();
+    assert_eq!(security.requests.json_max_bytes, Some(128));
+    assert_eq!(
+        security.cors.origins,
+        vec!["http://localhost:3000".to_owned()]
+    );
+    assert_eq!(security.cors.origins_env.as_deref(), Some("CORS_ORIGINS"));
+    assert!(security.cors.allow_credentials);
+    assert_eq!(
+        security.cors.allow_methods,
+        vec!["GET".to_owned(), "POST".to_owned(), "OPTIONS".to_owned()]
+    );
+    assert_eq!(
+        security.trusted_proxies.proxies,
+        vec!["127.0.0.1".to_owned(), "::1".to_owned()]
+    );
+    assert_eq!(
+        security.trusted_proxies.proxies_env.as_deref(),
+        Some("TRUSTED_PROXIES")
+    );
+    assert_eq!(
+        security.rate_limits.login,
+        Some(very_simple_rest::core::security::RateLimitRule {
+            requests: 2,
+            window_seconds: 60,
+        })
+    );
+    assert_eq!(
+        security.rate_limits.register,
+        Some(very_simple_rest::core::security::RateLimitRule {
+            requests: 2,
+            window_seconds: 60,
+        })
+    );
+    assert_eq!(
+        security.auth.issuer.as_deref(),
+        Some("very_simple_rest_tests")
+    );
+    assert_eq!(security.auth.audience.as_deref(), Some("api_clients"));
+    assert_eq!(security.auth.access_token_ttl_seconds, 900);
 }
 
 #[test]

@@ -236,6 +236,10 @@ Generated server projects serve the OpenAPI document at `/openapi.json` and a Sw
 When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
 the generated project so the emitted server can serve them without extra setup.
 
+When a `.eon` service defines `security`, `vsr server emit` also applies the compiled JSON body
+limits, CORS policy, trusted-proxy handling, auth rate limits, security headers, and built-in
+auth token settings automatically in the emitted server.
+
 ## OpenAPI
 
 You can also render an OpenAPI document directly from either a `.eon` file or derive-based Rust
@@ -309,6 +313,76 @@ The loader validates that:
 - reserved routes such as `/api`, `/auth`, `/docs`, and `/openapi.json` are not shadowed
 - SPA fallback only applies to `GET` and `HEAD` HTML navigations, not missing asset files
 - symlinked directories are rejected during emitted-project copying
+
+## Security In `.eon`
+
+Bare `.eon` services can also define service-level server security defaults:
+
+```eon
+security: {
+    requests: {
+        json_max_bytes: 1048576
+    }
+    cors: {
+        origins: ["http://localhost:3000"]
+        origins_env: "CORS_ORIGINS"
+        allow_credentials: true
+        allow_methods: ["GET", "POST", "OPTIONS"]
+        allow_headers: ["authorization", "content-type"]
+        expose_headers: ["x-total-count"]
+        max_age_seconds: 600
+    }
+    trusted_proxies: {
+        proxies: ["127.0.0.1", "::1"]
+        proxies_env: "TRUSTED_PROXIES"
+    }
+    rate_limits: {
+        login: { requests: 10, window_seconds: 60 }
+        register: { requests: 5, window_seconds: 300 }
+    }
+    headers: {
+        frame_options: Deny
+        content_type_options: true
+        referrer_policy: StrictOriginWhenCrossOrigin
+        hsts: {
+            max_age_seconds: 31536000
+            include_subdomains: true
+        }
+    }
+    auth: {
+        issuer: "very_simple_rest"
+        audience: "public-api"
+        access_token_ttl_seconds: 3600
+    }
+}
+```
+
+Supported security options:
+
+- `requests.json_max_bytes`: JSON body limit for generated resource and built-in auth routes
+- `cors.origins`: explicit allowed origins, or `["*"]` when credentials are disabled
+- `cors.origins_env`: optional comma-separated origin list loaded from an environment variable
+- `cors.allow_credentials`: emits `Access-Control-Allow-Credentials: true`
+- `cors.allow_methods`: allowed preflight methods, defaulting to common REST verbs when omitted
+- `cors.allow_headers`: allowed request headers, defaulting to `authorization`, `content-type`, and `accept`
+- `cors.expose_headers`: response headers exposed to the browser
+- `cors.max_age_seconds`: optional preflight cache duration
+- `trusted_proxies.proxies`: exact proxy IPs whose forwarded headers should be trusted
+- `trusted_proxies.proxies_env`: optional comma-separated trusted proxy IP list loaded from env
+- `rate_limits.login`: built-in auth login rate limit by resolved client IP
+- `rate_limits.register`: built-in auth registration rate limit by resolved client IP
+- `headers.frame_options`: `Deny` or `SameOrigin`
+- `headers.content_type_options`: emits `X-Content-Type-Options: nosniff`
+- `headers.referrer_policy`: values such as `NoReferrer` or `StrictOriginWhenCrossOrigin`
+- `headers.hsts`: optional `Strict-Transport-Security` configuration
+- `auth.issuer`: built-in auth JWT `iss` claim
+- `auth.audience`: built-in auth JWT `aud` claim
+- `auth.access_token_ttl_seconds`: built-in auth token lifetime
+
+Generated `.eon` modules expose the compiled settings through `module::security()` and
+`module::configure_security(...)`. Secrets such as `JWT_SECRET` still belong in the environment,
+not in `.eon`. The current rate-limit implementation is in-memory and process-local, so it is a
+good default for a single binary but not a shared distributed limiter.
 
 ## Migrations
 
