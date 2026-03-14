@@ -345,11 +345,7 @@ fn ensure_database_engine_is_compatible(service: &ServiceSpec, backend: DbBacken
                     "database.engine = TursoLocal requires SQLite resources".to_owned(),
                 ));
             }
-            if engine.encryption_key_env.is_some() {
-                return Err(Error::Config(
-                    "database.engine.encryption_key_env is not supported yet because generated CRUD/auth still execute through SQLx".to_owned(),
-                ));
-            }
+            let _ = engine;
             Ok(())
         }
     }
@@ -522,10 +518,17 @@ fn render_env_example(service: &ServiceSpec, backend: DbBackend, with_auth: bool
     };
     let engine_block = match &service.database.engine {
         DatabaseEngine::Sqlx => String::new(),
-        DatabaseEngine::TursoLocal(engine) => format!(
-            "# Local Turso bootstrap will initialize `{}` before SQLx connects.\n",
-            engine.path
-        ),
+        DatabaseEngine::TursoLocal(engine) => {
+            let encryption_block = engine
+                .encryption_key_env
+                .as_ref()
+                .map(|var| format!("{var}=change-me-hex-key\n"))
+                .unwrap_or_default();
+            format!(
+                "# Local Turso bootstrap will initialize `{}` before the runtime connects.\n{}",
+                engine.path, encryption_block
+            )
+        }
     };
 
     format!(
@@ -554,10 +557,22 @@ fn render_project_readme(
     };
     let database_note = match &service.database.engine {
         DatabaseEngine::Sqlx => "Runtime engine: `Sqlx`.\n\n".to_owned(),
-        DatabaseEngine::TursoLocal(engine) => format!(
-            "Runtime engine: `TursoLocal` bootstrapping `{}` before SQLx connects to the SQLite-compatible database file.\nCurrent limitation: local Turso encryption is not enabled yet in emitted servers because generated CRUD/auth still execute through SQLx.\n\n",
-            engine.path
-        ),
+        DatabaseEngine::TursoLocal(engine) => {
+            let encryption_note = engine
+                .encryption_key_env
+                .as_ref()
+                .map(|var| {
+                    format!(
+                        "Local encryption is enabled. Set `{var}` to a 64-character hex key before starting the server.\n"
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "Runtime engine: `TursoLocal` bootstrapping `{}` before the runtime connects to the SQLite-compatible database file.\n{}\
+\n",
+                engine.path, encryption_note
+            )
+        }
     };
 
     format!(
@@ -713,6 +728,8 @@ mod tests {
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("rest_api_from_eon!(\"blog_api.eon\")"));
         assert!(main_rs.contains("blog_api::security()"));
+        assert!(main_rs.contains("let database_config = blog_api::database();"));
+        assert!(main_rs.contains("prepare_database_engine(&database_config)"));
         assert!(main_rs.contains("blog_api::configure"));
         assert!(main_rs.contains("cors_middleware"));
         assert!(main_rs.contains("security_headers_middleware"));
@@ -722,10 +739,15 @@ mod tests {
         let cargo_toml = read_to_string(&root.join("Cargo.toml"));
         assert!(cargo_toml.contains("name = \"blog-server\""));
         assert!(cargo_toml.contains("very_simple_rest"));
+        assert!(cargo_toml.contains("\"sqlite\", \"turso-local\""));
 
         let migration = read_to_string(&root.join("migrations/0001_service.sql"));
         assert!(migration.contains("CREATE TABLE post"));
         assert!(migration.contains("CREATE TABLE comment"));
+
+        let env_example = read_to_string(&root.join(".env.example"));
+        assert!(env_example.contains("sqlite:var/data/blog_api.db?mode=rwc"));
+        assert!(env_example.contains("Local Turso bootstrap"));
 
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"openapi\": \"3.0.3\""));
@@ -797,23 +819,31 @@ mod tests {
     }
 
     #[test]
-    fn emit_server_project_rejects_encrypted_turso_local_runtime() {
+    fn emit_server_project_wires_encrypted_turso_local_bootstrap() {
         let root = test_root();
-        let error = emit_server_project(
+        emit_server_project(
             &fixture_path("turso_local_encrypted_api.eon"),
             &root,
             Some("turso-local-encrypted-server".to_owned()),
             false,
             false,
         )
-        .expect_err("encrypted turso local should remain rejected for emitted SQLx server");
+        .expect("encrypted turso local server project should emit");
 
-        assert!(
-            error
-                .to_string()
-                .contains("database.engine.encryption_key_env is not supported yet"),
-            "unexpected error: {error}"
-        );
+        let main_rs = read_to_string(&root.join("src/main.rs"));
+        assert!(main_rs.contains("let database_config = turso_local_encrypted_api::database();"));
+        assert!(main_rs.contains("prepare_database_engine(&database_config)"));
+
+        let cargo_toml = read_to_string(&root.join("Cargo.toml"));
+        assert!(cargo_toml.contains("\"sqlite\", \"turso-local\""));
+
+        let env_example = read_to_string(&root.join(".env.example"));
+        assert!(env_example.contains("TURSO_ENCRYPTION_KEY=change-me-hex-key"));
+        assert!(env_example.contains("Local Turso bootstrap"));
+
+        let readme = read_to_string(&root.join("README.md"));
+        assert!(readme.contains("Local encryption is enabled."));
+        assert!(readme.contains("TURSO_ENCRYPTION_KEY"));
     }
 
     #[test]
@@ -833,6 +863,31 @@ mod tests {
             false,
         )
         .expect("generated server binary should build");
+
+        assert!(
+            output.exists(),
+            "binary should exist at {}",
+            output.display()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn build_server_binary_compiles_encrypted_turso_local_generated_project() {
+        let root = test_root();
+        let output = root.join("dist/turso-encrypted-server");
+        build_server_binary(
+            &fixture_path("turso_local_encrypted_api.eon"),
+            &output,
+            Some("turso-encrypted-server".to_owned()),
+            Some(root.join("build")),
+            false,
+            false,
+            None,
+            false,
+            false,
+        )
+        .expect("generated encrypted turso local server binary should build");
 
         assert!(
             output.exists(),

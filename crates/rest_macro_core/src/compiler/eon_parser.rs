@@ -347,7 +347,12 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let static_mounts = build_static_mounts(&service_root, document.static_config)?;
-    let database = parse_database_document(document.db, document.database, span)?;
+    let database = parse_database_document(
+        document.db,
+        document.database,
+        &module_ident.to_string(),
+        span,
+    )?;
     let security = parse_security_document(document.security, span)?;
     validate_security_config(&security, span)?;
 
@@ -569,10 +574,17 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
 fn parse_database_document(
     db: DbBackend,
     document: Option<DatabaseDocument>,
+    module_name: &str,
     span: Span,
 ) -> syn::Result<DatabaseConfig> {
     let engine = match document.and_then(|database| database.engine) {
-        None => DatabaseEngine::Sqlx,
+        None => match db {
+            DbBackend::Sqlite => DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: format!("var/data/{module_name}.db"),
+                encryption_key_env: None,
+            }),
+            DbBackend::Postgres | DbBackend::Mysql => DatabaseEngine::Sqlx,
+        },
         Some(engine) => parse_database_engine_document(db, engine, span)?,
     };
 
@@ -1217,6 +1229,7 @@ mod tests {
                     encryption_key_env: None,
                 }),
             }),
+            "app_api",
             Span::call_site(),
         )
         .expect("database config should parse");
@@ -1240,6 +1253,7 @@ mod tests {
                     encryption_key_env: None,
                 }),
             }),
+            "app_api",
             Span::call_site(),
         )
         .expect_err("non-sqlite turso config should fail");
@@ -1248,6 +1262,20 @@ mod tests {
                 .to_string()
                 .contains("database.engine = TursoLocal requires `db: Sqlite`"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn defaults_sqlite_services_to_turso_local_engine() {
+        let database =
+            parse_database_document(DbBackend::Sqlite, None, "blog_api", Span::call_site())
+                .expect("sqlite service should default to turso local");
+        assert_eq!(
+            database.engine,
+            DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: "var/data/blog_api.db".to_owned(),
+                encryption_key_env: None,
+            })
         );
     }
 
@@ -1282,6 +1310,7 @@ mod tests {
                 database: parse_database_document(
                     document.db,
                     document.database,
+                    "test",
                     Span::call_site(),
                 )
                 .expect("database config should parse"),

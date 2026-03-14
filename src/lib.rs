@@ -109,11 +109,13 @@ directories are resolved relative to the `.eon` file, reserved routes like `/api
 cannot be shadowed, and `vsr server emit` copies the declared static directories into the emitted
 project automatically.
 
-`.eon` services can also define `database.engine`. The current supported values are the default
-`Sqlx` engine and `TursoLocal`, which bootstraps a local Turso database file before the emitted
-server connects through the project runtime's database adapter while keeping the SQL dialect as
-SQLite. `TursoLocal` can also carry `encryption_key_env`, which is read from the environment as a
-hex key for local Turso bootstrap and encrypted local database access.
+SQLite `.eon` services now default to `database.engine = TursoLocal`, using a per-service
+`var/data/<module>.db` path unless you override it explicitly. You can still opt back into the
+legacy runtime path with `database.engine.kind = Sqlx`. `TursoLocal` bootstraps a local Turso
+database file before the emitted server connects through the project runtime's database adapter
+while keeping the SQL dialect as SQLite. `TursoLocal` can also carry `encryption_key_env`, which
+is read from the environment as a hex key for local Turso bootstrap and encrypted local database
+access.
 
 `.eon` services can also define service-level `security` defaults for JSON body limits, CORS,
 trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings.

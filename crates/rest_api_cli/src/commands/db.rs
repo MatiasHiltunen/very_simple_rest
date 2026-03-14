@@ -109,6 +109,6 @@ mod tests {
     fn derives_default_sqlite_url_from_plain_service_config() {
         let url = database_url_from_service_config(&fixture_path("blog_api.eon"))
             .expect("service config should resolve");
-        assert_eq!(url, "sqlite:app.db?mode=rwc");
+        assert_eq!(url, "sqlite:var/data/blog_api.db?mode=rwc");
     }
 }

@@ -59,8 +59,8 @@ vsr --config api.eon check-db
 ```
 
 When `--config` points to a `.eon` service and `--database-url` / `DATABASE_URL` are both absent,
-the CLI uses the service’s compiled default database URL. That includes `database.engine =
-TursoLocal`, which resolves to the matching SQLite-compatible file URL.
+the CLI uses the service’s compiled default database URL. For SQLite services, that now defaults
+to `database.engine = TursoLocal`, which resolves to the matching SQLite-compatible file URL.
 
 ### Server Generation
 
@@ -161,7 +161,19 @@ The loader rejects mounts that escape the `.eon` root or conflict with reserved 
 
 ### Database Engine In `.eon`
 
-Bare `.eon` services can also define a service-level database engine:
+Bare `.eon` services can also define a service-level database engine. For SQLite services, the
+default when this block is omitted is:
+
+```eon
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/<module>.db"
+    }
+}
+```
+
+You can still override it explicitly:
 
 ```eon
 database: {
@@ -175,7 +187,8 @@ database: {
 
 Current support:
 
-- `Sqlx`: the existing default runtime path
+- `Sqlx`: the legacy runtime path; use this explicitly if you want plain SQLx SQLite for a
+  SQLite `.eon` service
 - `TursoLocal`: bootstraps a local Turso database file and uses the project runtime database
   adapter with SQLite-compatible SQL
 - `TursoLocal.encryption_key_env`: reads a hex key from the named environment variable and uses

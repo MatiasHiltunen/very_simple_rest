@@ -43,6 +43,24 @@ fn eon_macro_generates_models_dtos_and_configure_functions() {
 }
 
 #[test]
+fn eon_macro_defaults_sqlite_services_to_turso_local_database_engine() {
+    let database = blog_api::database();
+    assert_eq!(
+        database.engine,
+        very_simple_rest::core::database::DatabaseEngine::TursoLocal(
+            very_simple_rest::core::database::TursoLocalConfig {
+                path: "var/data/blog_api.db".to_owned(),
+                encryption_key_env: None,
+            }
+        )
+    );
+    assert_eq!(
+        blog_api::default_database_url(),
+        "sqlite:var/data/blog_api.db?mode=rwc"
+    );
+}
+
+#[test]
 fn eon_macro_owner_policies_trim_generated_dtos() {
     let post = owned_api::OwnedPost {
         id: Some(1),

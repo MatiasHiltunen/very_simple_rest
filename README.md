@@ -240,10 +240,10 @@ When a `.eon` service defines `security`, `vsr server emit` also applies the com
 limits, CORS policy, trusted-proxy handling, auth rate limits, security headers, and built-in
 auth token settings automatically in the emitted server.
 
-When a `.eon` service defines `database.engine`, `vsr server emit` also carries that runtime
-engine config into the generated project. The current supported engine values are the default
-`Sqlx` path and `TursoLocal`, which bootstraps a local Turso database file before the emitted
-server connects through the existing SQLite SQLx path.
+`vsr server emit` also carries the compiled `.eon` database engine config into the generated
+project. SQLite services now default to `database.engine = TursoLocal`, using
+`var/data/<module>.db` unless you override it explicitly. You can still opt back into the legacy
+runtime path with `database.engine.kind = Sqlx`.
 
 ## OpenAPI
 
@@ -321,7 +321,19 @@ The loader validates that:
 
 ## Database Engine In `.eon`
 
-Bare `.eon` services can also define a service-level database engine:
+Bare `.eon` services can also define a service-level database engine. For SQLite services, the
+default when this block is omitted is:
+
+```eon
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/<module>.db"
+    }
+}
+```
+
+You can still override it explicitly:
 
 ```eon
 database: {
@@ -335,7 +347,8 @@ database: {
 
 Current support:
 
-- `Sqlx`: the existing default runtime path
+- `Sqlx`: the legacy runtime path; use this explicitly if you want plain SQLx SQLite for a
+  SQLite `.eon` service
 - `TursoLocal`: bootstraps a local Turso database file and uses the project runtime database
   adapter with SQLite-compatible SQL
 - `TursoLocal.encryption_key_env`: reads a hex key from the named environment variable and uses
