@@ -725,6 +725,17 @@ pub async fn me(user: UserContext) -> impl Responder {
 /// Returns true if an admin exists (either previously or newly created),
 /// false only if there was an error creating the admin user.
 pub async fn ensure_admin_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
+    ensure_admin_exists_with_claim_prompt_mode(
+        pool,
+        stdin().is_terminal() && stdout().is_terminal(),
+    )
+    .await
+}
+
+async fn ensure_admin_exists_with_claim_prompt_mode(
+    pool: &DbPool,
+    interactive_claims: bool,
+) -> Result<bool, sqlx::Error> {
     // Check if any admin exists
     let count = match query_scalar::<sqlx::Any, i64>(
         "SELECT COUNT(*) FROM user WHERE role = 'admin'",
@@ -780,7 +791,6 @@ pub async fn ensure_admin_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
             return Err(error);
         }
     };
-    let interactive_claims = stdin().is_terminal() && stdout().is_terminal();
     let claim_columns = match discover_admin_claim_columns(pool, backend).await {
         Ok(columns) => columns,
         Err(error) => {
@@ -999,7 +1009,7 @@ impl AuthRateLimiter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthDbBackend, auth_migration_sql, ensure_admin_exists};
+    use super::{AuthDbBackend, auth_migration_sql, ensure_admin_exists_with_claim_prompt_mode};
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     use crate::db::{connect, connect_with_config, query, query_scalar};
     use sqlx::Row;
@@ -1061,7 +1071,7 @@ mod tests {
         .await
         .expect("user table should be created");
 
-        let created = ensure_admin_exists(&pool)
+        let created = ensure_admin_exists_with_claim_prompt_mode(&pool, false)
             .await
             .expect("ensure_admin_exists should not error");
         assert!(created);
@@ -1113,7 +1123,7 @@ mod tests {
         .await
         .expect("user table should be created");
 
-        let created = ensure_admin_exists(&pool)
+        let created = ensure_admin_exists_with_claim_prompt_mode(&pool, false)
             .await
             .expect("ensure_admin_exists should not error");
         assert!(!created);
@@ -1169,7 +1179,7 @@ mod tests {
                 .expect("auth schema should apply");
         }
 
-        let created = ensure_admin_exists(&pool)
+        let created = ensure_admin_exists_with_claim_prompt_mode(&pool, false)
             .await
             .expect("ensure_admin_exists should not error");
         assert!(created);
