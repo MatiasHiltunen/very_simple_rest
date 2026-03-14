@@ -10,14 +10,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-clap = { version = "4.4", features = ["derive"] }
-dialoguer = "0.11"
-console = "0.15"
-indicatif = "0.17"
+clap = { version = "4.6", features = ["derive"] }
+dialoguer = "0.12"
+console = "0.16"
+indicatif = "0.18"
 sqlx.workspace = true
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 dotenv.workspace = true
 rest_macro_core = { workspace = true, features = ["codegen", "turso-local"] }
 bcrypt.workspace = true
@@ -25,10 +25,10 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-colored = "2.0"
+colored = "3.1"
 rand.workspace = true
-regex = "1.10.2"
-reqwest = { version = "0.11", features = ["blocking", "json"] }
+regex = "1.12.3"
+reqwest = { version = "0.13", features = ["blocking", "json"] }
 
 [lib]
 name = "rest_api_cli"

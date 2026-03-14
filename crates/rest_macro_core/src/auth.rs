@@ -5,8 +5,8 @@ use bcrypt::{hash, verify};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::distr::Alphanumeric;
-use rand::{Rng, rng};
+use rand::distr::{Alphanumeric, SampleString};
+use rand::rng;
 use rpassword;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -140,11 +140,8 @@ fn get_jwt_secret() -> &'static [u8] {
         }
 
         // Generate random secret (32 characters)
-        let random_secret: String = rng()
-            .sample_iter(&Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect();
+        let mut random = rng();
+        let random_secret = Alphanumeric.sample_string(&mut random, 32);
 
         eprintln!("WARNING: No JWT_SECRET found in environment. Using random secret (will change on restart)");
         random_secret.into_bytes()
@@ -859,7 +856,7 @@ fn prompt_admin_credentials() -> (String, String) {
 
 /// Create default admin credentials as a fallback
 fn create_default_admin() -> (String, String) {
-    use rand::Rng;
+    use rand::RngExt;
 
     // Characters to use for password generation
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

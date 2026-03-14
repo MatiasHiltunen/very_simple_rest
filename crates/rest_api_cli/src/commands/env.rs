@@ -1,18 +1,15 @@
 use crate::error::Result;
 use colored::Colorize;
-use rand::distr::Alphanumeric;
-use rand::{Rng, rng};
+use rand::distr::{Alphanumeric, SampleString};
+use rand::rng;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
 /// Generate a secure random string for JWT secret
 fn generate_random_secret(length: usize) -> String {
-    rng()
-        .sample_iter(&Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect()
+    let mut random = rng();
+    Alphanumeric.sample_string(&mut random, length)
 }
 
 /// Generate .env template file

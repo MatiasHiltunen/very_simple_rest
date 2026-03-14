@@ -1,6 +1,6 @@
 use crate::error::Result;
 use colored::Colorize;
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::{Alphanumeric, SampleString};
 use std::fs::File;
 use std::io::Write;

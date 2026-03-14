@@ -25,11 +25,8 @@ authorization, and relationship handling.
 
 ## Quick Start
 
-```rust
-use actix_web::{App, HttpServer, web};
-use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use rest_api::prelude::*;
+```no_run
+use very_simple_rest::prelude::*;
 
 // Define your data models with RBAC
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]

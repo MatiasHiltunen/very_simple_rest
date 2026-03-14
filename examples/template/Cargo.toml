@@ -6,10 +6,10 @@ edition = "2024"
 [dependencies]
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8.3", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros", "chrono"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros", "chrono"] }
 serde_json = "1.0"
-jsonwebtoken = "9"
-bcrypt = "0.17"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+bcrypt = "0.19"
 chrono = "0.4"
 very_simple_rest = { git = "https://github.com/MatiasHiltunen/very_simple_rest.git" }
 log = "0.4"

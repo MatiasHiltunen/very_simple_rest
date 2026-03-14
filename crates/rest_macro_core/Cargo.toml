@@ -16,7 +16,7 @@ actix-web.workspace = true
 actix-files.workspace = true
 serde.workspace = true
 sqlx.workspace = true
-sqlx-core = "0.8.3"
+sqlx-core = "0.8.6"
 serde_json.workspace = true
 jsonwebtoken.workspace = true
 bcrypt.workspace = true
@@ -25,7 +25,7 @@ dotenv = "0.15.0"
 rand.workspace = true
 log = { workspace = true }
 env_logger = { workspace = true }
-rpassword = "7.2"
+rpassword = "7.4"
 either = "1"
 futures-core = "0.3"
 futures-util = "0.3"
