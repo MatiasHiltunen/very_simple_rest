@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use colored::Colorize;
 use rest_macro_core::auth::{AuthDbBackend, auth_migration_sql};
@@ -12,6 +14,7 @@ use crate::error::{Error, Result};
 
 const LOCAL_DEP_PATH_ENV: &str = "VSR_LOCAL_DEP_PATH";
 const REPO_GIT_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest.git";
+const CARGO_BUILD_RETRY_DELAYS_MS: &[u64] = &[200, 500, 1_000];
 
 pub fn emit_server_project(
     input: &Path,
@@ -64,18 +67,12 @@ pub fn build_server_binary(
     let emitted = emit_server_project_inner(input, &build_root, package_name, with_auth, true)?;
 
     let target_dir = emitted.project_dir.join("target");
-    let mut command = Command::new("cargo");
-    command.arg("build");
-    if release {
-        command.arg("--release");
-    }
-    if let Some(target) = &target {
-        command.arg("--target").arg(target);
-    }
-    command.current_dir(&emitted.project_dir);
-    command.env("CARGO_TARGET_DIR", &target_dir);
-
-    let output_result = command.output().map_err(Error::Io)?;
+    let output_result = run_generated_project_build(
+        &emitted.project_dir,
+        &target_dir,
+        release,
+        target.as_deref(),
+    )?;
     if !output_result.status.success() {
         let stdout = String::from_utf8_lossy(&output_result.stdout);
         let stderr = String::from_utf8_lossy(&output_result.stderr);
@@ -204,6 +201,58 @@ fn emit_server_project_inner(
 
 fn write_file(path: &Path, contents: &str) -> Result<()> {
     fs::write(path, contents).map_err(Error::Io)
+}
+
+fn run_generated_project_build(
+    project_dir: &Path,
+    target_dir: &Path,
+    release: bool,
+    target: Option<&str>,
+) -> Result<std::process::Output> {
+    for (attempt, delay_ms) in CARGO_BUILD_RETRY_DELAYS_MS
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .enumerate()
+    {
+        let mut command = Command::new("cargo");
+        command.arg("build");
+        if release {
+            command.arg("--release");
+        }
+        if let Some(target) = target {
+            command.arg("--target").arg(target);
+        }
+        command.current_dir(project_dir);
+        command.env("CARGO_TARGET_DIR", target_dir);
+
+        let output = command.output().map_err(Error::Io)?;
+        if output.status.success() {
+            return Ok(output);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if delay_ms == 0 || !is_text_file_busy_failure(&stdout, &stderr) {
+            return Ok(output);
+        }
+
+        eprintln!(
+            "cargo build hit a transient Text file busy error; retrying ({}/{})...",
+            attempt + 1,
+            CARGO_BUILD_RETRY_DELAYS_MS.len()
+        );
+        thread::sleep(Duration::from_millis(delay_ms));
+    }
+
+    unreachable!("retry loop always returns")
+}
+
+fn is_text_file_busy_failure(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    combined.contains("text file busy")
+        || combined.contains("os error 26")
+        || combined.contains("etxtbsy")
 }
 
 fn copy_configured_static_dirs(
@@ -676,7 +725,9 @@ fn binary_file_name(package_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_server_binary, emit_server_project, sanitize_package_name};
+    use super::{
+        build_server_binary, emit_server_project, is_text_file_busy_failure, sanitize_package_name,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
@@ -705,6 +756,19 @@ mod tests {
         );
         assert_eq!(sanitize_package_name("9service"), "vsr-9service");
         assert_eq!(sanitize_package_name("___"), "vsr-eon-server");
+    }
+
+    #[test]
+    fn text_file_busy_classifier_matches_cargo_error_output() {
+        assert!(is_text_file_busy_failure(
+            "",
+            "Caused by:\n  Text file busy (os error 26)\n",
+        ));
+        assert!(is_text_file_busy_failure("", "process failed with ETXTBSY"));
+        assert!(!is_text_file_busy_failure(
+            "",
+            "error: linker `cc` not found"
+        ));
     }
 
     #[test]
