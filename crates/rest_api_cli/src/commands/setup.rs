@@ -1,13 +1,19 @@
 use crate::commands::admin::{create_admin, create_admin_with_options, prompt_admin_credentials};
+use crate::commands::db::connect_database;
 use crate::commands::env::generate_env_template;
 use crate::commands::migrate::apply_auth_migration;
 use crate::error::Result;
 use colored::Colorize;
 use dialoguer::Confirm;
-use sqlx::AnyPool;
+use rest_macro_core::db::query_scalar;
+use std::path::Path;
 
 /// Run setup wizard to initialize the API
-pub async fn run_setup(database_url: &str, non_interactive: bool) -> Result<()> {
+pub async fn run_setup(
+    database_url: &str,
+    config_path: Option<&Path>,
+    non_interactive: bool,
+) -> Result<()> {
     println!(
         "{}",
         "=== very_simple_rest API Setup Wizard ===".cyan().bold()
@@ -15,12 +21,12 @@ pub async fn run_setup(database_url: &str, non_interactive: bool) -> Result<()> 
 
     // Step 1: Check database connection
     println!("\n{}", "Step 1: Checking database connection".cyan().bold());
-    let pool = AnyPool::connect(database_url).await?;
+    let pool = connect_database(database_url, config_path).await?;
     println!("{}", "✓ Database connection successful".green());
 
     // Step 2: Apply the built-in auth migration if needed
     println!("\n{}", "Step 2: Setting up database schema".cyan().bold());
-    apply_auth_migration(database_url)
+    apply_auth_migration(database_url, config_path)
         .await
         .map_err(|error| crate::error::Error::Config(error.to_string()))?;
     println!("{}", "✓ Auth schema migrated/verified".green());
@@ -28,7 +34,7 @@ pub async fn run_setup(database_url: &str, non_interactive: bool) -> Result<()> 
     // Step 3: Check if admin user already exists
     println!("\n{}", "Step 3: Verifying admin user".cyan().bold());
     let admin_exists =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
+        query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
             .fetch_one(&pool)
             .await?;
 
@@ -44,7 +50,7 @@ pub async fn run_setup(database_url: &str, non_interactive: bool) -> Result<()> 
 
             if create_another {
                 let (email, password) = prompt_admin_credentials().await?;
-                create_admin(database_url, email, password).await?;
+                create_admin(database_url, config_path, email, password).await?;
             }
         }
     } else {
@@ -60,14 +66,15 @@ pub async fn run_setup(database_url: &str, non_interactive: bool) -> Result<()> 
         if non_interactive {
             if let (Some(email), Some(password)) = (env_email, env_password) {
                 println!("Using admin credentials from environment variables");
-                create_admin_with_options(database_url, email, password, false).await?;
+                create_admin_with_options(database_url, config_path, email, password, false)
+                    .await?;
             } else {
                 println!("{}", "Warning: Cannot create admin user in non-interactive mode without ADMIN_EMAIL and ADMIN_PASSWORD environment variables.".yellow());
             }
         } else {
             // In interactive mode, always prompt for credentials
             let (email, password) = prompt_admin_credentials().await?;
-            create_admin_with_options(database_url, email, password, true).await?;
+            create_admin_with_options(database_url, config_path, email, password, true).await?;
         }
     }
 

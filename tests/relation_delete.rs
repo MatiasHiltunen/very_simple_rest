@@ -5,7 +5,6 @@ use serde::Serialize;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
 use very_simple_rest::rest_api_from_eon;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 const TEST_JWT_SECRET: &str = "relation-delete-secret";
 
@@ -20,37 +19,36 @@ struct TestClaims {
 
 #[actix_web::test]
 async fn deleting_parent_cascades_child_rows_in_sqlite() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("relation_delete");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE parent (
+    query(
+        "CREATE TABLE parent (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL
-        );
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("parent table should be created");
 
-        CREATE TABLE child (
+    query(
+        "CREATE TABLE child (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             parent_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE
-        );
-        "#,
+        )",
     )
     .execute(&pool)
     .await
-    .expect("migration should apply");
+    .expect("child table should be created");
 
     let app = test::init_service(
         App::new()
@@ -70,7 +68,7 @@ async fn deleting_parent_cascades_child_rows_in_sqlite() {
     let create_parent_response = test::call_service(&app, create_parent).await;
     assert_eq!(create_parent_response.status(), StatusCode::CREATED);
 
-    let parent_id: i64 = sqlx::query_scalar("SELECT id FROM parent LIMIT 1")
+    let parent_id: i64 = query_scalar::<sqlx::Any, i64>("SELECT id FROM parent LIMIT 1")
         .fetch_one(&pool)
         .await
         .expect("parent row should exist");
@@ -86,7 +84,7 @@ async fn deleting_parent_cascades_child_rows_in_sqlite() {
     let create_child_response = test::call_service(&app, create_child).await;
     assert_eq!(create_child_response.status(), StatusCode::CREATED);
 
-    let child_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM child")
+    let child_count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM child")
         .fetch_one(&pool)
         .await
         .expect("child row count should be queryable");
@@ -99,7 +97,7 @@ async fn deleting_parent_cascades_child_rows_in_sqlite() {
     let delete_parent_response = test::call_service(&app, delete_parent).await;
     assert_eq!(delete_parent_response.status(), StatusCode::OK);
 
-    let remaining_children: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM child")
+    let remaining_children: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM child")
         .fetch_one(&pool)
         .await
         .expect("child row count should be queryable");

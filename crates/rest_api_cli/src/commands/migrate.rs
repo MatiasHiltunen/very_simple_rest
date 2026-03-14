@@ -2,13 +2,15 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use rest_macro_core::auth::{AuthDbBackend, auth_migration_sql};
 use rest_macro_core::compiler;
-use sqlx::{AnyPool, Row};
+use rest_macro_core::db::{DbPool, query, query_scalar};
+use sqlx::Row;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
 };
 
+use crate::commands::db::connect_database;
 use crate::commands::schema::{load_filtered_derive_service, load_schema_service};
 
 const MIGRATIONS_TABLE: &str = "_vsr_migrations";
@@ -205,15 +207,14 @@ pub fn generate_diff_migration(
 
 pub async fn inspect_live_schema(
     database_url: &str,
+    config_path: Option<&Path>,
     input: &Path,
     exclude_tables: &[String],
 ) -> Result<()> {
     let service = load_schema_service(input, exclude_tables)?;
     let backend = AuthDbBackend::from_database_url(database_url)
         .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
-    let pool = AnyPool::connect(database_url)
-        .await
-        .with_context(|| format!("failed to connect to database at {database_url}"))?;
+    let pool = connect_pool(database_url, config_path).await?;
 
     let mut issues = Vec::new();
     for resource in &service.resources {
@@ -352,7 +353,11 @@ pub async fn inspect_live_schema(
     bail!("live schema drift detected:\n{message}");
 }
 
-pub async fn apply_migrations(database_url: &str, dir: &Path) -> Result<()> {
+pub async fn apply_migrations(
+    database_url: &str,
+    config_path: Option<&Path>,
+    dir: &Path,
+) -> Result<()> {
     let files = migration_files(dir)?;
     if files.is_empty() {
         println!(
@@ -363,7 +368,7 @@ pub async fn apply_migrations(database_url: &str, dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let pool = connect_pool(database_url).await?;
+    let pool = connect_pool(database_url, config_path).await?;
 
     for file in files {
         let name = file
@@ -383,8 +388,8 @@ pub async fn apply_migrations(database_url: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn apply_auth_migration(database_url: &str) -> Result<()> {
-    let pool = connect_pool(database_url).await?;
+pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>) -> Result<()> {
+    let pool = connect_pool(database_url, config_path).await?;
     let backend = AuthDbBackend::from_database_url(database_url)
         .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
     let sql = auth_migration_sql(backend);
@@ -434,7 +439,7 @@ fn normalize_sql_type(raw: &str) -> String {
 }
 
 async fn inspect_table_schema(
-    pool: &AnyPool,
+    pool: &DbPool,
     backend: AuthDbBackend,
     table: &str,
 ) -> Result<Option<LiveTableSchema>> {
@@ -445,8 +450,8 @@ async fn inspect_table_schema(
     }
 }
 
-async fn inspect_sqlite_table(pool: &AnyPool, table: &str) -> Result<Option<LiveTableSchema>> {
-    let exists = sqlx::query_scalar::<_, i64>(
+async fn inspect_sqlite_table(pool: &DbPool, table: &str) -> Result<Option<LiveTableSchema>> {
+    let exists = query_scalar::<sqlx::Any, i64>(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
     )
     .bind(table)
@@ -458,7 +463,7 @@ async fn inspect_sqlite_table(pool: &AnyPool, table: &str) -> Result<Option<Live
     }
 
     let mut schema = LiveTableSchema::default();
-    let columns = sqlx::query(&format!("PRAGMA table_info({})", quote_sqlite_ident(table)))
+    let columns = query(&format!("PRAGMA table_info({})", quote_sqlite_ident(table)))
         .fetch_all(pool)
         .await
         .context("failed to inspect sqlite columns")?;
@@ -479,7 +484,7 @@ async fn inspect_sqlite_table(pool: &AnyPool, table: &str) -> Result<Option<Live
         );
     }
 
-    let indexes = sqlx::query(&format!("PRAGMA index_list({})", quote_sqlite_ident(table)))
+    let indexes = query(&format!("PRAGMA index_list({})", quote_sqlite_ident(table)))
         .fetch_all(pool)
         .await
         .context("failed to inspect sqlite indexes")?;
@@ -490,7 +495,7 @@ async fn inspect_sqlite_table(pool: &AnyPool, table: &str) -> Result<Option<Live
         }
     }
 
-    let foreign_keys = sqlx::query(&format!(
+    let foreign_keys = query(&format!(
         "PRAGMA foreign_key_list({})",
         quote_sqlite_ident(table)
     ))
@@ -519,8 +524,8 @@ async fn inspect_sqlite_table(pool: &AnyPool, table: &str) -> Result<Option<Live
     Ok(Some(schema))
 }
 
-async fn inspect_postgres_table(pool: &AnyPool, table: &str) -> Result<Option<LiveTableSchema>> {
-    let columns = sqlx::query(
+async fn inspect_postgres_table(pool: &DbPool, table: &str) -> Result<Option<LiveTableSchema>> {
+    let columns = query(
         "SELECT column_name, data_type, is_nullable, column_default
          FROM information_schema.columns
          WHERE table_schema = current_schema() AND table_name = $1
@@ -534,7 +539,7 @@ async fn inspect_postgres_table(pool: &AnyPool, table: &str) -> Result<Option<Li
         return Ok(None);
     }
 
-    let primary_keys = sqlx::query(
+    let primary_keys = query(
         "SELECT kcu.column_name
          FROM information_schema.table_constraints tc
          JOIN information_schema.key_column_usage kcu
@@ -570,7 +575,7 @@ async fn inspect_postgres_table(pool: &AnyPool, table: &str) -> Result<Option<Li
         );
     }
 
-    let indexes = sqlx::query(
+    let indexes = query(
         "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1",
     )
     .bind(table)
@@ -581,7 +586,7 @@ async fn inspect_postgres_table(pool: &AnyPool, table: &str) -> Result<Option<Li
         schema.indexes.insert(row.get::<String, _>("indexname"));
     }
 
-    let relations = sqlx::query(
+    let relations = query(
         "SELECT
              child_attr.attname AS column_name,
              parent_table.relname AS referenced_table,
@@ -633,8 +638,8 @@ async fn inspect_postgres_table(pool: &AnyPool, table: &str) -> Result<Option<Li
     Ok(Some(schema))
 }
 
-async fn inspect_mysql_table(pool: &AnyPool, table: &str) -> Result<Option<LiveTableSchema>> {
-    let columns = sqlx::query(
+async fn inspect_mysql_table(pool: &DbPool, table: &str) -> Result<Option<LiveTableSchema>> {
+    let columns = query(
         "SELECT column_name, data_type, is_nullable, column_default, column_key, extra
          FROM information_schema.columns
          WHERE table_schema = DATABASE() AND table_name = ?
@@ -670,7 +675,7 @@ async fn inspect_mysql_table(pool: &AnyPool, table: &str) -> Result<Option<LiveT
         );
     }
 
-    let indexes = sqlx::query(
+    let indexes = query(
         "SELECT DISTINCT index_name
          FROM information_schema.statistics
          WHERE table_schema = DATABASE() AND table_name = ?",
@@ -683,7 +688,7 @@ async fn inspect_mysql_table(pool: &AnyPool, table: &str) -> Result<Option<LiveT
         schema.indexes.insert(row.get::<String, _>("index_name"));
     }
 
-    let relations = sqlx::query(
+    let relations = query(
         "SELECT
              kcu.column_name,
              kcu.referenced_table_name,
@@ -809,7 +814,7 @@ fn migration_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-async fn ensure_migrations_table(pool: &AnyPool) -> Result<()> {
+async fn ensure_migrations_table(pool: &DbPool) -> Result<()> {
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} (
             name TEXT PRIMARY KEY,
@@ -817,20 +822,20 @@ async fn ensure_migrations_table(pool: &AnyPool) -> Result<()> {
         )",
         MIGRATIONS_TABLE
     );
-    sqlx::query(&sql)
+    query(&sql)
         .execute(pool)
         .await
         .context("failed to ensure migration metadata table exists")?;
     Ok(())
 }
 
-async fn migration_applied(pool: &AnyPool, database_url: &str, name: &str) -> Result<bool> {
+async fn migration_applied(pool: &DbPool, database_url: &str, name: &str) -> Result<bool> {
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM {} WHERE name = {})",
         MIGRATIONS_TABLE,
         placeholder_for_url(database_url, 1)
     );
-    let exists = sqlx::query_scalar::<_, i64>(&sql)
+    let exists = query_scalar::<sqlx::Any, i64>(&sql)
         .bind(name)
         .fetch_one(pool)
         .await
@@ -838,8 +843,8 @@ async fn migration_applied(pool: &AnyPool, database_url: &str, name: &str) -> Re
     Ok(exists != 0)
 }
 
-async fn connect_pool(database_url: &str) -> Result<AnyPool> {
-    let pool = AnyPool::connect(database_url)
+async fn connect_pool(database_url: &str, config_path: Option<&Path>) -> Result<DbPool> {
+    let pool = connect_database(database_url, config_path)
         .await
         .with_context(|| format!("failed to connect to database at {database_url}"))?;
     ensure_migrations_table(&pool).await?;
@@ -847,7 +852,7 @@ async fn connect_pool(database_url: &str) -> Result<AnyPool> {
 }
 
 async fn apply_named_migration(
-    pool: &AnyPool,
+    pool: &DbPool,
     database_url: &str,
     name: &str,
     sql: &str,
@@ -856,13 +861,12 @@ async fn apply_named_migration(
         return Ok(ApplyResult::Skipped);
     }
 
-    let mut tx = pool
+    let tx = pool
         .begin()
         .await
         .context("failed to start migration transaction")?;
 
-    sqlx::raw_sql(sql)
-        .execute(&mut *tx)
+    tx.execute_batch(sql)
         .await
         .with_context(|| format!("failed to apply migration {name}"))?;
 
@@ -871,9 +875,9 @@ async fn apply_named_migration(
         MIGRATIONS_TABLE,
         placeholder_for_url(database_url, 1)
     );
-    sqlx::query(&insert_sql)
+    query(&insert_sql)
         .bind(name)
-        .execute(&mut *tx)
+        .execute(&tx)
         .await
         .with_context(|| format!("failed to record migration {name}"))?;
 
@@ -899,12 +903,20 @@ enum ApplyResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::commands::db::{connect_database, database_url_from_service_config};
+    use rest_macro_core::db::query_scalar;
     use sqlx::Row;
+    use std::sync::{Mutex, OnceLock};
 
     use super::{
         BUILTIN_AUTH_MIGRATION, apply_auth_migration, apply_migrations, check_derive_migration,
         generate_derive_migration, generate_diff_migration, inspect_live_schema, migration_files,
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn migration_files_only_returns_sorted_sql_files() {
@@ -944,10 +956,10 @@ mod tests {
         )
         .expect("migration should be written");
 
-        apply_migrations(&database_url, &root)
+        apply_migrations(&database_url, None, &root)
             .await
             .expect("migrations should apply");
-        apply_migrations(&database_url, &root)
+        apply_migrations(&database_url, None, &root)
             .await
             .expect("reapplying should skip existing migrations");
 
@@ -987,10 +999,10 @@ mod tests {
 
         std::fs::create_dir_all(&root).expect("temp dir should exist");
 
-        apply_auth_migration(&database_url)
+        apply_auth_migration(&database_url, None)
             .await
             .expect("auth migration should apply");
-        apply_auth_migration(&database_url)
+        apply_auth_migration(&database_url, None)
             .await
             .expect("reapplying should skip existing auth migration");
 
@@ -1108,11 +1120,11 @@ mod tests {
         std::fs::copy(fixtures.join("owned_api.eon"), &schema).expect("schema should copy");
 
         super::generate_migration(&schema, &output, false).expect("migration should generate");
-        apply_migrations(&database_url, &migrations)
+        apply_migrations(&database_url, None, &migrations)
             .await
             .expect("migration should apply");
 
-        inspect_live_schema(&database_url, &schema, &[])
+        inspect_live_schema(&database_url, None, &schema, &[])
             .await
             .expect("live schema should match");
     }
@@ -1140,11 +1152,11 @@ mod tests {
         std::fs::copy(fixtures.join("owned_api_v2.eon"), &next).expect("schema should copy");
 
         super::generate_migration(&previous, &output, false).expect("migration should generate");
-        apply_migrations(&database_url, &migrations)
+        apply_migrations(&database_url, None, &migrations)
             .await
             .expect("migration should apply");
 
-        let error = inspect_live_schema(&database_url, &next, &[])
+        let error = inspect_live_schema(&database_url, None, &next, &[])
             .await
             .expect_err("live schema drift should be reported");
         let message = error.to_string();
@@ -1173,11 +1185,11 @@ mod tests {
         std::fs::copy(fixtures.join("cascade_api.eon"), &schema).expect("schema should copy");
 
         super::generate_migration(&schema, &output, false).expect("migration should generate");
-        apply_migrations(&database_url, &migrations)
+        apply_migrations(&database_url, None, &migrations)
             .await
             .expect("migration should apply");
 
-        inspect_live_schema(&database_url, &schema, &[])
+        inspect_live_schema(&database_url, None, &schema, &[])
             .await
             .expect("live schema should match");
     }
@@ -1222,11 +1234,130 @@ mod tests {
         .await
         .expect("schema should apply");
 
-        let error = inspect_live_schema(&database_url, &schema, &[])
+        let error = inspect_live_schema(&database_url, None, &schema, &[])
             .await
             .expect_err("live relation drift should be reported");
         let message = error.to_string();
         assert!(message.contains("foreign key `parent_id` on `child` has ON DELETE `NO ACTION`"));
         assert!(message.contains("`CASCADE` was expected"));
+    }
+
+    #[tokio::test]
+    async fn apply_migrations_uses_turso_local_config_path() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_apply_turso_local_{stamp}"));
+        let schema = root.join("turso_local_api.eon");
+        let migrations = root.join("migrations");
+        let output = migrations.join("0001_turso_local.sql");
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+
+        std::fs::create_dir_all(&migrations).expect("temp dir should exist");
+        std::fs::copy(fixtures.join("turso_local_api.eon"), &schema).expect("schema should copy");
+
+        super::generate_migration(&schema, &output, false).expect("migration should generate");
+        let database_url =
+            database_url_from_service_config(&schema).expect("service database url should resolve");
+
+        apply_migrations(&database_url, Some(&schema), &migrations)
+            .await
+            .expect("migration should apply through the Turso local adapter");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect through the Turso local adapter");
+        let table_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'note')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("table lookup should succeed");
+        assert_ne!(table_exists, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_migrations_uses_encrypted_turso_local_config_path() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_apply_turso_local_encrypted_{stamp}"));
+        let schema = root.join("turso_local_encrypted_api.eon");
+        let migrations = root.join("migrations");
+        let output = migrations.join("0001_turso_local_encrypted.sql");
+        let database_path = root.join("var/data/turso_local_encrypted.db");
+        let env_var = format!("VSR_TURSO_ENCRYPTED_KEY_{stamp}");
+        let key = "d1bbfda4f589dc9daaf004fe21111e00dc00c98237102f5c7002a5669fc76327";
+
+        std::fs::create_dir_all(&migrations).expect("temp dir should exist");
+        if let Some(parent) = database_path.parent() {
+            std::fs::create_dir_all(parent).expect("database dir should exist");
+        }
+        unsafe {
+            std::env::set_var(&env_var, key);
+        }
+        std::fs::write(
+            &schema,
+            format!(
+                r#"module: "turso_local_encrypted_runtime"
+database: {{
+    engine: {{
+        kind: TursoLocal
+        path: "{}"
+        encryption_key_env: "{}"
+    }}
+}}
+resources: [
+    {{
+        name: "SecretNote"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "title", type: String }}
+        ]
+    }}
+]
+"#,
+                database_path.display(),
+                env_var,
+            ),
+        )
+        .expect("schema should be written");
+
+        super::generate_migration(&schema, &output, false).expect("migration should generate");
+        let database_url =
+            database_url_from_service_config(&schema).expect("service database url should resolve");
+
+        apply_auth_migration(&database_url, Some(&schema))
+            .await
+            .expect("auth migration should apply through the encrypted Turso local adapter");
+        apply_migrations(&database_url, Some(&schema), &migrations)
+            .await
+            .expect("migration should apply through the encrypted Turso local adapter");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect through the encrypted Turso local adapter");
+        let user_table_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("user table lookup should succeed");
+        let secret_note_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secret_note')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("resource table lookup should succeed");
+        assert_ne!(user_table_exists, 0);
+        assert_ne!(secret_note_exists, 0);
+
+        unsafe {
+            std::env::remove_var(&env_var);
+        }
     }
 }

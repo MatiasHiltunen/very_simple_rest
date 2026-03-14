@@ -10,7 +10,7 @@ use rand::{Rng, rng};
 use rpassword;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{AnyPool, Column, FromRow, Row, any::AnyRow};
+use sqlx::{Column, FromRow, Row, any::AnyRow};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::future::{Ready, ready};
@@ -19,6 +19,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::{
+    db::{DbPool, query, query_scalar},
     errors,
     security::{RateLimitRule, SecurityConfig, request_client_ip},
 };
@@ -60,7 +61,10 @@ impl AuthDbBackend {
             Some(Self::Postgres)
         } else if database_url.starts_with("mysql:") || database_url.starts_with("mariadb:") {
             Some(Self::Mysql)
-        } else if database_url.starts_with("sqlite:") {
+        } else if database_url.starts_with("sqlite:")
+            || database_url.starts_with("turso:")
+            || database_url.starts_with("turso-local:")
+        {
             Some(Self::Sqlite)
         } else {
             None
@@ -266,17 +270,17 @@ impl AuthRateLimitScope {
     }
 }
 
-pub async fn register(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -> impl Responder {
+pub async fn register(input: web::Json<RegisterInput>, db: web::Data<DbPool>) -> impl Responder {
     register_inner(input, db).await
 }
 
-async fn register_inner(input: web::Json<RegisterInput>, db: web::Data<AnyPool>) -> HttpResponse {
+async fn register_inner(input: web::Json<RegisterInput>, db: web::Data<DbPool>) -> HttpResponse {
     let password_hash = match hash(&input.password, 12) {
         Ok(h) => h,
         Err(_) => return errors::internal_error("Hashing error"),
     };
 
-    let result = sqlx::query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
+    let result = query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
         .bind(&input.email)
         .bind(password_hash)
         .bind("user")
@@ -295,7 +299,7 @@ async fn register_inner(input: web::Json<RegisterInput>, db: web::Data<AnyPool>)
 pub async fn register_with_request(
     req: HttpRequest,
     input: web::Json<RegisterInput>,
-    db: web::Data<AnyPool>,
+    db: web::Data<DbPool>,
 ) -> impl Responder {
     if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Register) {
         return response;
@@ -303,13 +307,13 @@ pub async fn register_with_request(
     register_inner(input, db).await
 }
 
-pub async fn login(input: web::Json<LoginInput>, db: web::Data<AnyPool>) -> impl Responder {
+pub async fn login(input: web::Json<LoginInput>, db: web::Data<DbPool>) -> impl Responder {
     login_with_settings(input, db, AuthSettings::default()).await
 }
 
 async fn login_with_settings(
     input: web::Json<LoginInput>,
-    db: web::Data<AnyPool>,
+    db: web::Data<DbPool>,
     settings: AuthSettings,
 ) -> HttpResponse {
     let user = match load_authenticated_user(db.get_ref(), &input.email).await {
@@ -345,7 +349,7 @@ async fn login_with_settings(
 pub async fn login_with_request(
     req: HttpRequest,
     input: web::Json<LoginInput>,
-    db: web::Data<AnyPool>,
+    db: web::Data<DbPool>,
 ) -> impl Responder {
     if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Login) {
         return response;
@@ -362,10 +366,10 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 async fn load_authenticated_user(
-    db: &AnyPool,
+    db: &DbPool,
     email: &str,
 ) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
-    let row = sqlx::query("SELECT * FROM user WHERE email = ?")
+    let row = query("SELECT * FROM user WHERE email = ?")
         .bind(email)
         .fetch_optional(db)
         .await?;
@@ -453,34 +457,36 @@ struct AdminClaimValue {
     value: i64,
 }
 
-async fn detect_auth_backend(pool: &AnyPool) -> Result<AuthDbBackend, sqlx::Error> {
-    let connection = pool.acquire().await?;
-    let backend_name = connection.backend_name().to_ascii_lowercase();
-    if backend_name.contains("postgres") {
-        Ok(AuthDbBackend::Postgres)
-    } else if backend_name.contains("mysql") {
-        Ok(AuthDbBackend::Mysql)
-    } else if backend_name.contains("sqlite") {
-        Ok(AuthDbBackend::Sqlite)
-    } else {
-        Err(sqlx::Error::Protocol(format!(
-            "unsupported built-in auth backend `{backend_name}`"
-        )))
+async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, sqlx::Error> {
+    match pool {
+        DbPool::Sqlx(pool) => {
+            let connection = pool.acquire().await?;
+            let backend_name = connection.backend_name().to_ascii_lowercase();
+            if backend_name.contains("postgres") {
+                Ok(AuthDbBackend::Postgres)
+            } else if backend_name.contains("mysql") {
+                Ok(AuthDbBackend::Mysql)
+            } else if backend_name.contains("sqlite") {
+                Ok(AuthDbBackend::Sqlite)
+            } else {
+                Err(sqlx::Error::Protocol(format!(
+                    "unsupported built-in auth backend `{backend_name}`"
+                )))
+            }
+        }
+        #[cfg(feature = "turso-local")]
+        DbPool::TursoLocal(_) => Ok(AuthDbBackend::Sqlite),
     }
 }
 
 async fn discover_admin_claim_columns(
-    pool: &AnyPool,
+    pool: &DbPool,
     backend: AuthDbBackend,
 ) -> Result<Vec<AdminClaimColumn>, sqlx::Error> {
     let rows = match backend {
-        AuthDbBackend::Sqlite => {
-            sqlx::query("PRAGMA table_info('user')")
-                .fetch_all(pool)
-                .await?
-        }
+        AuthDbBackend::Sqlite => query("PRAGMA table_info('user')").fetch_all(pool).await?,
         AuthDbBackend::Postgres => {
-            sqlx::query(
+            query(
                 "SELECT column_name, data_type, is_nullable, column_default \
              FROM information_schema.columns \
              WHERE table_schema = current_schema() AND table_name = 'user' \
@@ -490,7 +496,7 @@ async fn discover_admin_claim_columns(
             .await?
         }
         AuthDbBackend::Mysql => {
-            sqlx::query(
+            query(
                 "SELECT column_name, data_type, is_nullable, column_default \
              FROM information_schema.columns \
              WHERE table_schema = DATABASE() AND table_name = 'user' \
@@ -673,7 +679,7 @@ fn placeholder_for_backend(backend: AuthDbBackend, index: usize) -> String {
 }
 
 async fn insert_admin_user(
-    pool: &AnyPool,
+    pool: &DbPool,
     backend: AuthDbBackend,
     email: &str,
     password_hash: &str,
@@ -701,10 +707,7 @@ async fn insert_admin_user(
         columns.join(", "),
         placeholders
     );
-    let mut query = sqlx::query(&sql)
-        .bind(email)
-        .bind(password_hash)
-        .bind("admin");
+    let mut query = query(&sql).bind(email).bind(password_hash).bind("admin");
     for claim in claim_values {
         query = query.bind(claim.value);
     }
@@ -724,11 +727,13 @@ pub async fn me(user: UserContext) -> impl Responder {
 ///
 /// Returns true if an admin exists (either previously or newly created),
 /// false only if there was an error creating the admin user.
-pub async fn ensure_admin_exists(pool: &AnyPool) -> Result<bool, sqlx::Error> {
+pub async fn ensure_admin_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
     // Check if any admin exists
-    let count = match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
-        .fetch_one(pool)
-        .await
+    let count = match query_scalar::<sqlx::Any, i64>(
+        "SELECT COUNT(*) FROM user WHERE role = 'admin'",
+    )
+    .fetch_one(pool)
+    .await
     {
         Ok(count) => count,
         Err(error) => {
@@ -876,16 +881,16 @@ fn create_default_admin() -> (String, String) {
     (email, password)
 }
 
-pub fn auth_routes(cfg: &mut web::ServiceConfig, db: AnyPool) {
+pub fn auth_routes(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
     auth_routes_with_settings(cfg, db, AuthSettings::default());
 }
 
 pub fn auth_routes_with_settings(
     cfg: &mut web::ServiceConfig,
-    db: AnyPool,
+    db: impl Into<DbPool>,
     settings: AuthSettings,
 ) {
-    let db = web::Data::new(db);
+    let db = web::Data::new(db.into());
     let settings = web::Data::new(settings);
     let limiter = web::Data::new(AuthRateLimiter::default());
     errors::configure_extractor_errors(cfg);
@@ -998,7 +1003,9 @@ impl AuthRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::{AuthDbBackend, auth_migration_sql, ensure_admin_exists};
-    use sqlx::{AnyPool, Row};
+    use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
+    use crate::db::{connect, connect_with_config, query, query_scalar};
+    use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1029,7 +1036,6 @@ mod tests {
 
     #[actix_web::test]
     async fn ensure_admin_exists_inserts_detected_claim_columns_from_environment() {
-        sqlx::any::install_default_drivers();
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
 
         unsafe {
@@ -1040,11 +1046,11 @@ mod tests {
         }
 
         let database_url = unique_sqlite_url("ensure_admin_claims");
-        let pool = AnyPool::connect(&database_url)
+        let pool = connect(&database_url)
             .await
             .expect("database should connect");
 
-        sqlx::query(
+        query(
             "CREATE TABLE user (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
@@ -1063,11 +1069,10 @@ mod tests {
             .expect("ensure_admin_exists should not error");
         assert!(created);
 
-        let row =
-            sqlx::query("SELECT tenant_id, claim_workspace_id FROM user WHERE role = 'admin'")
-                .fetch_one(&pool)
-                .await
-                .expect("admin row should exist");
+        let row = query("SELECT tenant_id, claim_workspace_id FROM user WHERE role = 'admin'")
+            .fetch_one(&pool)
+            .await
+            .expect("admin row should exist");
         let tenant_id: Option<i64> = row.try_get("tenant_id").expect("tenant_id should decode");
         let workspace_id: Option<i64> = row
             .try_get("claim_workspace_id")
@@ -1085,7 +1090,6 @@ mod tests {
 
     #[actix_web::test]
     async fn ensure_admin_exists_returns_false_when_required_claim_is_missing() {
-        sqlx::any::install_default_drivers();
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
 
         unsafe {
@@ -1095,11 +1099,11 @@ mod tests {
         }
 
         let database_url = unique_sqlite_url("ensure_admin_required_claim");
-        let pool = AnyPool::connect(&database_url)
+        let pool = connect(&database_url)
             .await
             .expect("database should connect");
 
-        sqlx::query(
+        query(
             "CREATE TABLE user (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
@@ -1117,7 +1121,7 @@ mod tests {
             .expect("ensure_admin_exists should not error");
         assert!(!created);
 
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user")
+        let count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM user")
             .fetch_one(&pool)
             .await
             .expect("row count should be queryable");
@@ -1127,5 +1131,64 @@ mod tests {
             std::env::remove_var("ADMIN_EMAIL");
             std::env::remove_var("ADMIN_PASSWORD");
         }
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[actix_web::test]
+    async fn ensure_admin_exists_works_with_encrypted_turso_local() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic enough")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vsr_auth_encrypted_{stamp}.db"));
+        let env_var = format!("VSR_AUTH_TURSO_KEY_{stamp}");
+        let key = "c1bbfda4f589dc9daaf004fe21111e00dc00c98237102f5c7002a5669fc76327";
+
+        unsafe {
+            std::env::set_var("ADMIN_EMAIL", "encrypted-admin@example.com");
+            std::env::set_var("ADMIN_PASSWORD", "password123");
+            std::env::set_var(&env_var, key);
+        }
+
+        let config = DatabaseConfig {
+            engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: path.to_string_lossy().into_owned(),
+                encryption_key_env: Some(env_var.clone()),
+            }),
+        };
+        let pool = connect_with_config("sqlite:ignored.db?mode=rwc", &config)
+            .await
+            .expect("database should connect");
+
+        for statement in auth_migration_sql(AuthDbBackend::Sqlite)
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+        {
+            query(statement)
+                .execute(&pool)
+                .await
+                .expect("auth schema should apply");
+        }
+
+        let created = ensure_admin_exists(&pool)
+            .await
+            .expect("ensure_admin_exists should not error");
+        assert!(created);
+
+        let count: i64 =
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
+                .fetch_one(&pool)
+                .await
+                .expect("admin row should be queryable");
+        assert_eq!(count, 1);
+
+        unsafe {
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+            std::env::remove_var(&env_var);
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

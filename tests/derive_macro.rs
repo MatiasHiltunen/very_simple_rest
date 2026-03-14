@@ -30,7 +30,7 @@ fn derive_macro_generates_write_dtos() {
 
     let _configure: fn(
         &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
+        very_simple_rest::db::DbPool,
     ) = Article::configure;
 
     let _ = (article, create, update);

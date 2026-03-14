@@ -1,0 +1,16 @@
+module: "turso_local_api"
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/turso_local.db"
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

@@ -6,6 +6,8 @@ rest_api_from_eon!("tests/fixtures/tenant_api.eon");
 rest_api_from_eon!("tests/fixtures/paged_api.eon");
 rest_api_from_eon!("tests/fixtures/security_api.eon");
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
+rest_api_from_eon!("tests/fixtures/turso_local_api.eon");
+rest_api_from_eon!("tests/fixtures/turso_local_encrypted_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -30,14 +32,12 @@ fn eon_macro_generates_models_dtos_and_configure_functions() {
         post_id: 1,
     };
 
-    let _configure_service: fn(
-        &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
-    ) = blog_api::configure;
-    let _configure_post: fn(
-        &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
-    ) = blog_api::Post::configure;
+    let _configure_service_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| blog_api::configure(cfg, db);
+    let _configure_post_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| blog_api::Post::configure(cfg, db);
 
     let _ = (post, create, update, comment);
 }
@@ -58,14 +58,12 @@ fn eon_macro_owner_policies_trim_generated_dtos() {
         title: "Updated".to_owned(),
     };
 
-    let _configure_service: fn(
-        &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
-    ) = owned_api::configure;
-    let _configure_post: fn(
-        &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
-    ) = owned_api::OwnedPost::configure;
+    let _configure_service_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| owned_api::configure(cfg, db);
+    let _configure_post_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| owned_api::OwnedPost::configure(cfg, db);
 
     let _ = (post, create, update);
 }
@@ -87,14 +85,12 @@ fn eon_macro_claim_policies_trim_generated_dtos() {
         title: "Updated".to_owned(),
     };
 
-    let _configure_service: fn(
-        &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
-    ) = tenant_api::configure;
-    let _configure_post: fn(
-        &mut very_simple_rest::actix_web::web::ServiceConfig,
-        very_simple_rest::sqlx::AnyPool,
-    ) = tenant_api::TenantPost::configure;
+    let _configure_service_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| tenant_api::configure(cfg, db);
+    let _configure_post_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| tenant_api::TenantPost::configure(cfg, db);
 
     let _ = (post, create, update);
 }
@@ -149,6 +145,38 @@ fn eon_macro_generates_security_config_function() {
     );
     assert_eq!(security.auth.audience.as_deref(), Some("api_clients"));
     assert_eq!(security.auth.access_token_ttl_seconds, 900);
+}
+
+#[test]
+fn eon_macro_generates_database_config_function() {
+    let database = turso_local_api::database();
+    assert_eq!(
+        database.engine,
+        very_simple_rest::core::database::DatabaseEngine::TursoLocal(
+            very_simple_rest::core::database::TursoLocalConfig {
+                path: "var/data/turso_local.db".to_owned(),
+                encryption_key_env: None,
+            }
+        )
+    );
+    assert_eq!(
+        turso_local_api::default_database_url(),
+        "sqlite:var/data/turso_local.db?mode=rwc"
+    );
+}
+
+#[test]
+fn eon_macro_preserves_turso_encryption_env_name() {
+    let database = turso_local_encrypted_api::database();
+    assert_eq!(
+        database.engine,
+        very_simple_rest::core::database::DatabaseEngine::TursoLocal(
+            very_simple_rest::core::database::TursoLocalConfig {
+                path: "var/data/turso_encrypted.db".to_owned(),
+                encryption_key_env: Some("TURSO_ENCRYPTION_KEY".to_owned()),
+            }
+        )
+    );
 }
 
 #[test]

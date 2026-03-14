@@ -3,9 +3,13 @@ use colored::Colorize;
 use console::style;
 use dialoguer::{Input, Password};
 use regex::Regex;
-use sqlx::{AnyPool, Row};
+use rest_macro_core::db::{DbPool, query, query_scalar};
+use sqlx::Row;
 use std::io::{IsTerminal, stdin, stdout};
+use std::path::Path;
 use std::sync::OnceLock;
+
+use crate::commands::db::connect_database;
 
 /// Get a compiled regex for email validation
 fn email_regex() -> &'static Regex {
@@ -30,12 +34,12 @@ fn validate_password(password: &str) -> bool {
 }
 
 /// Checks if a user with the given email already exists
-async fn user_exists(pool: &AnyPool, database_url: &str, email: &str) -> Result<bool> {
+async fn user_exists(pool: &DbPool, database_url: &str, email: &str) -> Result<bool> {
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM user WHERE email = {})",
         placeholder_for_url(database_url, 1)
     );
-    let exists = sqlx::query_scalar::<_, i64>(&sql)
+    let exists = query_scalar::<sqlx::Any, i64>(&sql)
         .bind(email)
         .fetch_one(pool)
         .await?;
@@ -91,25 +95,38 @@ pub async fn prompt_admin_credentials() -> Result<(String, String)> {
 }
 
 /// Create an admin user in the database
-pub async fn create_admin(database_url: &str, email: String, password: String) -> Result<()> {
+pub async fn create_admin(
+    database_url: &str,
+    config_path: Option<&Path>,
+    email: String,
+    password: String,
+) -> Result<()> {
     let interactive_claims = stdin().is_terminal() && stdout().is_terminal();
-    create_admin_with_options(database_url, email, password, interactive_claims).await
+    create_admin_with_options(
+        database_url,
+        config_path,
+        email,
+        password,
+        interactive_claims,
+    )
+    .await
 }
 
 /// Create an admin user in the database with explicit claim prompting behavior
 pub async fn create_admin_with_options(
     database_url: &str,
+    config_path: Option<&Path>,
     email: String,
     password: String,
     interactive_claims: bool,
 ) -> Result<()> {
     println!("Connecting to database...");
-    let pool = AnyPool::connect(database_url).await?;
+    let pool = connect_database(database_url, config_path).await?;
     create_admin_in_pool(&pool, database_url, email, password, interactive_claims).await
 }
 
 async fn create_admin_in_pool(
-    pool: &AnyPool,
+    pool: &DbPool,
     database_url: &str,
     email: String,
     password: String,
@@ -143,7 +160,7 @@ async fn create_admin_in_pool(
         columns.join(", "),
         placeholders
     );
-    let mut query = sqlx::query(&sql)
+    let mut query = query(&sql)
         .bind(&email)
         .bind(&hashed_password)
         .bind("admin");
@@ -174,18 +191,14 @@ async fn create_admin_in_pool(
 }
 
 async fn discover_admin_claim_columns(
-    pool: &AnyPool,
+    pool: &DbPool,
     database_url: &str,
 ) -> Result<Vec<AdminClaimColumn>> {
     let backend = detect_backend(database_url)?;
     let rows = match backend {
-        DbBackend::Sqlite => {
-            sqlx::query("PRAGMA table_info('user')")
-                .fetch_all(pool)
-                .await?
-        }
+        DbBackend::Sqlite => query("PRAGMA table_info('user')").fetch_all(pool).await?,
         DbBackend::Postgres => {
-            sqlx::query(
+            query(
                 "SELECT column_name, data_type, is_nullable, column_default \
              FROM information_schema.columns \
              WHERE table_schema = current_schema() AND table_name = 'user' \
@@ -195,7 +208,7 @@ async fn discover_admin_claim_columns(
             .await?
         }
         DbBackend::Mysql => {
-            sqlx::query(
+            query(
                 "SELECT column_name, data_type, is_nullable, column_default \
              FROM information_schema.columns \
              WHERE table_schema = DATABASE() AND table_name = 'user' \
@@ -407,7 +420,8 @@ fn placeholder_for_url(database_url: &str, index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::create_admin_with_options;
-    use sqlx::{AnyPool, Row};
+    use rest_macro_core::db::{DbPool, query};
+    use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -427,14 +441,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_admin_inserts_detected_claim_columns_from_environment() {
-        sqlx::any::install_default_drivers();
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let database_url = unique_sqlite_url("claims");
-        let pool = AnyPool::connect(&database_url)
+        let pool = DbPool::connect(&database_url)
             .await
             .expect("database should connect");
 
-        sqlx::query(
+        query(
             "CREATE TABLE user (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
@@ -455,6 +468,7 @@ mod tests {
 
         create_admin_with_options(
             &database_url,
+            None,
             "admin@example.com".to_owned(),
             "password123".to_owned(),
             false,
@@ -462,7 +476,7 @@ mod tests {
         .await
         .expect("admin should be created");
 
-        let row = sqlx::query("SELECT tenant_id, claim_workspace_id FROM user WHERE email = ?")
+        let row = query("SELECT tenant_id, claim_workspace_id FROM user WHERE email = ?")
             .bind("admin@example.com")
             .fetch_one(&pool)
             .await
@@ -482,17 +496,16 @@ mod tests {
 
     #[tokio::test]
     async fn create_admin_requires_missing_non_nullable_claim_columns_in_non_interactive_mode() {
-        sqlx::any::install_default_drivers();
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::remove_var("ADMIN_TENANT_ID");
         }
         let database_url = unique_sqlite_url("required_claim");
-        let pool = AnyPool::connect(&database_url)
+        let pool = DbPool::connect(&database_url)
             .await
             .expect("database should connect");
 
-        sqlx::query(
+        query(
             "CREATE TABLE user (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE,
@@ -507,6 +520,7 @@ mod tests {
 
         let error = create_admin_with_options(
             &database_url,
+            None,
             "admin@example.com".to_owned(),
             "password123".to_owned(),
             false,

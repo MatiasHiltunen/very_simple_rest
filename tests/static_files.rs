@@ -1,16 +1,12 @@
 use very_simple_rest::actix_web::{App, HttpResponse, http::StatusCode, test, web};
+use very_simple_rest::db::connect;
 use very_simple_rest::rest_api_from_eon;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 
 #[actix_web::test]
 async fn eon_static_config_serves_assets_and_spa_routes() {
-    very_simple_rest::sqlx::any::install_default_drivers();
-
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+    let pool = connect("sqlite::memory:")
         .await
         .expect("database should connect");
 

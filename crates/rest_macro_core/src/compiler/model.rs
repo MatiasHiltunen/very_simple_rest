@@ -5,6 +5,7 @@ use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use syn::{Ident, Type};
 
+use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::security::SecurityConfig;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
@@ -305,12 +306,28 @@ pub struct ServiceSpec {
     pub module_ident: Ident,
     pub resources: Vec<ResourceSpec>,
     pub static_mounts: Vec<StaticMountSpec>,
+    pub database: DatabaseConfig,
     pub security: SecurityConfig,
 }
 
 impl ResourceSpec {
     pub fn find_field(&self, field_name: &str) -> Option<&FieldSpec> {
         self.fields.iter().find(|field| field.name() == field_name)
+    }
+}
+
+pub fn default_service_database_url(service: &ServiceSpec) -> String {
+    match &service.database.engine {
+        DatabaseEngine::TursoLocal(engine) => sqlite_url_for_path(&engine.path),
+        DatabaseEngine::Sqlx => service
+            .resources
+            .first()
+            .map(|resource| match resource.db {
+                DbBackend::Sqlite => "sqlite:app.db?mode=rwc".to_owned(),
+                DbBackend::Postgres => "postgres://postgres:postgres@127.0.0.1/app".to_owned(),
+                DbBackend::Mysql => "mysql://root:password@127.0.0.1/app".to_owned(),
+            })
+            .unwrap_or_else(|| "sqlite:app.db?mode=rwc".to_owned()),
     }
 }
 

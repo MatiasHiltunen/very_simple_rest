@@ -18,7 +18,7 @@ pub struct Comment {
     pub id: Option<i64>,
     pub title: String,
     pub content: String,
-    #[relation(foreign_key = "post_id", references = "post.id", nested_route = "true")]
+    #[relation(references = "post.id", nested_route = "true")]
     pub post_id: i64,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -81,10 +81,8 @@ async fn main() -> std::io::Result<()> {
 
     info!("Initializing REST API server...");
 
-    sqlx::any::install_default_drivers();
-
     info!("Connecting to database...");
-    let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
+    let pool = connect("sqlite:app.db?mode=rwc").await.unwrap();
     info!("Database connection established");
 
     // Apply `vsr migrate auth` and `vsr migrate derive --input src --exclude-table user`

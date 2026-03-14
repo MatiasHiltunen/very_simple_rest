@@ -50,6 +50,18 @@ For non-interactive setup (e.g., in CI/CD pipelines):
 vsr setup --non-interactive
 ```
 
+If you already have a bare `.eon` service, you can let `vsr` derive the database URL from it:
+
+```bash
+vsr --config api.eon setup
+vsr --config api.eon create-admin --email admin@example.com --password change-me
+vsr --config api.eon check-db
+```
+
+When `--config` points to a `.eon` service and `--database-url` / `DATABASE_URL` are both absent,
+the CLI uses the service’s compiled default database URL. That includes `database.engine =
+TursoLocal`, which resolves to the matching SQLite-compatible file URL.
+
 ### Server Generation
 
 Generate a runnable Rust server project from a bare `.eon` service:
@@ -88,7 +100,8 @@ When a `.eon` service defines static mounts, `vsr server emit` also copies those
 the generated project and wires the generated server to serve them. When a `.eon` service defines
 `security`, the emitted server also applies the compiled JSON body limit, CORS policy,
 trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings
-automatically.
+automatically. When a `.eon` service defines `database.engine`, the emitted server also carries
+that runtime engine config into the project, including local Turso bootstrap.
 
 ### OpenAPI Generation
 
@@ -145,6 +158,32 @@ Supported options:
 
 The loader rejects mounts that escape the `.eon` root or conflict with reserved routes such as
 `/api`, `/auth`, `/docs`, and `/openapi.json`.
+
+### Database Engine In `.eon`
+
+Bare `.eon` services can also define a service-level database engine:
+
+```eon
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/app.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+    }
+}
+```
+
+Current support:
+
+- `Sqlx`: the existing default runtime path
+- `TursoLocal`: bootstraps a local Turso database file and uses the project runtime database
+  adapter with SQLite-compatible SQL
+- `TursoLocal.encryption_key_env`: reads a hex key from the named environment variable and uses
+  Turso local encryption with the current default cipher (`aegis256`) during bootstrap
+
+Current limitation:
+
+- This is still a project-local runtime adapter, not a true upstream SQLx `Any` driver.
 
 ### Security In `.eon`
 
@@ -257,6 +296,14 @@ vsr setup
 
 # Check database status
 vsr check-db
+```
+
+### `.eon`-Driven Local Turso Example
+
+```bash
+# Use the database settings compiled from a bare .eon service
+vsr --config tests/fixtures/turso_local_api.eon check-db
+vsr --config tests/fixtures/turso_local_api.eon migrate apply --dir migrations
 ```
 
 ### Creating Admin in CI/CD Pipeline

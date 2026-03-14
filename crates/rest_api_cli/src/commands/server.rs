@@ -5,6 +5,7 @@ use std::process::Command;
 use colored::Colorize;
 use rest_macro_core::auth::{AuthDbBackend, auth_migration_sql};
 use rest_macro_core::compiler::{self, DbBackend, OpenApiSpecOptions, ServiceSpec};
+use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -133,6 +134,7 @@ fn emit_server_project_inner(
         .map_err(|error| Error::Config(format!("failed to load `{}`: {error}", input.display())))?;
     let backend = detect_backend(&service)?;
     ensure_auth_is_compatible(&service, with_auth)?;
+    ensure_database_engine_is_compatible(&service, backend)?;
 
     prepare_output_dir(output_dir, force)?;
 
@@ -161,16 +163,16 @@ fn emit_server_project_inner(
 
     write_file(
         &output_dir.join("Cargo.toml"),
-        &render_cargo_toml(&package_name, backend)?,
+        &render_cargo_toml(&package_name, &service, backend)?,
     )?;
     write_file(
         &output_dir.join("src/main.rs"),
-        &render_main_rs(&module_name, &eon_file_name, backend, with_auth),
+        &render_main_rs(&module_name, &eon_file_name, with_auth),
     )?;
     write_file(&output_dir.join(&eon_file_name), &input_content)?;
     write_file(
         &output_dir.join(".env.example"),
-        &render_env_example(backend, with_auth),
+        &render_env_example(&service, backend, with_auth),
     )?;
     write_file(
         &output_dir.join(".gitignore"),
@@ -178,7 +180,7 @@ fn emit_server_project_inner(
     )?;
     write_file(
         &output_dir.join("README.md"),
-        &render_project_readme(&package_name, backend, with_auth),
+        &render_project_readme(&package_name, &service, backend, with_auth),
     )?;
     write_file(&output_dir.join("openapi.json"), &openapi_json)?;
     copy_configured_static_dirs(input, output_dir, &service)?;
@@ -334,8 +336,31 @@ fn ensure_auth_is_compatible(service: &ServiceSpec, with_auth: bool) -> Result<(
     Ok(())
 }
 
-fn render_cargo_toml(package_name: &str, backend: DbBackend) -> Result<String> {
-    let dependency = render_runtime_dependency(backend)?;
+fn ensure_database_engine_is_compatible(service: &ServiceSpec, backend: DbBackend) -> Result<()> {
+    match &service.database.engine {
+        DatabaseEngine::Sqlx => Ok(()),
+        DatabaseEngine::TursoLocal(engine) => {
+            if backend != DbBackend::Sqlite {
+                return Err(Error::Config(
+                    "database.engine = TursoLocal requires SQLite resources".to_owned(),
+                ));
+            }
+            if engine.encryption_key_env.is_some() {
+                return Err(Error::Config(
+                    "database.engine.encryption_key_env is not supported yet because generated CRUD/auth still execute through SQLx".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn render_cargo_toml(
+    package_name: &str,
+    service: &ServiceSpec,
+    backend: DbBackend,
+) -> Result<String> {
+    let dependency = render_runtime_dependency(service, backend)?;
     let backend_feature = backend_feature_name(backend);
     Ok(format!(
         r#"[package]
@@ -357,13 +382,14 @@ sqlx = {{ version = "0.8.3", features = ["runtime-tokio-native-tls", "any", "mac
     ))
 }
 
-fn render_runtime_dependency(backend: DbBackend) -> Result<String> {
-    let backend_feature = backend_feature_name(backend);
+fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Result<String> {
+    let feature_list = runtime_feature_list(service, backend);
 
     if let Ok(explicit_path) = std::env::var(LOCAL_DEP_PATH_ENV) {
         return Ok(format!(
-            "very_simple_rest = {{ path = \"{}\", default-features = false, features = [\"{backend_feature}\"] }}",
-            escape_toml_path(&explicit_path)
+            "very_simple_rest = {{ path = \"{}\", default-features = false, features = [{}] }}",
+            escape_toml_path(&explicit_path),
+            feature_list
         ));
     }
 
@@ -371,23 +397,19 @@ fn render_runtime_dependency(backend: DbBackend) -> Result<String> {
     if workspace_root.join("Cargo.toml").exists() {
         let canonical = workspace_root.canonicalize().map_err(Error::Io)?;
         return Ok(format!(
-            "very_simple_rest = {{ path = \"{}\", default-features = false, features = [\"{backend_feature}\"] }}",
-            escape_toml_path(&canonical.display().to_string())
+            "very_simple_rest = {{ path = \"{}\", default-features = false, features = [{}] }}",
+            escape_toml_path(&canonical.display().to_string()),
+            feature_list
         ));
     }
 
     Ok(format!(
-        "very_simple_rest = {{ git = \"{REPO_GIT_URL}\", default-features = false, features = [\"{backend_feature}\"] }}"
+        "very_simple_rest = {{ git = \"{REPO_GIT_URL}\", default-features = false, features = [{}] }}",
+        feature_list
     ))
 }
 
-fn render_main_rs(
-    module_name: &str,
-    eon_file_name: &str,
-    backend: DbBackend,
-    with_auth: bool,
-) -> String {
-    let default_database_url = default_database_url(backend);
+fn render_main_rs(module_name: &str, eon_file_name: &str, with_auth: bool) -> String {
     let auth_config = if with_auth {
         "                    .configure(|cfg| auth::auth_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
     } else {
@@ -451,13 +473,19 @@ async fn main() -> std::io::Result<()> {{
         .format_timestamp_secs()
         .init();
 
-    very_simple_rest::sqlx::any::install_default_drivers();
-
-    let database_url =
-        env::var("DATABASE_URL").unwrap_or_else(|_| "{default_database_url}".to_owned());
+    let database_config = {module_name}::database();
+    let database_url = match env::var("DATABASE_URL") {{
+        Ok(url) => url,
+        Err(_) => {{
+            very_simple_rest::core::database::prepare_database_engine(&database_config)
+                .await
+                .map_err(|error| std::io::Error::other(format!("database engine bootstrap failed: {{error}}")))?;
+            {module_name}::default_database_url().to_owned()
+        }}
+    }};
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
 
-    let pool = AnyPool::connect(&database_url)
+    let pool = very_simple_rest::db::connect_with_config(&database_url, &database_config)
         .await
         .map_err(|error| std::io::Error::other(format!("database connection failed: {{error}}")))?;
 
@@ -486,21 +514,34 @@ async fn main() -> std::io::Result<()> {{
     )
 }
 
-fn render_env_example(backend: DbBackend, with_auth: bool) -> String {
+fn render_env_example(service: &ServiceSpec, backend: DbBackend, with_auth: bool) -> String {
     let auth_block = if with_auth {
         "JWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
     } else {
         "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n"
     };
+    let engine_block = match &service.database.engine {
+        DatabaseEngine::Sqlx => String::new(),
+        DatabaseEngine::TursoLocal(engine) => format!(
+            "# Local Turso bootstrap will initialize `{}` before SQLx connects.\n",
+            engine.path
+        ),
+    };
 
     format!(
-        "DATABASE_URL={}\nBIND_ADDR=127.0.0.1:8080\nRUST_LOG=info\n{}",
-        default_database_url(backend),
+        "{}DATABASE_URL={}\nBIND_ADDR=127.0.0.1:8080\nRUST_LOG=info\n{}",
+        engine_block,
+        default_database_url(service, backend),
         auth_block
     )
 }
 
-fn render_project_readme(package_name: &str, backend: DbBackend, with_auth: bool) -> String {
+fn render_project_readme(
+    package_name: &str,
+    service: &ServiceSpec,
+    backend: DbBackend,
+    with_auth: bool,
+) -> String {
     let auth_note = if with_auth {
         "The generated project includes built-in auth/account routes and `migrations/0000_auth.sql`.\n"
     } else {
@@ -511,10 +552,18 @@ fn render_project_readme(package_name: &str, backend: DbBackend, with_auth: bool
     } else {
         "\n"
     };
+    let database_note = match &service.database.engine {
+        DatabaseEngine::Sqlx => "Runtime engine: `Sqlx`.\n\n".to_owned(),
+        DatabaseEngine::TursoLocal(engine) => format!(
+            "Runtime engine: `TursoLocal` bootstrapping `{}` before SQLx connects to the SQLite-compatible database file.\nCurrent limitation: local Turso encryption is not enabled yet in emitted servers because generated CRUD/auth still execute through SQLx.\n\n",
+            engine.path
+        ),
+    };
 
     format!(
         "# {package_name}\n\nGenerated by `vsr server emit`.\n\n\
 Backend: `{}`\n\n\
+{}\
 {}\n\
 The generated server serves `openapi.json` at `/openapi.json` and Swagger UI at `/docs`.\n\
 {}\
@@ -524,6 +573,7 @@ cp .env.example .env\n\
 cargo run\n\
 ```\n",
         backend_feature_name(backend),
+        database_note,
         auth_note,
         openapi_note
     )
@@ -545,11 +595,22 @@ fn auth_backend(backend: DbBackend) -> AuthDbBackend {
     }
 }
 
-fn default_database_url(backend: DbBackend) -> &'static str {
-    match backend {
-        DbBackend::Sqlite => "sqlite:app.db?mode=rwc",
-        DbBackend::Postgres => "postgres://postgres:postgres@127.0.0.1/app",
-        DbBackend::Mysql => "mysql://root:password@127.0.0.1/app",
+fn runtime_feature_list(service: &ServiceSpec, backend: DbBackend) -> String {
+    let mut features = vec![format!("\"{}\"", backend_feature_name(backend))];
+    if matches!(service.database.engine, DatabaseEngine::TursoLocal(_)) {
+        features.push("\"turso-local\"".to_owned());
+    }
+    features.join(", ")
+}
+
+fn default_database_url(service: &ServiceSpec, backend: DbBackend) -> String {
+    match &service.database.engine {
+        DatabaseEngine::TursoLocal(engine) => sqlite_url_for_path(&engine.path),
+        DatabaseEngine::Sqlx => match backend {
+            DbBackend::Sqlite => "sqlite:app.db?mode=rwc".to_owned(),
+            DbBackend::Postgres => "postgres://postgres:postgres@127.0.0.1/app".to_owned(),
+            DbBackend::Mysql => "mysql://root:password@127.0.0.1/app".to_owned(),
+        },
     }
 }
 
@@ -708,6 +769,51 @@ mod tests {
         assert!(main_rs.contains(".configure(static_site_api::configure_static)"));
         assert!(root.join("static_site/index.html").exists());
         assert!(root.join("static_site/assets/app.js").exists());
+    }
+
+    #[test]
+    fn emit_server_project_wires_turso_local_bootstrap() {
+        let root = test_root();
+        emit_server_project(
+            &fixture_path("turso_local_api.eon"),
+            &root,
+            Some("turso-local-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("server project should emit");
+
+        let main_rs = read_to_string(&root.join("src/main.rs"));
+        assert!(main_rs.contains("let database_config = turso_local_api::database();"));
+        assert!(main_rs.contains("prepare_database_engine(&database_config)"));
+        assert!(main_rs.contains("turso_local_api::default_database_url()"));
+
+        let cargo_toml = read_to_string(&root.join("Cargo.toml"));
+        assert!(cargo_toml.contains("\"sqlite\", \"turso-local\""));
+
+        let env_example = read_to_string(&root.join(".env.example"));
+        assert!(env_example.contains("sqlite:var/data/turso_local.db?mode=rwc"));
+        assert!(env_example.contains("Local Turso bootstrap"));
+    }
+
+    #[test]
+    fn emit_server_project_rejects_encrypted_turso_local_runtime() {
+        let root = test_root();
+        let error = emit_server_project(
+            &fixture_path("turso_local_encrypted_api.eon"),
+            &root,
+            Some("turso-local-encrypted-server".to_owned()),
+            false,
+            false,
+        )
+        .expect_err("encrypted turso local should remain rejected for emitted SQLx server");
+
+        assert!(
+            error
+                .to_string()
+                .contains("database.engine.encryption_key_env is not supported yet"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

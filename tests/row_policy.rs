@@ -2,7 +2,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "owned_post", id = "id", db = "sqlite")]
@@ -35,16 +34,12 @@ struct DbOwnedPost {
 
 #[actix_web::test]
 async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
-    sqlx::any::install_default_drivers();
-
     let database_url = unique_sqlite_url("row_policy");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::query(
+    query(
         "CREATE TABLE user (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE,
@@ -56,7 +51,7 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
     .await
     .expect("user table should be created");
 
-    sqlx::query(
+    query(
         "CREATE TABLE owned_post (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -108,7 +103,7 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
     let register_admin_response = test::call_service(&app, register_admin).await;
     assert_eq!(register_admin_response.status(), StatusCode::CREATED);
 
-    sqlx::query("UPDATE user SET role = ? WHERE email = ?")
+    query("UPDATE user SET role = ? WHERE email = ?")
         .bind("admin")
         .bind("admin@example.com")
         .execute(&pool)
@@ -145,12 +140,12 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
     let admin_token: TokenResponse = test::call_and_read_body_json(&app, login_admin).await;
     let admin_token = admin_token.token;
 
-    let alice_id: i64 = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+    let alice_id: i64 = query_scalar::<sqlx::Any, i64>("SELECT id FROM user WHERE email = ?")
         .bind("alice@example.com")
         .fetch_one(&pool)
         .await
         .expect("alice id should exist");
-    let bob_id: i64 = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+    let bob_id: i64 = query_scalar::<sqlx::Any, i64>("SELECT id FROM user WHERE email = ?")
         .bind("bob@example.com")
         .fetch_one(&pool)
         .await
@@ -206,7 +201,7 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
     assert_eq!(create_bob_response.status(), StatusCode::CREATED);
 
     let created_posts: Vec<DbOwnedPost> =
-        sqlx::query_as("SELECT id, title, user_id FROM owned_post ORDER BY id")
+        query_as::<sqlx::Any, DbOwnedPost>("SELECT id, title, user_id FROM owned_post ORDER BY id")
             .fetch_all(&pool)
             .await
             .expect("created rows should exist");
@@ -328,21 +323,23 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
     let admin_update_response = test::call_service(&app, admin_update_request).await;
     assert_eq!(admin_update_response.status(), StatusCode::OK);
 
-    let updated_alice: DbOwnedPost =
-        sqlx::query_as("SELECT id, title, user_id FROM owned_post WHERE id = ?")
-            .bind(alice_first_id)
-            .fetch_one(&pool)
-            .await
-            .expect("alice row should still exist");
+    let updated_alice: DbOwnedPost = query_as::<sqlx::Any, DbOwnedPost>(
+        "SELECT id, title, user_id FROM owned_post WHERE id = ?",
+    )
+    .bind(alice_first_id)
+    .fetch_one(&pool)
+    .await
+    .expect("alice row should still exist");
     assert_eq!(updated_alice.user_id, alice_id);
     assert_eq!(updated_alice.title, "updated by owner");
 
-    let updated_bob: DbOwnedPost =
-        sqlx::query_as("SELECT id, title, user_id FROM owned_post WHERE id = ?")
-            .bind(bob_post_id)
-            .fetch_one(&pool)
-            .await
-            .expect("bob row should still exist");
+    let updated_bob: DbOwnedPost = query_as::<sqlx::Any, DbOwnedPost>(
+        "SELECT id, title, user_id FROM owned_post WHERE id = ?",
+    )
+    .bind(bob_post_id)
+    .fetch_one(&pool)
+    .await
+    .expect("bob row should still exist");
     assert_eq!(updated_bob.user_id, bob_id);
     assert_eq!(updated_bob.title, "updated by admin");
 
@@ -367,7 +364,7 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
     let admin_delete_response = test::call_service(&app, admin_delete_request).await;
     assert_eq!(admin_delete_response.status(), StatusCode::OK);
 
-    let remaining_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM owned_post")
+    let remaining_count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM owned_post")
         .fetch_one(&pool)
         .await
         .expect("remaining row count should be queryable");

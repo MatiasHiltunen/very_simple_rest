@@ -12,7 +12,8 @@ use syn::{DeriveInput, LitStr, Path};
 
 pub use model::{
     DbBackend, GeneratedValue, ReferentialAction, RelationSpec, ResourceSpec, RoleRequirements,
-    RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, is_optional_type,
+    RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
+    default_service_database_url, is_optional_type,
 };
 pub use openapi::OpenApiSpecOptions;
 

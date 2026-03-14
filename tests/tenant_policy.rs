@@ -7,7 +7,6 @@ use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::Value;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 const TEST_JWT_SECRET: &str = "tenant-policy-secret";
 
@@ -61,20 +60,16 @@ struct TestClaims {
 
 #[actix_web::test]
 async fn tenant_claim_policy_scopes_access_without_native_rls() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("tenant_policy");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::query(
+    query(
         "CREATE TABLE tenant_post (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -135,11 +130,12 @@ async fn tenant_claim_policy_scopes_access_without_native_rls() {
     let create_tenant2_response = test::call_service(&app, create_tenant2).await;
     assert_eq!(create_tenant2_response.status(), StatusCode::CREATED);
 
-    let created_posts: Vec<DbTenantPost> =
-        sqlx::query_as("SELECT id, title, user_id, tenant_id FROM tenant_post ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .expect("tenant posts should exist");
+    let created_posts: Vec<DbTenantPost> = query_as::<sqlx::Any, DbTenantPost>(
+        "SELECT id, title, user_id, tenant_id FROM tenant_post ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("tenant posts should exist");
     assert_eq!(created_posts.len(), 2);
     assert_eq!(created_posts[0].user_id, 11);
     assert_eq!(created_posts[0].tenant_id, 1);
@@ -217,12 +213,13 @@ async fn tenant_claim_policy_scopes_access_without_native_rls() {
     let tenant1_admin_update_response = test::call_service(&app, tenant1_admin_update).await;
     assert_eq!(tenant1_admin_update_response.status(), StatusCode::OK);
 
-    let updated_tenant1: DbTenantPost =
-        sqlx::query_as("SELECT id, title, user_id, tenant_id FROM tenant_post WHERE id = ?")
-            .bind(tenant1_id)
-            .fetch_one(&pool)
-            .await
-            .expect("tenant one row should exist");
+    let updated_tenant1: DbTenantPost = query_as::<sqlx::Any, DbTenantPost>(
+        "SELECT id, title, user_id, tenant_id FROM tenant_post WHERE id = ?",
+    )
+    .bind(tenant1_id)
+    .fetch_one(&pool)
+    .await
+    .expect("tenant one row should exist");
     assert_eq!(updated_tenant1.title, "tenant one admin update");
     assert_eq!(updated_tenant1.user_id, 11);
     assert_eq!(updated_tenant1.tenant_id, 1);
@@ -250,7 +247,7 @@ async fn tenant_claim_policy_scopes_access_without_native_rls() {
     let tenant1_admin_delete_response = test::call_service(&app, tenant1_admin_delete).await;
     assert_eq!(tenant1_admin_delete_response.status(), StatusCode::OK);
 
-    let remaining_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_post")
+    let remaining_count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM tenant_post")
         .fetch_one(&pool)
         .await
         .expect("remaining row count should be queryable");
@@ -259,20 +256,16 @@ async fn tenant_claim_policy_scopes_access_without_native_rls() {
 
 #[actix_web::test]
 async fn auth_login_emits_tenant_claims_for_row_policies() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("tenant_policy_auth");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::query(
+    query(
         "CREATE TABLE user (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE,
@@ -285,7 +278,7 @@ async fn auth_login_emits_tenant_claims_for_row_policies() {
     .await
     .expect("user table should be created");
 
-    sqlx::query(
+    query(
         "CREATE TABLE tenant_post (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
@@ -328,13 +321,13 @@ async fn auth_login_emits_tenant_claims_for_row_policies() {
     let register_bob_response = test::call_service(&app, register_bob).await;
     assert_eq!(register_bob_response.status(), StatusCode::CREATED);
 
-    sqlx::query("UPDATE user SET tenant_id = ? WHERE email = ?")
+    query("UPDATE user SET tenant_id = ? WHERE email = ?")
         .bind(1_i64)
         .bind("alice@example.com")
         .execute(&pool)
         .await
         .expect("alice tenant should be updated");
-    sqlx::query("UPDATE user SET tenant_id = ? WHERE email = ?")
+    query("UPDATE user SET tenant_id = ? WHERE email = ?")
         .bind(2_i64)
         .bind("bob@example.com")
         .execute(&pool)
@@ -383,17 +376,18 @@ async fn auth_login_emits_tenant_claims_for_row_policies() {
     let create_alice_response = test::call_service(&app, create_alice).await;
     assert_eq!(create_alice_response.status(), StatusCode::CREATED);
 
-    let alice_id: i64 = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+    let alice_id: i64 = query_scalar::<sqlx::Any, i64>("SELECT id FROM user WHERE email = ?")
         .bind("alice@example.com")
         .fetch_one(&pool)
         .await
         .expect("alice user id should exist");
 
-    let created: DbTenantPost =
-        sqlx::query_as("SELECT id, title, user_id, tenant_id FROM tenant_post LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("tenant post should exist");
+    let created: DbTenantPost = query_as::<sqlx::Any, DbTenantPost>(
+        "SELECT id, title, user_id, tenant_id FROM tenant_post LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("tenant post should exist");
     assert_eq!(created.user_id, alice_id);
     assert_eq!(created.tenant_id, 1);
 
@@ -409,20 +403,16 @@ async fn auth_login_emits_tenant_claims_for_row_policies() {
 
 #[actix_web::test]
 async fn auth_login_emits_generic_numeric_claim_columns() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("generic_claims");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::query(
+    query(
         "CREATE TABLE user (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE,
@@ -452,16 +442,14 @@ async fn auth_login_emits_generic_numeric_claim_columns() {
     let register_response = test::call_service(&app, register_request).await;
     assert_eq!(register_response.status(), StatusCode::CREATED);
 
-    sqlx::query(
-        "UPDATE user SET org_id = ?, claim_workspace_id = ?, external_id = ? WHERE email = ?",
-    )
-    .bind(7_i64)
-    .bind(42_i64)
-    .bind("text-only")
-    .bind("claims@example.com")
-    .execute(&pool)
-    .await
-    .expect("user claim columns should be updated");
+    query("UPDATE user SET org_id = ?, claim_workspace_id = ?, external_id = ? WHERE email = ?")
+        .bind(7_i64)
+        .bind(42_i64)
+        .bind("text-only")
+        .bind("claims@example.com")
+        .execute(&pool)
+        .await
+        .expect("user claim columns should be updated");
 
     let login_request = test::TestRequest::post()
         .uri("/api/auth/login")

@@ -5,7 +5,6 @@ use serde::Serialize;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
 use very_simple_rest::rest_api_from_eon;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 use very_simple_rest::sqlx::{self, FromRow};
 
 const TEST_JWT_SECRET: &str = "fine-grained-policy-secret";
@@ -53,20 +52,16 @@ struct DbOnCallSubscription {
 
 #[actix_web::test]
 async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("fine_grained_policies");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::query(
+    query(
         "CREATE TABLE workspace (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,
@@ -82,7 +77,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     .await
     .expect("workspace table should be created");
 
-    sqlx::query(
+    query(
         "CREATE TABLE project (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,
@@ -100,7 +95,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     .await
     .expect("project table should be created");
 
-    sqlx::query(
+    query(
         "CREATE TABLE on_call_subscription (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,
@@ -153,7 +148,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     let create_workspace_response = test::call_service(&app, create_workspace).await;
     assert_eq!(create_workspace_response.status(), StatusCode::CREATED);
 
-    let workspace: DbWorkspace = sqlx::query_as(
+    let workspace: DbWorkspace = query_as::<sqlx::Any, DbWorkspace>(
         "SELECT id, tenant_id, owner_user_id, slug, name, compliance_mode FROM workspace",
     )
     .fetch_one(&pool)
@@ -213,7 +208,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     let admin_update_response = test::call_service(&app, admin_update_request).await;
     assert_eq!(admin_update_response.status(), StatusCode::OK);
 
-    let updated_workspace: DbWorkspace = sqlx::query_as(
+    let updated_workspace: DbWorkspace = query_as::<sqlx::Any, DbWorkspace>(
         "SELECT id, tenant_id, owner_user_id, slug, name, compliance_mode FROM workspace WHERE id = ?",
     )
     .bind(workspace.id)
@@ -238,7 +233,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     let create_project_response = test::call_service(&app, create_project).await;
     assert_eq!(create_project_response.status(), StatusCode::CREATED);
 
-    let project: DbProject = sqlx::query_as(
+    let project: DbProject = query_as::<sqlx::Any, DbProject>(
         "SELECT id, tenant_id, workspace_id, lead_user_id, code, name, status FROM project",
     )
     .fetch_one(&pool)
@@ -285,7 +280,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     let create_subscription_response = test::call_service(&app, create_subscription).await;
     assert_eq!(create_subscription_response.status(), StatusCode::CREATED);
 
-    let subscription: DbOnCallSubscription = sqlx::query_as(
+    let subscription: DbOnCallSubscription = query_as::<sqlx::Any, DbOnCallSubscription>(
         "SELECT id, tenant_id, project_id, subscriber_user_id, channel, escalation_level FROM on_call_subscription",
     )
     .fetch_one(&pool)
@@ -374,13 +369,14 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
         test::call_service(&app, owner_subscription_update).await;
     assert_eq!(owner_subscription_update_response.status(), StatusCode::OK);
 
-    let updated_subscription: DbOnCallSubscription = sqlx::query_as(
+    let updated_subscription: DbOnCallSubscription =
+        query_as::<sqlx::Any, DbOnCallSubscription>(
         "SELECT id, tenant_id, project_id, subscriber_user_id, channel, escalation_level FROM on_call_subscription WHERE id = ?",
-    )
-    .bind(subscription.id)
-    .fetch_one(&pool)
-    .await
-    .expect("updated subscription should exist");
+        )
+        .bind(subscription.id)
+        .fetch_one(&pool)
+        .await
+        .expect("updated subscription should exist");
     assert_eq!(updated_subscription.channel, "slack");
     assert_eq!(updated_subscription.escalation_level, 2);
     assert_eq!(updated_subscription.subscriber_user_id, 1);
@@ -408,7 +404,7 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
     assert_eq!(owner_subscription_delete_response.status(), StatusCode::OK);
 
     let remaining_subscriptions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM on_call_subscription")
+        query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM on_call_subscription")
             .fetch_one(&pool)
             .await
             .expect("remaining rows should be queryable");
@@ -417,20 +413,16 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
 
 #[actix_web::test]
 async fn admin_bypass_create_allows_manual_tenant_assignment_without_claims() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("fine_grained_admin_create");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::query(
+    query(
         "CREATE TABLE workspace (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tenant_id INTEGER NOT NULL,
@@ -470,7 +462,7 @@ async fn admin_bypass_create_allows_manual_tenant_assignment_without_claims() {
     let create_workspace_response = test::call_service(&app, create_workspace).await;
     assert_eq!(create_workspace_response.status(), StatusCode::CREATED);
 
-    let workspace: DbWorkspace = sqlx::query_as(
+    let workspace: DbWorkspace = query_as::<sqlx::Any, DbWorkspace>(
         "SELECT id, tenant_id, owner_user_id, slug, name, compliance_mode FROM workspace",
     )
     .fetch_one(&pool)

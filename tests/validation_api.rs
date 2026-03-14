@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
 use very_simple_rest::rest_api_from_eon;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 const TEST_JWT_SECRET: &str = "validation-api-secret";
 
@@ -27,27 +26,21 @@ struct ApiErrorResponse {
 
 #[actix_web::test]
 async fn generated_handlers_enforce_field_validation_rules() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("validation_api");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE widget (
+    query(
+        "CREATE TABLE widget (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             score INTEGER NOT NULL
-        );
-        "#,
+        )",
     )
     .execute(&pool)
     .await
@@ -130,7 +123,7 @@ async fn generated_handlers_enforce_field_validation_rules() {
     let valid_create_response = test::call_service(&app, valid_create).await;
     assert_eq!(valid_create_response.status(), StatusCode::CREATED);
 
-    sqlx::query("INSERT INTO widget (title, score) VALUES (?, ?), (?, ?)")
+    query("INSERT INTO widget (title, score) VALUES (?, ?), (?, ?)")
         .bind("alpha")
         .bind(7_i64)
         .bind("zeta")
@@ -214,7 +207,7 @@ async fn generated_handlers_enforce_field_validation_rules() {
     assert_eq!(invalid_offset_body.code, "invalid_pagination");
     assert_eq!(invalid_offset_body.message, "`offset` requires `limit`");
 
-    let widget_id: i64 = sqlx::query_scalar("SELECT id FROM widget LIMIT 1")
+    let widget_id: i64 = query_scalar::<sqlx::Any, i64>("SELECT id FROM widget LIMIT 1")
         .fetch_one(&pool)
         .await
         .expect("widget row should exist");

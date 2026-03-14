@@ -6,9 +6,12 @@ use syn::Path;
 
 use super::model::{
     GeneratedValue, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile,
-    StaticMode, WriteModelStyle,
+    StaticMode, WriteModelStyle, default_service_database_url,
 };
-use crate::security::{FrameOptions, ReferrerPolicy};
+use crate::{
+    database::DatabaseEngine,
+    security::{FrameOptions, ReferrerPolicy},
+};
 
 pub fn expand_resource_impl(
     resource: &ResourceSpec,
@@ -119,6 +122,8 @@ pub fn expand_service_module(
             #runtime_crate::core::static_files::configure_static_mounts(cfg, &mounts);
         }
     };
+    let database = database_tokens(service, runtime_crate);
+    let default_database_url = Literal::string(&default_service_database_url(service));
     let security = security_tokens(service, runtime_crate);
 
     Ok(quote! {
@@ -126,17 +131,26 @@ pub fn expand_service_module(
             const _: &str = include_str!(#include_path_lit);
 
             use #runtime_crate::actix_web::{web, HttpResponse, Responder};
-            use #runtime_crate::sqlx::AnyPool;
+            use #runtime_crate::db::DbPool;
 
             #(#resources)*
 
-            pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
+            pub fn configure(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
+                let db = db.into();
                 #(#configure_calls)*
                 configure_security(cfg);
             }
 
             pub fn configure_static(cfg: &mut web::ServiceConfig) {
                 #configure_static_body
+            }
+
+            pub fn database() -> #runtime_crate::core::database::DatabaseConfig {
+                #database
+            }
+
+            pub fn default_database_url() -> &'static str {
+                #default_database_url
             }
 
             pub fn security() -> #runtime_crate::core::security::SecurityConfig {
@@ -149,6 +163,34 @@ pub fn expand_service_module(
             }
         }
     })
+}
+
+fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    match &service.database.engine {
+        DatabaseEngine::Sqlx => {
+            quote!(#runtime_crate::core::database::DatabaseConfig {
+                engine: #runtime_crate::core::database::DatabaseEngine::Sqlx,
+            })
+        }
+        DatabaseEngine::TursoLocal(engine) => {
+            let path = Literal::string(&engine.path);
+            let encryption_key_env = match engine.encryption_key_env.as_deref() {
+                Some(value) => {
+                    let value = Literal::string(value);
+                    quote!(Some(#value.to_owned()))
+                }
+                None => quote!(None),
+            };
+            quote!(#runtime_crate::core::database::DatabaseConfig {
+                engine: #runtime_crate::core::database::DatabaseEngine::TursoLocal(
+                    #runtime_crate::core::database::TursoLocalConfig {
+                        path: #path.to_owned(),
+                        encryption_key_env: #encryption_key_env,
+                    }
+                ),
+            })
+        }
+    }
 }
 
 fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
@@ -859,7 +901,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         let id_placeholder = resource.db.placeholder(1);
         quote! {
             let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-            match #runtime_crate::sqlx::query_as::<_, Self>(&sql)
+            match #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
                 .bind(path.into_inner())
                 .fetch_optional(db.get_ref())
                 .await
@@ -877,9 +919,10 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             let filtered_sql = #filtered_sql;
 
             let query = if #admin_bypass && #is_admin {
-                #runtime_crate::sqlx::query_as::<_, Self>(&sql).bind(path.into_inner())
+                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
+                    .bind(path.into_inner())
             } else {
-                let mut q = #runtime_crate::sqlx::query_as::<_, Self>(filtered_sql)
+                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(filtered_sql)
                     .bind(path.into_inner());
                 #(#read_filter_binds)*
                 q
@@ -896,7 +939,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     let create_body = if insert_fields.is_empty() {
         quote! {
             let sql = format!("INSERT INTO {} DEFAULT VALUES", #table_name);
-            match #runtime_crate::sqlx::query(&sql).execute(db.get_ref()).await {
+            match #runtime_crate::db::query(&sql).execute(db.get_ref()).await {
                 Ok(_) => HttpResponse::Created().finish(),
                 Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
             }
@@ -905,7 +948,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         if resource.policies.admin_bypass && resource.policies.create.iter().next().is_some() {
             quote! {
                 let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                let mut q = #runtime_crate::sqlx::query(&sql);
+                let mut q = #runtime_crate::db::query(&sql);
                 if #is_admin {
                     #(#bind_fields_insert_admin)*
                 } else {
@@ -919,7 +962,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         } else {
             quote! {
                 let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                let mut q = #runtime_crate::sqlx::query(&sql);
+                let mut q = #runtime_crate::db::query(&sql);
                 #(#bind_fields_insert)*
                 match q.execute(db.get_ref()).await {
                     Ok(_) => HttpResponse::Created().finish(),
@@ -948,7 +991,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
 
             quote! {
                 let sql = #sql;
-                let mut q = #runtime_crate::sqlx::query(sql);
+                let mut q = #runtime_crate::db::query(sql);
                 #(#bind_fields_update)*
                 q = q.bind(path.into_inner());
                 match q.execute(db.get_ref()).await {
@@ -975,7 +1018,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             quote! {
                 if #admin_bypass && #is_admin {
                     let sql = #admin_sql;
-                    let mut q = #runtime_crate::sqlx::query(sql);
+                    let mut q = #runtime_crate::db::query(sql);
                     #(#bind_fields_update)*
                     q = q.bind(path.into_inner());
                     match q.execute(db.get_ref()).await {
@@ -985,7 +1028,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     }
                 } else {
                     let sql = #filtered_sql;
-                    let mut q = #runtime_crate::sqlx::query(sql);
+                    let mut q = #runtime_crate::db::query(sql);
                     #(#bind_fields_update)*
                     q = q.bind(path.into_inner());
                     #(#update_filter_binds)*
@@ -1003,7 +1046,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         let id_placeholder = resource.db.placeholder(1);
         quote! {
             let sql = format!("DELETE FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-            match #runtime_crate::sqlx::query(&sql)
+            match #runtime_crate::db::query(&sql)
                 .bind(path.into_inner())
                 .execute(db.get_ref())
                 .await
@@ -1024,7 +1067,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         quote! {
             if #admin_bypass && #is_admin {
                 let sql = #admin_sql;
-                match #runtime_crate::sqlx::query(sql)
+                match #runtime_crate::db::query(sql)
                     .bind(path.into_inner())
                     .execute(db.get_ref())
                     .await
@@ -1035,7 +1078,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 }
             } else {
                 let sql = #filtered_sql;
-                let mut q = #runtime_crate::sqlx::query(sql);
+                let mut q = #runtime_crate::db::query(sql);
                 q = q.bind(path.into_inner());
                 #(#delete_filter_binds)*
                 match q.execute(db.get_ref()).await {
@@ -1070,7 +1113,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 path: web::Path<i64>,
                 query: web::Query<#list_query_ty>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<AnyPool>,
+                db: web::Data<DbPool>,
             ) -> impl Responder {
                 #read_check
 
@@ -1085,7 +1128,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Err(response) => return response,
                 };
                 let mut count_query =
-                    #runtime_crate::sqlx::query_scalar::<_, i64>(&plan.count_sql);
+                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
                 for bind in &plan.filter_binds {
                     count_query = match bind.clone() {
                         #(#count_bind_matches)*
@@ -1095,7 +1138,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Ok(total) => total,
                     Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
                 };
-                let mut q = #runtime_crate::sqlx::query_as::<_, Self>(&plan.select_sql);
+                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
                 for bind in &plan.select_binds {
                     q = match bind.clone() {
                         #(#list_bind_matches)*
@@ -1114,11 +1157,11 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
 
     quote! {
         use #runtime_crate::actix_web::{web, HttpResponse, Responder};
-        use #runtime_crate::sqlx::AnyPool;
+        use #runtime_crate::db::DbPool;
 
         impl #struct_ident {
-            pub fn configure(cfg: &mut web::ServiceConfig, db: AnyPool) {
-                let db = web::Data::new(db);
+            pub fn configure(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
+                let db = web::Data::new(db.into());
                 #runtime_crate::core::errors::configure_extractor_errors(cfg);
                 cfg.app_data(db.clone());
 
@@ -1449,7 +1492,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             async fn get_all(
                 query: web::Query<#list_query_ty>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<AnyPool>,
+                db: web::Data<DbPool>,
             ) -> impl Responder {
                 #read_check
                 let query = query.into_inner();
@@ -1458,7 +1501,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Err(response) => return response,
                 };
                 let mut count_query =
-                    #runtime_crate::sqlx::query_scalar::<_, i64>(&plan.count_sql);
+                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
                 for bind in &plan.filter_binds {
                     count_query = match bind.clone() {
                         #(#count_bind_matches)*
@@ -1468,7 +1511,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Ok(total) => total,
                     Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
                 };
-                let mut q = #runtime_crate::sqlx::query_as::<_, Self>(&plan.select_sql);
+                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
                 for bind in &plan.select_binds {
                     q = match bind.clone() {
                         #(#list_bind_matches)*
@@ -1486,7 +1529,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             async fn get_one(
                 path: web::Path<i64>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<AnyPool>,
+                db: web::Data<DbPool>,
             ) -> impl Responder {
                 #read_check
                 #get_one_body
@@ -1495,7 +1538,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             async fn create(
                 item: web::Json<#create_payload_ty>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<AnyPool>,
+                db: web::Data<DbPool>,
             ) -> impl Responder {
                 #create_check
                 #(#create_validation)*
@@ -1506,7 +1549,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 path: web::Path<i64>,
                 item: web::Json<#update_payload_ty>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<AnyPool>,
+                db: web::Data<DbPool>,
             ) -> impl Responder {
                 #update_check
                 #(#update_validation)*
@@ -1516,7 +1559,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             async fn delete(
                 path: web::Path<i64>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<AnyPool>,
+                db: web::Data<DbPool>,
             ) -> impl Responder {
                 #delete_check
                 #delete_body

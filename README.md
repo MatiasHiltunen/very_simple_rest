@@ -240,6 +240,11 @@ When a `.eon` service defines `security`, `vsr server emit` also applies the com
 limits, CORS policy, trusted-proxy handling, auth rate limits, security headers, and built-in
 auth token settings automatically in the emitted server.
 
+When a `.eon` service defines `database.engine`, `vsr server emit` also carries that runtime
+engine config into the generated project. The current supported engine values are the default
+`Sqlx` path and `TursoLocal`, which bootstraps a local Turso database file before the emitted
+server connects through the existing SQLite SQLx path.
+
 ## OpenAPI
 
 You can also render an OpenAPI document directly from either a `.eon` file or derive-based Rust
@@ -313,6 +318,32 @@ The loader validates that:
 - reserved routes such as `/api`, `/auth`, `/docs`, and `/openapi.json` are not shadowed
 - SPA fallback only applies to `GET` and `HEAD` HTML navigations, not missing asset files
 - symlinked directories are rejected during emitted-project copying
+
+## Database Engine In `.eon`
+
+Bare `.eon` services can also define a service-level database engine:
+
+```eon
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/app.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+    }
+}
+```
+
+Current support:
+
+- `Sqlx`: the existing default runtime path
+- `TursoLocal`: bootstraps a local Turso database file and uses the project runtime database
+  adapter with SQLite-compatible SQL
+- `TursoLocal.encryption_key_env`: reads a hex key from the named environment variable and uses
+  Turso local encryption with the current default cipher (`aegis256`) during bootstrap
+
+Current limitation:
+
+- This is still a project-local runtime adapter, not a true upstream SQLx `Any` driver.
 
 ## Security In `.eon`
 
@@ -410,6 +441,9 @@ vsr migrate check --input tests/fixtures/blog_api.eon --output migrations/0001_i
 
 # Apply migrations to the configured database
 vsr --database-url sqlite:app.db?mode=rwc migrate apply --dir migrations
+
+# Or derive the database URL from a bare .eon service, including TursoLocal paths
+vsr --config tests/fixtures/turso_local_api.eon migrate apply --dir migrations
 ```
 
 The generated SQL includes:

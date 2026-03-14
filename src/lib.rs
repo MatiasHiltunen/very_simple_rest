@@ -28,7 +28,7 @@ authorization, and relationship handling.
 ```rust
 use actix_web::{App, HttpServer, web};
 use serde::{Deserialize, Serialize};
-use sqlx::{AnyPool, FromRow};
+use sqlx::FromRow;
 use rest_api::prelude::*;
 
 // Define your data models with RBAC
@@ -45,9 +45,7 @@ pub struct Post {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    sqlx::any::install_default_drivers();
-
-    let pool = AnyPool::connect("sqlite:app.db?mode=rwc").await.unwrap();
+    let pool = connect("sqlite:app.db?mode=rwc").await.unwrap();
 
     // Apply migrations before starting the server in production.
     HttpServer::new(move || {
@@ -111,6 +109,12 @@ directories are resolved relative to the `.eon` file, reserved routes like `/api
 cannot be shadowed, and `vsr server emit` copies the declared static directories into the emitted
 project automatically.
 
+`.eon` services can also define `database.engine`. The current supported values are the default
+`Sqlx` engine and `TursoLocal`, which bootstraps a local Turso database file before the emitted
+server connects through the project runtime's database adapter while keeping the SQL dialect as
+SQLite. `TursoLocal` can also carry `encryption_key_env`, which is read from the environment as a
+hex key for local Turso bootstrap and encrypted local database access.
+
 `.eon` services can also define service-level `security` defaults for JSON body limits, CORS,
 trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings.
 Generated modules expose those settings through `module::security()` and
@@ -160,6 +164,20 @@ pub mod auth {
     };
 }
 
+pub mod database {
+    pub use rest_macro_core::database::{
+        DatabaseConfig, DatabaseEngine, TursoLocalConfig, prepare_database_engine,
+        sqlite_url_for_path,
+    };
+}
+
+pub mod db {
+    pub use rest_macro_core::db::{
+        DbPool, DbQueryResult, DbTransaction, IntoDbValue, connect, connect_with_config, query,
+        query_as, query_scalar,
+    };
+}
+
 pub use actix_cors;
 pub use actix_files;
 pub use actix_web;
@@ -174,6 +192,8 @@ pub mod prelude {
     pub use crate::auth;
     pub use crate::auth::{AuthSettings, UserContext};
     pub use crate::core;
+    pub use crate::database;
+    pub use crate::db;
     pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 
     pub use actix_web::{
@@ -186,6 +206,9 @@ pub mod prelude {
     pub use actix_files as fs;
     pub use env_logger::Env;
     pub use log::{debug, error, info, trace, warn};
+    pub use rest_macro_core::db::{
+        DbPool, connect, connect_with_config, query, query_as, query_scalar,
+    };
     pub use serde::{Deserialize, Serialize};
     pub use sqlx::{AnyPool, FromRow};
 }

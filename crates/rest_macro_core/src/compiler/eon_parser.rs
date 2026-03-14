@@ -18,6 +18,7 @@ use super::model::{
 };
 use crate::{
     auth::AuthSettings,
+    database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig},
     security::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
@@ -35,11 +36,28 @@ struct ServiceDocument {
     module: Option<String>,
     #[serde(default)]
     db: DbBackend,
+    #[serde(default)]
+    database: Option<DatabaseDocument>,
     #[serde(default, rename = "static")]
     static_config: Option<StaticConfigDocument>,
     #[serde(default)]
     security: SecurityDocument,
     resources: Vec<ResourceDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct DatabaseDocument {
+    #[serde(default)]
+    engine: Option<DatabaseEngineDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct DatabaseEngineDocument {
+    kind: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    encryption_key_env: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -329,6 +347,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let static_mounts = build_static_mounts(&service_root, document.static_config)?;
+    let database = parse_database_document(document.db, document.database, span)?;
     let security = parse_security_document(document.security, span)?;
     validate_security_config(&security, span)?;
 
@@ -345,6 +364,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             module_ident,
             resources,
             static_mounts,
+            database,
             security,
         },
         include_path,
@@ -544,6 +564,59 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         headers,
         auth,
     })
+}
+
+fn parse_database_document(
+    db: DbBackend,
+    document: Option<DatabaseDocument>,
+    span: Span,
+) -> syn::Result<DatabaseConfig> {
+    let engine = match document.and_then(|database| database.engine) {
+        None => DatabaseEngine::Sqlx,
+        Some(engine) => parse_database_engine_document(db, engine, span)?,
+    };
+
+    Ok(DatabaseConfig { engine })
+}
+
+fn parse_database_engine_document(
+    db: DbBackend,
+    document: DatabaseEngineDocument,
+    span: Span,
+) -> syn::Result<DatabaseEngine> {
+    match document.kind.trim().to_ascii_lowercase().as_str() {
+        "sqlx" => Ok(DatabaseEngine::Sqlx),
+        "tursolocal" | "turso_local" | "turso-local" => {
+            if db != DbBackend::Sqlite {
+                return Err(syn::Error::new(
+                    span,
+                    "database.engine = TursoLocal requires `db: Sqlite`",
+                ));
+            }
+
+            let path = document.path.ok_or_else(|| {
+                syn::Error::new(
+                    span,
+                    "database.engine.path is required when `kind = TursoLocal`",
+                )
+            })?;
+            if path.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    "database.engine.path cannot be empty",
+                ));
+            }
+
+            Ok(DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path,
+                encryption_key_env: document.encryption_key_env,
+            }))
+        }
+        other => Err(syn::Error::new(
+            span,
+            format!("unsupported `database.engine.kind` value `{other}`"),
+        )),
+    }
 }
 
 fn parse_rate_limit_rule_document(document: RateLimitRuleDocument) -> RateLimitRule {
@@ -1134,6 +1207,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_turso_local_database_engine_from_eon() {
+        let database = parse_database_document(
+            DbBackend::Sqlite,
+            Some(DatabaseDocument {
+                engine: Some(DatabaseEngineDocument {
+                    kind: "TursoLocal".to_owned(),
+                    path: Some("var/data/app.db".to_owned()),
+                    encryption_key_env: None,
+                }),
+            }),
+            Span::call_site(),
+        )
+        .expect("database config should parse");
+        assert_eq!(
+            database.engine,
+            DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: "var/data/app.db".to_owned(),
+                encryption_key_env: None,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_turso_local_for_non_sqlite_dialect() {
+        let error = parse_database_document(
+            DbBackend::Postgres,
+            Some(DatabaseDocument {
+                engine: Some(DatabaseEngineDocument {
+                    kind: "TursoLocal".to_owned(),
+                    path: Some("var/data/app.db".to_owned()),
+                    encryption_key_env: None,
+                }),
+            }),
+            Span::call_site(),
+        )
+        .expect_err("non-sqlite turso config should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("database.engine = TursoLocal requires `db: Sqlite`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn parses_row_policies_from_eon() {
         let path = syn::LitStr::new("test.eon", Span::call_site());
         let document = parse_document(
@@ -1161,6 +1279,12 @@ mod tests {
                 resources: build_resources(document.db, document.resources)
                     .expect("resources should build"),
                 static_mounts: Vec::new(),
+                database: parse_database_document(
+                    document.db,
+                    document.database,
+                    Span::call_site(),
+                )
+                .expect("database config should parse"),
                 security: SecurityConfig::default(),
             },
             include_path: path.value(),

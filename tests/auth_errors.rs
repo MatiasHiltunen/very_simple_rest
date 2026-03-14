@@ -2,8 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
+use very_simple_rest::db::{connect, query};
 use very_simple_rest::prelude::*;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 #[derive(Debug, Deserialize)]
 struct ApiErrorResponse {
@@ -14,21 +14,24 @@ struct ApiErrorResponse {
 
 #[actix_web::test]
 async fn built_in_auth_uses_json_error_envelope() {
-    sqlx::any::install_default_drivers();
-
     let database_url = unique_sqlite_url("auth_errors");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::raw_sql(&very_simple_rest::core::auth::auth_migration_sql(
+    let migration = very_simple_rest::core::auth::auth_migration_sql(
         very_simple_rest::core::auth::AuthDbBackend::Sqlite,
-    ))
-    .execute(&pool)
-    .await
-    .expect("auth migration should apply");
+    );
+    for statement in migration
+        .split(';')
+        .map(str::trim)
+        .filter(|stmt| !stmt.is_empty())
+    {
+        query(statement)
+            .execute(&pool)
+            .await
+            .expect("auth migration should apply");
+    }
 
     let app = test::init_service(
         App::new().service(scope("/api").configure(|cfg| auth::auth_routes(cfg, pool.clone()))),

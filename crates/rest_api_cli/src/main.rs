@@ -9,7 +9,7 @@ use std::path::PathBuf;
 #[command(about = "CLI tool for very_simple_rest API management", long_about = None)]
 #[command(version)]
 struct Cli {
-    /// Optional configuration file path
+    /// Optional `.eon` service config path used to derive defaults such as `DATABASE_URL`
     #[arg(short, long, value_name = "FILE")]
     config: Option<String>,
 
@@ -308,18 +308,22 @@ enum ServerCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    sqlx::any::install_default_drivers();
-
     // Load .env file if present
     let _ = dotenv::dotenv();
 
     let cli = Cli::parse();
+    let config_path = cli.config.as_deref().map(PathBuf::from);
 
-    // Determine database URL from CLI args or environment
-    let database_url = cli
-        .database_url
-        .or_else(|| std::env::var("DATABASE_URL").ok())
-        .unwrap_or_else(|| "sqlite:app.db?mode=rwc".to_string());
+    // Determine database URL from CLI args, environment, or an `.eon` service config.
+    let database_url = if let Some(url) = cli.database_url {
+        url
+    } else if let Ok(url) = std::env::var("DATABASE_URL") {
+        url
+    } else if let Some(config) = config_path.as_deref() {
+        commands::db::database_url_from_service_config(config)?
+    } else {
+        "sqlite:app.db?mode=rwc".to_string()
+    };
 
     // Process commands
     match &cli.command {
@@ -346,14 +350,21 @@ async fn main() -> Result<()> {
 
         Commands::Setup { non_interactive } => {
             println!("{}", "Running setup wizard...".green().bold());
-            commands::setup::run_setup(&database_url, *non_interactive).await?;
+            commands::setup::run_setup(&database_url, config_path.as_deref(), *non_interactive)
+                .await?;
         }
 
         Commands::CreateAdmin { email, password } => {
             println!("{}", "Creating admin user...".green().bold());
             match (email.clone(), password.clone()) {
                 (Some(email), Some(password)) => {
-                    commands::admin::create_admin(&database_url, email, password).await?;
+                    commands::admin::create_admin(
+                        &database_url,
+                        config_path.as_deref(),
+                        email,
+                        password,
+                    )
+                    .await?;
                 }
                 _ => {
                     // Check environment variables if command line args not provided
@@ -366,7 +377,13 @@ async fn main() -> Result<()> {
                                 "{}",
                                 "Using admin credentials from environment variables".yellow()
                             );
-                            commands::admin::create_admin(&database_url, email, password).await?;
+                            commands::admin::create_admin(
+                                &database_url,
+                                config_path.as_deref(),
+                                email,
+                                password,
+                            )
+                            .await?;
                         }
                         _ => {
                             println!(
@@ -377,7 +394,13 @@ async fn main() -> Result<()> {
                             println!("{}", "Please enter admin credentials:".cyan());
                             let (email, password) =
                                 commands::admin::prompt_admin_credentials().await?;
-                            commands::admin::create_admin(&database_url, email, password).await?;
+                            commands::admin::create_admin(
+                                &database_url,
+                                config_path.as_deref(),
+                                email,
+                                password,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -386,7 +409,7 @@ async fn main() -> Result<()> {
 
         Commands::CheckDb => {
             println!("{}", "Checking database connection...".green().bold());
-            commands::db::check_connection(&database_url).await?;
+            commands::db::check_connection(&database_url, config_path.as_deref()).await?;
         }
 
         Commands::Migrate { command } => match command {
@@ -449,12 +472,18 @@ async fn main() -> Result<()> {
                 exclude_tables,
             } => {
                 println!("{}", "Inspecting live schema drift...".green().bold());
-                commands::migrate::inspect_live_schema(&database_url, input, exclude_tables)
-                    .await?;
+                commands::migrate::inspect_live_schema(
+                    &database_url,
+                    config_path.as_deref(),
+                    input,
+                    exclude_tables,
+                )
+                .await?;
             }
             MigrationCommand::Apply { dir } => {
                 println!("{}", "Applying migrations...".green().bold());
-                commands::migrate::apply_migrations(&database_url, dir).await?;
+                commands::migrate::apply_migrations(&database_url, config_path.as_deref(), dir)
+                    .await?;
             }
         },
 

@@ -1,0 +1,17 @@
+module: "turso_local_encrypted_api"
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/turso_encrypted.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+    }
+}
+resources: [
+    {
+        name: "SecretNote"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

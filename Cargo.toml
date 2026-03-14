@@ -30,6 +30,7 @@ log = "0.4"
 env_logger = "0.11"
 actix-cors = "0.7"
 actix-files = "0.6"
+turso = "0.6.0-pre.1"
 
 [workspace.package]
 version = "0.1.0"
@@ -75,6 +76,7 @@ default = ["sqlite"]
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
+turso-local = ["rest_macro_core/turso-local"]
 
 [dev-dependencies]
 jsonwebtoken.workspace = true

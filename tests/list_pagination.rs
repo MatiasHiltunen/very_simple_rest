@@ -3,9 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
+use very_simple_rest::db::{connect, query};
 use very_simple_rest::prelude::*;
 use very_simple_rest::rest_api_from_eon;
-use very_simple_rest::sqlx::any::AnyPoolOptions;
 
 const TEST_JWT_SECRET: &str = "list-pagination-secret";
 
@@ -20,32 +20,32 @@ struct TestClaims {
 
 #[actix_web::test]
 async fn list_config_applies_default_and_max_page_sizes() {
-    sqlx::any::install_default_drivers();
-
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
 
     let database_url = unique_sqlite_url("list_pagination");
-    let pool = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
+    let pool = connect(&database_url)
         .await
         .expect("database should connect");
 
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE item (
+    query(
+        "CREATE TABLE item (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             score INTEGER NOT NULL
-        );
-        INSERT INTO item (title, score) VALUES
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("schema should apply");
+
+    query(
+        "INSERT INTO item (title, score) VALUES
             ('alpha', 10),
             ('beta', 20),
             ('gamma', 30),
-            ('delta', 40);
-        "#,
+            ('delta', 40)",
     )
     .execute(&pool)
     .await

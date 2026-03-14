@@ -12,6 +12,7 @@ use super::{
     derive_parser,
     model::{ResourceSpec, ServiceSpec, sanitize_module_ident},
 };
+use crate::database::DatabaseConfig;
 
 pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
     let mut rust_files = collect_rust_files(path)?;
@@ -63,6 +64,7 @@ pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
         module_ident: sanitize_module_ident(module_name, Span::call_site()),
         resources,
         static_mounts: Vec::new(),
+        database: DatabaseConfig::default(),
         security: crate::security::SecurityConfig::default(),
     })
 }
