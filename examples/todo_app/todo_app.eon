@@ -1,0 +1,80 @@
+module: "todo_app_api"
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/todo_app.db"
+    }
+}
+security: {
+    requests: {
+        json_max_bytes: 65536
+    }
+    cors: {
+        origins_env: "CORS_ORIGINS"
+        allow_credentials: true
+        allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+        allow_headers: ["authorization", "content-type", "accept"]
+        max_age_seconds: 600
+    }
+    trusted_proxies: {
+        proxies: ["127.0.0.1", "::1"]
+        proxies_env: "TRUSTED_PROXIES"
+    }
+    rate_limits: {
+        login: { requests: 10, window_seconds: 60 }
+        register: { requests: 5, window_seconds: 300 }
+    }
+    headers: {
+        frame_options: Deny
+        content_type_options: true
+        referrer_policy: StrictOriginWhenCrossOrigin
+    }
+    auth: {
+        issuer: "todo_app_api"
+        audience: "todo_app_clients"
+        access_token_ttl_seconds: 3600
+    }
+}
+static: {
+    mounts: [
+        {
+            mount: "/"
+            dir: "public"
+            mode: Spa
+            index_file: "index.html"
+            fallback_file: "index.html"
+            cache: NoStore
+        }
+    ]
+}
+resources: [
+    {
+        name: "Todo"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        policies: {
+            admin_bypass: true
+            read: { kind: Owner, field: "user_id" }
+            create: { kind: SetOwner, field: "user_id" }
+            update: { kind: Owner, field: "user_id" }
+            delete: { kind: Owner, field: "user_id" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "title"
+                type: String
+                validate: {
+                    min_length: 1
+                    max_length: 120
+                }
+            }
+            { name: "completed", type: Bool }
+            { name: "user_id", type: I64 }
+        ]
+    }
+]

@@ -1,4 +1,9 @@
+use std::env;
+
 use very_simple_rest::prelude::*;
+
+const DEFAULT_DB_PATH: &str = "var/data/app.db";
+const PUBLIC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/public");
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "post", id = "id", db = "sqlite")]
@@ -34,88 +39,163 @@ pub struct User {
     pub role: String,
 }
 
-fn log_available_endpoints() {
+fn database_config() -> database::DatabaseConfig {
+    database::DatabaseConfig {
+        engine: database::DatabaseEngine::TursoLocal(database::TursoLocalConfig {
+            path: DEFAULT_DB_PATH.to_owned(),
+            encryption_key_env: env::var_os("TURSO_ENCRYPTION_KEY")
+                .map(|_| "TURSO_ENCRYPTION_KEY".to_owned()),
+        }),
+    }
+}
+
+fn default_database_url(config: &database::DatabaseConfig) -> String {
+    match &config.engine {
+        database::DatabaseEngine::TursoLocal(engine) => database::sqlite_url_for_path(&engine.path),
+        database::DatabaseEngine::Sqlx => "sqlite:app.db?mode=rwc".to_owned(),
+    }
+}
+
+fn security_config() -> core::security::SecurityConfig {
+    core::security::SecurityConfig {
+        requests: core::security::RequestSecurity {
+            json_max_bytes: Some(262_144),
+        },
+        cors: core::security::CorsSecurity {
+            origins: vec!["http://127.0.0.1:8080".to_owned()],
+            origins_env: Some("CORS_ORIGINS".to_owned()),
+            allow_credentials: true,
+            allow_methods: vec![
+                "GET".to_owned(),
+                "POST".to_owned(),
+                "PUT".to_owned(),
+                "PATCH".to_owned(),
+                "DELETE".to_owned(),
+                "OPTIONS".to_owned(),
+            ],
+            allow_headers: vec![
+                "authorization".to_owned(),
+                "content-type".to_owned(),
+                "accept".to_owned(),
+            ],
+            expose_headers: vec!["x-total-count".to_owned()],
+            max_age_seconds: Some(600),
+        },
+        trusted_proxies: core::security::TrustedProxySecurity {
+            proxies: vec!["127.0.0.1".to_owned(), "::1".to_owned()],
+            proxies_env: Some("TRUSTED_PROXIES".to_owned()),
+        },
+        rate_limits: core::security::RateLimitSecurity {
+            login: Some(core::security::RateLimitRule {
+                requests: 10,
+                window_seconds: 60,
+            }),
+            register: Some(core::security::RateLimitRule {
+                requests: 5,
+                window_seconds: 300,
+            }),
+        },
+        headers: core::security::HeaderSecurity {
+            frame_options: Some(core::security::FrameOptions::Deny),
+            content_type_options: true,
+            referrer_policy: Some(core::security::ReferrerPolicy::StrictOriginWhenCrossOrigin),
+            hsts: None,
+        },
+        auth: auth::AuthSettings {
+            issuer: Some("very_simple_rest_template".to_owned()),
+            audience: Some("template-clients".to_owned()),
+            access_token_ttl_seconds: 3600,
+        },
+    }
+}
+
+fn log_available_endpoints(bind_addr: &str) {
     let id = "1";
     info!("===== Available API Endpoints =====");
-
-    // Auth endpoints
+    info!("Database engine: TursoLocal ({DEFAULT_DB_PATH})");
+    info!(
+        "Security defaults: auth rate limits, CORS env override (CORS_ORIGINS), trusted proxies (TRUSTED_PROXIES), and response headers"
+    );
     info!("Authentication:");
-    info!("  POST   /api/auth/register  - Register a new user");
-    info!("  POST   /api/auth/login     - Login and get a JWT token");
-    info!("  GET    /api/auth/me        - Get authenticated user info");
-
-    // User endpoints
+    info!("  POST   /api/auth/register   - Register a new user");
+    info!("  POST   /api/auth/login      - Login and get a JWT token");
+    info!("  GET    /api/auth/me         - Get authenticated user info and numeric claims");
     info!("Users (requires admin role):");
-    info!("  GET    /api/user          - Get all users");
-    info!("  GET    /api/user/{id}     - Get user by ID");
-    info!("  POST   /api/user          - Create a new user");
-    info!("  PUT    /api/user/{id}     - Update user");
-    info!("  DELETE /api/user/{id}     - Delete user");
-
-    // Post endpoints
+    info!("  GET    /api/user");
+    info!("  GET    /api/user/{id}");
+    info!("  POST   /api/user");
+    info!("  PUT    /api/user/{id}");
+    info!("  DELETE /api/user/{id}");
     info!("Posts (requires user role):");
-    info!("  GET    /api/post          - Get all posts");
-    info!("  GET    /api/post/{id}     - Get post by ID");
-    info!("  POST   /api/post          - Create a new post");
-    info!("  PUT    /api/post/{id}     - Update post");
-    info!("  DELETE /api/post/{id}     - Delete post");
-
-    // Comment endpoints
+    info!("  GET    /api/post");
+    info!("  GET    /api/post/{id}");
+    info!("  POST   /api/post");
+    info!("  PUT    /api/post/{id}");
+    info!("  DELETE /api/post/{id}");
     info!("Comments (requires user role):");
-    info!("  GET    /api/comment         - Get all comments");
-    info!("  GET    /api/comment/{id}    - Get comment by ID");
-    info!("  POST   /api/comment         - Create a new comment");
-    info!("  PUT    /api/comment/{id}    - Update comment");
-    info!("  DELETE /api/comment/{id}    - Delete comment");
-    info!("  GET    /api/post/{id}/comment - Get comments for a post");
-
+    info!("  GET    /api/comment");
+    info!("  GET    /api/comment/{id}");
+    info!("  POST   /api/comment");
+    info!("  PUT    /api/comment/{id}");
+    info!("  DELETE /api/comment/{id}");
+    info!("  GET    /api/post/{id}/comment");
+    info!("Frontend: http://{bind_addr}");
     info!("=====================================");
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Initialize logger
+    let _ = dotenv::dotenv();
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .format_timestamp_secs()
         .init();
 
-    info!("Initializing REST API server...");
+    let database_config = database_config();
+    let database_url = match env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            database::prepare_database_engine(&database_config)
+                .await
+                .map_err(|error| std::io::Error::other(format!("database bootstrap failed: {error}")))?;
+            default_database_url(&database_config)
+        }
+    };
+    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let security = security_config();
 
-    info!("Connecting to database...");
-    let pool = connect("sqlite:app.db?mode=rwc").await.unwrap();
+    info!("Initializing REST API server...");
+    info!("Connecting to database at {database_url}...");
+    let pool = connect_with_config(&database_url, &database_config)
+        .await
+        .map_err(|error| std::io::Error::other(format!("database connection failed: {error}")))?;
     info!("Database connection established");
 
-    // Apply `vsr migrate auth` and `vsr migrate derive --input src --exclude-table user`
-    // before starting the server.
-    info!("Configuring server with existing database schema...");
-
     let server_pool = pool.clone();
+    let server_security = security.clone();
     let server = HttpServer::new(move || {
-        // Configure CORS for frontend
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allow_any_method()
-            .allow_any_header()
-            .max_age(3600);
-
+        let security = server_security.clone();
         App::new()
             .wrap(Logger::default())
-            .wrap(cors)
-            .wrap(DefaultHeaders::new().add(("X-Version", "0.1.0")))
-            // Api routes
+            .wrap(core::security::cors_middleware(&security))
+            .wrap(core::security::security_headers_middleware(&security))
             .service(
                 scope("/api")
-                    .configure(|cfg| auth::auth_routes(cfg, server_pool.clone()))
+                    .configure(|cfg| core::security::configure_scope_security(cfg, &security))
+                    .configure(|cfg| {
+                        auth::auth_routes_with_settings(
+                            cfg,
+                            server_pool.clone(),
+                            security.auth.clone(),
+                        )
+                    })
                     .configure(|cfg| User::configure(cfg, server_pool.clone()))
                     .configure(|cfg| Post::configure(cfg, server_pool.clone()))
                     .configure(|cfg| Comment::configure(cfg, server_pool.clone())),
             )
-            // Serve static files from the public directory
-            .service(fs::Files::new("/", "public").index_file("index.html"))
+            .service(fs::Files::new("/", PUBLIC_DIR).index_file("index.html"))
     })
-    .bind(("127.0.0.1", 8080))?;
+    .bind(&bind_addr)?;
 
-    // Check for admin user or create one interactively if needed
     info!("Checking for admin user...");
     match auth::ensure_admin_exists(&pool).await {
         Ok(true) => info!("Admin user is ready for login"),
@@ -123,18 +203,13 @@ async fn main() -> std::io::Result<()> {
             error!("Failed to create admin user - shutting down");
             return Ok(());
         }
-        Err(e) => {
-            error!(
-                "Database error when checking/creating admin user: {} - shutting down",
-                e
-            );
+        Err(error) => {
+            error!("Database error when checking/creating admin user: {error} - shutting down");
             return Ok(());
         }
     }
 
-    // Log available endpoints
-    log_available_endpoints();
-
-    info!("Server starting at http://127.0.0.1:8080");
+    log_available_endpoints(&bind_addr);
+    info!("Server starting at http://{bind_addr}");
     server.run().await
 }

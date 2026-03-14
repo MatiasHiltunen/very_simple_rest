@@ -1,4 +1,31 @@
 module: "commerce_bench_api"
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/commerce_bench.db"
+    }
+}
+security: {
+    requests: {
+        json_max_bytes: 1048576
+    }
+    cors: {
+        origins_env: "CORS_ORIGINS"
+        allow_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+        allow_headers: ["authorization", "content-type", "accept"]
+        expose_headers: ["x-total-count"]
+        max_age_seconds: 600
+    }
+    trusted_proxies: {
+        proxies: ["127.0.0.1", "::1"]
+        proxies_env: "TRUSTED_PROXIES"
+    }
+    headers: {
+        frame_options: Deny
+        content_type_options: true
+        referrer_policy: StrictOriginWhenCrossOrigin
+    }
+}
 resources: [
     {
         name: "Account"

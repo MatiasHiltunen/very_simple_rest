@@ -9,7 +9,7 @@ use std::path::PathBuf;
 #[command(about = "CLI tool for very_simple_rest API management", long_about = None)]
 #[command(version)]
 struct Cli {
-    /// Optional `.eon` service config path used to derive defaults such as `DATABASE_URL`
+    /// Optional `.eon` service config path used to derive defaults such as `DATABASE_URL`, Turso envs, and security env hints
     #[arg(short, long, value_name = "FILE")]
     config: Option<String>,
 
@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new project
+    /// Initialize a new starter project with local Turso and shared security defaults
     Init {
         /// Project name
         #[arg(value_name = "NAME")]
@@ -118,7 +118,7 @@ enum Commands {
         force: bool,
     },
 
-    /// Generate .env file template
+    /// Generate a .env file template, optionally derived from `--config`
     GenEnv {
         /// Path to the environment file
         #[arg(short, long)]
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
     } else if let Some(config) = config_path.as_deref() {
         commands::db::database_url_from_service_config(config)?
     } else {
-        "sqlite:app.db?mode=rwc".to_string()
+        "sqlite:var/data/app.db?mode=rwc".to_string()
     };
 
     // Process commands
@@ -555,7 +555,7 @@ async fn main() -> Result<()> {
 
         Commands::GenEnv { path } => {
             println!("{}", "Generating environment file...".green().bold());
-            commands::gen_env::generate_env_file(path.clone())?;
+            commands::gen_env::generate_env_file(path.clone(), config_path.as_deref())?;
         }
     }
 

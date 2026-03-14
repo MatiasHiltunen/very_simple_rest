@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Todo App Example</title>
+  <style>
+    :root {
+      --bg: #f2efe7;
+      --panel: #fffdf8;
+      --panel-strong: #f7f1e6;
+      --ink: #1f2a2e;
+      --muted: #647076;
+      --line: #d8d0c0;
+      --accent: #0e8f6a;
+      --accent-strong: #0a6b50;
+      --danger: #b8483d;
+      --warning: #d08d18;
+      --shadow: 0 18px 50px rgba(38, 42, 38, 0.10);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Iosevka Aile", "IBM Plex Sans", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(14, 143, 106, 0.10), transparent 32%),
+        linear-gradient(160deg, #efe9dc 0%, #f7f3eb 45%, #ece6d7 100%);
+      min-height: 100vh;
+    }
+
+    .shell {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 28px 18px 40px;
+    }
+
+    .hero {
+      margin-bottom: 22px;
+      padding: 22px 24px;
+      border: 1px solid rgba(31, 42, 46, 0.08);
+      border-radius: 24px;
+      background: rgba(255, 253, 248, 0.88);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 5vw, 3.5rem);
+      line-height: 0.95;
+      letter-spacing: -0.06em;
+    }
+
+    .hero p,
+    .hero li,
+    .status-note,
+    .helper {
+      color: var(--muted);
+    }
+
+    .hero-grid,
+    .main-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero-grid {
+      grid-template-columns: 1.2fr 0.8fr;
+      align-items: start;
+    }
+
+    .main-grid {
+      grid-template-columns: 340px 1fr;
+      align-items: start;
+    }
+
+    .panel {
+      padding: 18px;
+      border-radius: 22px;
+      background: var(--panel);
+      border: 1px solid rgba(31, 42, 46, 0.08);
+      box-shadow: var(--shadow);
+    }
+
+    .panel.alt {
+      background: var(--panel-strong);
+    }
+
+    .stack {
+      display: grid;
+      gap: 14px;
+    }
+
+    h2,
+    h3 {
+      margin: 0 0 10px;
+      letter-spacing: -0.04em;
+    }
+
+    .pill-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: rgba(14, 143, 106, 0.08);
+      color: var(--accent-strong);
+      font-size: 0.92rem;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      padding: 11px 12px;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font: inherit;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    button.secondary {
+      background: rgba(31, 42, 46, 0.08);
+      color: var(--ink);
+    }
+
+    button.danger {
+      background: rgba(184, 72, 61, 0.12);
+      color: var(--danger);
+    }
+
+    button.warning {
+      background: rgba(208, 141, 24, 0.14);
+      color: #845d12;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+      transform: none;
+    }
+
+    .status-box {
+      min-height: 64px;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(31, 42, 46, 0.04);
+      border: 1px dashed rgba(31, 42, 46, 0.12);
+      white-space: pre-wrap;
+    }
+
+    .status-box.error {
+      color: var(--danger);
+      background: rgba(184, 72, 61, 0.08);
+      border-color: rgba(184, 72, 61, 0.18);
+    }
+
+    .status-box.success {
+      color: var(--accent-strong);
+      background: rgba(14, 143, 106, 0.08);
+      border-color: rgba(14, 143, 106, 0.18);
+    }
+
+    .session {
+      display: grid;
+      gap: 10px;
+    }
+
+    .session-card {
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(31, 42, 46, 0.08);
+      background: linear-gradient(160deg, rgba(14, 143, 106, 0.10), rgba(255, 255, 255, 0.95));
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .todos-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .todos {
+      display: grid;
+      gap: 12px;
+    }
+
+    .todo {
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(31, 42, 46, 0.08);
+      background: rgba(255, 255, 255, 0.88);
+      display: grid;
+      gap: 10px;
+    }
+
+    .todo.done {
+      background: rgba(14, 143, 106, 0.07);
+    }
+
+    .todo-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .todo-title {
+      margin: 0;
+      font-size: 1.08rem;
+    }
+
+    .todo-meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .empty {
+      padding: 24px 18px;
+      border-radius: 16px;
+      border: 1px dashed rgba(31, 42, 46, 0.18);
+      text-align: center;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.65);
+    }
+
+    .tiny {
+      font-size: 0.84rem;
+    }
+
+    @media (max-width: 860px) {
+      .hero-grid,
+      .main-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <h1>Todo App</h1>
+          <p>
+            This example is generated from a single <code>.eon</code> file. Normal users only see
+            their own todos. Admin users can inspect and manage every todo row.
+          </p>
+          <div class="pill-row">
+            <span class="pill">Built-in Auth</span>
+            <span class="pill">Owner Policies</span>
+            <span class="pill">Admin Bypass</span>
+            <span class="pill">Local Turso</span>
+          </div>
+        </div>
+        <div class="panel alt">
+          <h3>Try This</h3>
+          <ol class="status-note">
+            <li>Log in as the admin account created through the CLI.</li>
+            <li>Create a few todos as admin.</li>
+            <li>Register a normal user and log in.</li>
+            <li>Notice that the normal user only sees their own todos.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <div class="main-grid">
+      <aside class="stack">
+        <section class="panel">
+          <h2>Session</h2>
+          <div class="session">
+            <div class="session-card">
+              <div id="sessionSummary">Not logged in.</div>
+              <div id="sessionClaims" class="muted tiny"></div>
+            </div>
+            <div class="button-row">
+              <button class="secondary" id="refreshProfileBtn">Refresh Session</button>
+              <button class="danger" id="logoutBtn">Log Out</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Register / Login</h2>
+          <div class="stack">
+            <label>
+              Email
+              <input id="emailInput" type="email" placeholder="user@example.com">
+            </label>
+            <label>
+              Password
+              <input id="passwordInput" type="password" placeholder="password123">
+            </label>
+            <div class="button-row">
+              <button class="primary" id="registerBtn">Register</button>
+              <button class="secondary" id="loginBtn">Login</button>
+            </div>
+            <div id="authStatus" class="status-box">Use the admin account from the README, or register a new user here.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Create Todo</h2>
+          <div class="stack">
+            <label>
+              Title
+              <input id="todoTitleInput" type="text" maxlength="120" placeholder="Ship the `.eon` todo example">
+            </label>
+            <label>
+              Initial State
+              <select id="todoCompletedInput">
+                <option value="false" selected>Open</option>
+                <option value="true">Completed</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button class="primary" id="createTodoBtn">Create Todo</button>
+            </div>
+            <div class="helper tiny">
+              Normal users automatically get their own <code>user_id</code>. Admin users can still
+              create rows because the policy keeps <code>admin_bypass: true</code>.
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="stack">
+        <section class="panel">
+          <div class="todos-header">
+            <div>
+              <h2>Your Data View</h2>
+              <div class="muted">
+                The API decides what you can see. Users only get their own rows. Admin sees all.
+              </div>
+            </div>
+            <div class="button-row">
+              <button class="secondary" id="reloadTodosBtn">Reload Todos</button>
+            </div>
+          </div>
+          <div id="todoList" class="todos"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

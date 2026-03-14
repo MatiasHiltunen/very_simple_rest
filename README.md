@@ -497,6 +497,9 @@ For a larger SQLite benchmark fixture with deep relations and a deterministic se
 For a policy-heavy `.eon` example with tenant claims, owner-scoped writes, and self-scoped
 resources, see `examples/fine_grained_policies/`.
 
+For a minimal `.eon`-only app with built-in auth, owner-scoped todos, admin visibility across all
+rows, and a static browser client, see `examples/todo_app/`.
+
 ## RBAC Attributes
 
 Protect your endpoints with declarative role requirements:

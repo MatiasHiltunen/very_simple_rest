@@ -15,25 +15,60 @@ The schema is relation-heavy on purpose:
 
 ```bash
 mkdir -p examples/sqlite_bench/migrations
+mkdir -p examples/sqlite_bench/var/data
 
 vsr migrate generate \
   --input examples/sqlite_bench/commerce.eon \
   --output examples/sqlite_bench/migrations/0001_commerce.sql
 
-vsr --database-url sqlite:examples/sqlite_bench/commerce.db?mode=rwc \
+vsr --config examples/sqlite_bench/commerce.eon \
   migrate apply \
   --dir examples/sqlite_bench/migrations
 
-sqlite3 examples/sqlite_bench/commerce.db < examples/sqlite_bench/seed.sql
+sqlite3 examples/sqlite_bench/var/data/commerce_bench.db < examples/sqlite_bench/seed.sql
 ```
+
+The service now declares an explicit local Turso runtime:
+
+```eon
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/commerce_bench.db"
+    }
+}
+```
+
+That keeps the SQL dialect SQLite-compatible while letting the generated runtime bootstrap the
+local database file consistently through the same `database.engine` config used by emitted servers.
 
 ## Check Drift
 
 ```bash
-vsr --database-url sqlite:examples/sqlite_bench/commerce.db?mode=rwc \
+vsr --config examples/sqlite_bench/commerce.eon \
   migrate inspect \
   --input examples/sqlite_bench/commerce.eon
 ```
+
+## Generated Server Flow
+
+This benchmark service also demonstrates the newer server CLI path and compiled service security
+settings:
+
+```bash
+vsr server emit \
+  --input examples/sqlite_bench/commerce.eon \
+  --output-dir examples/sqlite_bench/generated-server
+
+vsr server build \
+  --input examples/sqlite_bench/commerce.eon \
+  --output examples/sqlite_bench/dist/commerce-bench-server \
+  --release
+```
+
+The service-level `security` block is intentionally lightweight here: JSON body limits, CORS env
+override support through `CORS_ORIGINS`, trusted proxy overrides through `TRUSTED_PROXIES`, and
+default security response headers.
 
 ## Seed Shape
 

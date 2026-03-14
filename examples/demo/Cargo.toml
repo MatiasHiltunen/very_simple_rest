@@ -7,13 +7,14 @@ license.workspace = true
 
 [dependencies]
 actix-web = { workspace = true }
+dotenv = { workspace = true }
 serde = { workspace = true }
 sqlx = { workspace = true }
 serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
-very_simple_rest = { path = "../.." }
+very_simple_rest = { path = "../..", default-features = false, features = ["sqlite", "turso-local"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 actix-cors = { workspace = true }
@@ -23,5 +24,4 @@ actix-files = { workspace = true }
 [[bin]]
 name = "demo"
 path = "src/main.rs"
-
 

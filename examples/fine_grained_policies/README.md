@@ -25,9 +25,12 @@ The policies use `claim.tenant_id`, so the authenticated user must receive a num
 claim. Built-in auth can do that after the auth schema is extended:
 
 ```bash
-vsr migrate auth --output migrations/0000_auth.sql
-sqlite3 app.db < migrations/0000_auth.sql
-sqlite3 app.db < examples/fine_grained_policies/auth_extension.sql
+mkdir -p examples/fine_grained_policies/migrations
+mkdir -p examples/fine_grained_policies/var/data
+
+vsr migrate auth --output examples/fine_grained_policies/migrations/0000_auth.sql
+sqlite3 examples/fine_grained_policies/var/data/ops_control.db < examples/fine_grained_policies/migrations/0000_auth.sql
+sqlite3 examples/fine_grained_policies/var/data/ops_control.db < examples/fine_grained_policies/auth_extension.sql
 ```
 
 After that, any numeric `tenant_id` value stored on the built-in `user` row will be emitted as a
@@ -42,15 +45,20 @@ claim. Resources with `admin_bypass: false` still require the claim on the token
 
 ```bash
 mkdir -p examples/fine_grained_policies/migrations
+mkdir -p examples/fine_grained_policies/var/data
 
 vsr migrate generate \
   --input examples/fine_grained_policies/ops_control.eon \
   --output examples/fine_grained_policies/migrations/0001_ops_control.sql
 
-vsr --database-url sqlite:examples/fine_grained_policies/app.db?mode=rwc \
+vsr --config examples/fine_grained_policies/ops_control.eon \
   migrate apply \
   --dir examples/fine_grained_policies/migrations
 ```
+
+The example now declares both `database.engine = TursoLocal` and a service-level `security` block.
+That means the same `.eon` file drives local Turso bootstrap, JWT token defaults, CORS handling,
+trusted-proxy resolution, auth rate limits, and default security headers.
 
 ## Seed Data
 
@@ -59,7 +67,7 @@ such as `1`, `2`, `3`, and `4` already exist and that those users are assigned m
 `tenant_id` values in the built-in auth table.
 
 ```bash
-sqlite3 examples/fine_grained_policies/app.db < examples/fine_grained_policies/seed.sql
+sqlite3 examples/fine_grained_policies/var/data/ops_control.db < examples/fine_grained_policies/seed.sql
 ```
 
 ## Server Generation
@@ -67,6 +75,12 @@ sqlite3 examples/fine_grained_policies/app.db < examples/fine_grained_policies/s
 This example also works with the new server CLI flow:
 
 ```bash
+export JWT_SECRET=change-me
+# Optional when testing from another frontend origin:
+# export CORS_ORIGINS=http://localhost:3000
+# Optional when running behind a local reverse proxy:
+# export TRUSTED_PROXIES=127.0.0.1,::1
+
 vsr server emit \
   --input examples/fine_grained_policies/ops_control.eon \
   --output-dir generated-ops-control \
@@ -75,4 +89,5 @@ vsr server emit \
 
 That generates a runnable Actix project plus explicit SQL migrations. The only manual follow-up is
 adding the auth claim extension from `auth_extension.sql` before relying on tenant-based login
-claims.
+claims. The emitted server also inherits the `.eon` security settings for request size limits,
+compiled JWT metadata, auth rate limits, CORS, trusted proxies, and response headers.

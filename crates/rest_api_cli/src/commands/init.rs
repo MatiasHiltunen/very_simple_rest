@@ -3,10 +3,11 @@ use colored::Colorize;
 use reqwest;
 use std::fs::{File, create_dir_all};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // Base URL for raw content (not the HTML view)
 const TEMPLATE_DIR_URL: &str = "https://raw.githubusercontent.com/MatiasHiltunen/very_simple_rest/refs/heads/main/examples/template";
+const LOCAL_TEMPLATE_DIR: &str = "../../examples/template";
 const TEMPLATE_MAIN_RS: &str = "src/main.rs";
 const TEMPLATE_CARGO_TOML: &str = "Cargo.toml";
 const TEMPLATE_ENV_EXAMPLE: &str = ".env.example";
@@ -45,15 +46,24 @@ pub fn create_project(
     // Create public directory
     create_dir_all(project_dir.join("public"))?;
 
-    // Download and process template files
-    let client = reqwest::blocking::Client::new();
+    let template_root = bundled_template_root();
+    let client = template_root.is_none().then(reqwest::blocking::Client::new);
 
-    println!("Downloading template files from GitHub...");
+    if let Some(root) = template_root.as_deref() {
+        println!(
+            "{} {}",
+            "Using bundled template files from".green(),
+            root.display()
+        );
+    } else {
+        println!("Downloading template files from GitHub...");
+    }
 
     // Main source file
-    fetch_and_process_file(
-        &client,
-        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_MAIN_RS),
+    load_and_process_file(
+        template_root.as_deref(),
+        client.as_ref(),
+        TEMPLATE_MAIN_RS,
         &project_dir.join(TEMPLATE_MAIN_RS),
         &[
             ("{{project_name}}", name),
@@ -63,9 +73,10 @@ pub fn create_project(
     )?;
 
     // Cargo.toml
-    fetch_and_process_file(
-        &client,
-        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_CARGO_TOML),
+    load_and_process_file(
+        template_root.as_deref(),
+        client.as_ref(),
+        TEMPLATE_CARGO_TOML,
         &project_dir.join(TEMPLATE_CARGO_TOML),
         &[
             ("{{project_name}}", name),
@@ -77,17 +88,19 @@ pub fn create_project(
     )?;
 
     // .env.example
-    fetch_and_process_file(
-        &client,
-        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_ENV_EXAMPLE),
+    load_and_process_file(
+        template_root.as_deref(),
+        client.as_ref(),
+        TEMPLATE_ENV_EXAMPLE,
         &project_dir.join(TEMPLATE_ENV_EXAMPLE),
         &[],
     )?;
 
     // README.md
-    fetch_and_process_file(
-        &client,
-        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_README_MD),
+    load_and_process_file(
+        template_root.as_deref(),
+        client.as_ref(),
+        TEMPLATE_README_MD,
         &project_dir.join(TEMPLATE_README_MD),
         &[
             ("{{project_name}}", name),
@@ -98,17 +111,19 @@ pub fn create_project(
     )?;
 
     // public/index.html
-    fetch_and_process_file(
-        &client,
-        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_PUBLIC_INDEX),
+    load_and_process_file(
+        template_root.as_deref(),
+        client.as_ref(),
+        TEMPLATE_PUBLIC_INDEX,
         &project_dir.join(TEMPLATE_PUBLIC_INDEX),
         &[("{{project_name}}", name)],
     )?;
 
     // public/app.js
-    fetch_and_process_file(
-        &client,
-        &format!("{}/{}", TEMPLATE_DIR_URL, TEMPLATE_PUBLIC_APP_JS),
+    load_and_process_file(
+        template_root.as_deref(),
+        client.as_ref(),
+        TEMPLATE_PUBLIC_APP_JS,
         &project_dir.join(TEMPLATE_PUBLIC_APP_JS),
         &[],
     )?;
@@ -126,30 +141,48 @@ pub fn create_project(
     Ok(())
 }
 
-/// Fetch a file from URL and process its content
-fn fetch_and_process_file(
-    client: &reqwest::blocking::Client,
-    url: &str,
+fn bundled_template_root() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(LOCAL_TEMPLATE_DIR);
+    root.exists().then_some(root)
+}
+
+/// Load a template file from the bundled checkout when available, otherwise fetch it remotely.
+fn load_and_process_file(
+    template_root: Option<&Path>,
+    client: Option<&reqwest::blocking::Client>,
+    relative_path: &str,
     destination: &Path,
     replacements: &[(&str, &str)],
 ) -> Result<()> {
-    println!("Fetching: {}", url);
+    let content = if let Some(root) = template_root {
+        let source = root.join(relative_path);
+        println!("Reading: {}", source.display());
+        std::fs::read_to_string(&source).map_err(|error| {
+            crate::error::Error::Config(format!(
+                "Failed to read bundled template file `{}`: {error}",
+                source.display()
+            ))
+        })?
+    } else {
+        let client = client.expect("remote template loading requires a reqwest client");
+        let url = format!("{}/{}", TEMPLATE_DIR_URL, relative_path);
+        println!("Fetching: {}", url);
 
-    // Fetch file content from URL
-    let response = client.get(url).send().map_err(|e| {
-        crate::error::Error::Config(format!("Failed to fetch template file: {}", e))
-    })?;
+        let response = client.get(&url).send().map_err(|e| {
+            crate::error::Error::Config(format!("Failed to fetch template file: {}", e))
+        })?;
 
-    if !response.status().is_success() {
-        return Err(crate::error::Error::Config(format!(
-            "Failed to fetch template file: HTTP status {}",
-            response.status()
-        )));
-    }
+        if !response.status().is_success() {
+            return Err(crate::error::Error::Config(format!(
+                "Failed to fetch template file: HTTP status {}",
+                response.status()
+            )));
+        }
 
-    let content = response.text().map_err(|e| {
-        crate::error::Error::Config(format!("Failed to read template content: {}", e))
-    })?;
+        response.text().map_err(|e| {
+            crate::error::Error::Config(format!("Failed to read template content: {}", e))
+        })?
+    };
 
     // Create parent directories if needed
     if let Some(parent) = destination.parent() {
@@ -169,4 +202,17 @@ fn fetch_and_process_file(
     println!("{} {}", "Created:".green(), destination.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bundled_template_root;
+
+    #[test]
+    fn bundled_template_root_exists_in_repo_checkout() {
+        let root = bundled_template_root().expect("bundled template root should exist");
+        assert!(root.join("src/main.rs").exists());
+        assert!(root.join("Cargo.toml").exists());
+        assert!(root.join(".env.example").exists());
+    }
 }

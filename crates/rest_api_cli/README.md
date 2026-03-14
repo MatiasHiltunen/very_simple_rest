@@ -22,13 +22,24 @@ cargo build --release -p rest_api_cli
 ./target/release/vsr --help
 ```
 
-### Cargo Install (Coming Soon)
+### Cargo Install
 
 ```bash
-cargo install vsr
+cargo install --path crates/rest_api_cli
 ```
 
 ## Commands
+
+### Init
+
+Scaffold a starter project from the bundled template:
+
+```bash
+vsr init my-api
+```
+
+The starter template now uses local Turso by default and wires in the shared runtime security
+helpers for request limits, CORS, trusted proxies, auth rate limits, and response headers.
 
 ### Setup
 
@@ -61,6 +72,19 @@ vsr --config api.eon check-db
 When `--config` points to a `.eon` service and `--database-url` / `DATABASE_URL` are both absent,
 the CLI uses the service’s compiled default database URL. For SQLite services, that now defaults
 to `database.engine = TursoLocal`, which resolves to the matching SQLite-compatible file URL.
+
+### Env Generation
+
+Generate a `.env` file directly:
+
+```bash
+vsr gen-env
+vsr --config api.eon gen-env --path .env.local
+```
+
+When `--config` points to a `.eon` service, the generated file mirrors the compiled default
+database URL plus optional env-driven Turso/security variables such as `TURSO_ENCRYPTION_KEY`,
+`CORS_ORIGINS`, and `TRUSTED_PROXIES` when those are referenced by the service.
 
 ### Server Generation
 
@@ -290,7 +314,7 @@ The CLI tool respects the following environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | Database connection string | `sqlite:app.db?mode=rwc` |
+| `DATABASE_URL` | Database connection string | `sqlite:var/data/app.db?mode=rwc` when you use the modern local Turso layout |
 | `ADMIN_EMAIL` | Default admin email address | None |
 | `ADMIN_PASSWORD` | Default admin password | None |
 | `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` | None |
@@ -302,7 +326,7 @@ The CLI tool respects the following environment variables:
 
 ```bash
 # Set database URL
-export DATABASE_URL="sqlite:my_app.db?mode=rwc"
+export DATABASE_URL="sqlite:var/data/my_app.db?mode=rwc"
 
 # Initialize the application
 vsr setup
@@ -323,7 +347,7 @@ vsr --config tests/fixtures/turso_local_api.eon migrate apply --dir migrations
 
 ```bash
 # Set required variables
-export DATABASE_URL="sqlite:app.db?mode=rwc"
+export DATABASE_URL="sqlite:var/data/app.db?mode=rwc"
 export ADMIN_EMAIL="admin@example.com"
 export ADMIN_PASSWORD="secure_random_password"
 export ADMIN_TENANT_ID="1"

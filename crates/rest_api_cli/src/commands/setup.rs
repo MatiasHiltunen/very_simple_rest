@@ -88,7 +88,7 @@ pub async fn run_setup(
             .unwrap_or(false);
 
         if create_env {
-            generate_env_template()?;
+            generate_env_template(config_path)?;
         }
     }
 

@@ -1,4 +1,42 @@
 module: "ops_control_api"
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/ops_control.db"
+    }
+}
+security: {
+    requests: {
+        json_max_bytes: 262144
+    }
+    cors: {
+        origins: ["http://127.0.0.1:8080"]
+        origins_env: "CORS_ORIGINS"
+        allow_credentials: true
+        allow_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+        allow_headers: ["authorization", "content-type", "accept"]
+        expose_headers: ["x-total-count"]
+        max_age_seconds: 600
+    }
+    trusted_proxies: {
+        proxies: ["127.0.0.1", "::1"]
+        proxies_env: "TRUSTED_PROXIES"
+    }
+    rate_limits: {
+        login: { requests: 10, window_seconds: 60 }
+        register: { requests: 5, window_seconds: 300 }
+    }
+    headers: {
+        frame_options: Deny
+        content_type_options: true
+        referrer_policy: StrictOriginWhenCrossOrigin
+    }
+    auth: {
+        issuer: "ops_control_api"
+        audience: "ops_control_clients"
+        access_token_ttl_seconds: 1800
+    }
+}
 resources: [
     {
         name: "Workspace"
