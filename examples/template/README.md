@@ -31,7 +31,7 @@ The `user` table is excluded from the derive migration because the built-in auth
 
 ## Environment Variables
 
-- `JWT_SECRET` is required for stable auth tokens across restarts
+- `JWT_SECRET` is required because built-in auth will not start without it
 - `BIND_ADDR` changes the listen address, defaulting to `127.0.0.1:8080`
 - `TURSO_ENCRYPTION_KEY` enables encrypted local Turso bootstrap when present
 - `CORS_ORIGINS` appends comma-separated frontend origins to the built-in local default

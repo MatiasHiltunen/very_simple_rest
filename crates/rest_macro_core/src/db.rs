@@ -9,7 +9,13 @@ use sqlx_core::HashMap;
 #[cfg(feature = "turso-local")]
 use sqlx_core::any::{AnyColumn, AnyTypeInfo, AnyTypeInfoKind, AnyValue, AnyValueKind};
 #[cfg(feature = "turso-local")]
+use sqlx_core::error::{DatabaseError as SqlxDatabaseError, ErrorKind as SqlxErrorKind};
+#[cfg(feature = "turso-local")]
 use sqlx_core::ext::ustr::UStr;
+#[cfg(feature = "turso-local")]
+use std::borrow::Cow;
+#[cfg(feature = "turso-local")]
+use std::fmt;
 #[cfg(feature = "turso-local")]
 use std::sync::Arc;
 #[cfg(feature = "turso-local")]
@@ -888,8 +894,135 @@ fn type_info_kind_for_value_kind(value: &AnyValueKind<'_>) -> AnyTypeInfoKind {
 }
 
 #[cfg(feature = "turso-local")]
+#[derive(Debug)]
+struct TursoDatabaseError {
+    message: String,
+    kind: SqlxErrorKind,
+    transient_in_connect_phase: bool,
+}
+
+#[cfg(feature = "turso-local")]
+impl TursoDatabaseError {
+    fn new(message: String, kind: SqlxErrorKind) -> Self {
+        Self {
+            message,
+            kind,
+            transient_in_connect_phase: false,
+        }
+    }
+
+    fn transient(mut self) -> Self {
+        self.transient_in_connect_phase = true;
+        self
+    }
+}
+
+#[cfg(feature = "turso-local")]
+impl fmt::Display for TursoDatabaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+#[cfg(feature = "turso-local")]
+impl std::error::Error for TursoDatabaseError {}
+
+#[cfg(feature = "turso-local")]
+impl SqlxDatabaseError for TursoDatabaseError {
+    fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn code(&self) -> Option<Cow<'_, str>> {
+        None
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+
+    fn is_transient_in_connect_phase(&self) -> bool {
+        self.transient_in_connect_phase
+    }
+
+    fn kind(&self) -> SqlxErrorKind {
+        match self.kind {
+            SqlxErrorKind::UniqueViolation => SqlxErrorKind::UniqueViolation,
+            SqlxErrorKind::ForeignKeyViolation => SqlxErrorKind::ForeignKeyViolation,
+            SqlxErrorKind::NotNullViolation => SqlxErrorKind::NotNullViolation,
+            SqlxErrorKind::CheckViolation => SqlxErrorKind::CheckViolation,
+            SqlxErrorKind::Other => SqlxErrorKind::Other,
+            _ => SqlxErrorKind::Other,
+        }
+    }
+}
+
+#[cfg(feature = "turso-local")]
+fn sqlite_error_kind_from_message(message: &str) -> SqlxErrorKind {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("unique constraint failed")
+        || normalized.contains("is not unique")
+        || normalized.contains("duplicate")
+        || normalized.contains("primary key")
+    {
+        SqlxErrorKind::UniqueViolation
+    } else if normalized.contains("foreign key constraint failed")
+        || normalized.contains("foreign key mismatch")
+    {
+        SqlxErrorKind::ForeignKeyViolation
+    } else if normalized.contains("not null constraint failed")
+        || normalized.contains("cannot be null")
+    {
+        SqlxErrorKind::NotNullViolation
+    } else if normalized.contains("check constraint failed") {
+        SqlxErrorKind::CheckViolation
+    } else {
+        SqlxErrorKind::Other
+    }
+}
+
+#[cfg(feature = "turso-local")]
 fn map_turso_error(error: turso::Error) -> sqlx::Error {
-    sqlx::Error::Protocol(error.to_string())
+    match error {
+        turso::Error::ToSqlConversionFailure(error) => sqlx::Error::Encode(error),
+        turso::Error::QueryReturnedNoRows => sqlx::Error::RowNotFound,
+        turso::Error::ConversionFailure(message) => sqlx::Error::Protocol(message),
+        turso::Error::Busy(message) => sqlx::Error::database(
+            TursoDatabaseError::new(message, SqlxErrorKind::Other).transient(),
+        ),
+        turso::Error::BusySnapshot(message) => sqlx::Error::database(
+            TursoDatabaseError::new(message, SqlxErrorKind::Other).transient(),
+        ),
+        turso::Error::Interrupt(message) => {
+            sqlx::Error::database(TursoDatabaseError::new(message, SqlxErrorKind::Other))
+        }
+        turso::Error::Error(message) => sqlx::Error::database(TursoDatabaseError::new(
+            message.clone(),
+            sqlite_error_kind_from_message(&message),
+        )),
+        turso::Error::Misuse(message) => sqlx::Error::Protocol(message),
+        turso::Error::Constraint(message) => sqlx::Error::database(TursoDatabaseError::new(
+            message.clone(),
+            sqlite_error_kind_from_message(&message),
+        )),
+        turso::Error::Readonly(message)
+        | turso::Error::DatabaseFull(message)
+        | turso::Error::NotAdb(message)
+        | turso::Error::Corrupt(message) => {
+            sqlx::Error::database(TursoDatabaseError::new(message, SqlxErrorKind::Other))
+        }
+        turso::Error::IoError(kind, operation) => {
+            sqlx::Error::Io(std::io::Error::new(kind, operation))
+        }
+    }
 }
 
 #[cfg(feature = "turso-local")]
@@ -901,7 +1034,18 @@ fn parse_turso_local_url(
         let path = if parsed.path() == "/:memory:" || parsed.path() == ":memory:" {
             ":memory:".to_owned()
         } else {
-            parsed.path().trim_start_matches('/').to_owned()
+            let host = parsed.host_str().unwrap_or_default();
+            let path = parsed.path();
+            match (host.is_empty(), path.is_empty() || path == "/") {
+                (false, true) => host.to_owned(),
+                (false, false) => format!("{host}{path}"),
+                (true, false) => path.to_owned(),
+                (true, true) => {
+                    return Err(sqlx::Error::Configuration(
+                        format!("turso-local URL must include a database path: {url}").into(),
+                    ));
+                }
+            }
         };
         let encryption_key_env = parsed
             .query_pairs()
@@ -938,13 +1082,62 @@ fn parse_turso_local_url(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "turso-local")]
     use super::{DbPool, connect_with_config, query, query_scalar};
+    #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
+    #[cfg(feature = "turso-local")]
+    use sqlx::error::DatabaseError as _;
+    #[cfg(feature = "turso-local")]
     use std::sync::{Mutex, OnceLock};
 
+    #[cfg(feature = "turso-local")]
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[test]
+    fn parse_turso_local_url_preserves_relative_and_absolute_paths() {
+        let relative = super::parse_turso_local_url(
+            "turso-local://var/data/app.db?encryption_key_env=TURSO_KEY",
+        )
+        .expect("relative url should parse")
+        .expect("relative url should resolve to config");
+        assert_eq!(relative.path, "var/data/app.db");
+        assert_eq!(relative.encryption_key_env.as_deref(), Some("TURSO_KEY"));
+
+        let absolute = super::parse_turso_local_url("turso-local:///tmp/app.db")
+            .expect("absolute url should parse")
+            .expect("absolute url should resolve to config");
+        assert_eq!(absolute.path, "/tmp/app.db");
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[test]
+    fn map_turso_error_preserves_database_error_kind() {
+        let error = super::map_turso_error(turso::Error::Constraint(
+            "UNIQUE constraint failed: user.email".to_owned(),
+        ));
+        let database_error = error
+            .as_database_error()
+            .expect("constraint should map to database error");
+        assert!(database_error.is_unique_violation());
+        assert_eq!(
+            database_error.message(),
+            "UNIQUE constraint failed: user.email"
+        );
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[test]
+    fn map_turso_error_surfaces_missing_table_as_database_error() {
+        let error = super::map_turso_error(turso::Error::Error("no such table: user".to_owned()));
+        let database_error = error
+            .as_database_error()
+            .expect("sqlite runtime error should map to database error");
+        assert!(database_error.message().contains("no such table: user"));
     }
 
     #[cfg(feature = "turso-local")]

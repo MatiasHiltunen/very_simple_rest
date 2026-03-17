@@ -15,26 +15,27 @@ everything.
 ## Start The Example
 
 ```bash
-vsr server emit \
-  --input examples/todo_app/todo_app.eon \
-  --output-dir examples/todo_app/generated-server \
-  --force
+cd examples/todo_app
 
-cd examples/todo_app/generated-server
-mkdir -p var/data
+vsr build todo_app.eon --force
+cp todo-app.bundle/.env.example .env
 
-sqlite3 var/data/todo_app.db < migrations/0000_auth.sql
-sqlite3 var/data/todo_app.db < migrations/0001_service.sql
+# Set these in `.env` or export them before the next steps.
+export JWT_SECRET=replace-me
+export TURSO_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
-vsr --config todo_app.eon create-admin \
-  --email admin@example.com \
-  --password change-me
+export ADMIN_EMAIL=admin@example.com
+export ADMIN_PASSWORD=change-me
+vsr setup --non-interactive
 
-cp .env.example .env
-cargo run
+./todo-app
 ```
 
 Then open `http://127.0.0.1:8080`.
+
+`vsr setup` auto-discovers `todo_app.eon` in the current directory, applies the built-in auth
+schema, and initializes `var/data/todo_app.db`. `vsr build todo_app.eon` writes the binary to
+`./todo-app` and exports the runtime assets to `./todo-app.bundle/`.
 
 ## How To Test The Access Rules
 
@@ -46,7 +47,8 @@ Then open `http://127.0.0.1:8080`.
 
 ## Optional Environment Overrides
 
-- `JWT_SECRET` for stable auth tokens across restarts
+- `JWT_SECRET` is required because built-in auth will not start without it
+- `TURSO_ENCRYPTION_KEY` is required because this example uses encrypted local Turso
 - `CORS_ORIGINS` if you want to test the API from another frontend origin
 - `TRUSTED_PROXIES` if you run the generated server behind a local proxy
 

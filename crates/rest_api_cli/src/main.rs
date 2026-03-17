@@ -83,6 +83,49 @@ enum Commands {
         command: ServerCommand,
     },
 
+    /// Build a server binary directly from a `.eon` service
+    Build {
+        /// Path to the `.eon` service file
+        #[arg(value_name = "FILE")]
+        input: PathBuf,
+
+        /// Output binary path or directory
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Override the generated Cargo package name
+        #[arg(long, value_name = "NAME")]
+        package_name: Option<String>,
+
+        /// Temporary build directory for the generated Cargo project
+        #[arg(long, value_name = "DIR")]
+        build_dir: Option<PathBuf>,
+
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
+        with_auth: bool,
+
+        /// Exclude built-in auth routes and auth migration SQL
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
+
+        /// Build an optimized release binary
+        #[arg(long)]
+        release: bool,
+
+        /// Cargo target triple to build for
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
+
+        /// Keep the generated build project after compiling
+        #[arg(long)]
+        keep_build_dir: bool,
+
+        /// Overwrite the output binary if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Generate an OpenAPI document from a `.eon` service or derive-based Rust sources
     #[command(name = "openapi")]
     OpenApi {
@@ -281,7 +324,7 @@ enum ServerCommand {
         #[arg(short, long, value_name = "FILE")]
         input: PathBuf,
 
-        /// Output binary path
+        /// Output binary path or directory
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
 
@@ -325,7 +368,7 @@ async fn main() -> Result<()> {
     let _ = dotenv::dotenv();
 
     let cli = Cli::parse();
-    let config_path = cli.config.as_deref().map(PathBuf::from);
+    let config_path = resolve_config_path(cli.config.as_deref())?;
 
     // Determine database URL from CLI args, environment, or an `.eon` service config.
     let database_url = if let Some(url) = cli.database_url {
@@ -533,9 +576,9 @@ async fn main() -> Result<()> {
             } => {
                 println!("{}", "Building server binary...".green().bold());
                 let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
-                commands::server::build_server_binary(
+                commands::server::build_server_binary_with_defaults(
                     input,
-                    output,
+                    Some(output),
                     package_name.clone(),
                     build_dir.clone(),
                     include_builtin_auth,
@@ -546,6 +589,33 @@ async fn main() -> Result<()> {
                 )?;
             }
         },
+
+        Commands::Build {
+            input,
+            output,
+            package_name,
+            build_dir,
+            with_auth,
+            without_auth,
+            release,
+            target,
+            keep_build_dir,
+            force,
+        } => {
+            println!("{}", "Building server binary...".green().bold());
+            let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+            commands::server::build_server_binary_with_defaults(
+                input,
+                output.as_deref(),
+                package_name.clone(),
+                build_dir.clone(),
+                include_builtin_auth,
+                *release,
+                target.clone(),
+                *keep_build_dir,
+                *force,
+            )?;
+        }
 
         Commands::OpenApi {
             input,
@@ -593,10 +663,35 @@ fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {
     true
 }
 
+fn resolve_config_path(explicit: Option<&str>) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit {
+        return Ok(Some(PathBuf::from(path)));
+    }
+
+    let cwd = std::env::current_dir()?;
+    Ok(autodiscover_config_path(&cwd))
+}
+
+fn autodiscover_config_path(dir: &std::path::Path) -> Option<PathBuf> {
+    let mut matches = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("eon"))
+        .collect::<Vec<_>>();
+    matches.sort();
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, include_builtin_auth};
+    use super::{Cli, autodiscover_config_path, include_builtin_auth};
     use clap::Parser;
+    use std::{fs, path::PathBuf};
+    use uuid::Uuid;
 
     #[test]
     fn include_builtin_auth_defaults_on() {
@@ -618,5 +713,39 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn build_command_accepts_positional_service_input() {
+        assert!(Cli::try_parse_from(["vsr", "build", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn autodiscover_config_path_picks_single_local_eon() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/main_tests")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("test directory should exist");
+        fs::write(root.join("todo_app.eon"), "module: \"todo_app\"\n")
+            .expect("config should write");
+
+        assert_eq!(
+            autodiscover_config_path(&root),
+            Some(root.join("todo_app.eon"))
+        );
+    }
+
+    #[test]
+    fn autodiscover_config_path_skips_ambiguous_directories() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/main_tests")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).expect("test directory should exist");
+        fs::write(root.join("todo_app.eon"), "module: \"todo_app\"\n")
+            .expect("first config should write");
+        fs::write(root.join("blog_api.eon"), "module: \"blog_api\"\n")
+            .expect("second config should write");
+
+        assert_eq!(autodiscover_config_path(&root), None);
     }
 }

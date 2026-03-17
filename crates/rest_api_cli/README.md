@@ -61,9 +61,15 @@ For non-interactive setup (e.g., in CI/CD pipelines):
 vsr setup --non-interactive
 ```
 
-If you already have a bare `.eon` service, you can let `vsr` derive the database URL from it:
+If you run `vsr` from a directory containing exactly one `.eon` service, the CLI auto-discovers
+it for `setup`, `create-admin`, `check-db`, and `gen-env`. You can still pass `--config`
+explicitly when you want a non-default file:
 
 ```bash
+vsr setup
+vsr create-admin --email admin@example.com --password change-me
+vsr check-db
+
 vsr --config api.eon setup
 vsr --config api.eon create-admin --email admin@example.com --password change-me
 vsr --config api.eon check-db
@@ -109,7 +115,7 @@ This emits:
 You can also build a server binary directly:
 
 ```bash
-vsr server build --input api.eon --output dist/api-server --release
+vsr build api.eon --release
 ```
 
 Useful options:
@@ -118,13 +124,19 @@ Useful options:
 - `--package-name` overrides the generated Cargo package name
 - `--build-dir` keeps the temporary Cargo project in a known location
 - `--keep-build-dir` preserves the generated build project after compilation
+- `--output dist` writes the binary into an existing directory; otherwise it defaults to the
+  current directory and names the binary after the `.eon` file stem
 
 Built-in auth is enabled by default. If the `.eon` service already defines a `user` table, re-run
 with `--without-auth` because the built-in auth migration owns that table name.
 
-`vsr server build` also exports the generated runtime artifacts next to the binary in
+`vsr build` also exports the generated runtime artifacts next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file, `README.md`,
 and `migrations/`.
+
+The generated server fails fast if built-in auth is enabled and `JWT_SECRET` is missing. `vsr
+gen-env` and emitted `.env.example` files still help by generating or surfacing the required env
+vars, but runtime auth is no longer allowed to fall back to a random secret.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and Swagger UI at `/docs`.
 When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
@@ -324,11 +336,11 @@ The CLI tool respects the following environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | Database connection string | `sqlite:var/data/app.db?mode=rwc` when you use the modern local Turso layout |
+| `DATABASE_URL` | Database connection string | Derived from `--config` or a single local `.eon`; otherwise `sqlite:var/data/app.db?mode=rwc` |
 | `ADMIN_EMAIL` | Default admin email address | None |
 | `ADMIN_PASSWORD` | Default admin password | None |
 | `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` | None |
-| `JWT_SECRET` | Secret key for JWT tokens | Auto-generated |
+| `JWT_SECRET` | Secret key for JWT tokens | Required for built-in auth at runtime |
 
 ## Examples
 
@@ -337,6 +349,7 @@ The CLI tool respects the following environment variables:
 ```bash
 # Set database URL
 export DATABASE_URL="sqlite:var/data/my_app.db?mode=rwc"
+export JWT_SECRET="replace-me"
 
 # Initialize the application
 vsr setup
@@ -348,7 +361,7 @@ vsr check-db
 ### `.eon`-Driven Local Turso Example
 
 ```bash
-# Use the database settings compiled from a bare .eon service
+# Use the compiled database settings from a bare .eon service explicitly
 vsr --config tests/fixtures/turso_local_api.eon check-db
 vsr --config tests/fixtures/turso_local_api.eon migrate apply --dir migrations
 ```
@@ -361,6 +374,7 @@ export DATABASE_URL="sqlite:var/data/app.db?mode=rwc"
 export ADMIN_EMAIL="admin@example.com"
 export ADMIN_PASSWORD="secure_random_password"
 export ADMIN_TENANT_ID="1"
+export JWT_SECRET="replace-me"
 
 # Create admin non-interactively
 vsr create-admin --email $ADMIN_EMAIL --password $ADMIN_PASSWORD

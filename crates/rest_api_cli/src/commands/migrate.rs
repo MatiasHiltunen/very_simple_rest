@@ -212,9 +212,8 @@ pub async fn inspect_live_schema(
     exclude_tables: &[String],
 ) -> Result<()> {
     let service = load_schema_service(input, exclude_tables)?;
-    let backend = AuthDbBackend::from_database_url(database_url)
-        .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
     let pool = connect_pool(database_url, config_path).await?;
+    let backend = detect_runtime_backend(&pool).await?;
 
     let mut issues = Vec::new();
     for resource in &service.resources {
@@ -369,6 +368,7 @@ pub async fn apply_migrations(
     }
 
     let pool = connect_pool(database_url, config_path).await?;
+    let backend = detect_runtime_backend(&pool).await?;
 
     for file in files {
         let name = file
@@ -379,7 +379,7 @@ pub async fn apply_migrations(
 
         let sql = fs::read_to_string(&file)
             .with_context(|| format!("failed to read {}", file.display()))?;
-        match apply_named_migration(&pool, database_url, &name, &sql).await? {
+        match apply_named_migration(&pool, backend, &name, &sql).await? {
             ApplyResult::Skipped => println!("{} {}", "Skipping applied migration".yellow(), name),
             ApplyResult::Applied => println!("{} {}", "Applied migration".green().bold(), name),
         }
@@ -390,11 +390,10 @@ pub async fn apply_migrations(
 
 pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>) -> Result<()> {
     let pool = connect_pool(database_url, config_path).await?;
-    let backend = AuthDbBackend::from_database_url(database_url)
-        .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
+    let backend = detect_runtime_backend(&pool).await?;
     let sql = auth_migration_sql(backend);
 
-    match apply_named_migration(&pool, database_url, BUILTIN_AUTH_MIGRATION, &sql).await? {
+    match apply_named_migration(&pool, backend, BUILTIN_AUTH_MIGRATION, &sql).await? {
         ApplyResult::Skipped => println!(
             "{} {}",
             "Auth migration already applied".yellow().bold(),
@@ -829,11 +828,11 @@ async fn ensure_migrations_table(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
-async fn migration_applied(pool: &DbPool, database_url: &str, name: &str) -> Result<bool> {
+async fn migration_applied(pool: &DbPool, backend: AuthDbBackend, name: &str) -> Result<bool> {
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM {} WHERE name = {})",
         MIGRATIONS_TABLE,
-        placeholder_for_url(database_url, 1)
+        placeholder_for_backend(backend, 1)
     );
     let exists = query_scalar::<sqlx::Any, i64>(&sql)
         .bind(name)
@@ -851,13 +850,32 @@ async fn connect_pool(database_url: &str, config_path: Option<&Path>) -> Result<
     Ok(pool)
 }
 
+async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
+    match pool {
+        DbPool::Sqlx(pool) => {
+            let connection = pool.acquire().await?;
+            let backend_name = connection.backend_name().to_ascii_lowercase();
+            if backend_name.contains("postgres") {
+                Ok(AuthDbBackend::Postgres)
+            } else if backend_name.contains("mysql") {
+                Ok(AuthDbBackend::Mysql)
+            } else if backend_name.contains("sqlite") {
+                Ok(AuthDbBackend::Sqlite)
+            } else {
+                bail!("unsupported live database backend `{backend_name}`")
+            }
+        }
+        DbPool::TursoLocal(_) => Ok(AuthDbBackend::Sqlite),
+    }
+}
+
 async fn apply_named_migration(
     pool: &DbPool,
-    database_url: &str,
+    backend: AuthDbBackend,
     name: &str,
     sql: &str,
 ) -> Result<ApplyResult> {
-    if migration_applied(pool, database_url, name).await? {
+    if migration_applied(pool, backend, name).await? {
         return Ok(ApplyResult::Skipped);
     }
 
@@ -873,7 +891,7 @@ async fn apply_named_migration(
     let insert_sql = format!(
         "INSERT INTO {} (name) VALUES ({})",
         MIGRATIONS_TABLE,
-        placeholder_for_url(database_url, 1)
+        placeholder_for_backend(backend, 1)
     );
     query(&insert_sql)
         .bind(name)
@@ -888,11 +906,10 @@ async fn apply_named_migration(
     Ok(ApplyResult::Applied)
 }
 
-fn placeholder_for_url(database_url: &str, index: usize) -> String {
-    if database_url.starts_with("postgres:") || database_url.starts_with("postgresql:") {
-        format!("${index}")
-    } else {
-        "?".to_owned()
+fn placeholder_for_backend(backend: AuthDbBackend, index: usize) -> String {
+    match backend {
+        AuthDbBackend::Postgres => format!("${index}"),
+        AuthDbBackend::Sqlite | AuthDbBackend::Mysql => "?".to_owned(),
     }
 }
 

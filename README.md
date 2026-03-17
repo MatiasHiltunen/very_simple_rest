@@ -135,13 +135,15 @@ flows accept environment variables named `ADMIN_<COLUMN_NAME>`, such as `ADMIN_T
 
 ### JWT Secret Configuration
 
-The library supports the following methods for setting the JWT secret (in order of precedence):
+Built-in auth now requires `JWT_SECRET` to be set before the server starts.
+
+Supported sources:
 
 1. Environment variable: `JWT_SECRET=your_secret_here`
 2. `.env` file in your project root: `JWT_SECRET=your_secret_here`
-3. If no secret is provided, a random secret is generated at startup (not recommended for production)
 
-For production environments, it's strongly recommended to set a persistent secret using one of the first two methods.
+The runtime no longer generates a random fallback secret, so tokens remain valid across restarts
+and multi-instance deployments only when you provide an explicit secret.
 
 ### Example login:
 
@@ -182,7 +184,7 @@ vsr migrate auth --output migrations/0000_auth.sql
 vsr server emit --input api.eon --output-dir generated-api
 
 # Build a server binary directly from a bare .eon service
-vsr server build --input api.eon --output dist/api-server --release
+vsr build api.eon --release
 
 # Setup wizard with interactive prompts
 vsr setup
@@ -202,6 +204,10 @@ vsr gen-env
 
 The CLI tool provides a secure way to set up admin users with password confirmation and validation.
 
+When you run `vsr` from a directory containing exactly one `.eon` file, commands such as `setup`,
+`create-admin`, `check-db`, and `gen-env` now auto-discover that service and derive the default
+database URL from it.
+
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 
 ## Server Generation
@@ -214,7 +220,7 @@ compiled binary:
 vsr server emit --input tests/fixtures/blog_api.eon --output-dir generated-api
 
 # Build a binary directly from the same .eon file
-vsr server build --input tests/fixtures/blog_api.eon --output dist/blog-api --release
+vsr build tests/fixtures/blog_api.eon --release
 ```
 
 The emitted project includes:
@@ -231,7 +237,12 @@ Built-in auth and account routes are enabled by default for generated servers an
 `--without-auth` if your `.eon` service defines its own `user` table or if you want to omit the
 shared `/auth` routes and `migrations/0000_auth.sql`.
 
-`vsr server build` also exports the generated runtime assets next to the binary in
+`vsr build <service.eon>` now writes the binary into the current directory by default, naming it
+after the `.eon` file stem. For example, `vsr build blog_api.eon` produces `./blog-api`. If
+`--output` points to an existing directory, the binary is placed inside that directory using the
+same default name.
+
+The build command also exports the generated runtime assets next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file,
 `README.md`, and `migrations/`.
 

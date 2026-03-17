@@ -3,6 +3,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/todo_app.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
     }
 }
 security: {

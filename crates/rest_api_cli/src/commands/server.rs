@@ -35,6 +35,33 @@ pub fn emit_server_project(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn build_server_binary_with_defaults(
+    input: &Path,
+    output: Option<&Path>,
+    package_name: Option<String>,
+    build_dir: Option<PathBuf>,
+    include_builtin_auth: bool,
+    release: bool,
+    target: Option<String>,
+    keep_build_dir: bool,
+    force: bool,
+) -> Result<PathBuf> {
+    let resolved_output = resolve_binary_output_path(input, output, package_name.as_deref())?;
+    build_server_binary(
+        input,
+        &resolved_output,
+        package_name,
+        build_dir,
+        include_builtin_auth,
+        release,
+        target,
+        keep_build_dir,
+        force,
+    )?;
+    Ok(resolved_output)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn build_server_binary(
     input: &Path,
     output: &Path,
@@ -53,16 +80,13 @@ pub fn build_server_binary(
         )));
     }
 
+    let resolved_package_name = resolve_generated_package_name(input, package_name.as_deref())?;
     let build_root = match build_dir {
         Some(dir) => dir,
         None => std::env::current_dir()
             .map_err(Error::Io)?
             .join(".vsr-build")
-            .join(
-                package_name
-                    .clone()
-                    .unwrap_or_else(|| "vsr-eon-server".to_owned()),
-            )
+            .join(&resolved_package_name)
             .join(Uuid::new_v4().to_string()),
     };
 
@@ -144,9 +168,7 @@ fn emit_server_project_inner(
 
     prepare_output_dir(output_dir, force)?;
 
-    let package_name = package_name
-        .map(|name| sanitize_package_name(&name))
-        .unwrap_or_else(|| sanitize_package_name(&service.module_ident.to_string()));
+    let package_name = resolve_generated_package_name(input, package_name.as_deref())?;
     let eon_file_name = input
         .file_name()
         .and_then(|name| name.to_str())
@@ -514,6 +536,11 @@ fn render_main_rs(module_name: &str, eon_file_name: &str, include_builtin_auth: 
     } else {
         ""
     };
+    let auth_startup_check = if include_builtin_auth {
+        "    very_simple_rest::auth::ensure_jwt_secret_configured()\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
+    } else {
+        ""
+    };
 
     format!(
         r##"use std::env;
@@ -572,7 +599,7 @@ async fn main() -> std::io::Result<()> {{
         .format_timestamp_secs()
         .init();
 
-    let database_config = {module_name}::database();
+{auth_startup_check}    let database_config = {module_name}::database();
     let database_url = match env::var("DATABASE_URL") {{
         Ok(url) => url,
         Err(_) => {{
@@ -619,7 +646,7 @@ fn render_env_example(
     include_builtin_auth: bool,
 ) -> String {
     let auth_block = if include_builtin_auth {
-        "JWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
+        "# Required when built-in auth is enabled\nJWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
     } else {
         "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n"
     };
@@ -655,7 +682,7 @@ fn render_project_readme(
     include_builtin_auth: bool,
 ) -> String {
     let auth_note = if include_builtin_auth {
-        "The generated project includes built-in auth/account routes and `migrations/0000_auth.sql`.\n"
+        "The generated project includes built-in auth/account routes and `migrations/0000_auth.sql`. Set `JWT_SECRET` before starting the server.\n"
     } else {
         "The generated project does not include built-in auth/account routes by default.\n"
     };
@@ -808,6 +835,41 @@ fn runtime_feature_list(service: &ServiceSpec, backend: DbBackend) -> String {
     features.join(", ")
 }
 
+fn resolve_generated_package_name(input: &Path, package_name: Option<&str>) -> Result<String> {
+    if let Some(package_name) = package_name {
+        return Ok(sanitize_package_name(package_name));
+    }
+
+    if let Some(stem) = input
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+    {
+        return Ok(sanitize_package_name(stem));
+    }
+
+    let service = compiler::load_service_from_path(input)
+        .map_err(|error| Error::Config(format!("failed to load `{}`: {error}", input.display())))?;
+    Ok(sanitize_package_name(&service.module_ident.to_string()))
+}
+
+fn resolve_binary_output_path(
+    input: &Path,
+    output: Option<&Path>,
+    package_name: Option<&str>,
+) -> Result<PathBuf> {
+    let package_name = resolve_generated_package_name(input, package_name)?;
+    let binary_name = binary_file_name(&package_name);
+
+    match output {
+        Some(path) if path.exists() && path.is_dir() => Ok(path.join(binary_name)),
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(std::env::current_dir()
+            .map_err(Error::Io)?
+            .join(binary_name)),
+    }
+}
+
 fn default_database_url(service: &ServiceSpec, backend: DbBackend) -> String {
     match &service.database.engine {
         DatabaseEngine::TursoLocal(engine) => sqlite_url_for_path(&engine.path),
@@ -867,8 +929,9 @@ fn binary_file_name(package_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_artifact_dir, build_server_binary, emit_server_project,
-        export_generated_runtime_artifacts, is_text_file_busy_failure, sanitize_package_name,
+        binary_file_name, build_artifact_dir, build_server_binary, emit_server_project,
+        export_generated_runtime_artifacts, is_text_file_busy_failure, resolve_binary_output_path,
+        resolve_generated_package_name, sanitize_package_name,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -877,6 +940,12 @@ mod tests {
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn example_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
             .join(name)
     }
 
@@ -898,6 +967,34 @@ mod tests {
         );
         assert_eq!(sanitize_package_name("9service"), "vsr-9service");
         assert_eq!(sanitize_package_name("___"), "vsr-eon-server");
+    }
+
+    #[test]
+    fn resolve_binary_output_path_defaults_to_current_directory() {
+        let resolved = resolve_binary_output_path(&fixture_path("blog_api.eon"), None, None)
+            .expect("default output should resolve");
+        assert_eq!(
+            resolved,
+            std::env::current_dir()
+                .expect("current dir should resolve")
+                .join(binary_file_name("blog-api"))
+        );
+    }
+
+    #[test]
+    fn resolve_binary_output_path_places_binary_inside_existing_directory() {
+        let root = test_root();
+        fs::create_dir_all(&root).expect("output directory should exist");
+        let resolved = resolve_binary_output_path(&fixture_path("blog_api.eon"), Some(&root), None)
+            .expect("directory output should resolve");
+        assert_eq!(resolved, root.join(binary_file_name("blog-api")));
+    }
+
+    #[test]
+    fn resolve_generated_package_name_defaults_to_input_file_stem() {
+        let resolved = resolve_generated_package_name(&example_path("todo_app/todo_app.eon"), None)
+            .expect("default package name should resolve");
+        assert_eq!(resolved, "todo-app");
     }
 
     #[test]
@@ -963,6 +1060,25 @@ mod tests {
     }
 
     #[test]
+    fn emit_server_project_defaults_package_name_to_input_file_stem() {
+        let root = test_root();
+        emit_server_project(
+            &example_path("todo_app/todo_app.eon"),
+            &root,
+            None,
+            true,
+            false,
+        )
+        .expect("server project should emit");
+
+        let cargo_toml = read_to_string(&root.join("Cargo.toml"));
+        assert!(cargo_toml.contains("name = \"todo-app\""));
+
+        let main_rs = read_to_string(&root.join("src/main.rs"));
+        assert!(main_rs.contains("todo_app_api::database()"));
+    }
+
+    #[test]
     fn emit_server_project_includes_auth_migration_when_requested() {
         let root = test_root();
         emit_server_project(
@@ -977,6 +1093,7 @@ mod tests {
         assert!(root.join("migrations/0000_auth.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("auth::auth_routes_with_settings"));
+        assert!(main_rs.contains("ensure_jwt_secret_configured"));
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"/auth/login\""));
         assert!(openapi.contains("\"Account\""));

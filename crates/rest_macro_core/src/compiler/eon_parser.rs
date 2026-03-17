@@ -15,6 +15,7 @@ use super::model::{
     StaticMountSpec, WriteModelStyle, default_resource_module_ident, infer_generated_value,
     infer_sql_type, sanitize_module_ident, sanitize_struct_ident, validate_field_validations,
     validate_list_config, validate_relations, validate_row_policies, validate_security_config,
+    validate_sql_identifier,
 };
 use crate::{
     auth::AuthSettings,
@@ -398,6 +399,7 @@ fn build_resources(
         let table_name = resource
             .table
             .unwrap_or_else(|| struct_name.to_snake_case());
+        validate_sql_identifier(&table_name, Span::call_site(), "table name")?;
         let configured_id = resource.id_field.unwrap_or_else(|| "id".to_owned());
 
         let mut seen_fields = HashSet::new();
@@ -941,6 +943,9 @@ fn parse_relation_document(relation: RelationDocument) -> syn::Result<super::mod
         ));
     }
 
+    validate_sql_identifier(references_table, Span::call_site(), "relation table")?;
+    validate_sql_identifier(references_field, Span::call_site(), "relation field")?;
+
     let on_delete = relation
         .on_delete
         .as_deref()
@@ -1279,6 +1284,56 @@ mod tests {
                 encryption_key_env: Some(DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV.to_owned()),
             })
         );
+    }
+
+    #[test]
+    fn rejects_invalid_table_identifier_from_eon() {
+        let error = build_resources(
+            DbBackend::Sqlite,
+            vec![ResourceDocument {
+                name: "Post".to_owned(),
+                table: Some("post; DROP TABLE user;".to_owned()),
+                id_field: None,
+                roles: RoleRequirements::default(),
+                policies: RowPoliciesDocument::default(),
+                list: ListConfigDocument::default(),
+                fields: vec![
+                    FieldDocument {
+                        name: "id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        nullable: false,
+                        id: true,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "title".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::String),
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                ],
+            }],
+        )
+        .expect_err("invalid table identifier should fail");
+        assert!(error.to_string().contains("table name"));
+        assert!(error.to_string().contains("valid SQL identifier"));
+    }
+
+    #[test]
+    fn rejects_invalid_relation_identifier_from_eon() {
+        let error = parse_relation_document(RelationDocument {
+            references: "post.id); DROP TABLE user;".to_owned(),
+            on_delete: None,
+            nested_route: false,
+        })
+        .expect_err("invalid relation identifier should fail");
+        assert!(error.to_string().contains("relation field"));
+        assert!(error.to_string().contains("valid SQL identifier"));
     }
 
     #[test]

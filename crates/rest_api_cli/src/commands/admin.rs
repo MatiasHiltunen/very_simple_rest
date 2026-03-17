@@ -34,10 +34,12 @@ fn validate_password(password: &str) -> bool {
 }
 
 /// Checks if a user with the given email already exists
-async fn user_exists(pool: &DbPool, database_url: &str, email: &str) -> Result<bool> {
+async fn user_exists(pool: &DbPool, backend: DbBackend, email: &str) -> Result<bool> {
     let sql = format!(
-        "SELECT EXISTS(SELECT 1 FROM user WHERE email = {})",
-        placeholder_for_url(database_url, 1)
+        "SELECT EXISTS(SELECT 1 FROM {} WHERE {} = {})",
+        quote_ident(backend, "user"),
+        quote_ident(backend, "email"),
+        placeholder_for_backend(backend, 1)
     );
     let exists = query_scalar::<sqlx::Any, i64>(&sql)
         .bind(email)
@@ -122,26 +124,27 @@ pub async fn create_admin_with_options(
 ) -> Result<()> {
     println!("Connecting to database...");
     let pool = connect_database(database_url, config_path).await?;
-    create_admin_in_pool(&pool, database_url, email, password, interactive_claims).await
+    create_admin_in_pool(&pool, email, password, interactive_claims).await
 }
 
 async fn create_admin_in_pool(
     pool: &DbPool,
-    database_url: &str,
     email: String,
     password: String,
     interactive_claims: bool,
 ) -> Result<()> {
+    let backend = detect_backend(pool).await?;
+
     // Hash the password
     let hashed_password = bcrypt::hash(&password, bcrypt::DEFAULT_COST)?;
 
     // Check if the user already exists
-    if user_exists(pool, database_url, &email).await? {
+    if user_exists(pool, backend, &email).await? {
         println!("{} {}", "User already exists:".yellow().bold(), email);
         return Ok(());
     }
 
-    let claim_columns = discover_admin_claim_columns(pool, database_url).await?;
+    let claim_columns = discover_admin_claim_columns(pool, backend).await?;
     let claim_values = resolve_admin_claim_values(&claim_columns, interactive_claims)?;
 
     // Insert the admin user
@@ -152,12 +155,18 @@ async fn create_admin_in_pool(
     ];
     columns.extend(claim_values.iter().map(|claim| claim.column_name.clone()));
     let placeholders = (1..=columns.len())
-        .map(|index| placeholder_for_url(database_url, index))
+        .map(|index| placeholder_for_backend(backend, index))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let quoted_columns = columns
+        .iter()
+        .map(|column| quote_ident(backend, column))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "INSERT INTO user ({}) VALUES ({})",
-        columns.join(", "),
+        "INSERT INTO {} ({}) VALUES ({})",
+        quote_ident(backend, "user"),
+        quoted_columns,
         placeholders
     );
     let mut query = query(&sql)
@@ -192,9 +201,8 @@ async fn create_admin_in_pool(
 
 async fn discover_admin_claim_columns(
     pool: &DbPool,
-    database_url: &str,
+    backend: DbBackend,
 ) -> Result<Vec<AdminClaimColumn>> {
-    let backend = detect_backend(database_url)?;
     let rows = match backend {
         DbBackend::Sqlite => query("PRAGMA table_info('user')").fetch_all(pool).await?,
         DbBackend::Postgres => {
@@ -395,25 +403,41 @@ enum DbBackend {
     Mysql,
 }
 
-fn detect_backend(database_url: &str) -> Result<DbBackend> {
-    if database_url.starts_with("postgres:") || database_url.starts_with("postgresql:") {
-        Ok(DbBackend::Postgres)
-    } else if database_url.starts_with("mysql:") || database_url.starts_with("mariadb:") {
-        Ok(DbBackend::Mysql)
-    } else if database_url.starts_with("sqlite:") {
-        Ok(DbBackend::Sqlite)
-    } else {
-        Err(Error::Config(format!(
-            "Unsupported database URL for admin setup: {database_url}"
-        )))
+async fn detect_backend(pool: &DbPool) -> Result<DbBackend> {
+    match pool {
+        DbPool::Sqlx(pool) => {
+            let connection = pool.acquire().await?;
+            let backend_name = connection.backend_name().to_ascii_lowercase();
+            if backend_name.contains("postgres") {
+                Ok(DbBackend::Postgres)
+            } else if backend_name.contains("mysql") {
+                Ok(DbBackend::Mysql)
+            } else if backend_name.contains("sqlite") {
+                Ok(DbBackend::Sqlite)
+            } else {
+                Err(Error::Config(format!(
+                    "Unsupported database backend for admin setup: {backend_name}"
+                )))
+            }
+        }
+        DbPool::TursoLocal(_) => Ok(DbBackend::Sqlite),
     }
 }
 
-fn placeholder_for_url(database_url: &str, index: usize) -> String {
-    if database_url.starts_with("postgres:") || database_url.starts_with("postgresql:") {
+fn placeholder_for_backend(backend: DbBackend, index: usize) -> String {
+    if matches!(backend, DbBackend::Postgres) {
         format!("${index}")
     } else {
         "?".to_owned()
+    }
+}
+
+fn quote_ident(backend: DbBackend, ident: &str) -> String {
+    match backend {
+        DbBackend::Sqlite | DbBackend::Postgres => {
+            format!("\"{}\"", ident.replace('"', "\"\""))
+        }
+        DbBackend::Mysql => format!("`{}`", ident.replace('`', "``")),
     }
 }
 

@@ -7,7 +7,7 @@ use super::model::{
     PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
     RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
-    validate_relations, validate_row_policies,
+    validate_relations, validate_row_policies, validate_sql_identifier,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -29,7 +29,11 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
                     .to_string();
                 let lit = meta.value()?.parse::<Lit>()?;
                 match (key.as_str(), lit) {
-                    ("table", Lit::Str(value)) => table_name = value.value(),
+                    ("table", Lit::Str(value)) => {
+                        let parsed = value.value();
+                        validate_sql_identifier(&parsed, value.span(), "table name")?;
+                        table_name = parsed;
+                    }
                     ("id", Lit::Str(value)) => id_field = value.value(),
                     ("db", Lit::Str(value)) => db = parse_db_backend(&value.value(), value.span())?,
                     _ => return Err(meta.error("expected string literal value")),
@@ -337,6 +341,9 @@ fn parse_reference_target(value: &str, span: proc_macro2::Span) -> syn::Result<(
             "relation reference must be exactly `table.field`",
         ));
     }
+
+    validate_sql_identifier(table, span, "relation table")?;
+    validate_sql_identifier(field, span, "relation field")?;
 
     Ok((table.to_owned(), field.to_owned()))
 }
@@ -650,6 +657,38 @@ mod tests {
             relation.on_delete,
             Some(super::super::model::ReferentialAction::Cascade)
         );
+    }
+
+    #[test]
+    fn rejects_invalid_table_identifier_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[rest_api(table = "post; DROP TABLE user;")]
+            struct Post {
+                id: Option<i64>,
+                title: String,
+            }
+        };
+
+        let error = parse_derive_input(input).expect_err("invalid table identifier should fail");
+        assert!(error.to_string().contains("table name"));
+        assert!(error.to_string().contains("valid SQL identifier"));
+    }
+
+    #[test]
+    fn rejects_invalid_relation_identifier_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            struct Comment {
+                id: Option<i64>,
+                #[relation(references = "post.id); DROP TABLE user;")]
+                post_id: i64,
+            }
+        };
+
+        let error = parse_derive_input(input).expect_err("invalid relation identifier should fail");
+        assert!(error.to_string().contains("relation field"));
+        assert!(error.to_string().contains("valid SQL identifier"));
     }
 
     #[test]

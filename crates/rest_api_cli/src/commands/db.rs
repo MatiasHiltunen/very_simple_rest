@@ -89,13 +89,19 @@ fn is_missing_user_table(error: &dyn sqlx::error::DatabaseError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::database_url_from_service_config;
+    use super::{check_connection, database_url_from_service_config};
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures")
             .join(name)
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -110,5 +116,28 @@ mod tests {
         let url = database_url_from_service_config(&fixture_path("blog_api.eon"))
             .expect("service config should resolve");
         assert_eq!(url, "sqlite:var/data/blog_api.db?mode=rwc");
+    }
+
+    #[tokio::test]
+    async fn check_connection_accepts_missing_auth_table_for_turso_local_service() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var(
+                "TURSO_ENCRYPTION_KEY",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            );
+        }
+
+        let config = fixture_path("blog_api.eon");
+        let database_url =
+            database_url_from_service_config(&config).expect("service config should resolve");
+
+        check_connection(&database_url, Some(&config))
+            .await
+            .expect("missing auth table should only warn");
+
+        unsafe {
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+        }
     }
 }

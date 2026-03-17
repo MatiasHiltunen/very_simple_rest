@@ -5,8 +5,6 @@ use bcrypt::{hash, verify};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::distr::{Alphanumeric, SampleString};
-use rand::rng;
 use rpassword;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,6 +97,13 @@ impl AuthDbBackend {
             Self::Mysql => "role VARCHAR(64) NOT NULL",
         }
     }
+
+    fn quote_ident(self, ident: &str) -> String {
+        match self {
+            Self::Sqlite | Self::Postgres => format!("\"{}\"", ident.replace('"', "\"\"")),
+            Self::Mysql => format!("`{}`", ident.replace('`', "``")),
+        }
+    }
 }
 
 pub fn auth_migration_sql(backend: AuthDbBackend) -> String {
@@ -118,34 +123,28 @@ pub fn auth_migration_sql(backend: AuthDbBackend) -> String {
     )
 }
 
-// Function to get JWT secret from environment or generate a random one
-fn get_jwt_secret() -> &'static [u8] {
-    static JWT_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
+fn load_jwt_secret_from_env() -> Result<Vec<u8>, String> {
+    let _ = dotenv();
 
-    JWT_SECRET.get_or_init(|| {
-        // Try loading from .env file
-        let _ = dotenv();
+    match env::var("JWT_SECRET") {
+        Ok(secret) if !secret.trim().is_empty() => Ok(secret.into_bytes()),
+        Ok(_) | Err(_) => Err("JWT_SECRET must be set when built-in auth is enabled".to_owned()),
+    }
+}
 
-        // Try to get from environment variable
-        match env::var("JWT_SECRET") {
-            Ok(secret) => {
-                if !secret.is_empty() {
-                    return secret.into_bytes();
-                }
-                // Fall through to random generation if empty
-            }
-            Err(_) => {
-                // Fall through to random generation
-            }
-        }
+fn configured_jwt_secret() -> Result<&'static [u8], &'static str> {
+    static JWT_SECRET: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
 
-        // Generate random secret (32 characters)
-        let mut random = rng();
-        let random_secret = Alphanumeric.sample_string(&mut random, 32);
+    match JWT_SECRET.get_or_init(load_jwt_secret_from_env) {
+        Ok(secret) => Ok(secret.as_slice()),
+        Err(message) => Err(message.as_str()),
+    }
+}
 
-        eprintln!("WARNING: No JWT_SECRET found in environment. Using random secret (will change on restart)");
-        random_secret.into_bytes()
-    }).as_slice()
+pub fn ensure_jwt_secret_configured() -> Result<(), String> {
+    configured_jwt_secret()
+        .map(|_| ())
+        .map_err(ToOwned::to_owned)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -191,9 +190,15 @@ impl FromRequest for UserContext {
 
         if let Some(token) = token {
             let settings = auth_settings_from_request(req);
+            let jwt_secret = match configured_jwt_secret() {
+                Ok(secret) => secret,
+                Err(message) => {
+                    return ready(Err(actix_web::error::ErrorInternalServerError(message)));
+                }
+            };
             match decode::<Claims>(
                 &token,
-                &DecodingKey::from_secret(get_jwt_secret()),
+                &DecodingKey::from_secret(jwt_secret),
                 &validation_for_settings(&settings),
             ) {
                 Ok(data) => {
@@ -329,11 +334,15 @@ async fn login_with_settings(
                 as usize,
             extra: user.claims,
         };
+        let jwt_secret = match configured_jwt_secret() {
+            Ok(secret) => secret,
+            Err(message) => return errors::internal_error(message),
+        };
 
         match encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(get_jwt_secret()),
+            &EncodingKey::from_secret(jwt_secret),
         ) {
             Ok(token) => HttpResponse::Ok().json(serde_json::json!({ "token": token })),
             Err(_) => errors::internal_error("Token generation failed"),
@@ -698,10 +707,16 @@ async fn insert_admin_user(
         .map(|index| placeholder_for_backend(backend, index))
         .collect::<Vec<_>>()
         .join(", ");
+    let quoted_columns = columns
+        .iter()
+        .map(|column| backend.quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let sql = format!(
-        "INSERT INTO user ({}) VALUES ({})",
-        columns.join(", "),
+        "INSERT INTO {} ({}) VALUES ({})",
+        backend.quote_ident("user"),
+        quoted_columns,
         placeholders
     );
     let mut query = query(&sql).bind(email).bind(password_hash).bind("admin");
@@ -1009,9 +1024,15 @@ impl AuthRateLimiter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthDbBackend, auth_migration_sql, ensure_admin_exists_with_claim_prompt_mode};
+    use super::{
+        AuthDbBackend, auth_migration_sql, ensure_admin_exists_with_claim_prompt_mode,
+        load_jwt_secret_from_env,
+    };
+    #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
-    use crate::db::{connect, connect_with_config, query, query_scalar};
+    #[cfg(feature = "turso-local")]
+    use crate::db::connect_with_config;
+    use crate::db::{connect, query, query_scalar};
     use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1039,6 +1060,43 @@ mod tests {
         assert!(sql.contains("password_hash TEXT NOT NULL"));
         assert!(sql.contains("role TEXT NOT NULL"));
         assert!(sql.contains("CREATE INDEX idx_user_role ON user (role);"));
+    }
+
+    #[test]
+    fn load_jwt_secret_from_env_requires_non_empty_secret() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+        }
+
+        let error = load_jwt_secret_from_env().expect_err("missing JWT secret should fail");
+        assert!(error.contains("JWT_SECRET must be set"));
+
+        unsafe {
+            std::env::set_var("JWT_SECRET", "");
+        }
+
+        let error = load_jwt_secret_from_env().expect_err("empty JWT secret should fail");
+        assert!(error.contains("JWT_SECRET must be set"));
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+        }
+    }
+
+    #[test]
+    fn load_jwt_secret_from_env_accepts_non_empty_secret() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", "unit-test-secret");
+        }
+
+        let secret = load_jwt_secret_from_env().expect("non-empty JWT secret should load");
+        assert_eq!(secret, b"unit-test-secret");
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+        }
     }
 
     #[actix_web::test]

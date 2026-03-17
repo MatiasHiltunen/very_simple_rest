@@ -398,6 +398,29 @@ pub fn sanitize_module_ident(name: &str, span: Span) -> Ident {
     syn::parse_str::<Ident>(&candidate).unwrap_or_else(|_| Ident::new("generated_api", span))
 }
 
+pub fn is_valid_sql_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some('a'..='z' | 'A'..='Z' | '_') => {}
+        _ => return false,
+    }
+
+    chars.all(|ch| matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
+}
+
+pub fn validate_sql_identifier(value: &str, span: Span, label: &str) -> syn::Result<()> {
+    if is_valid_sql_identifier(value) {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            span,
+            format!(
+                "{label} `{value}` is not a valid SQL identifier; use only letters, digits, and underscores, and start with a letter or underscore"
+            ),
+        ))
+    }
+}
+
 pub fn default_resource_module_ident(struct_ident: &Ident) -> Ident {
     let lower = struct_ident.to_string().to_snake_case();
     syn::Ident::new(&format!("__rest_api_impl_for_{lower}"), struct_ident.span())

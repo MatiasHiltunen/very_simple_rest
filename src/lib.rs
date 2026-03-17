@@ -139,13 +139,9 @@ SQL.
 
 ## JWT Secret Configuration
 
-The library supports the following methods for setting the JWT secret (in order of precedence):
-
-1. Environment variable: `JWT_SECRET=your_secret_here`
-2. `.env` file in your project root: `JWT_SECRET=your_secret_here`
-3. If no secret is provided, a random secret is generated at startup (not recommended for production)
-
-For production environments, it's strongly recommended to set a persistent secret using one of the first two methods.
+Built-in auth requires `JWT_SECRET` to be set, either through the environment or a `.env` file
+in your project root. The runtime now fails closed instead of generating a random secret at
+startup, so tokens remain stable across restarts and multi-instance deployments.
 
 The built-in auth login route will also emit numeric claims automatically from `user` table
 columns such as `tenant_id`, `org_id`, or `claim_workspace_id`.
@@ -159,7 +155,8 @@ pub use rest_macro_core as core;
 pub mod auth {
     pub use rest_macro_core::auth::{
         AuthSettings, LoginInput, RegisterInput, User, UserContext, auth_routes,
-        auth_routes_with_settings, ensure_admin_exists, login, login_with_request, me, register,
+        auth_routes_with_settings, ensure_admin_exists, ensure_jwt_secret_configured, login,
+        login_with_request, me, register,
     };
 }
 

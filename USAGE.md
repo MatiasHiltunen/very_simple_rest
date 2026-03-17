@@ -63,13 +63,13 @@ async fn main() -> std::io::Result<()> {
 
 ## JWT Secret Configuration
 
-For secure authentication, configure the JWT secret using one of these methods:
+Built-in auth requires `JWT_SECRET` to be configured before the server starts. Supported sources:
 
 1. Environment variable: `JWT_SECRET=your_secret_here`
 2. `.env` file in your project root: `JWT_SECRET=your_secret_here`
-3. If no secret is provided, a random secret is generated at startup (not recommended for production)
 
-For production environments, always set a secure, persistent secret.
+The runtime no longer generates a random fallback secret. For production, always set a secure,
+persistent secret.
 
 ## Database Support
 

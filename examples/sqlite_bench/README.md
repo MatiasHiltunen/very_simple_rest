@@ -60,9 +60,9 @@ vsr server emit \
   --input examples/sqlite_bench/commerce.eon \
   --output-dir examples/sqlite_bench/generated-server
 
-vsr server build \
-  --input examples/sqlite_bench/commerce.eon \
-  --output examples/sqlite_bench/dist/commerce-bench-server \
+vsr build \
+  examples/sqlite_bench/commerce.eon \
+  --output examples/sqlite_bench/dist \
   --release
 ```
 

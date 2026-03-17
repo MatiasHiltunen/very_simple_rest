@@ -75,7 +75,7 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     writeln!(&mut output, "# Authentication").unwrap();
     writeln!(
         &mut output,
-        "# Secret key used for JWT token generation and verification"
+        "# Required secret key used for JWT token generation and verification"
     )
     .unwrap();
     writeln!(
