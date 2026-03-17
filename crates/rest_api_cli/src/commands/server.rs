@@ -15,15 +15,17 @@ use crate::error::{Error, Result};
 const LOCAL_DEP_PATH_ENV: &str = "VSR_LOCAL_DEP_PATH";
 const REPO_GIT_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest.git";
 const CARGO_BUILD_RETRY_DELAYS_MS: &[u64] = &[200, 500, 1_000];
+const BUILD_ARTIFACT_DIR_SUFFIX: &str = ".bundle";
 
 pub fn emit_server_project(
     input: &Path,
     output_dir: &Path,
     package_name: Option<String>,
-    with_auth: bool,
+    include_builtin_auth: bool,
     force: bool,
 ) -> Result<()> {
-    let emitted = emit_server_project_inner(input, output_dir, package_name, with_auth, force)?;
+    let emitted =
+        emit_server_project_inner(input, output_dir, package_name, include_builtin_auth, force)?;
     println!(
         "{} {}",
         "Generated server project:".green().bold(),
@@ -38,7 +40,7 @@ pub fn build_server_binary(
     output: &Path,
     package_name: Option<String>,
     build_dir: Option<PathBuf>,
-    with_auth: bool,
+    include_builtin_auth: bool,
     release: bool,
     target: Option<String>,
     keep_build_dir: bool,
@@ -64,7 +66,8 @@ pub fn build_server_binary(
             .join(Uuid::new_v4().to_string()),
     };
 
-    let emitted = emit_server_project_inner(input, &build_root, package_name, with_auth, true)?;
+    let emitted =
+        emit_server_project_inner(input, &build_root, package_name, include_builtin_auth, true)?;
 
     let target_dir = emitted.project_dir.join("target");
     let output_result = run_generated_project_build(
@@ -101,6 +104,7 @@ pub fn build_server_binary(
         fs::create_dir_all(parent).map_err(Error::Io)?;
     }
     fs::copy(&binary_path, output).map_err(Error::Io)?;
+    let artifact_dir = export_generated_runtime_artifacts(&emitted.project_dir, output, force)?;
 
     if !keep_build_dir {
         let _ = fs::remove_dir_all(&emitted.project_dir);
@@ -110,6 +114,11 @@ pub fn build_server_binary(
         "{} {}",
         "Built server binary:".green().bold(),
         output.display()
+    );
+    println!(
+        "{} {}",
+        "Exported runtime artifacts:".green().bold(),
+        artifact_dir.display()
     );
 
     Ok(())
@@ -124,13 +133,13 @@ fn emit_server_project_inner(
     input: &Path,
     output_dir: &Path,
     package_name: Option<String>,
-    with_auth: bool,
+    include_builtin_auth: bool,
     force: bool,
 ) -> Result<EmittedProject> {
     let service = compiler::load_service_from_path(input)
         .map_err(|error| Error::Config(format!("failed to load `{}`: {error}", input.display())))?;
     let backend = detect_backend(&service)?;
-    ensure_auth_is_compatible(&service, with_auth)?;
+    ensure_auth_is_compatible(&service, include_builtin_auth)?;
     ensure_database_engine_is_compatible(&service, backend)?;
 
     prepare_output_dir(output_dir, force)?;
@@ -150,7 +159,7 @@ fn emit_server_project_inner(
     let openapi_json = compiler::render_service_openapi_json(
         &service,
         &OpenApiSpecOptions::new(package_name.clone(), "1.0.0", "/api")
-            .with_builtin_auth(with_auth),
+            .with_builtin_auth(include_builtin_auth),
     )
     .map_err(|error| Error::Config(format!("failed to render OpenAPI JSON: {error}")))?;
     let module_name = service.module_ident.to_string();
@@ -164,12 +173,12 @@ fn emit_server_project_inner(
     )?;
     write_file(
         &output_dir.join("src/main.rs"),
-        &render_main_rs(&module_name, &eon_file_name, with_auth),
+        &render_main_rs(&module_name, &eon_file_name, include_builtin_auth),
     )?;
     write_file(&output_dir.join(&eon_file_name), &input_content)?;
     write_file(
         &output_dir.join(".env.example"),
-        &render_env_example(&service, backend, with_auth),
+        &render_env_example(&service, backend, include_builtin_auth),
     )?;
     write_file(
         &output_dir.join(".gitignore"),
@@ -177,7 +186,7 @@ fn emit_server_project_inner(
     )?;
     write_file(
         &output_dir.join("README.md"),
-        &render_project_readme(&package_name, &service, backend, with_auth),
+        &render_project_readme(&package_name, &service, backend, include_builtin_auth),
     )?;
     write_file(&output_dir.join("openapi.json"), &openapi_json)?;
     copy_configured_static_dirs(input, output_dir, &service)?;
@@ -186,7 +195,7 @@ fn emit_server_project_inner(
         &migration_sql,
     )?;
 
-    if with_auth {
+    if include_builtin_auth {
         write_file(
             &output_dir.join("migrations/0000_auth.sql"),
             &auth_migration_sql(auth_backend(backend)),
@@ -201,6 +210,51 @@ fn emit_server_project_inner(
 
 fn write_file(path: &Path, contents: &str) -> Result<()> {
     fs::write(path, contents).map_err(Error::Io)
+}
+
+fn export_generated_runtime_artifacts(
+    project_dir: &Path,
+    output: &Path,
+    force: bool,
+) -> Result<PathBuf> {
+    let artifact_dir = build_artifact_dir(output)?;
+    prepare_output_dir(&artifact_dir, force)?;
+
+    for file_name in [".env.example", "README.md", "openapi.json"] {
+        let source = project_dir.join(file_name);
+        if source.exists() {
+            fs::copy(&source, artifact_dir.join(file_name)).map_err(Error::Io)?;
+        }
+    }
+
+    for entry in fs::read_dir(project_dir).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("eon") {
+            fs::copy(&path, artifact_dir.join(entry.file_name())).map_err(Error::Io)?;
+        }
+    }
+
+    let migrations = project_dir.join("migrations");
+    if migrations.exists() {
+        copy_dir_recursive(&migrations, &artifact_dir.join("migrations"))?;
+    }
+
+    Ok(artifact_dir)
+}
+
+fn build_artifact_dir(output: &Path) -> Result<PathBuf> {
+    let file_name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::Config(format!(
+                "output path must end with a file name: {}",
+                output.display()
+            ))
+        })?;
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    Ok(parent.join(format!("{file_name}{BUILD_ARTIFACT_DIR_SUFFIX}")))
 }
 
 fn run_generated_project_build(
@@ -366,8 +420,8 @@ fn detect_backend(service: &ServiceSpec) -> Result<DbBackend> {
     Ok(first)
 }
 
-fn ensure_auth_is_compatible(service: &ServiceSpec, with_auth: bool) -> Result<()> {
-    if !with_auth {
+fn ensure_auth_is_compatible(service: &ServiceSpec, include_builtin_auth: bool) -> Result<()> {
+    if !include_builtin_auth {
         return Ok(());
     }
 
@@ -377,7 +431,7 @@ fn ensure_auth_is_compatible(service: &ServiceSpec, with_auth: bool) -> Result<(
         .any(|resource| resource.table_name == "user")
     {
         return Err(Error::Config(
-            "`--with-auth` cannot be used when the service already defines a `user` table"
+            "built-in auth is enabled by default and cannot be used when the service already defines a `user` table; re-run with `--without-auth`"
                 .to_owned(),
         ));
     }
@@ -454,8 +508,8 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
     ))
 }
 
-fn render_main_rs(module_name: &str, eon_file_name: &str, with_auth: bool) -> String {
-    let auth_config = if with_auth {
+fn render_main_rs(module_name: &str, eon_file_name: &str, include_builtin_auth: bool) -> String {
+    let auth_config = if include_builtin_auth {
         "                    .configure(|cfg| auth::auth_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
     } else {
         ""
@@ -559,8 +613,12 @@ async fn main() -> std::io::Result<()> {{
     )
 }
 
-fn render_env_example(service: &ServiceSpec, backend: DbBackend, with_auth: bool) -> String {
-    let auth_block = if with_auth {
+fn render_env_example(
+    service: &ServiceSpec,
+    backend: DbBackend,
+    include_builtin_auth: bool,
+) -> String {
+    let auth_block = if include_builtin_auth {
         "JWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
     } else {
         "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n"
@@ -594,14 +652,14 @@ fn render_project_readme(
     package_name: &str,
     service: &ServiceSpec,
     backend: DbBackend,
-    with_auth: bool,
+    include_builtin_auth: bool,
 ) -> String {
-    let auth_note = if with_auth {
+    let auth_note = if include_builtin_auth {
         "The generated project includes built-in auth/account routes and `migrations/0000_auth.sql`.\n"
     } else {
         "The generated project does not include built-in auth/account routes by default.\n"
     };
-    let openapi_note = if with_auth {
+    let openapi_note = if include_builtin_auth {
         "The OpenAPI document also includes the built-in auth/account routes, with `/auth/me` grouped under `Account` in Swagger.\n\n"
     } else {
         "\n"
@@ -809,7 +867,8 @@ fn binary_file_name(package_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_server_binary, emit_server_project, is_text_file_busy_failure, sanitize_package_name,
+        build_artifact_dir, build_server_binary, emit_server_project,
+        export_generated_runtime_artifacts, is_text_file_busy_failure, sanitize_package_name,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -895,6 +954,7 @@ mod tests {
         let env_example = read_to_string(&root.join(".env.example"));
         assert!(env_example.contains("sqlite:var/data/blog_api.db?mode=rwc"));
         assert!(env_example.contains("Local Turso bootstrap"));
+        assert!(env_example.contains("TURSO_ENCRYPTION_KEY=change-me-hex-key"));
 
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"openapi\": \"3.0.3\""));
@@ -942,6 +1002,7 @@ mod tests {
         let readme = read_to_string(&root.join("README.md"));
         assert!(readme.contains("Compiled security defaults:"));
         assert!(readme.contains("Optional security env vars surfaced in `.env.example`"));
+        assert!(env_example.contains("TURSO_ENCRYPTION_KEY=change-me-hex-key"));
     }
 
     #[test]
@@ -1016,6 +1077,71 @@ mod tests {
     }
 
     #[test]
+    fn emit_server_project_rejects_builtin_auth_for_service_owned_user_table() {
+        let root = test_root();
+        let error = emit_server_project(
+            &fixture_path("user_table_api.eon"),
+            &root,
+            Some("user-table-server".to_owned()),
+            true,
+            false,
+        )
+        .expect_err("default built-in auth should reject a service-owned user table");
+
+        assert!(
+            error.to_string().contains("re-run with `--without-auth`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn emit_server_project_can_opt_out_of_builtin_auth_for_service_owned_user_table() {
+        let root = test_root();
+        emit_server_project(
+            &fixture_path("user_table_api.eon"),
+            &root,
+            Some("user-table-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("service-owned user table should emit when built-in auth is disabled");
+
+        assert!(root.join("migrations/0001_service.sql").exists());
+        assert!(!root.join("migrations/0000_auth.sql").exists());
+
+        let openapi = read_to_string(&root.join("openapi.json"));
+        assert!(!openapi.contains("\"/auth/login\""));
+    }
+
+    #[test]
+    fn export_generated_runtime_artifacts_writes_sidecar_bundle() {
+        let root = test_root();
+        let project_dir = root.join("project");
+        let migrations = project_dir.join("migrations");
+        fs::create_dir_all(&migrations).expect("project migrations directory should exist");
+        fs::write(project_dir.join(".env.example"), "JWT_SECRET=change-me\n")
+            .expect("env example should write");
+        fs::write(project_dir.join("README.md"), "# Generated\n").expect("readme should write");
+        fs::write(project_dir.join("openapi.json"), "{ }\n").expect("openapi should write");
+        fs::write(project_dir.join("service.eon"), "resources: []\n").expect("eon should write");
+        fs::write(migrations.join("0000_auth.sql"), "-- auth\n").expect("migration should write");
+
+        let output = root.join("dist/api-server");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+            .expect("runtime artifacts should export");
+
+        assert_eq!(
+            artifact_dir,
+            build_artifact_dir(&output).expect("artifact dir should resolve")
+        );
+        assert!(artifact_dir.join(".env.example").exists());
+        assert!(artifact_dir.join("README.md").exists());
+        assert!(artifact_dir.join("openapi.json").exists());
+        assert!(artifact_dir.join("service.eon").exists());
+        assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
+    }
+
+    #[test]
     #[ignore]
     fn build_server_binary_compiles_generated_project() {
         let root = test_root();
@@ -1037,6 +1163,13 @@ mod tests {
             output.exists(),
             "binary should exist at {}",
             output.display()
+        );
+        assert!(
+            output
+                .parent()
+                .expect("binary output should have a parent")
+                .join("blog-server.bundle/.env.example")
+                .exists()
         );
     }
 
@@ -1062,6 +1195,13 @@ mod tests {
             output.exists(),
             "binary should exist at {}",
             output.display()
+        );
+        assert!(
+            output
+                .parent()
+                .expect("binary output should have a parent")
+                .join("turso-encrypted-server.bundle/.env.example")
+                .exists()
         );
     }
 }

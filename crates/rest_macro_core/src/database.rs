@@ -27,6 +27,8 @@ pub struct TursoLocalConfig {
     pub encryption_key_env: Option<String>,
 }
 
+pub const DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV: &str = "TURSO_ENCRYPTION_KEY";
+
 pub fn sqlite_url_for_path(path: &str) -> String {
     if path == ":memory:" {
         "sqlite::memory:".to_owned()

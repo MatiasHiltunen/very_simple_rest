@@ -1,0 +1,10 @@
+module: "user_table_api"
+resources: [
+    {
+        name: "User"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "email", type: String }
+        ]
+    }
+]

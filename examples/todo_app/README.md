@@ -18,7 +18,6 @@ everything.
 vsr server emit \
   --input examples/todo_app/todo_app.eon \
   --output-dir examples/todo_app/generated-server \
-  --with-auth \
   --force
 
 cd examples/todo_app/generated-server

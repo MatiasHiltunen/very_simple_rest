@@ -18,7 +18,9 @@ use super::model::{
 };
 use crate::{
     auth::AuthSettings,
-    database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig},
+    database::{
+        DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
+    },
     security::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
@@ -581,7 +583,7 @@ fn parse_database_document(
         None => match db {
             DbBackend::Sqlite => DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: format!("var/data/{module_name}.db"),
-                encryption_key_env: None,
+                encryption_key_env: Some(DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV.to_owned()),
             }),
             DbBackend::Postgres | DbBackend::Mysql => DatabaseEngine::Sqlx,
         },
@@ -1274,7 +1276,7 @@ mod tests {
             database.engine,
             DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: "var/data/blog_api.db".to_owned(),
-                encryption_key_env: None,
+                encryption_key_env: Some(DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV.to_owned()),
             })
         );
     }

@@ -3,7 +3,7 @@ use colored::Colorize;
 use rand::distr::{Alphanumeric, SampleString};
 use rand::rng;
 use rest_macro_core::compiler::{self, default_service_database_url};
-use rest_macro_core::database::DatabaseEngine;
+use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -62,8 +62,13 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     writeln!(&mut output).unwrap();
 
     if let Some(var_name) = &config.turso_encryption_var {
-        writeln!(&mut output, "# Optional local Turso encryption").unwrap();
-        writeln!(&mut output, "# {var_name}=64_hex_characters_here").unwrap();
+        let heading = if var_name == DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV {
+            "# Local Turso encryption used by the compiled database engine"
+        } else {
+            "# Local Turso encryption"
+        };
+        writeln!(&mut output, "{heading}").unwrap();
+        writeln!(&mut output, "{var_name}=64_hex_characters_here").unwrap();
         writeln!(&mut output).unwrap();
     }
 
@@ -167,6 +172,7 @@ mod tests {
         let content = render_env_template(Some(&fixture_path("security_api.eon")))
             .expect("security fixture should render");
         assert!(content.contains("DATABASE_URL=sqlite:var/data/security_api.db?mode=rwc"));
+        assert!(content.contains("TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
         assert!(content.contains("# CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000"));
         assert!(content.contains("# TRUSTED_PROXIES=127.0.0.1,::1"));
     }
@@ -176,6 +182,6 @@ mod tests {
         let content = render_env_template(Some(&fixture_path("turso_local_encrypted_api.eon")))
             .expect("encrypted fixture should render");
         assert!(content.contains("DATABASE_URL=sqlite:var/data/turso_encrypted.db?mode=rwc"));
-        assert!(content.contains("# TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
+        assert!(content.contains("TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
     }
 }

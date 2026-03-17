@@ -50,7 +50,10 @@ fn eon_macro_defaults_sqlite_services_to_turso_local_database_engine() {
         very_simple_rest::core::database::DatabaseEngine::TursoLocal(
             very_simple_rest::core::database::TursoLocalConfig {
                 path: "var/data/blog_api.db".to_owned(),
-                encryption_key_env: None,
+                encryption_key_env: Some(
+                    very_simple_rest::core::database::DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV
+                        .to_owned()
+                ),
             }
         )
     );

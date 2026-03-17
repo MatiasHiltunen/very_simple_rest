@@ -97,9 +97,9 @@ explicitly.
 
 For generated resource routes, `vsr openapi --input ... --output openapi.json` renders an OpenAPI
 document, and `vsr server emit` projects serve that same document at `/openapi.json` with Swagger
-UI at `/docs`. Add `--with-auth` when you also want the built-in auth/account routes in the
-document. In Swagger, `/auth/register` and `/auth/login` appear under `Auth`, while `/auth/me`
-appears under `Account`.
+UI at `/docs`. Built-in auth/account routes are included by default; add `--without-auth` to omit
+them when your service owns the `user` model. In Swagger, `/auth/register` and `/auth/login`
+appear under `Auth`, while `/auth/me` appears under `Account`.
 
 `.eon` services can also define `static.mounts` with `Directory` or `Spa` modes. Static
 directories are resolved relative to the `.eon` file, reserved routes like `/api` and `/docs`

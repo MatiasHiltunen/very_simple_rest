@@ -71,7 +71,8 @@ vsr --config api.eon check-db
 
 When `--config` points to a `.eon` service and `--database-url` / `DATABASE_URL` are both absent,
 the CLI uses the service’s compiled default database URL. For SQLite services, that now defaults
-to `database.engine = TursoLocal`, which resolves to the matching SQLite-compatible file URL.
+to encrypted `database.engine = TursoLocal`, which resolves to the matching SQLite-compatible file
+URL and the default `TURSO_ENCRYPTION_KEY` env var.
 
 ### Env Generation
 
@@ -83,8 +84,9 @@ vsr --config api.eon gen-env --path .env.local
 ```
 
 When `--config` points to a `.eon` service, the generated file mirrors the compiled default
-database URL plus optional env-driven Turso/security variables such as `TURSO_ENCRYPTION_KEY`,
-`CORS_ORIGINS`, and `TRUSTED_PROXIES` when those are referenced by the service.
+database URL plus the required/default Turso and security env vars such as
+`TURSO_ENCRYPTION_KEY`, `CORS_ORIGINS`, and `TRUSTED_PROXIES` when those are referenced by the
+service.
 
 ### Server Generation
 
@@ -101,6 +103,7 @@ This emits:
 - the copied `.eon` file
 - `.env.example`
 - `openapi.json`
+- `migrations/0000_auth.sql` with built-in auth enabled by default
 - `migrations/0001_service.sql`
 
 You can also build a server binary directly:
@@ -111,13 +114,17 @@ vsr server build --input api.eon --output dist/api-server --release
 
 Useful options:
 
-- `--with-auth` includes built-in auth/account routes plus `migrations/0000_auth.sql`
+- `--without-auth` excludes the built-in auth/account routes and omits `migrations/0000_auth.sql`
 - `--package-name` overrides the generated Cargo package name
 - `--build-dir` keeps the temporary Cargo project in a known location
 - `--keep-build-dir` preserves the generated build project after compilation
 
-`--with-auth` is rejected if the `.eon` service already defines a `user` table, because the
-built-in auth migration owns that table.
+Built-in auth is enabled by default. If the `.eon` service already defines a `user` table, re-run
+with `--without-auth` because the built-in auth migration owns that table name.
+
+`vsr server build` also exports the generated runtime artifacts next to the binary in
+`<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file, `README.md`,
+and `migrations/`.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and Swagger UI at `/docs`.
 When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
@@ -125,7 +132,8 @@ the generated project and wires the generated server to serve them. When a `.eon
 `security`, the emitted server also applies the compiled JSON body limit, CORS policy,
 trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings
 automatically. When a `.eon` service defines `database.engine`, the emitted server also carries
-that runtime engine config into the project, including local Turso bootstrap.
+that runtime engine config into the project, including encrypted local Turso bootstrap by default
+for bare SQLite `.eon` services.
 
 ### OpenAPI Generation
 
@@ -134,7 +142,7 @@ Render an OpenAPI document from either a `.eon` service or derive-based Rust res
 ```bash
 vsr openapi --input api.eon --output openapi.json
 vsr openapi --input src --exclude-table user --output openapi.json
-vsr openapi --input api.eon --with-auth --output openapi-auth.json
+vsr openapi --input api.eon --without-auth --output openapi-no-auth.json
 ```
 
 Useful options:
@@ -142,8 +150,9 @@ Useful options:
 - `--title` overrides the document title
 - `--version` overrides the OpenAPI version string in `info.version`
 - `--server-url` changes the generated server URL, which defaults to `/api`
-- `--with-auth` adds the built-in `/auth/register`, `/auth/login`, and `/auth/me` routes, with
+- built-in `/auth/register`, `/auth/login`, and `/auth/me` routes are included by default, with
   `/auth/me` grouped under `Account` in Swagger
+- `--without-auth` removes those built-in auth/account routes from the document
 - `--exclude-table` removes specific tables from the document
 
 ### Static Files In `.eon`
@@ -193,6 +202,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/<module>.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
     }
 }
 ```

@@ -224,11 +224,16 @@ The emitted project includes:
 - the copied `.eon` file
 - `.env.example`
 - `openapi.json`
+- `migrations/0000_auth.sql` with built-in auth enabled by default
 - `migrations/0001_service.sql`
 
-When `--with-auth` is enabled, the project also includes built-in auth and account routes plus
-`migrations/0000_auth.sql`. That flag cannot be used if the `.eon` service already defines a
-`user` table.
+Built-in auth and account routes are enabled by default for generated servers and documents. Use
+`--without-auth` if your `.eon` service defines its own `user` table or if you want to omit the
+shared `/auth` routes and `migrations/0000_auth.sql`.
+
+`vsr server build` also exports the generated runtime assets next to the binary in
+`<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file,
+`README.md`, and `migrations/`.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and a Swagger UI page at
 `/docs`.
@@ -241,9 +246,9 @@ limits, CORS policy, trusted-proxy handling, auth rate limits, security headers,
 auth token settings automatically in the emitted server.
 
 `vsr server emit` also carries the compiled `.eon` database engine config into the generated
-project. SQLite services now default to `database.engine = TursoLocal`, using
-`var/data/<module>.db` unless you override it explicitly. You can still opt back into the legacy
-runtime path with `database.engine.kind = Sqlx`.
+project. SQLite services now default to encrypted `database.engine = TursoLocal`, using
+`var/data/<module>.db` and `TURSO_ENCRYPTION_KEY` unless you override it explicitly. You can still
+opt back into the legacy runtime path with `database.engine.kind = Sqlx`.
 
 ## OpenAPI
 
@@ -257,13 +262,13 @@ vsr openapi --input tests/fixtures/blog_api.eon --output openapi.json
 # Generate the same kind of document from #[derive(RestApi)] resources
 vsr openapi --input src --exclude-table user --output openapi.json
 
-# Include the built-in auth and account routes in the document when you use them
-vsr openapi --input tests/fixtures/blog_api.eon --with-auth --output openapi-auth.json
+# Omit built-in auth and account routes if your service owns the user model
+vsr openapi --input tests/fixtures/blog_api.eon --without-auth --output openapi-no-auth.json
 ```
 
 The current generator covers generated resource routes, DTO schemas, nested collection routes, JWT
-bearer auth, the `/api` server base URL, and optional built-in auth/account routes when
-`--with-auth` is enabled. In Swagger, login and registration appear under `Auth`, while the
+bearer auth, the `/api` server base URL, and built-in auth/account routes by default. Use
+`--without-auth` to omit them. In Swagger, login and registration appear under `Auth`, while the
 current-user endpoint appears under `Account`. Generated server projects reuse the same document.
 Collection and nested collection routes also document their typed list query parameters and their
 paged response envelopes, including pagination, sorting, cursor pagination, exact-match field
@@ -329,6 +334,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/<module>.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
     }
 }
 ```

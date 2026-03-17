@@ -16,7 +16,7 @@ pub fn generate_openapi(
     title: Option<String>,
     version: Option<String>,
     server_url: &str,
-    with_auth: bool,
+    include_builtin_auth: bool,
 ) -> Result<()> {
     if output.exists() && !force {
         bail!(
@@ -31,7 +31,7 @@ pub fn generate_openapi(
         version.unwrap_or_else(|| DEFAULT_OPENAPI_VERSION.to_owned()),
         server_url.to_owned(),
     )
-    .with_builtin_auth(with_auth);
+    .with_builtin_auth(include_builtin_auth);
     let document = compiler::render_service_openapi_json(&service, &options)
         .map_err(|error| anyhow::anyhow!(error.to_string()))
         .context("failed to render OpenAPI JSON")?;
@@ -112,6 +112,7 @@ mod tests {
         assert!(document["paths"]["/post"].is_object());
         assert!(document["components"]["schemas"]["PostCreate"].is_object());
         assert!(document["components"]["securitySchemes"]["bearerAuth"].is_object());
+        assert!(document["paths"].get("/auth/login").is_none());
     }
 
     #[test]

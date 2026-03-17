@@ -84,6 +84,7 @@ enum Commands {
     },
 
     /// Generate an OpenAPI document from a `.eon` service or derive-based Rust sources
+    #[command(name = "openapi")]
     OpenApi {
         /// Schema source (`.eon`, `.rs`, or a Rust source directory)
         #[arg(short, long, value_name = "PATH")]
@@ -105,9 +106,13 @@ enum Commands {
         #[arg(long, value_name = "URL", default_value = "/api")]
         server_url: String,
 
-        /// Include built-in auth routes in the generated document
-        #[arg(long)]
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
         with_auth: bool,
+
+        /// Exclude built-in auth routes from the generated document
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
 
         /// Exclude a table from the generated document
         #[arg(long = "exclude-table", value_name = "TABLE")]
@@ -257,9 +262,13 @@ enum ServerCommand {
         #[arg(long, value_name = "NAME")]
         package_name: Option<String>,
 
-        /// Include built-in auth routes and auth migration SQL
-        #[arg(long)]
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
         with_auth: bool,
+
+        /// Exclude built-in auth routes and auth migration SQL
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
 
         /// Overwrite the output directory if it already exists
         #[arg(long)]
@@ -284,9 +293,13 @@ enum ServerCommand {
         #[arg(long, value_name = "DIR")]
         build_dir: Option<PathBuf>,
 
-        /// Include built-in auth routes and auth migration SQL
-        #[arg(long)]
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
         with_auth: bool,
+
+        /// Exclude built-in auth routes and auth migration SQL
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
 
         /// Build an optimized release binary
         #[arg(long)]
@@ -493,14 +506,16 @@ async fn main() -> Result<()> {
                 output_dir,
                 package_name,
                 with_auth,
+                without_auth,
                 force,
             } => {
                 println!("{}", "Generating server project...".green().bold());
+                let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
                 commands::server::emit_server_project(
                     input,
                     output_dir,
                     package_name.clone(),
-                    *with_auth,
+                    include_builtin_auth,
                     *force,
                 )?;
             }
@@ -510,18 +525,20 @@ async fn main() -> Result<()> {
                 package_name,
                 build_dir,
                 with_auth,
+                without_auth,
                 release,
                 target,
                 keep_build_dir,
                 force,
             } => {
                 println!("{}", "Building server binary...".green().bold());
+                let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
                 commands::server::build_server_binary(
                     input,
                     output,
                     package_name.clone(),
                     build_dir.clone(),
-                    *with_auth,
+                    include_builtin_auth,
                     *release,
                     target.clone(),
                     *keep_build_dir,
@@ -537,10 +554,12 @@ async fn main() -> Result<()> {
             version,
             server_url,
             with_auth,
+            without_auth,
             exclude_tables,
             force,
         } => {
             println!("{}", "Generating OpenAPI spec...".green().bold());
+            let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
             commands::openapi::generate_openapi(
                 input,
                 output,
@@ -549,7 +568,7 @@ async fn main() -> Result<()> {
                 title.clone(),
                 version.clone(),
                 server_url,
-                *with_auth,
+                include_builtin_auth,
             )?;
         }
 
@@ -560,4 +579,44 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {
+    if without_auth {
+        return false;
+    }
+
+    if with_auth {
+        return true;
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, include_builtin_auth};
+    use clap::Parser;
+
+    #[test]
+    fn include_builtin_auth_defaults_on() {
+        assert!(include_builtin_auth(false, false));
+        assert!(include_builtin_auth(true, false));
+        assert!(!include_builtin_auth(false, true));
+    }
+
+    #[test]
+    fn openapi_subcommand_uses_documented_name() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "openapi",
+                "--input",
+                "api.eon",
+                "--output",
+                "openapi.json",
+            ])
+            .is_ok()
+        );
+    }
 }

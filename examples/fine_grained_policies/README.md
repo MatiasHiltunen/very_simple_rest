@@ -83,8 +83,7 @@ export JWT_SECRET=change-me
 
 vsr server emit \
   --input examples/fine_grained_policies/ops_control.eon \
-  --output-dir generated-ops-control \
-  --with-auth
+  --output-dir generated-ops-control
 ```
 
 That generates a runnable Actix project plus explicit SQL migrations. The only manual follow-up is
