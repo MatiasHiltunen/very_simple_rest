@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
@@ -8,6 +11,8 @@ use very_simple_rest::rest_api_from_eon;
 use very_simple_rest::sqlx::{self, FromRow};
 
 const TEST_JWT_SECRET: &str = "fine-grained-policy-secret";
+const TEST_JWT_ISSUER: &str = "ops_control_api";
+const TEST_JWT_AUDIENCE: &str = "ops_control_clients";
 
 rest_api_from_eon!("examples/fine_grained_policies/ops_control.eon");
 
@@ -15,6 +20,8 @@ rest_api_from_eon!("examples/fine_grained_policies/ops_control.eon");
 struct TestClaims {
     sub: i64,
     roles: Vec<String>,
+    iss: String,
+    aud: String,
     exp: usize,
     tenant_id: Option<i64>,
 }
@@ -50,8 +57,14 @@ struct DbOnCallSubscription {
     escalation_level: i64,
 }
 
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[actix_web::test]
 async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
@@ -409,10 +422,15 @@ async fn fine_grained_policy_example_enforces_shared_and_self_scoped_routes() {
             .await
             .expect("remaining rows should be queryable");
     assert_eq!(remaining_subscriptions, 0);
+
+    unsafe {
+        std::env::remove_var("JWT_SECRET");
+    }
 }
 
 #[actix_web::test]
 async fn admin_bypass_create_allows_manual_tenant_assignment_without_claims() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {
         std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
     }
@@ -471,6 +489,10 @@ async fn admin_bypass_create_allows_manual_tenant_assignment_without_claims() {
     assert_eq!(workspace.tenant_id, 300);
     assert_eq!(workspace.owner_user_id, 99);
     assert_eq!(workspace.slug, "manual-admin");
+
+    unsafe {
+        std::env::remove_var("JWT_SECRET");
+    }
 }
 
 fn issue_token(user_id: i64, roles: &[&str], tenant_id: Option<i64>) -> String {
@@ -479,6 +501,8 @@ fn issue_token(user_id: i64, roles: &[&str], tenant_id: Option<i64>) -> String {
         &TestClaims {
             sub: user_id,
             roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+            iss: TEST_JWT_ISSUER.to_owned(),
+            aud: TEST_JWT_AUDIENCE.to_owned(),
             exp: 4_102_444_800,
             tenant_id,
         },

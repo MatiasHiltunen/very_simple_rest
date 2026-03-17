@@ -1,16 +1,21 @@
 use actix_web::dev::Payload;
-use actix_web::{FromRequest, HttpRequest};
+use actix_web::{
+    FromRequest, HttpRequest,
+    cookie::{Cookie, SameSite, time::Duration as CookieDuration},
+    http::Method,
+};
 use actix_web::{HttpResponse, Responder, web};
 use bcrypt::{hash, verify};
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use rand::distr::{Alphanumeric, SampleString};
+use rand::rng;
 use rpassword;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Column, FromRow, Row, any::AnyRow};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::env;
 use std::future::{Ready, ready};
 use std::io::{IsTerminal, Write, stdin, stdout};
 use std::sync::{Mutex, OnceLock};
@@ -19,6 +24,7 @@ use std::time::{Duration as StdDuration, Instant};
 use crate::{
     db::{DbPool, query, query_scalar},
     errors,
+    secret::load_secret_from_env_or_file,
     security::{RateLimitRule, SecurityConfig, request_client_ip},
 };
 
@@ -30,6 +36,33 @@ pub struct AuthSettings {
     pub audience: Option<String>,
     #[serde(default = "default_access_token_ttl_seconds")]
     pub access_token_ttl_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_cookie: Option<SessionCookieSettings>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCookieSameSite {
+    Lax,
+    None,
+    #[default]
+    Strict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionCookieSettings {
+    #[serde(default = "default_session_cookie_name")]
+    pub name: String,
+    #[serde(default = "default_session_csrf_cookie_name")]
+    pub csrf_cookie_name: String,
+    #[serde(default = "default_session_csrf_header_name")]
+    pub csrf_header_name: String,
+    #[serde(default = "default_session_cookie_path")]
+    pub path: String,
+    #[serde(default = "default_session_cookie_secure")]
+    pub secure: bool,
+    #[serde(default)]
+    pub same_site: SessionCookieSameSite,
 }
 
 impl Default for AuthSettings {
@@ -38,12 +71,46 @@ impl Default for AuthSettings {
             issuer: None,
             audience: None,
             access_token_ttl_seconds: default_access_token_ttl_seconds(),
+            session_cookie: None,
+        }
+    }
+}
+
+impl Default for SessionCookieSettings {
+    fn default() -> Self {
+        Self {
+            name: default_session_cookie_name(),
+            csrf_cookie_name: default_session_csrf_cookie_name(),
+            csrf_header_name: default_session_csrf_header_name(),
+            path: default_session_cookie_path(),
+            secure: default_session_cookie_secure(),
+            same_site: SessionCookieSameSite::default(),
         }
     }
 }
 
 const fn default_access_token_ttl_seconds() -> i64 {
     24 * 60 * 60
+}
+
+fn default_session_cookie_name() -> String {
+    "vsr_session".to_owned()
+}
+
+fn default_session_csrf_cookie_name() -> String {
+    "vsr_csrf".to_owned()
+}
+
+fn default_session_csrf_header_name() -> String {
+    "x-csrf-token".to_owned()
+}
+
+fn default_session_cookie_path() -> String {
+    "/".to_owned()
+}
+
+const fn default_session_cookie_secure() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,10 +193,11 @@ pub fn auth_migration_sql(backend: AuthDbBackend) -> String {
 fn load_jwt_secret_from_env() -> Result<Vec<u8>, String> {
     let _ = dotenv();
 
-    match env::var("JWT_SECRET") {
-        Ok(secret) if !secret.trim().is_empty() => Ok(secret.into_bytes()),
-        Ok(_) | Err(_) => Err("JWT_SECRET must be set when built-in auth is enabled".to_owned()),
-    }
+    load_secret_from_env_or_file("JWT_SECRET", "JWT secret")
+        .map(String::into_bytes)
+        .map_err(|_| {
+            "JWT_SECRET or JWT_SECRET_FILE must be set when built-in auth is enabled".to_owned()
+        })
 }
 
 fn configured_jwt_secret() -> Result<&'static [u8], &'static str> {
@@ -181,47 +249,87 @@ impl FromRequest for UserContext {
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
         use actix_web::http::header;
 
-        let token = req
+        let settings = auth_settings_from_request(req);
+        let bearer_token = req
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|s| s.to_string());
 
-        if let Some(token) = token {
-            let settings = auth_settings_from_request(req);
-            let jwt_secret = match configured_jwt_secret() {
-                Ok(secret) => secret,
-                Err(message) => {
-                    return ready(Err(actix_web::error::ErrorInternalServerError(message)));
-                }
-            };
-            match decode::<Claims>(
-                &token,
-                &DecodingKey::from_secret(jwt_secret),
-                &validation_for_settings(&settings),
-            ) {
-                Ok(data) => {
-                    let claims = data.claims;
-                    return ready(Ok(UserContext {
-                        id: claims.sub,
-                        roles: claims.roles,
-                        claims: claims.extra,
-                    }));
-                }
-                Err(_) => {
-                    return ready(Err(errors::into_actix_error(errors::unauthorized(
-                        "invalid_token",
-                        "Invalid token",
-                    ))));
-                }
+        if let Some(token) = bearer_token {
+            return ready(decode_user_context_token(&token, &settings));
+        }
+
+        if let Some(cookie_settings) = &settings.session_cookie
+            && let Some(cookie) = req.cookie(&cookie_settings.name)
+        {
+            if request_needs_csrf(req.method())
+                && let Err(response) = validate_cookie_csrf(req, cookie_settings)
+            {
+                return ready(Err(errors::into_actix_error(response)));
             }
+
+            return ready(decode_user_context_token(cookie.value(), &settings));
         }
 
         ready(Err(errors::into_actix_error(errors::unauthorized(
             "missing_token",
             "Missing token",
         ))))
+    }
+}
+
+fn decode_user_context_token(
+    token: &str,
+    settings: &AuthSettings,
+) -> Result<UserContext, actix_web::Error> {
+    let jwt_secret = configured_jwt_secret().map_err(actix_web::error::ErrorInternalServerError)?;
+    let data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(jwt_secret),
+        &validation_for_settings(settings),
+    )
+    .map_err(|_| {
+        errors::into_actix_error(errors::unauthorized("invalid_token", "Invalid token"))
+    })?;
+    let claims = data.claims;
+
+    Ok(UserContext {
+        id: claims.sub,
+        roles: claims.roles,
+        claims: claims.extra,
+    })
+}
+
+fn request_needs_csrf(method: &Method) -> bool {
+    !matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+    )
+}
+
+fn validate_cookie_csrf(
+    req: &HttpRequest,
+    settings: &SessionCookieSettings,
+) -> Result<(), HttpResponse> {
+    let csrf_cookie = req
+        .cookie(&settings.csrf_cookie_name)
+        .ok_or_else(|| errors::forbidden("invalid_csrf", "Missing or invalid CSRF token"))?;
+    let csrf_header = req
+        .headers()
+        .get(settings.csrf_header_name.as_str())
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| errors::forbidden("invalid_csrf", "Missing or invalid CSRF token"))?;
+
+    if csrf_header == csrf_cookie.value() {
+        Ok(())
+    } else {
+        Err(errors::forbidden(
+            "invalid_csrf",
+            "Missing or invalid CSRF token",
+        ))
     }
 }
 
@@ -344,7 +452,17 @@ async fn login_with_settings(
             &claims,
             &EncodingKey::from_secret(jwt_secret),
         ) {
-            Ok(token) => HttpResponse::Ok().json(serde_json::json!({ "token": token })),
+            Ok(token) => {
+                if let Some(cookie_settings) = &settings.session_cookie {
+                    issue_cookie_login_response(
+                        &token,
+                        cookie_settings,
+                        settings.access_token_ttl_seconds,
+                    )
+                } else {
+                    HttpResponse::Ok().json(serde_json::json!({ "token": token }))
+                }
+            }
             Err(_) => errors::internal_error("Token generation failed"),
         }
     } else {
@@ -362,6 +480,52 @@ pub async fn login_with_request(
     }
     let settings = auth_settings_from_request(&req);
     login_with_settings(input, db, settings).await
+}
+
+fn issue_cookie_login_response(
+    token: &str,
+    settings: &SessionCookieSettings,
+    ttl_seconds: i64,
+) -> HttpResponse {
+    let csrf_token = generate_ephemeral_secret(32);
+    let same_site = same_site_from_settings(settings.same_site);
+    let max_age = CookieDuration::seconds(ttl_seconds.max(1));
+
+    let session_cookie = Cookie::build(settings.name.clone(), token.to_owned())
+        .path(settings.path.clone())
+        .http_only(true)
+        .secure(settings.secure)
+        .same_site(same_site)
+        .max_age(max_age)
+        .finish();
+    let csrf_cookie = Cookie::build(settings.csrf_cookie_name.clone(), csrf_token.clone())
+        .path(settings.path.clone())
+        .http_only(false)
+        .secure(settings.secure)
+        .same_site(same_site)
+        .max_age(max_age)
+        .finish();
+
+    HttpResponse::Ok()
+        .cookie(session_cookie)
+        .cookie(csrf_cookie)
+        .json(serde_json::json!({
+            "token": token,
+            "csrf_token": csrf_token,
+        }))
+}
+
+fn generate_ephemeral_secret(length: usize) -> String {
+    let mut random = rng();
+    Alphanumeric.sample_string(&mut random, length)
+}
+
+fn same_site_from_settings(value: SessionCookieSameSite) -> SameSite {
+    match value {
+        SessionCookieSameSite::Lax => SameSite::Lax,
+        SessionCookieSameSite::None => SameSite::None,
+        SessionCookieSameSite::Strict => SameSite::Strict,
+    }
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -731,6 +895,44 @@ pub async fn me(user: UserContext) -> impl Responder {
     HttpResponse::Ok().json(user)
 }
 
+pub async fn logout(req: HttpRequest) -> impl Responder {
+    let settings = auth_settings_from_request(&req);
+    let Some(cookie_settings) = settings.session_cookie.as_ref() else {
+        return HttpResponse::NoContent().finish();
+    };
+
+    if req.cookie(&cookie_settings.name).is_some()
+        && let Err(response) = validate_cookie_csrf(&req, cookie_settings)
+    {
+        return response;
+    }
+
+    clear_session_cookie_response(cookie_settings)
+}
+
+fn clear_session_cookie_response(settings: &SessionCookieSettings) -> HttpResponse {
+    let same_site = same_site_from_settings(settings.same_site);
+    let expired_session = Cookie::build(settings.name.clone(), "")
+        .path(settings.path.clone())
+        .http_only(true)
+        .secure(settings.secure)
+        .same_site(same_site)
+        .max_age(CookieDuration::seconds(0))
+        .finish();
+    let expired_csrf = Cookie::build(settings.csrf_cookie_name.clone(), "")
+        .path(settings.path.clone())
+        .http_only(false)
+        .secure(settings.secure)
+        .same_site(same_site)
+        .max_age(CookieDuration::seconds(0))
+        .finish();
+
+    HttpResponse::NoContent()
+        .cookie(expired_session)
+        .cookie(expired_csrf)
+        .finish()
+}
+
 /// Check if an admin user exists, and create one automatically if not
 ///
 /// This function will:
@@ -922,6 +1124,7 @@ pub fn auth_routes_with_settings(
 
     cfg.route("/auth/register", web::post().to(register_with_request));
     cfg.route("/auth/login", web::post().to(login_with_request));
+    cfg.route("/auth/logout", web::post().to(logout));
     cfg.route("/auth/me", web::get().to(me));
 }
 
@@ -1067,17 +1270,18 @@ mod tests {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("JWT_SECRET_FILE");
         }
 
         let error = load_jwt_secret_from_env().expect_err("missing JWT secret should fail");
-        assert!(error.contains("JWT_SECRET must be set"));
+        assert!(error.contains("JWT_SECRET"));
 
         unsafe {
             std::env::set_var("JWT_SECRET", "");
         }
 
         let error = load_jwt_secret_from_env().expect_err("empty JWT secret should fail");
-        assert!(error.contains("JWT_SECRET must be set"));
+        assert!(error.contains("JWT_SECRET"));
 
         unsafe {
             std::env::remove_var("JWT_SECRET");
@@ -1097,6 +1301,32 @@ mod tests {
         unsafe {
             std::env::remove_var("JWT_SECRET");
         }
+    }
+
+    #[test]
+    fn load_jwt_secret_from_file_path_env() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let path = std::env::temp_dir().join(format!(
+            "vsr_jwt_secret_{}.txt",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic enough")
+                .as_nanos()
+        ));
+        std::fs::write(&path, "file-secret\n").expect("jwt secret file should write");
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+            std::env::set_var("JWT_SECRET_FILE", path.as_os_str());
+        }
+
+        let secret = load_jwt_secret_from_env().expect("file-backed JWT secret should load");
+        assert_eq!(secret, b"file-secret");
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET_FILE");
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[actix_web::test]

@@ -14,7 +14,7 @@ security: {
         origins_env: "CORS_ORIGINS"
         allow_credentials: true
         allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-        allow_headers: ["authorization", "content-type", "accept"]
+        allow_headers: ["authorization", "content-type", "accept", "x-csrf-token"]
         max_age_seconds: 600
     }
     trusted_proxies: {
@@ -34,6 +34,9 @@ security: {
         issuer: "todo_app_api"
         audience: "todo_app_clients"
         access_token_ttl_seconds: 3600
+        session_cookie: {
+            secure: false
+        }
     }
 }
 static: {

@@ -3,6 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use actix_web::cookie::Cookie;
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
@@ -65,6 +66,15 @@ async fn eon_security_config_applies_headers_request_limits_and_auth_settings() 
             .await
             .expect("auth migration should apply");
     }
+    query(
+        "CREATE TABLE note (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("note table should exist");
 
     let security = security_api::security();
     let app = test::init_service(
@@ -193,6 +203,11 @@ async fn eon_security_config_applies_headers_request_limits_and_auth_settings() 
             .to_ascii_lowercase()
             .contains("authorization")
     );
+    assert!(
+        allowed_headers
+            .to_ascii_lowercase()
+            .contains("x-csrf-token")
+    );
 
     let login = test::TestRequest::post()
         .uri("/api/auth/login")
@@ -205,6 +220,10 @@ async fn eon_security_config_applies_headers_request_limits_and_auth_settings() 
         .to_request();
     let login_response = test::call_service(&app, login).await;
     assert_eq!(login_response.status(), StatusCode::OK);
+    let session_cookie = response_cookie(&login_response, "vsr_session")
+        .expect("login should issue a session cookie");
+    let csrf_cookie =
+        response_cookie(&login_response, "vsr_csrf").expect("login should issue a CSRF cookie");
     let token_body: TokenResponse = test::read_body_json(login_response).await;
 
     let mut validation = Validation::default();
@@ -260,6 +279,50 @@ async fn eon_security_config_applies_headers_request_limits_and_auth_settings() 
     let me_response = test::call_service(&app, me).await;
     assert_eq!(me_response.status(), StatusCode::OK);
 
+    let cookie_me = test::TestRequest::get()
+        .uri("/api/auth/me")
+        .cookie(session_cookie.clone())
+        .to_request();
+    let cookie_me_response = test::call_service(&app, cookie_me).await;
+    assert_eq!(cookie_me_response.status(), StatusCode::OK);
+
+    let csrf_missing_create = test::TestRequest::post()
+        .uri("/api/note")
+        .cookie(session_cookie.clone())
+        .set_json(&security_api::NoteCreate {
+            title: "cookie note".to_owned(),
+        })
+        .to_request();
+    let csrf_missing_response = test::call_service(&app, csrf_missing_create).await;
+    assert_eq!(csrf_missing_response.status(), StatusCode::FORBIDDEN);
+    let csrf_missing_body: ApiErrorResponse = test::read_body_json(csrf_missing_response).await;
+    assert_eq!(csrf_missing_body.code, "invalid_csrf");
+
+    let csrf_header_create = test::TestRequest::post()
+        .uri("/api/note")
+        .cookie(session_cookie.clone())
+        .cookie(csrf_cookie.clone())
+        .insert_header(("x-csrf-token", csrf_cookie.value().to_owned()))
+        .set_json(&security_api::NoteCreate {
+            title: "cookie note".to_owned(),
+        })
+        .to_request();
+    let csrf_header_response = test::call_service(&app, csrf_header_create).await;
+    assert_eq!(csrf_header_response.status(), StatusCode::CREATED);
+
+    let logout = test::TestRequest::post()
+        .uri("/api/auth/logout")
+        .cookie(session_cookie)
+        .cookie(csrf_cookie.clone())
+        .insert_header(("x-csrf-token", csrf_cookie.value().to_owned()))
+        .to_request();
+    let logout_response = test::call_service(&app, logout).await;
+    assert_eq!(logout_response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        response_cookie(&logout_response, "vsr_session").is_some(),
+        "logout should clear the session cookie"
+    );
+
     unsafe {
         std::env::remove_var("TRUSTED_PROXIES");
     }
@@ -273,6 +336,20 @@ fn header_value<'a, B>(
         .headers()
         .get(name)
         .and_then(|value| value.to_str().ok())
+}
+
+fn response_cookie<B>(
+    response: &very_simple_rest::actix_web::dev::ServiceResponse<B>,
+    name: &str,
+) -> Option<Cookie<'static>> {
+    response
+        .headers()
+        .get_all(very_simple_rest::actix_web::http::header::SET_COOKIE)
+        .into_iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| Cookie::parse(value.to_owned()).ok())
+        .find(|cookie| cookie.name() == name)
+        .map(Cookie::into_owned)
 }
 
 fn unique_sqlite_url(prefix: &str) -> String {

@@ -5,6 +5,7 @@ use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use syn::{Ident, Type};
 
+use crate::auth::SessionCookieSameSite;
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::security::SecurityConfig;
 
@@ -698,6 +699,74 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
 
     validate_rate_limit_rule("login", security.rate_limits.login, span)?;
     validate_rate_limit_rule("register", security.rate_limits.register, span)?;
+
+    if let Some(cookie) = &security.auth.session_cookie {
+        if cookie.name.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.session_cookie.name` cannot be empty",
+            ));
+        }
+
+        if cookie.csrf_cookie_name.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.session_cookie.csrf_cookie_name` cannot be empty",
+            ));
+        }
+
+        if cookie.csrf_cookie_name == cookie.name {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.session_cookie.csrf_cookie_name` must differ from `name`",
+            ));
+        }
+
+        if cookie.csrf_header_name.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.session_cookie.csrf_header_name` cannot be empty",
+            ));
+        }
+
+        HeaderName::try_from(cookie.csrf_header_name.as_str()).map_err(|_| {
+            syn::Error::new(
+                span,
+                format!(
+                    "`security.auth.session_cookie.csrf_header_name` contains invalid header name `{}`",
+                    cookie.csrf_header_name
+                ),
+            )
+        })?;
+
+        if !cookie.path.starts_with('/') {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.session_cookie.path` must start with `/`",
+            ));
+        }
+
+        if matches!(cookie.same_site, SessionCookieSameSite::None) && !cookie.secure {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.session_cookie.same_site = None` requires `secure = true`",
+            ));
+        }
+
+        for (label, name) in [
+            ("name", cookie.name.as_str()),
+            ("csrf_cookie_name", cookie.csrf_cookie_name.as_str()),
+        ] {
+            if name.starts_with("__Host-") && (!cookie.secure || cookie.path != "/") {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`security.auth.session_cookie.{label}` uses the `__Host-` prefix but requires `secure = true` and `path = \"/\"`",
+                    ),
+                ));
+            }
+        }
+    }
 
     Ok(())
 }

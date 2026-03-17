@@ -1,7 +1,7 @@
 const API_URL = "/api";
-const storageKey = "todo_app_auth_token";
+const csrfCookieName = "vsr_csrf";
 
-let authToken = localStorage.getItem(storageKey) || "";
+let csrfToken = "";
 let currentUser = null;
 let todos = [];
 
@@ -22,12 +22,7 @@ document.getElementById("refreshProfileBtn").addEventListener("click", refreshSe
 document.getElementById("createTodoBtn").addEventListener("click", createTodo);
 document.getElementById("reloadTodosBtn").addEventListener("click", loadTodos);
 
-if (authToken) {
-  refreshSession();
-} else {
-  renderSession();
-  renderTodos();
-}
+refreshSession();
 
 function setStatus(message, kind = "") {
   authStatus.textContent = message;
@@ -103,12 +98,13 @@ async function apiFetch(path, options = {}) {
   if (!headers.has("Content-Type") && options.body) {
     headers.set("Content-Type", "application/json");
   }
-  if (authToken) {
-    headers.set("Authorization", `Bearer ${authToken}`);
+  if (requestNeedsCsrf(options.method) && csrfToken && !headers.has("x-csrf-token")) {
+    headers.set("x-csrf-token", csrfToken);
   }
 
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
+    credentials: "same-origin",
     headers,
   });
 
@@ -159,8 +155,7 @@ async function loginUser() {
       method: "POST",
       body: JSON.stringify({ email, password }),
     });
-    authToken = data.token;
-    localStorage.setItem(storageKey, authToken);
+    csrfToken = data.csrf_token || readCookie(csrfCookieName) || "";
     setStatus("Login succeeded. Loading your current API view...", "success");
     await refreshSession();
   } catch (error) {
@@ -169,7 +164,8 @@ async function loginUser() {
 }
 
 async function refreshSession() {
-  if (!authToken) {
+  syncCsrfToken();
+  if (!csrfToken) {
     currentUser = null;
     todos = [];
     renderSession();
@@ -182,21 +178,30 @@ async function refreshSession() {
     renderSession();
     await loadTodos();
   } catch (error) {
-    authToken = "";
+    csrfToken = "";
     currentUser = null;
     todos = [];
-    localStorage.removeItem(storageKey);
     renderSession();
     renderTodos();
-    setStatus(`Session refresh failed: ${error.message}`, "error");
+    if (!String(error.message || "").includes("Missing token")) {
+      setStatus(`Session refresh failed: ${error.message}`, "error");
+    }
   }
 }
 
-function logoutUser() {
-  authToken = "";
+async function logoutUser() {
+  try {
+    await apiFetch("/auth/logout", {
+      method: "POST",
+    });
+  } catch (error) {
+    setStatus(`Logout failed: ${error.message}`, "error");
+    return;
+  }
+
+  csrfToken = "";
   currentUser = null;
   todos = [];
-  localStorage.removeItem(storageKey);
   renderSession();
   renderTodos();
   setStatus("Logged out.", "success");
@@ -281,4 +286,26 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function syncCsrfToken() {
+  csrfToken = readCookie(csrfCookieName) || "";
+}
+
+function readCookie(name) {
+  const parts = document.cookie
+    .split(";")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const part of parts) {
+    if (part.startsWith(`${name}=`)) {
+      return decodeURIComponent(part.slice(name.length + 1));
+    }
+  }
+  return "";
+}
+
+function requestNeedsCsrf(method) {
+  const normalized = String(method || "GET").toUpperCase();
+  return !["GET", "HEAD", "OPTIONS", "TRACE"].includes(normalized);
 }

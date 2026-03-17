@@ -105,6 +105,7 @@ fn security_config() -> core::security::SecurityConfig {
             issuer: Some("very_simple_rest_template".to_owned()),
             audience: Some("template-clients".to_owned()),
             access_token_ttl_seconds: 3600,
+            session_cookie: None,
         },
     }
 }

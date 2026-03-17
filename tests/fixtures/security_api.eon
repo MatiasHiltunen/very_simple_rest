@@ -8,7 +8,7 @@ security: {
         origins_env: "CORS_ORIGINS"
         allow_credentials: true
         allow_methods: ["GET", "POST", "OPTIONS"]
-        allow_headers: ["authorization", "content-type"]
+        allow_headers: ["authorization", "content-type", "x-csrf-token"]
         expose_headers: ["x-total-count"]
         max_age_seconds: 600
     }
@@ -33,13 +33,23 @@ security: {
         issuer: "very_simple_rest_tests"
         audience: "api_clients"
         access_token_ttl_seconds: 900
+        session_cookie: {
+            secure: false
+            same_site: Strict
+        }
     }
 }
 resources: [
     {
         name: "Note"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
         fields: [
-            { name: "id", type: I64 }
+            { name: "id", type: I64, id: true }
             { name: "title", type: String }
         ]
     }

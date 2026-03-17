@@ -18,7 +18,7 @@ use super::model::{
     validate_sql_identifier,
 };
 use crate::{
-    auth::AuthSettings,
+    auth::{AuthSettings, SessionCookieSameSite, SessionCookieSettings},
     database::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
     },
@@ -152,6 +152,24 @@ struct AuthSecurityDocument {
     audience: Option<String>,
     #[serde(default)]
     access_token_ttl_seconds: Option<i64>,
+    #[serde(default)]
+    session_cookie: Option<SessionCookieDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SessionCookieDocument {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    csrf_cookie_name: Option<String>,
+    #[serde(default)]
+    csrf_header_name: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    secure: Option<bool>,
+    #[serde(default)]
+    same_site: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -554,16 +572,20 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         })
         .unwrap_or_default();
 
-    let auth = document
-        .auth
-        .map(|auth| AuthSettings {
+    let auth = match document.auth {
+        Some(auth) => AuthSettings {
             issuer: auth.issuer,
             audience: auth.audience,
             access_token_ttl_seconds: auth
                 .access_token_ttl_seconds
                 .unwrap_or(AuthSettings::default().access_token_ttl_seconds),
-        })
-        .unwrap_or_default();
+            session_cookie: auth
+                .session_cookie
+                .map(parse_session_cookie_document)
+                .transpose()?,
+        },
+        None => AuthSettings::default(),
+    };
 
     Ok(SecurityConfig {
         requests,
@@ -573,6 +595,43 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         headers,
         auth,
     })
+}
+
+fn parse_session_cookie_document(
+    document: SessionCookieDocument,
+) -> syn::Result<SessionCookieSettings> {
+    let defaults = SessionCookieSettings::default();
+    let same_site = match document.same_site.as_deref() {
+        None => defaults.same_site,
+        Some(value) => parse_session_cookie_same_site(value).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("unsupported `security.auth.session_cookie.same_site` value `{value}`"),
+            )
+        })?,
+    };
+
+    Ok(SessionCookieSettings {
+        name: document.name.unwrap_or(defaults.name),
+        csrf_cookie_name: document
+            .csrf_cookie_name
+            .unwrap_or(defaults.csrf_cookie_name),
+        csrf_header_name: document
+            .csrf_header_name
+            .unwrap_or(defaults.csrf_header_name),
+        path: document.path.unwrap_or(defaults.path),
+        secure: document.secure.unwrap_or(defaults.secure),
+        same_site,
+    })
+}
+
+fn parse_session_cookie_same_site(value: &str) -> Option<SessionCookieSameSite> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "strict" => Some(SessionCookieSameSite::Strict),
+        "lax" => Some(SessionCookieSameSite::Lax),
+        "none" => Some(SessionCookieSameSite::None),
+        _ => None,
+    }
 }
 
 fn parse_database_document(
@@ -1437,7 +1496,7 @@ mod tests {
                     origins_env: "CORS_ORIGINS"
                     allow_credentials: true
                     allow_methods: ["GET", "POST", "OPTIONS"]
-                    allow_headers: ["authorization", "content-type"]
+                        allow_headers: ["authorization", "content-type", "x-csrf-token"]
                     expose_headers: ["x-total-count"]
                     max_age_seconds: 600
                 }
@@ -1462,6 +1521,11 @@ mod tests {
                     issuer: "issuer"
                     audience: "audience"
                     access_token_ttl_seconds: 600
+                    session_cookie: {
+                        secure: false
+                        same_site: Lax
+                        csrf_header_name: "x-session-csrf"
+                    }
                 }
             }
             resources: [
@@ -1489,7 +1553,11 @@ mod tests {
         );
         assert_eq!(
             security.cors.allow_headers,
-            vec!["authorization".to_owned(), "content-type".to_owned()]
+            vec![
+                "authorization".to_owned(),
+                "content-type".to_owned(),
+                "x-csrf-token".to_owned()
+            ]
         );
         assert_eq!(
             security.cors.expose_headers,
@@ -1521,6 +1589,13 @@ mod tests {
         assert_eq!(security.auth.issuer.as_deref(), Some("issuer"));
         assert_eq!(security.auth.audience.as_deref(), Some("audience"));
         assert_eq!(security.auth.access_token_ttl_seconds, 600);
+        let session_cookie = security
+            .auth
+            .session_cookie
+            .expect("session cookie settings should parse");
+        assert!(!session_cookie.secure);
+        assert_eq!(session_cookie.same_site, SessionCookieSameSite::Lax);
+        assert_eq!(session_cookie.csrf_header_name, "x-session-csrf");
         assert_eq!(security.headers.frame_options, Some(FrameOptions::Deny));
         assert_eq!(
             security.headers.referrer_policy,

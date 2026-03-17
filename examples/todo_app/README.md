@@ -3,6 +3,7 @@
 This example shows the `.eon`-only workflow end to end:
 
 - built-in auth routes for registration and login
+- browser-friendly auth through same-origin session cookies plus CSRF protection
 - owner-scoped todo data for normal users
 - admin access to all todos through `admin_bypass: true`
 - a small static client app served by the generated server itself
@@ -36,6 +37,10 @@ Then open `http://127.0.0.1:8080`.
 `vsr setup` auto-discovers `todo_app.eon` in the current directory, applies the built-in auth
 schema, and initializes `var/data/todo_app.db`. `vsr build todo_app.eon` writes the binary to
 `./todo-app` and exports the runtime assets to `./todo-app.bundle/`.
+
+The browser client uses cookie-based auth for the session. It no longer stores bearer tokens in
+`localStorage`; instead the server issues an `HttpOnly` session cookie and a CSRF cookie for
+unsafe requests.
 
 ## How To Test The Access Rules
 

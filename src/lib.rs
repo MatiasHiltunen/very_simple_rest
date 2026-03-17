@@ -154,9 +154,9 @@ pub use rest_macro_core as core;
 
 pub mod auth {
     pub use rest_macro_core::auth::{
-        AuthSettings, LoginInput, RegisterInput, User, UserContext, auth_routes,
-        auth_routes_with_settings, ensure_admin_exists, ensure_jwt_secret_configured, login,
-        login_with_request, me, register,
+        AuthSettings, LoginInput, RegisterInput, SessionCookieSameSite, SessionCookieSettings,
+        User, UserContext, auth_routes, auth_routes_with_settings, ensure_admin_exists,
+        ensure_jwt_secret_configured, login, login_with_request, logout, me, register,
     };
 }
 

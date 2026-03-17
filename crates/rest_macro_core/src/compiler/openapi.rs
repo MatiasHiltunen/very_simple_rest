@@ -245,7 +245,8 @@ fn append_builtin_auth_components(
         json!({
             "type": "object",
             "properties": {
-                "token": { "type": "string" }
+                "token": { "type": "string" },
+                "csrf_token": { "type": "string" }
             },
             "required": ["token"]
         }),
@@ -290,7 +291,7 @@ fn append_builtin_auth_components(
         json!({
             "post": {
                 "tags": ["Auth"],
-                "summary": "Login and receive a JWT token",
+                "summary": "Login and receive a JWT token or configured session cookie",
                 "operationId": "loginUser",
                 "requestBody": json_request_body("LoginInput"),
                 "responses": {
@@ -300,6 +301,20 @@ fn append_builtin_auth_components(
                     "415": api_error_response("Unsupported media type"),
                     "401": api_error_response("Invalid credentials"),
                     "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/logout".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Account"],
+                "summary": "Clear configured auth session cookies",
+                "operationId": "logoutUser",
+                "responses": {
+                    "204": plain_response("Logged out"),
+                    "403": api_error_response("Missing or invalid CSRF token")
                 }
             }
         }),
@@ -1128,9 +1143,14 @@ mod tests {
 
         assert!(document["paths"]["/auth/register"]["post"].is_object());
         assert!(document["paths"]["/auth/login"]["post"].is_object());
+        assert!(document["paths"]["/auth/logout"]["post"].is_object());
         assert!(document["paths"]["/auth/me"]["get"].is_object());
         assert!(document["components"]["schemas"]["AuthTokenResponse"].is_object());
         assert!(document["components"]["schemas"]["ApiErrorResponse"].is_object());
+        assert!(
+            document["components"]["schemas"]["AuthTokenResponse"]["properties"]["csrf_token"]
+                .is_object()
+        );
         assert_eq!(document["paths"]["/auth/me"]["get"]["tags"][0], "Account");
         assert!(document["paths"]["/auth/login"]["post"]["security"].is_null());
         assert_eq!(

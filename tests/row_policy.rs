@@ -3,6 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::prelude::*;
 
+const TEST_JWT_SECRET: &str = "row-policy-secret";
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
 #[rest_api(table = "owned_post", id = "id", db = "sqlite")]
 #[require_role(read = "user", create = "user", update = "user", delete = "user")]
@@ -34,6 +36,10 @@ struct DbOwnedPost {
 
 #[actix_web::test]
 async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
+    unsafe {
+        std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+    }
+
     let database_url = unique_sqlite_url("row_policy");
     let pool = connect(&database_url)
         .await
@@ -369,6 +375,10 @@ async fn row_policy_scopes_reads_and_mutations_across_auth_cases() {
         .await
         .expect("remaining row count should be queryable");
     assert_eq!(remaining_count, 1);
+
+    unsafe {
+        std::env::remove_var("JWT_SECRET");
+    }
 }
 
 fn unique_sqlite_url(prefix: &str) -> String {

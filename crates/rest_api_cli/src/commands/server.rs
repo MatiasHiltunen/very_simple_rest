@@ -262,7 +262,68 @@ fn export_generated_runtime_artifacts(
         copy_dir_recursive(&migrations, &artifact_dir.join("migrations"))?;
     }
 
+    copy_generated_static_artifacts(project_dir, &artifact_dir)?;
+
     Ok(artifact_dir)
+}
+
+fn copy_generated_static_artifacts(project_dir: &Path, artifact_dir: &Path) -> Result<()> {
+    let Some(service) = load_emitted_service_spec(project_dir)? else {
+        return Ok(());
+    };
+
+    if service.static_mounts.is_empty() {
+        return Ok(());
+    }
+
+    let mut copied = Vec::<PathBuf>::new();
+    let mut mounts = service.static_mounts.iter().collect::<Vec<_>>();
+    mounts.sort_by_key(|mount| Path::new(&mount.source_dir).components().count());
+
+    for mount in mounts {
+        let relative_dir = PathBuf::from(&mount.source_dir);
+        if copied
+            .iter()
+            .any(|existing| relative_dir.starts_with(existing))
+        {
+            continue;
+        }
+
+        let source = project_dir.join(&relative_dir);
+        if !source.exists() {
+            return Err(Error::Config(format!(
+                "emitted project is missing copied static dir: {}",
+                source.display()
+            )));
+        }
+
+        copy_dir_recursive(&source, &artifact_dir.join(&relative_dir))?;
+        copied.push(relative_dir);
+    }
+
+    Ok(())
+}
+
+fn load_emitted_service_spec(project_dir: &Path) -> Result<Option<ServiceSpec>> {
+    let mut eon_files = fs::read_dir(project_dir)
+        .map_err(Error::Io)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("eon"))
+        .collect::<Vec<_>>();
+    eon_files.sort();
+
+    let Some(path) = eon_files.into_iter().next() else {
+        return Ok(None);
+    };
+
+    compiler::load_service_from_path(&path)
+        .map(Some)
+        .map_err(|error| {
+            Error::Config(format!(
+                "failed to reload emitted service from `{}`: {error}",
+                path.display()
+            ))
+        })
 }
 
 fn build_artifact_dir(output: &Path) -> Result<PathBuf> {
@@ -646,7 +707,7 @@ fn render_env_example(
     include_builtin_auth: bool,
 ) -> String {
     let auth_block = if include_builtin_auth {
-        "# Required when built-in auth is enabled\nJWT_SECRET=change-me\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
+        "# Required when built-in auth is enabled\nJWT_SECRET=change-me\n# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/jwt_secret\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
     } else {
         "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n"
     };
@@ -656,7 +717,11 @@ fn render_env_example(
             let encryption_block = engine
                 .encryption_key_env
                 .as_ref()
-                .map(|var| format!("{var}=change-me-hex-key\n"))
+                .map(|var| {
+                    format!(
+                        "{var}=change-me-hex-key\n# Or mount a secret file and set {var}_FILE=/run/secrets/{var}\n"
+                    )
+                })
                 .unwrap_or_default();
             format!(
                 "# Local Turso bootstrap will initialize `{}` before the runtime connects.\n{}",
@@ -1240,7 +1305,11 @@ mod tests {
             .expect("env example should write");
         fs::write(project_dir.join("README.md"), "# Generated\n").expect("readme should write");
         fs::write(project_dir.join("openapi.json"), "{ }\n").expect("openapi should write");
-        fs::write(project_dir.join("service.eon"), "resources: []\n").expect("eon should write");
+        fs::write(
+            project_dir.join("service.eon"),
+            fs::read_to_string(fixture_path("blog_api.eon")).expect("fixture should read"),
+        )
+        .expect("eon should write");
         fs::write(migrations.join("0000_auth.sql"), "-- auth\n").expect("migration should write");
 
         let output = root.join("dist/api-server");
@@ -1256,6 +1325,27 @@ mod tests {
         assert!(artifact_dir.join("openapi.json").exists());
         assert!(artifact_dir.join("service.eon").exists());
         assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
+    }
+
+    #[test]
+    fn export_generated_runtime_artifacts_copies_static_dirs_into_bundle() {
+        let root = test_root();
+        let project_dir = root.join("project");
+        emit_server_project(
+            &fixture_path("static_site_api.eon"),
+            &project_dir,
+            Some("static-site-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("server project should emit");
+
+        let output = root.join("dist/static-site-server");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+            .expect("runtime artifacts should export");
+
+        assert!(artifact_dir.join("static_site/index.html").exists());
+        assert!(artifact_dir.join("static_site/assets/app.js").exists());
     }
 
     #[test]

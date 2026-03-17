@@ -69,6 +69,11 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
         };
         writeln!(&mut output, "{heading}").unwrap();
         writeln!(&mut output, "{var_name}=64_hex_characters_here").unwrap();
+        writeln!(
+            &mut output,
+            "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
+        )
+        .unwrap();
         writeln!(&mut output).unwrap();
     }
 
@@ -84,6 +89,11 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     )
     .unwrap();
     writeln!(&mut output, "JWT_SECRET={jwt_secret}").unwrap();
+    writeln!(
+        &mut output,
+        "# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/jwt_secret"
+    )
+    .unwrap();
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "# Admin User (optional)").unwrap();
     writeln!(

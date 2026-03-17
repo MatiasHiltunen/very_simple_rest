@@ -3,9 +3,10 @@ use std::io::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "turso-local")]
-use std::env;
-#[cfg(feature = "turso-local")]
 use std::path::Path;
+
+#[cfg(feature = "turso-local")]
+use crate::secret::load_secret_from_env_or_file;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseConfig {
@@ -88,21 +89,10 @@ fn resolve_turso_encryption(engine: &TursoLocalConfig) -> Result<Option<turso::E
         return Ok(None);
     };
 
-    let hexkey = env::var(var_name).map_err(|_| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "database.engine.encryption_key_env references missing environment variable `{var_name}`"
-            ),
-        )
-    })?;
-
-    if hexkey.trim().is_empty() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("database.engine.encryption_key_env `{var_name}` resolved to an empty value"),
-        ));
-    }
+    let hexkey = load_secret_from_env_or_file(
+        var_name,
+        &format!("database.engine.encryption_key_env `{var_name}`"),
+    )?;
 
     Ok(Some(turso::EncryptionOpts {
         cipher: "aegis256".to_owned(),
@@ -193,5 +183,33 @@ mod tests {
         unsafe {
             std::env::remove_var(var_name);
         }
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[test]
+    fn resolve_turso_encryption_uses_file_backed_hex_key() {
+        let key = "c2bbfda4f589dc9daaf004fe21111e00dc00c98237102f5c7002a5669fc76327";
+        let var_name = format!("VSR_TURSO_KEY_FILE_{}", std::process::id());
+        let path = std::env::temp_dir().join(format!("{var_name}.txt"));
+        std::fs::write(&path, key).expect("hex key file should write");
+        unsafe {
+            std::env::remove_var(&var_name);
+            std::env::set_var(format!("{var_name}_FILE"), path.as_os_str());
+        }
+
+        let encryption = super::resolve_turso_encryption(&TursoLocalConfig {
+            path: "app.db".to_owned(),
+            encryption_key_env: Some(var_name.clone()),
+        })
+        .expect("file-backed env should resolve")
+        .expect("encryption opts should exist");
+
+        assert_eq!(encryption.cipher, "aegis256");
+        assert_eq!(encryption.hexkey, key);
+
+        unsafe {
+            std::env::remove_var(format!("{var_name}_FILE"));
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

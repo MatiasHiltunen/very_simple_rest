@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    env,
+    path::{Component, Path, PathBuf},
+};
 
 use actix_files::NamedFile;
 use actix_web::{
@@ -23,6 +26,7 @@ pub enum StaticCacheProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaticMount {
     pub mount_path: &'static str,
+    pub source_dir: &'static str,
     pub resolved_dir: &'static str,
     pub mode: StaticMode,
     pub index_file: Option<&'static str>,
@@ -87,8 +91,9 @@ async fn serve_static_request(
         return Ok(HttpResponse::NotFound().finish());
     }
 
-    let base_dir = PathBuf::from(mount.resolved_dir);
-    let canonical_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
+    let Some(canonical_base) = resolve_mount_base_dir(mount) else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
     let relative_path = sanitize_requested_path(tail.as_deref().unwrap_or(""))?;
 
     if let Some(path) = resolve_existing_path(&canonical_base, &relative_path, mount.index_file) {
@@ -104,6 +109,34 @@ async fn serve_static_request(
     }
 
     Ok(HttpResponse::NotFound().finish())
+}
+
+fn resolve_mount_base_dir(mount: StaticMount) -> Option<PathBuf> {
+    resolve_existing_dir(Path::new(mount.resolved_dir))
+        .or_else(|| {
+            let executable = env::current_exe().ok()?;
+            resolve_bundle_mount_dir(&executable, mount)
+        })
+        .or_else(|| {
+            let executable = env::current_exe().ok()?;
+            let executable_parent = executable.parent()?;
+            resolve_existing_dir(&executable_parent.join(mount.source_dir))
+        })
+}
+
+fn resolve_existing_dir(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    canonical.is_dir().then_some(canonical)
+}
+
+fn bundle_dir_for_executable(executable: &Path) -> PathBuf {
+    let mut artifact_dir = executable.as_os_str().to_os_string();
+    artifact_dir.push(".bundle");
+    PathBuf::from(artifact_dir)
+}
+
+fn resolve_bundle_mount_dir(executable: &Path, mount: StaticMount) -> Option<PathBuf> {
+    resolve_existing_dir(&bundle_dir_for_executable(executable).join(mount.source_dir))
 }
 
 fn apply_cache_header(headers: &mut header::HeaderMap, cache: StaticCacheProfile) {
@@ -268,7 +301,10 @@ mod tests {
         web::scope,
     };
 
-    use super::{StaticCacheProfile, StaticMode, StaticMount, configure_static_mounts};
+    use super::{
+        StaticCacheProfile, StaticMode, StaticMount, bundle_dir_for_executable,
+        configure_static_mounts, resolve_bundle_mount_dir,
+    };
 
     fn temp_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -297,6 +333,7 @@ mod tests {
         let mounts = [
             StaticMount {
                 mount_path: "/assets",
+                source_dir: "public/assets",
                 resolved_dir: assets_dir,
                 mode: StaticMode::Directory,
                 index_file: None,
@@ -305,6 +342,7 @@ mod tests {
             },
             StaticMount {
                 mount_path: "/",
+                source_dir: "public",
                 resolved_dir: public_dir,
                 mode: StaticMode::Spa,
                 index_file: Some("index.html"),
@@ -361,5 +399,34 @@ mod tests {
         let api_req = test::TestRequest::get().uri("/api/health").to_request();
         let api_resp = test::call_service(&app, api_req).await;
         assert_eq!(api_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[::core::prelude::v1::test]
+    fn prefers_bundle_static_dir_when_compiled_path_is_missing() {
+        let root = temp_root("static_runtime_bundle");
+        let executable = root.join("dist/todo-app");
+        let bundle_public = bundle_dir_for_executable(&executable).join("public");
+        fs::create_dir_all(&bundle_public).expect("bundle public dir should exist");
+
+        let mount = StaticMount {
+            mount_path: "/",
+            source_dir: "public",
+            resolved_dir: "/path/that/does/not/exist",
+            mode: StaticMode::Spa,
+            index_file: Some("index.html"),
+            fallback_file: Some("index.html"),
+            cache: StaticCacheProfile::NoStore,
+        };
+
+        let resolved =
+            resolve_bundle_mount_dir(&executable, mount).expect("bundle dir should resolve");
+        assert_eq!(
+            resolved,
+            bundle_public
+                .canonicalize()
+                .expect("bundle dir should canonicalize")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

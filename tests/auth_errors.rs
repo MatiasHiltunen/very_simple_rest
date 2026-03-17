@@ -1,3 +1,4 @@
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -12,8 +13,18 @@ struct ApiErrorResponse {
     field: Option<String>,
 }
 
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[actix_web::test]
 async fn built_in_auth_uses_json_error_envelope() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("JWT_SECRET", "auth-errors-secret");
+    }
+
     let database_url = unique_sqlite_url("auth_errors");
     let pool = connect(&database_url)
         .await
@@ -110,6 +121,10 @@ async fn built_in_auth_uses_json_error_envelope() {
     assert_eq!(invalid_token_body.code, "invalid_token");
     assert_eq!(invalid_token_body.message, "Invalid token");
     assert_eq!(invalid_token_body.field, None);
+
+    unsafe {
+        std::env::remove_var("JWT_SECRET");
+    }
 }
 
 fn unique_sqlite_url(prefix: &str) -> String {

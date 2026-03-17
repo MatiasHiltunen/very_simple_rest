@@ -68,6 +68,7 @@ pub fn expand_service_module(
     });
     let static_mounts = service.static_mounts.iter().map(|mount| {
         let mount_path = Literal::string(&mount.mount_path);
+        let source_dir = Literal::string(&mount.source_dir);
         let resolved_dir = Literal::string(&mount.resolved_dir);
         let index_file = match mount.index_file.as_deref() {
             Some(value) => {
@@ -104,6 +105,7 @@ pub fn expand_service_module(
         quote! {
             #runtime_crate::core::static_files::StaticMount {
                 mount_path: #mount_path,
+                source_dir: #source_dir,
                 resolved_dir: #resolved_dir,
                 mode: #mode,
                 index_file: #index_file,
@@ -257,6 +259,8 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
     let issuer = option_string_tokens(security.auth.issuer.as_deref());
     let audience = option_string_tokens(security.auth.audience.as_deref());
     let access_token_ttl_seconds = Literal::i64_unsuffixed(security.auth.access_token_ttl_seconds);
+    let session_cookie =
+        option_session_cookie_tokens(security.auth.session_cookie.as_ref(), runtime_crate);
     let content_type_options = security.headers.content_type_options;
 
     quote! {
@@ -291,6 +295,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 issuer: #issuer,
                 audience: #audience,
                 access_token_ttl_seconds: #access_token_ttl_seconds,
+                session_cookie: #session_cookie,
             },
         }
     }
@@ -336,6 +341,43 @@ fn option_rate_limit_tokens(
                 Some(#runtime_crate::core::security::RateLimitRule {
                     requests: #requests,
                     window_seconds: #window_seconds,
+                })
+            }
+        }
+        None => quote!(None),
+    }
+}
+
+fn option_session_cookie_tokens(
+    value: Option<&crate::auth::SessionCookieSettings>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        Some(value) => {
+            let name = Literal::string(&value.name);
+            let csrf_cookie_name = Literal::string(&value.csrf_cookie_name);
+            let csrf_header_name = Literal::string(&value.csrf_header_name);
+            let path = Literal::string(&value.path);
+            let secure = value.secure;
+            let same_site = match value.same_site {
+                crate::auth::SessionCookieSameSite::Lax => {
+                    quote!(#runtime_crate::core::auth::SessionCookieSameSite::Lax)
+                }
+                crate::auth::SessionCookieSameSite::None => {
+                    quote!(#runtime_crate::core::auth::SessionCookieSameSite::None)
+                }
+                crate::auth::SessionCookieSameSite::Strict => {
+                    quote!(#runtime_crate::core::auth::SessionCookieSameSite::Strict)
+                }
+            };
+            quote! {
+                Some(#runtime_crate::core::auth::SessionCookieSettings {
+                    name: #name.to_owned(),
+                    csrf_cookie_name: #csrf_cookie_name.to_owned(),
+                    csrf_header_name: #csrf_header_name.to_owned(),
+                    path: #path.to_owned(),
+                    secure: #secure,
+                    same_site: #same_site,
                 })
             }
         }
