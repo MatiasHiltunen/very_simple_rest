@@ -1,0 +1,18 @@
+module: "datetime_api"
+resources: [
+    {
+        name: "Event"
+        list: {
+            default_limit: 1
+            max_limit: 10
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "starts_at", type: DateTime }
+            { name: "ends_at", type: DateTime, nullable: true }
+            { name: "created_at", type: DateTime }
+            { name: "updated_at", type: DateTime }
+        ]
+    }
+]

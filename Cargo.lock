@@ -741,6 +741,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -4875,6 +4876,7 @@ dependencies = [
  "actix-files",
  "actix-web",
  "base64",
+ "chrono",
  "env_logger",
  "jsonwebtoken",
  "log",

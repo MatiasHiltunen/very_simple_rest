@@ -2,7 +2,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use proc_macro2::Span;
 
-use super::model::{GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_optional_type};
+use super::model::{
+    GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_datetime_type, is_optional_type,
+};
 
 pub fn render_service_migration_sql(service: &ServiceSpec) -> syn::Result<String> {
     let ordered_resources = topologically_sorted_resources(service)?;
@@ -240,8 +242,12 @@ fn render_field_definition(resource: &ResourceSpec, field: &super::model::FieldS
     match field.generated {
         GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt => {
             format!(
-                "{} {} NOT NULL DEFAULT CURRENT_TIMESTAMP",
-                field_name, field.sql_type
+                "{} {} NOT NULL DEFAULT {}",
+                field_name,
+                field.sql_type,
+                resource
+                    .db
+                    .generated_time_expression(is_datetime_type(&field.ty))
             )
         }
         GeneratedValue::None | GeneratedValue::AutoIncrement => {
@@ -429,6 +435,22 @@ mod tests {
             render_service_migration_sql(&loaded.service).expect("migration sql should render");
 
         assert!(sql.contains("FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE"));
+    }
+
+    #[test]
+    fn migration_sql_renders_datetime_columns_with_sqlite_utc_defaults() {
+        let loaded = load_service_from_path(&fixture_path("datetime_api.eon"))
+            .expect("fixture should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("starts_at TEXT NOT NULL"));
+        assert!(sql.contains(
+            "created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))"
+        ));
+        assert!(sql.contains(
+            "updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))"
+        ));
     }
 
     #[test]

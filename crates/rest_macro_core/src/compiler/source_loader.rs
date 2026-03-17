@@ -13,6 +13,7 @@ use super::{
     model::{ResourceSpec, ServiceSpec, sanitize_module_ident},
 };
 use crate::database::DatabaseConfig;
+use crate::logging::LoggingConfig;
 
 pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
     let mut rust_files = collect_rust_files(path)?;
@@ -65,6 +66,7 @@ pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
         resources,
         static_mounts: Vec::new(),
         database: DatabaseConfig::default(),
+        logging: LoggingConfig::default(),
         security: crate::security::SecurityConfig::default(),
     })
 }

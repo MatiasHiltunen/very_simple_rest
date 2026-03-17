@@ -280,7 +280,7 @@ pub async fn inspect_live_schema(
             ) && !column.default_current_timestamp
             {
                 issues.push(format!(
-                    "column `{}` on `{}` is missing a CURRENT_TIMESTAMP default",
+                    "column `{}` on `{}` is missing a current-timestamp default",
                     field_name, resource.table_name
                 ));
             }
@@ -750,7 +750,10 @@ fn default_is_current_timestamp(value: Option<&str>) -> bool {
     value
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
-            normalized.contains("current_timestamp") || normalized.contains("now()")
+            normalized.contains("current_timestamp")
+                || normalized.contains("now()")
+                || normalized.contains("utc_timestamp")
+                || (normalized.contains("strftime(") && normalized.contains("'now'"))
         })
         .unwrap_or(false)
 }

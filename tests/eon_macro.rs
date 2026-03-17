@@ -4,6 +4,7 @@ rest_api_from_eon!("tests/fixtures/blog_api.eon");
 rest_api_from_eon!("tests/fixtures/owned_api.eon");
 rest_api_from_eon!("tests/fixtures/tenant_api.eon");
 rest_api_from_eon!("tests/fixtures/paged_api.eon");
+rest_api_from_eon!("tests/fixtures/datetime_api.eon");
 rest_api_from_eon!("tests/fixtures/security_api.eon");
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_api.eon");
@@ -169,6 +170,17 @@ fn eon_macro_generates_security_config_function() {
 }
 
 #[test]
+fn eon_macro_generates_logging_config_function() {
+    let logging = security_api::logging();
+    assert_eq!(logging.filter_env, "APP_LOG");
+    assert_eq!(logging.default_filter, "debug,sqlx=warn");
+    assert_eq!(
+        logging.timestamp,
+        very_simple_rest::core::logging::LogTimestampPrecision::Millis
+    );
+}
+
+#[test]
 fn eon_macro_generates_database_config_function() {
     let database = turso_local_api::database();
     assert_eq!(
@@ -220,5 +232,46 @@ fn eon_macro_generates_list_query_and_response_types() {
         offset: 0,
         next_offset: None,
         next_cursor: None,
+    };
+}
+
+#[test]
+fn eon_macro_generates_datetime_types_and_range_filters() {
+    let starts_at = "2026-03-17T10:00:00Z"
+        .parse::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>()
+        .expect("datetime should parse");
+    let ends_at = "2026-03-17T11:00:00Z"
+        .parse::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>()
+        .expect("datetime should parse");
+    let created_at = "2026-03-17T09:00:00Z"
+        .parse::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>()
+        .expect("datetime should parse");
+
+    let _event = datetime_api::Event {
+        id: Some(1),
+        title: "Launch".to_owned(),
+        starts_at: starts_at.clone(),
+        ends_at: Some(ends_at.clone()),
+        created_at: Some(created_at),
+        updated_at: Some(
+            "2026-03-17T09:30:00Z"
+                .parse::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>()
+                .expect("datetime should parse"),
+        ),
+    };
+    let _create = datetime_api::EventCreate {
+        title: "Launch".to_owned(),
+        starts_at: starts_at.clone(),
+        ends_at: Some(ends_at.clone()),
+    };
+    let _update = datetime_api::EventUpdate {
+        title: "Retimed".to_owned(),
+        starts_at: starts_at.clone(),
+        ends_at: None,
+    };
+    let _query = datetime_api::EventListQuery {
+        filter_starts_at_gte: Some(starts_at),
+        filter_starts_at_lt: Some(ends_at),
+        ..Default::default()
     };
 }

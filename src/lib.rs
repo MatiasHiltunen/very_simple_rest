@@ -114,11 +114,11 @@ while keeping the SQL dialect as SQLite. `TursoLocal` can also carry `encryption
 is read from the environment as a hex key for local Turso bootstrap and encrypted local database
 access.
 
-`.eon` services can also define service-level `security` defaults for JSON body limits, CORS,
-trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings.
-Generated modules expose those settings through `module::security()` and
-`module::configure_security(...)`, while secrets such as `JWT_SECRET` still belong in the
-environment.
+`.eon` services can also define service-level `logging` and `security` defaults. Logging controls
+the emitted server's filter env var, default filter, and timestamp precision through
+`module::logging()`, while `security` covers JSON body limits, CORS, trusted-proxy handling, auth
+rate limits, security headers, and built-in auth token settings through `module::security()` and
+`module::configure_security(...)`. Secrets such as `JWT_SECRET` still belong in the environment.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
 the `/auth/register` and `/auth/login` routes in a fresh database.
@@ -174,10 +174,15 @@ pub mod db {
     };
 }
 
+pub mod logging {
+    pub use rest_macro_core::logging::{LogTimestampPrecision, LoggingConfig};
+}
+
 pub use actix_cors;
 pub use actix_files;
 pub use actix_web;
 pub use base64;
+pub use chrono;
 pub use env_logger;
 pub use log;
 pub use serde;
@@ -190,6 +195,7 @@ pub mod prelude {
     pub use crate::core;
     pub use crate::database;
     pub use crate::db;
+    pub use crate::logging;
     pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 
     pub use actix_web::{

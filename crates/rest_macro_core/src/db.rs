@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::AnyPool;
 use sqlx::any::{Any, AnyPoolOptions, AnyRow};
 use sqlx::{FromRow, Row as _};
@@ -137,6 +138,14 @@ impl IntoDbValue for Vec<u8> {
 impl IntoDbValue for &[u8] {
     fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
         Ok(DbValue::Blob(self.to_vec()))
+    }
+}
+
+impl IntoDbValue for DateTime<Utc> {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        Ok(DbValue::Text(
+            self.to_rfc3339_opts(SecondsFormat::Micros, false),
+        ))
     }
 }
 

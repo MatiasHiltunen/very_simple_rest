@@ -7,7 +7,10 @@ use syn::{Ident, Type};
 
 use crate::auth::SessionCookieSameSite;
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
+use crate::logging::LoggingConfig;
 use crate::security::SecurityConfig;
+
+pub const GENERATED_DATETIME_ALIAS: &str = "__VsrDateTimeUtc";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 pub enum DbBackend {
@@ -30,6 +33,28 @@ impl DbBackend {
             Self::Sqlite => format!("{field_name} INTEGER PRIMARY KEY AUTOINCREMENT"),
             Self::Postgres => format!("{field_name} BIGSERIAL PRIMARY KEY"),
             Self::Mysql => format!("{field_name} BIGINT AUTO_INCREMENT PRIMARY KEY"),
+        }
+    }
+
+    pub fn datetime_sql(self) -> &'static str {
+        match self {
+            Self::Sqlite => "TEXT",
+            Self::Postgres => "TEXT",
+            Self::Mysql => "VARCHAR(64)",
+        }
+    }
+
+    pub fn generated_time_expression(self, datetime_type: bool) -> &'static str {
+        if datetime_type {
+            match self {
+                Self::Sqlite => "(STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))",
+                Self::Postgres => {
+                    "(TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') || '+00:00')"
+                }
+                Self::Mysql => "(DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%f+00:00'))",
+            }
+        } else {
+            "CURRENT_TIMESTAMP"
         }
     }
 }
@@ -308,6 +333,7 @@ pub struct ServiceSpec {
     pub resources: Vec<ResourceSpec>,
     pub static_mounts: Vec<StaticMountSpec>,
     pub database: DatabaseConfig,
+    pub logging: LoggingConfig,
     pub security: SecurityConfig,
 }
 
@@ -332,7 +358,11 @@ pub fn default_service_database_url(service: &ServiceSpec) -> String {
     }
 }
 
-pub fn infer_sql_type(ty: &Type) -> String {
+pub fn infer_sql_type(ty: &Type, db: DbBackend) -> String {
+    if is_datetime_type(ty) {
+        return db.datetime_sql().to_owned();
+    }
+
     match type_leaf_name(ty).as_deref() {
         Some("i8" | "i16" | "i32" | "i64" | "isize") => "INTEGER".to_owned(),
         Some("u8" | "u16" | "u32" | "u64" | "usize") => "INTEGER".to_owned(),
@@ -373,8 +403,39 @@ pub fn is_optional_type(ty: &Type) -> bool {
     }
 }
 
+pub fn base_type(ty: &Type) -> Type {
+    match ty {
+        Type::Path(type_path) => {
+            let Some(segment) = type_path.path.segments.last() else {
+                return ty.clone();
+            };
+            if segment.ident != "Option" {
+                return ty.clone();
+            }
+            let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+                return ty.clone();
+            };
+            args.args
+                .iter()
+                .find_map(|arg| match arg {
+                    syn::GenericArgument::Type(inner_ty) => Some(inner_ty.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| ty.clone())
+        }
+        _ => ty.clone(),
+    }
+}
+
 pub fn is_i64_field(ty: &Type) -> bool {
     matches!(type_leaf_name(ty).as_deref(), Some("i64"))
+}
+
+pub fn is_datetime_type(ty: &Type) -> bool {
+    matches!(
+        type_leaf_name(ty).as_deref(),
+        Some("DateTime" | GENERATED_DATETIME_ALIAS)
+    )
 }
 
 pub fn infer_generated_value(field_name: &str, is_id: bool) -> GeneratedValue {
@@ -766,6 +827,24 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+pub fn validate_logging_config(logging: &LoggingConfig, span: Span) -> syn::Result<()> {
+    if logging.filter_env.trim().is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "`logging.filter_env` cannot be empty",
+        ));
+    }
+
+    if logging.default_filter.trim().is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "`logging.default_filter` cannot be empty",
+        ));
     }
 
     Ok(())

@@ -4,7 +4,8 @@ use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
 use super::model::{
-    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_optional_type,
+    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_datetime_type,
+    is_optional_type,
 };
 
 #[derive(Clone, Debug)]
@@ -567,6 +568,26 @@ fn list_query_parameters(
             "description": description,
             "schema": query_parameter_schema(field),
         }));
+
+        if is_datetime_type(&field.ty) {
+            for (suffix, operator, inclusive) in [
+                ("gt", "after", false),
+                ("gte", "after", true),
+                ("lt", "before", false),
+                ("lte", "before", true),
+            ] {
+                let qualifier = if inclusive { " or equal to" } else { "" };
+                parameters.push(json!({
+                    "name": format!("filter_{field_name}_{suffix}"),
+                    "in": "query",
+                    "required": false,
+                    "description": format!(
+                        "Filter `{field_name}` values {operator}{qualifier} this timestamp"
+                    ),
+                    "schema": query_parameter_schema(field),
+                }));
+            }
+        }
     }
 
     parameters
@@ -692,10 +713,12 @@ fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value 
         }),
     };
 
-    if matches!(
-        field.generated,
-        GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
-    ) || field.name().ends_with("_at")
+    if is_datetime_type(&field.ty)
+        || matches!(
+            field.generated,
+            GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
+        )
+        || field.name().ends_with("_at")
     {
         schema["format"] = json!("date-time");
     }
@@ -954,6 +977,38 @@ mod tests {
             document["paths"]["/post/{parent_id}/comment"]["get"]["responses"]["400"]["content"]["application/json"]
                 ["schema"]["$ref"],
             "#/components/schemas/ApiErrorResponse"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_datetime_filters_for_eon_service() {
+        let service = load_service_from_path(&fixture_path("datetime_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Datetime API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/event"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+
+        let starts_at_gte = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_starts_at_gte")
+            .expect("datetime gte filter should exist");
+        let starts_at_lt = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_starts_at_lt")
+            .expect("datetime lt filter should exist");
+
+        assert_eq!(starts_at_gte["schema"]["type"], json!("string"));
+        assert_eq!(starts_at_gte["schema"]["format"], json!("date-time"));
+        assert_eq!(starts_at_lt["schema"]["format"], json!("date-time"));
+        assert_eq!(
+            document["components"]["schemas"]["Event"]["properties"]["starts_at"]["format"],
+            json!("date-time")
         );
     }
 

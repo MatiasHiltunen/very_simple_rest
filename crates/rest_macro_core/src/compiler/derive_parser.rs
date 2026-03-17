@@ -164,7 +164,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         parsed_fields.push(FieldSpec {
             ident,
             ty: field.ty.clone(),
-            sql_type: infer_sql_type(&field.ty),
+            sql_type: infer_sql_type(&field.ty, db),
             is_id,
             generated,
             validation,

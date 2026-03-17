@@ -1,4 +1,9 @@
 module: "security_api"
+logging: {
+    filter_env: "APP_LOG"
+    default_filter: "debug,sqlx=warn"
+    timestamp: Millis
+}
 security: {
     requests: {
         json_max_bytes: 128

@@ -18,6 +18,8 @@ struct EnvTemplateConfig {
     turso_encryption_var: Option<String>,
     cors_origins_var: Option<String>,
     trusted_proxies_var: Option<String>,
+    log_filter_env: String,
+    log_default_filter: String,
 }
 
 fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> {
@@ -27,6 +29,8 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
             turso_encryption_var: None,
             cors_origins_var: None,
             trusted_proxies_var: None,
+            log_filter_env: "RUST_LOG".to_owned(),
+            log_default_filter: "info".to_owned(),
         });
     };
 
@@ -42,6 +46,8 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
         turso_encryption_var,
         cors_origins_var: service.security.cors.origins_env.clone(),
         trusted_proxies_var: service.security.trusted_proxies.proxies_env.clone(),
+        log_filter_env: service.logging.filter_env.clone(),
+        log_default_filter: service.logging.default_filter.clone(),
     })
 }
 
@@ -137,7 +143,12 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
         "# Possible values: error, warn, info, debug, trace"
     )
     .unwrap();
-    writeln!(&mut output, "RUST_LOG=info").unwrap();
+    writeln!(
+        &mut output,
+        "{}={}",
+        config.log_filter_env, config.log_default_filter
+    )
+    .unwrap();
 
     Ok(output)
 }
@@ -185,6 +196,7 @@ mod tests {
         assert!(content.contains("TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
         assert!(content.contains("# CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000"));
         assert!(content.contains("# TRUSTED_PROXIES=127.0.0.1,::1"));
+        assert!(content.contains("APP_LOG=debug,sqlx=warn"));
     }
 
     #[test]

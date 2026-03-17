@@ -91,8 +91,8 @@ vsr --config api.eon gen-env --path .env.local
 
 When `--config` points to a `.eon` service, the generated file mirrors the compiled default
 database URL plus the required/default Turso and security env vars such as
-`TURSO_ENCRYPTION_KEY`, `CORS_ORIGINS`, and `TRUSTED_PROXIES` when those are referenced by the
-service.
+`TURSO_ENCRYPTION_KEY`, `CORS_ORIGINS`, `TRUSTED_PROXIES`, and the configured logging filter env
+var when those are referenced by the service.
 
 ### Server Generation
 
@@ -145,7 +145,9 @@ the generated project and wires the generated server to serve them. When a `.eon
 trusted-proxy handling, auth rate limits, security headers, and built-in auth token settings
 automatically. When a `.eon` service defines `database.engine`, the emitted server also carries
 that runtime engine config into the project, including encrypted local Turso bootstrap by default
-for bare SQLite `.eon` services.
+for bare SQLite `.eon` services. When a `.eon` service defines `logging`, the emitted server also
+uses the compiled log env var, default filter, and timestamp precision instead of hard-coded
+logger defaults.
 
 ### OpenAPI Generation
 

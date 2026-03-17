@@ -9,19 +9,20 @@ use proc_macro2::Span;
 use syn::{LitStr, Type};
 
 use super::model::{
-    DbBackend, FieldSpec, FieldValidation, GeneratedValue, ListConfig, NumericBound,
-    PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec,
-    RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
-    StaticMountSpec, WriteModelStyle, default_resource_module_ident, infer_generated_value,
-    infer_sql_type, sanitize_module_ident, sanitize_struct_ident, validate_field_validations,
-    validate_list_config, validate_relations, validate_row_policies, validate_security_config,
-    validate_sql_identifier,
+    DbBackend, FieldSpec, FieldValidation, GENERATED_DATETIME_ALIAS, GeneratedValue, ListConfig,
+    NumericBound, PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction,
+    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile,
+    StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
+    validate_field_validations, validate_list_config, validate_logging_config, validate_relations,
+    validate_row_policies, validate_security_config, validate_sql_identifier,
 };
 use crate::{
     auth::{AuthSettings, SessionCookieSameSite, SessionCookieSettings},
     database::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
     },
+    logging::{LogTimestampPrecision, LoggingConfig},
     security::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
@@ -41,6 +42,8 @@ struct ServiceDocument {
     db: DbBackend,
     #[serde(default)]
     database: Option<DatabaseDocument>,
+    #[serde(default)]
+    logging: Option<LoggingDocument>,
     #[serde(default, rename = "static")]
     static_config: Option<StaticConfigDocument>,
     #[serde(default)]
@@ -170,6 +173,16 @@ struct SessionCookieDocument {
     secure: Option<bool>,
     #[serde(default)]
     same_site: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct LoggingDocument {
+    #[serde(default)]
+    filter_env: Option<String>,
+    #[serde(default)]
+    default_filter: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -320,6 +333,7 @@ enum ScalarType {
     F32,
     F64,
     Bool,
+    DateTime,
 }
 
 pub fn load_service_from_file(path: LitStr) -> syn::Result<LoadedService> {
@@ -374,7 +388,9 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         &module_ident.to_string(),
         span,
     )?;
+    let logging = parse_logging_document(document.logging)?;
     let security = parse_security_document(document.security, span)?;
+    validate_logging_config(&logging, span)?;
     validate_security_config(&security, span)?;
 
     let resources = build_resources(document.db, document.resources)?;
@@ -391,6 +407,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             resources,
             static_mounts,
             database,
+            logging,
             security,
         },
         include_path,
@@ -444,7 +461,7 @@ fn build_resources(
                 &field.ty,
                 field.nullable || generated != GeneratedValue::None,
             )?;
-            let sql_type = infer_sql_type(&ty);
+            let sql_type = infer_sql_type(&ty, db);
 
             let relation = match field.relation {
                 Some(relation) => Some(parse_relation_document(relation)?),
@@ -595,6 +612,40 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         headers,
         auth,
     })
+}
+
+fn parse_logging_document(document: Option<LoggingDocument>) -> syn::Result<LoggingConfig> {
+    let defaults = LoggingConfig::default();
+    let Some(document) = document else {
+        return Ok(defaults);
+    };
+
+    let timestamp = match document.timestamp.as_deref() {
+        None => defaults.timestamp,
+        Some(value) => parse_log_timestamp_precision(value).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("unsupported `logging.timestamp` value `{value}`"),
+            )
+        })?,
+    };
+
+    Ok(LoggingConfig {
+        filter_env: document.filter_env.unwrap_or(defaults.filter_env),
+        default_filter: document.default_filter.unwrap_or(defaults.default_filter),
+        timestamp,
+    })
+}
+
+fn parse_log_timestamp_precision(value: &str) -> Option<LogTimestampPrecision> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Some(LogTimestampPrecision::None),
+        "seconds" | "second" | "secs" | "sec" => Some(LogTimestampPrecision::Seconds),
+        "millis" | "milliseconds" | "millisecond" | "ms" => Some(LogTimestampPrecision::Millis),
+        "micros" | "microseconds" | "microsecond" | "us" => Some(LogTimestampPrecision::Micros),
+        "nanos" | "nanoseconds" | "nanosecond" | "ns" => Some(LogTimestampPrecision::Nanos),
+        _ => None,
+    }
 }
 
 fn parse_session_cookie_document(
@@ -970,6 +1021,7 @@ impl ScalarType {
             Self::F32 => "f32",
             Self::F64 => "f64",
             Self::Bool => "bool",
+            Self::DateTime => GENERATED_DATETIME_ALIAS,
         }
     }
 }
@@ -1346,6 +1398,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_datetime_scalar_as_typed_datetime_field() {
+        let resources = build_resources(
+            DbBackend::Sqlite,
+            vec![ResourceDocument {
+                name: "Event".to_owned(),
+                table: None,
+                id_field: None,
+                roles: RoleRequirements::default(),
+                policies: RowPoliciesDocument::default(),
+                list: ListConfigDocument::default(),
+                fields: vec![
+                    FieldDocument {
+                        name: "id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        nullable: false,
+                        id: true,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "starts_at".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::DateTime),
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                ],
+            }],
+        )
+        .expect("resources should build");
+
+        let starts_at = resources[0]
+            .find_field("starts_at")
+            .expect("starts_at field should exist");
+        assert_eq!(starts_at.sql_type, "TEXT");
+        assert!(super::super::model::is_datetime_type(&starts_at.ty));
+    }
+
+    #[test]
     fn rejects_invalid_table_identifier_from_eon() {
         let error = build_resources(
             DbBackend::Sqlite,
@@ -1430,6 +1524,7 @@ mod tests {
                     Span::call_site(),
                 )
                 .expect("database config should parse"),
+                logging: LoggingConfig::default(),
                 security: SecurityConfig::default(),
             },
             include_path: path.value(),
@@ -1489,6 +1584,11 @@ mod tests {
     fn parses_security_config_from_eon() {
         let document = parse_document(
             r#"
+            logging: {
+                filter_env: "APP_LOG"
+                default_filter: "debug,sqlx=warn"
+                timestamp: Millis
+            }
             security: {
                 requests: { json_max_bytes: 128 }
                 cors: {
@@ -1537,9 +1637,13 @@ mod tests {
             "#,
         );
 
+        let logging = parse_logging_document(document.logging).expect("logging ok");
         let security =
             parse_security_document(document.security, Span::call_site()).expect("security ok");
 
+        assert_eq!(logging.filter_env, "APP_LOG");
+        assert_eq!(logging.default_filter, "debug,sqlx=warn");
+        assert_eq!(logging.timestamp, LogTimestampPrecision::Millis);
         assert_eq!(security.requests.json_max_bytes, Some(128));
         assert_eq!(
             security.cors.origins,
