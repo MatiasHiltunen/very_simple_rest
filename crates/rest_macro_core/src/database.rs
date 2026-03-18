@@ -1,9 +1,7 @@
 use std::io::{Error, ErrorKind, Result};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "turso-local")]
-use std::path::Path;
 
 #[cfg(feature = "turso-local")]
 use crate::secret::load_secret_from_env_or_file;
@@ -35,6 +33,66 @@ pub fn sqlite_url_for_path(path: &str) -> String {
         "sqlite::memory:".to_owned()
     } else {
         format!("sqlite:{path}?mode=rwc")
+    }
+}
+
+pub fn service_base_dir_from_config_path(config_path: &Path) -> PathBuf {
+    let config_dir = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    if config_dir.extension().and_then(|ext| ext.to_str()) == Some("bundle") {
+        config_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(config_dir)
+    } else {
+        config_dir
+    }
+}
+
+pub fn resolve_relative_database_path(base_dir: &Path, path: &str) -> String {
+    if path.is_empty() || path == ":memory:" {
+        return path.to_owned();
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        candidate.to_string_lossy().into_owned()
+    } else {
+        base_dir.join(candidate).to_string_lossy().into_owned()
+    }
+}
+
+pub fn resolve_database_url(database_url: &str, base_dir: &Path) -> String {
+    let Some(sqlite_path) = database_url.strip_prefix("sqlite:") else {
+        return database_url.to_owned();
+    };
+    if sqlite_path == ":memory:" {
+        return database_url.to_owned();
+    }
+
+    let (path, suffix) = if let Some((path, query)) = sqlite_path.split_once('?') {
+        (path, format!("?{query}"))
+    } else {
+        (sqlite_path, String::new())
+    };
+
+    let resolved = resolve_relative_database_path(base_dir, path);
+    format!("sqlite:{resolved}{suffix}")
+}
+
+pub fn resolve_database_config(config: &DatabaseConfig, base_dir: &Path) -> DatabaseConfig {
+    match &config.engine {
+        DatabaseEngine::Sqlx => config.clone(),
+        DatabaseEngine::TursoLocal(engine) => DatabaseConfig {
+            engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: resolve_relative_database_path(base_dir, &engine.path),
+                encryption_key_env: engine.encryption_key_env.clone(),
+            }),
+        },
     }
 }
 
@@ -118,7 +176,10 @@ pub async fn open_turso_local_database(_engine: &TursoLocalConfig) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseConfig, DatabaseEngine, TursoLocalConfig, sqlite_url_for_path};
+    use super::{
+        DatabaseConfig, DatabaseEngine, TursoLocalConfig, resolve_database_config,
+        resolve_database_url, service_base_dir_from_config_path, sqlite_url_for_path,
+    };
 
     #[test]
     fn sqlite_url_for_path_handles_memory_and_file_paths() {
@@ -142,6 +203,55 @@ mod tests {
                 path: "app.db".to_owned(),
                 encryption_key_env: None,
             })
+        );
+    }
+
+    #[test]
+    fn service_base_dir_uses_bundle_parent_for_bundled_configs() {
+        let root = std::env::temp_dir().join("vsr_database_base_dir");
+        let config = root.join("app.bundle").join("service.eon");
+
+        assert_eq!(service_base_dir_from_config_path(&config), root);
+    }
+
+    #[test]
+    fn resolve_database_url_rebases_relative_sqlite_paths() {
+        let base_dir = std::env::temp_dir().join("vsr-database-url");
+        let expected = format!(
+            "sqlite:{}?mode=rwc",
+            base_dir.join("var/data/app.db").display()
+        );
+        assert_eq!(
+            resolve_database_url("sqlite:var/data/app.db?mode=rwc", &base_dir),
+            expected
+        );
+        assert_eq!(
+            resolve_database_url("sqlite::memory:", &base_dir),
+            "sqlite::memory:"
+        );
+    }
+
+    #[test]
+    fn resolve_database_config_rebases_relative_turso_paths() {
+        let base_dir = std::env::temp_dir().join("vsr-database-config");
+        let resolved = resolve_database_config(
+            &DatabaseConfig {
+                engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                    path: "var/data/app.db".to_owned(),
+                    encryption_key_env: Some("TURSO_KEY".to_owned()),
+                }),
+            },
+            &base_dir,
+        );
+
+        assert_eq!(
+            resolved,
+            DatabaseConfig {
+                engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                    path: base_dir.join("var/data/app.db").display().to_string(),
+                    encryption_key_env: Some("TURSO_KEY".to_owned()),
+                }),
+            }
         );
     }
 

@@ -1,7 +1,9 @@
 use crate::error::Result;
 use colored::Colorize;
 use rest_macro_core::compiler::{self, default_service_database_url};
-use rest_macro_core::database::DatabaseConfig;
+use rest_macro_core::database::{
+    DatabaseConfig, resolve_database_config, service_base_dir_from_config_path,
+};
 use rest_macro_core::db::{DbPool, query_scalar};
 use std::path::Path;
 use std::time::Instant;
@@ -15,7 +17,8 @@ pub fn database_url_from_service_config(path: &Path) -> Result<String> {
 pub fn database_config_from_service_config(path: &Path) -> Result<DatabaseConfig> {
     let service = compiler::load_service_from_path(path)
         .map_err(|error| crate::error::Error::Config(error.to_string()))?;
-    Ok(service.database)
+    let base_dir = service_base_dir_from_config_path(path);
+    Ok(resolve_database_config(&service.database, &base_dir))
 }
 
 pub async fn connect_database(database_url: &str, config_path: Option<&Path>) -> Result<DbPool> {
@@ -92,6 +95,7 @@ mod tests {
     use super::{check_connection, database_url_from_service_config};
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -128,7 +132,14 @@ mod tests {
             );
         }
 
-        let config = fixture_path("blog_api.eon");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic enough")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_check_connection_{stamp}"));
+        std::fs::create_dir_all(&root).expect("temp root should be created");
+        let config = root.join("blog_api.eon");
+        std::fs::copy(fixture_path("blog_api.eon"), &config).expect("fixture should copy");
         let database_url =
             database_url_from_service_config(&config).expect("service config should resolve");
 
@@ -139,5 +150,6 @@ mod tests {
         unsafe {
             std::env::remove_var("TURSO_ENCRYPTION_KEY");
         }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

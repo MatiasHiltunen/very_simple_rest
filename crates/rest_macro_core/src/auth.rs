@@ -571,7 +571,18 @@ struct AuthenticatedUser {
     email_verified_at: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
+    has_email_verified_at_column: bool,
+    has_created_at_column: bool,
+    has_updated_at_column: bool,
     claims: BTreeMap<String, Value>,
+}
+
+impl AuthenticatedUser {
+    fn has_auth_management_schema(&self) -> bool {
+        self.has_email_verified_at_column
+            && self.has_created_at_column
+            && self.has_updated_at_column
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -794,6 +805,12 @@ fn optional_text_column(row: &AnyRow, column: &str) -> Result<Option<String>, sq
     }
 }
 
+fn row_has_column(row: &AnyRow, column: &str) -> bool {
+    row.columns()
+        .iter()
+        .any(|candidate| candidate.name().eq_ignore_ascii_case(column))
+}
+
 fn authenticated_user_from_row(row: &AnyRow) -> Result<AuthenticatedUser, sqlx::Error> {
     Ok(AuthenticatedUser {
         id: row.try_get("id")?,
@@ -803,6 +820,9 @@ fn authenticated_user_from_row(row: &AnyRow) -> Result<AuthenticatedUser, sqlx::
         email_verified_at: optional_text_column(row, "email_verified_at")?,
         created_at: optional_text_column(row, "created_at")?,
         updated_at: optional_text_column(row, "updated_at")?,
+        has_email_verified_at_column: row_has_column(row, "email_verified_at"),
+        has_created_at_column: row_has_column(row, "created_at"),
+        has_updated_at_column: row_has_column(row, "updated_at"),
         claims: collect_user_claims(row)?,
     })
 }
@@ -953,7 +973,7 @@ async fn login_with_settings(
 
     if verify(&input.password, &user.password_hash).unwrap_or(false) {
         if settings.require_email_verification && user.email_verified_at.is_none() {
-            if user.created_at.is_none() && user.updated_at.is_none() {
+            if !user.has_auth_management_schema() {
                 return missing_auth_management_schema_response();
             }
             return errors::forbidden(
@@ -2892,14 +2912,15 @@ impl AuthRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthDbBackend, auth_migration_sql, ensure_admin_exists_with_claim_prompt_mode,
-        load_jwt_secret_from_env,
+        AuthDbBackend, AuthSettings, LoginInput, auth_management_migration_sql, auth_migration_sql,
+        ensure_admin_exists_with_claim_prompt_mode, load_jwt_secret_from_env, login_with_settings,
     };
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     #[cfg(feature = "turso-local")]
     use crate::db::connect_with_config;
     use crate::db::{connect, query, query_scalar};
+    use actix_web::{body::to_bytes, http::StatusCode, web};
     use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3090,6 +3111,73 @@ mod tests {
             std::env::remove_var("ADMIN_EMAIL");
             std::env::remove_var("ADMIN_PASSWORD");
         }
+    }
+
+    #[actix_web::test]
+    async fn login_treats_null_management_fields_as_unverified_when_schema_exists() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", "auth-management-test-secret");
+        }
+
+        let database_url = unique_sqlite_url("management_nulls");
+        let pool = connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        for statement in auth_migration_sql(AuthDbBackend::Sqlite)
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+        {
+            query(statement)
+                .execute(&pool)
+                .await
+                .expect("auth schema should apply");
+        }
+        for statement in auth_management_migration_sql(AuthDbBackend::Sqlite)
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+        {
+            query(statement)
+                .execute(&pool)
+                .await
+                .expect("auth management schema should apply");
+        }
+
+        let password_hash =
+            super::hash("password123", 12).expect("password hash should be created");
+        query("INSERT INTO user (email, password_hash, role) VALUES (?, ?, ?)")
+            .bind("nulls@example.com")
+            .bind(password_hash)
+            .bind("user")
+            .execute(&pool)
+            .await
+            .expect("user row should insert");
+
+        let response = login_with_settings(
+            web::Json(LoginInput {
+                email: "nulls@example.com".to_owned(),
+                password: "password123".to_owned(),
+            }),
+            web::Data::new(pool),
+            AuthSettings {
+                require_email_verification: true,
+                ..AuthSettings::default()
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body())
+            .await
+            .expect("response body should be readable");
+        let body = String::from_utf8(body.to_vec()).expect("response should be valid utf-8");
+        assert!(
+            body.contains("\"email_not_verified\""),
+            "unexpected body: {body}"
+        );
     }
 
     #[cfg(feature = "turso-local")]

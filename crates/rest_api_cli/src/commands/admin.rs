@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use chrono::{SecondsFormat, Utc};
 use colored::Colorize;
 use console::style;
 use dialoguer::{Input, Password};
@@ -177,6 +178,7 @@ async fn create_admin_in_pool(
         query = query.bind(claim.value);
     }
     query.execute(pool).await?;
+    initialize_admin_management_fields(pool, &email).await?;
 
     println!(
         "{} {}",
@@ -197,6 +199,44 @@ async fn create_admin_in_pool(
     }
 
     Ok(())
+}
+
+async fn initialize_admin_management_fields(pool: &DbPool, email: &str) -> Result<()> {
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, false);
+    match query(
+        "UPDATE user \
+         SET created_at = COALESCE(created_at, ?), \
+             email_verified_at = COALESCE(email_verified_at, ?), \
+             updated_at = COALESCE(updated_at, ?) \
+         WHERE email = ?",
+    )
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(&timestamp)
+    .bind(email)
+    .execute(pool)
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if is_missing_auth_management_schema(&error) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn is_missing_auth_management_schema(error: &sqlx::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("no such table: auth_user_token")
+        || message.contains("relation \"auth_user_token\" does not exist")
+        || message.contains("unknown table 'auth_user_token'")
+        || message.contains("no such column: email_verified_at")
+        || message.contains("column \"email_verified_at\" does not exist")
+        || message.contains("unknown column 'email_verified_at'")
+        || message.contains("no such column: created_at")
+        || message.contains("column \"created_at\" does not exist")
+        || message.contains("unknown column 'created_at'")
+        || message.contains("no such column: updated_at")
+        || message.contains("column \"updated_at\" does not exist")
+        || message.contains("unknown column 'updated_at'")
 }
 
 async fn discover_admin_claim_columns(
@@ -556,5 +596,56 @@ mod tests {
             error.to_string().contains("ADMIN_TENANT_ID"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_admin_initializes_auth_management_fields_when_present() {
+        let database_url = unique_sqlite_url("management_fields");
+        let pool = DbPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        query(
+            "CREATE TABLE user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                email_verified_at TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("user table should exist");
+
+        create_admin_with_options(
+            &database_url,
+            None,
+            "admin@example.com".to_owned(),
+            "password123".to_owned(),
+            false,
+        )
+        .await
+        .expect("admin should be created");
+
+        let row =
+            query("SELECT email_verified_at, created_at, updated_at FROM user WHERE email = ?")
+                .bind("admin@example.com")
+                .fetch_one(&pool)
+                .await
+                .expect("admin row should exist");
+        let email_verified_at: Option<String> = row
+            .try_get("email_verified_at")
+            .expect("email_verified_at should decode");
+        let created_at: Option<String> =
+            row.try_get("created_at").expect("created_at should decode");
+        let updated_at: Option<String> =
+            row.try_get("updated_at").expect("updated_at should decode");
+
+        assert!(email_verified_at.is_some());
+        assert!(created_at.is_some());
+        assert!(updated_at.is_some());
     }
 }

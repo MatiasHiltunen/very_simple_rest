@@ -1,7 +1,7 @@
 use crate::commands::admin::{create_admin, create_admin_with_options, prompt_admin_credentials};
 use crate::commands::db::connect_database;
 use crate::commands::env::generate_env_template;
-use crate::commands::migrate::apply_auth_migration;
+use crate::commands::migrate::apply_setup_migrations;
 use crate::error::Result;
 use colored::Colorize;
 use dialoguer::Confirm;
@@ -24,12 +24,12 @@ pub async fn run_setup(
     let pool = connect_database(database_url, config_path).await?;
     println!("{}", "✓ Database connection successful".green());
 
-    // Step 2: Apply the built-in auth migration if needed
+    // Step 2: Apply auth and service migrations if needed
     println!("\n{}", "Step 2: Setting up database schema".cyan().bold());
-    apply_auth_migration(database_url, config_path)
+    apply_setup_migrations(database_url, config_path)
         .await
         .map_err(|error| crate::error::Error::Config(error.to_string()))?;
-    println!("{}", "✓ Auth schema migrated/verified".green());
+    println!("{}", "✓ Schema migrated/verified".green());
 
     // Step 3: Check if admin user already exists
     println!("\n{}", "Step 3: Verifying admin user".cyan().bold());

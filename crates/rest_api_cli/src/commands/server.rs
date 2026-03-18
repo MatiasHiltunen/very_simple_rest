@@ -614,6 +614,7 @@ fn render_main_rs(module_name: &str, eon_file_name: &str, include_builtin_auth: 
 
     format!(
         r##"use std::env;
+use std::path::PathBuf;
 
 use very_simple_rest::prelude::*;
 
@@ -668,14 +669,33 @@ async fn main() -> std::io::Result<()> {{
     let logging = {module_name}::logging();
     logging.init_env_logger();
 
-{auth_startup_check}    let database_config = {module_name}::database();
+{auth_startup_check}    let database_base_dir = env::current_exe()
+        .ok()
+        .and_then(|path| {{
+            let bundle_dir = path.with_extension("bundle");
+            if bundle_dir.is_dir() {{
+                path.parent().map(|dir| dir.to_path_buf())
+            }} else {{
+                None
+            }}
+        }})
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let database_config = very_simple_rest::core::database::resolve_database_config(
+        &{module_name}::database(),
+        &database_base_dir,
+    );
+    let default_database_url = very_simple_rest::core::database::resolve_database_url(
+        {module_name}::default_database_url(),
+        &database_base_dir,
+    );
     let database_url = match env::var("DATABASE_URL") {{
         Ok(url) => url,
         Err(_) => {{
             very_simple_rest::core::database::prepare_database_engine(&database_config)
                 .await
                 .map_err(|error| std::io::Error::other(format!("database engine bootstrap failed: {{error}}")))?;
-            {module_name}::default_database_url().to_owned()
+            default_database_url
         }}
     }};
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
@@ -1143,7 +1163,9 @@ mod tests {
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("rest_api_from_eon!(\"blog_api.eon\")"));
         assert!(main_rs.contains("blog_api::security()"));
-        assert!(main_rs.contains("let database_config = blog_api::database();"));
+        assert!(main_rs.contains("resolve_database_config("));
+        assert!(main_rs.contains("&blog_api::database()"));
+        assert!(main_rs.contains("resolve_database_url("));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
         assert!(main_rs.contains("blog_api::configure"));
         assert!(main_rs.contains("cors_middleware"));
@@ -1187,7 +1209,7 @@ mod tests {
         assert!(cargo_toml.contains("name = \"todo-app\""));
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("todo_app_api::database()"));
+        assert!(main_rs.contains("&todo_app_api::database()"));
     }
 
     #[test]
@@ -1274,7 +1296,7 @@ mod tests {
         .expect("server project should emit");
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("let database_config = turso_local_api::database();"));
+        assert!(main_rs.contains("&turso_local_api::database()"));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
         assert!(main_rs.contains("turso_local_api::default_database_url()"));
 
@@ -1299,7 +1321,7 @@ mod tests {
         .expect("encrypted turso local server project should emit");
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("let database_config = turso_local_encrypted_api::database();"));
+        assert!(main_rs.contains("&turso_local_encrypted_api::database()"));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
 
         let cargo_toml = read_to_string(&root.join("Cargo.toml"));

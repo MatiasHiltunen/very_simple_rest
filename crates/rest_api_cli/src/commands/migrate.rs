@@ -393,6 +393,35 @@ pub async fn apply_migrations(
     Ok(())
 }
 
+pub async fn apply_setup_migrations(database_url: &str, config_path: Option<&Path>) -> Result<()> {
+    let Some(config_path) = config_path else {
+        return apply_auth_migration(database_url, None).await;
+    };
+
+    let migrations_dir = config_path.parent().map(|parent| parent.join("migrations"));
+
+    if let Some(dir) = migrations_dir.as_deref()
+        && dir.is_dir()
+    {
+        let files = migration_files(dir)?;
+        if !files.is_empty() {
+            let has_bundled_auth = files.iter().any(|path| {
+                matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("0000_auth.sql" | "0001_auth_management.sql")
+                )
+            });
+            if !has_bundled_auth {
+                apply_auth_migration(database_url, Some(config_path)).await?;
+            }
+            return apply_migrations(database_url, Some(config_path), dir).await;
+        }
+    }
+
+    apply_auth_migration(database_url, Some(config_path)).await?;
+    apply_rendered_service_migration(database_url, config_path).await
+}
+
 pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>) -> Result<()> {
     let pool = connect_pool(database_url, config_path).await?;
     let backend = detect_runtime_backend(&pool).await?;
@@ -418,8 +447,72 @@ pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>
     Ok(())
 }
 
+async fn apply_rendered_service_migration(database_url: &str, config_path: &Path) -> Result<()> {
+    let service = compiler::load_service_from_path(config_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .with_context(|| {
+            format!(
+                "failed to load service definition from {}",
+                config_path.display()
+            )
+        })?;
+    let sql = compiler::render_service_migration_sql(&service)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("failed to render service migration SQL")?;
+    if normalize_sql(&sql).is_empty() {
+        return Ok(());
+    }
+
+    let pool = connect_pool(database_url, Some(config_path)).await?;
+    let backend = detect_runtime_backend(&pool).await?;
+    let migration_name = format!(
+        "0002_{}.sql",
+        sanitize_migration_stem(
+            config_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("service")
+        )
+    );
+
+    match apply_named_migration(&pool, backend, &migration_name, &sql).await? {
+        ApplyResult::Skipped => println!(
+            "{} {}",
+            "Generated service migration already applied"
+                .yellow()
+                .bold(),
+            migration_name
+        ),
+        ApplyResult::Applied => println!(
+            "{} {}",
+            "Applied generated service migration".green().bold(),
+            migration_name
+        ),
+    }
+
+    Ok(())
+}
+
 fn normalize_sql(sql: &str) -> String {
     sql.replace("\r\n", "\n").trim().to_owned()
+}
+
+fn sanitize_migration_stem(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "service".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn normalize_sql_type(raw: &str) -> String {
@@ -971,14 +1064,15 @@ enum ApplyResult {
 #[cfg(test)]
 mod tests {
     use crate::commands::db::{connect_database, database_url_from_service_config};
+    use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
     use rest_macro_core::db::query_scalar;
     use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
 
     use super::{
         BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, apply_auth_migration,
-        apply_migrations, check_derive_migration, generate_derive_migration,
-        generate_diff_migration, inspect_live_schema, migration_files,
+        apply_migrations, apply_setup_migrations, check_derive_migration,
+        generate_derive_migration, generate_diff_migration, inspect_live_schema, migration_files,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1097,6 +1191,144 @@ mod tests {
             names,
             vec![BUILTIN_AUTH_MIGRATION, BUILTIN_AUTH_MANAGEMENT_MIGRATION]
         );
+    }
+
+    #[tokio::test]
+    async fn apply_setup_migrations_renders_service_schema_when_no_migrations_dir_exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_setup_rendered_service_{stamp}"));
+        let schema = root.join("setup_rendered.eon");
+        let database_path = root.join("var/data/setup_rendered.db");
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+
+        if let Some(parent) = database_path.parent() {
+            std::fs::create_dir_all(parent).expect("database dir should exist");
+        }
+        std::fs::write(
+            &schema,
+            format!(
+                r#"module: "setup_rendered"
+database: {{
+    engine: {{
+        kind: TursoLocal
+        path: "{}"
+    }}
+}}
+resources: [
+    {{
+        name: "Note"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "title", type: String }}
+        ]
+    }}
+]
+"#,
+                database_path.display(),
+            ),
+        )
+        .expect("schema should be written");
+
+        apply_setup_migrations(&database_url, Some(&schema))
+            .await
+            .expect("setup migrations should apply");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect");
+        let user_table_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("user table lookup should succeed");
+        let note_table_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'note')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("resource table lookup should succeed");
+        assert_ne!(user_table_exists, 0);
+        assert_ne!(note_table_exists, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_setup_migrations_uses_bundled_migrations_when_present() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_setup_bundled_service_{stamp}"));
+        let schema = root.join("bundle_service.eon");
+        let migrations = root.join("migrations");
+        let database_path = root.join("var/data/bundle_service.db");
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+
+        std::fs::create_dir_all(&migrations).expect("migrations dir should exist");
+        if let Some(parent) = database_path.parent() {
+            std::fs::create_dir_all(parent).expect("database dir should exist");
+        }
+        std::fs::write(
+            &schema,
+            format!(
+                r#"module: "bundle_service"
+database: {{
+    engine: {{
+        kind: TursoLocal
+        path: "{}"
+    }}
+}}
+resources: [
+    {{
+        name: "Opportunity"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "title", type: String }}
+        ]
+    }}
+]
+"#,
+                database_path.display(),
+            ),
+        )
+        .expect("schema should be written");
+        std::fs::write(
+            migrations.join("0000_auth.sql"),
+            auth_migration_sql(AuthDbBackend::Sqlite),
+        )
+        .expect("auth migration should be written");
+        std::fs::write(
+            migrations.join("0001_auth_management.sql"),
+            auth_management_migration_sql(AuthDbBackend::Sqlite),
+        )
+        .expect("auth management migration should be written");
+        super::generate_migration(&schema, &migrations.join("0002_service.sql"), false)
+            .expect("service migration should generate");
+
+        apply_setup_migrations(&database_url, Some(&schema))
+            .await
+            .expect("setup migrations should apply");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect");
+        let user_table_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("user table lookup should succeed");
+        let opportunity_table_exists = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'opportunity')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("resource table lookup should succeed");
+        assert_ne!(user_table_exists, 0);
+        assert_ne!(opportunity_table_exists, 0);
     }
 
     #[test]
