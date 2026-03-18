@@ -11,6 +11,66 @@ use crate::logging::LoggingConfig;
 use crate::security::SecurityConfig;
 
 pub const GENERATED_DATETIME_ALIAS: &str = "__VsrDateTimeUtc";
+pub const GENERATED_DATE_ALIAS: &str = "__VsrNaiveDate";
+pub const GENERATED_TIME_ALIAS: &str = "__VsrNaiveTime";
+pub const GENERATED_UUID_ALIAS: &str = "__VsrUuid";
+pub const GENERATED_DECIMAL_ALIAS: &str = "__VsrDecimal";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructuredScalarKind {
+    DateTime,
+    Date,
+    Time,
+    Uuid,
+    Decimal,
+}
+
+impl StructuredScalarKind {
+    pub fn sql_type(self, db: DbBackend) -> &'static str {
+        match (self, db) {
+            (_, DbBackend::Sqlite | DbBackend::Postgres) => "TEXT",
+            (Self::DateTime, DbBackend::Mysql) => "VARCHAR(64)",
+            (Self::Date, DbBackend::Mysql) => "VARCHAR(10)",
+            (Self::Time, DbBackend::Mysql) => "VARCHAR(15)",
+            (Self::Uuid, DbBackend::Mysql) => "CHAR(36)",
+            (Self::Decimal, DbBackend::Mysql) => "VARCHAR(80)",
+        }
+    }
+
+    pub fn openapi_format(self) -> &'static str {
+        match self {
+            Self::DateTime => "date-time",
+            Self::Date => "date",
+            Self::Time => "time",
+            Self::Uuid => "uuid",
+            Self::Decimal => "decimal",
+        }
+    }
+
+    pub fn supports_range_filters(self) -> bool {
+        matches!(self, Self::DateTime | Self::Date | Self::Time)
+    }
+
+    pub fn supports_sort(self) -> bool {
+        !matches!(self, Self::Decimal)
+    }
+
+    pub fn generated_temporal_kind(self) -> Option<GeneratedTemporalKind> {
+        match self {
+            Self::DateTime => Some(GeneratedTemporalKind::DateTime),
+            Self::Date => Some(GeneratedTemporalKind::Date),
+            Self::Time => Some(GeneratedTemporalKind::Time),
+            Self::Uuid | Self::Decimal => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneratedTemporalKind {
+    DateTime,
+    Date,
+    Time,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 pub enum DbBackend {
@@ -36,25 +96,31 @@ impl DbBackend {
         }
     }
 
-    pub fn datetime_sql(self) -> &'static str {
-        match self {
-            Self::Sqlite => "TEXT",
-            Self::Postgres => "TEXT",
-            Self::Mysql => "VARCHAR(64)",
-        }
-    }
-
-    pub fn generated_time_expression(self, datetime_type: bool) -> &'static str {
-        if datetime_type {
-            match self {
+    pub fn generated_temporal_expression(
+        self,
+        kind: Option<GeneratedTemporalKind>,
+    ) -> &'static str {
+        match kind {
+            Some(GeneratedTemporalKind::DateTime) => match self {
                 Self::Sqlite => "(STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))",
                 Self::Postgres => {
                     "(TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') || '+00:00')"
                 }
                 Self::Mysql => "(DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%f+00:00'))",
-            }
-        } else {
-            "CURRENT_TIMESTAMP"
+            },
+            Some(GeneratedTemporalKind::Date) => match self {
+                Self::Sqlite => "(DATE('now'))",
+                Self::Postgres => "(TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD'))",
+                Self::Mysql => "(DATE_FORMAT(UTC_DATE(), '%Y-%m-%d'))",
+            },
+            Some(GeneratedTemporalKind::Time) => match self {
+                Self::Sqlite => "(STRFTIME('%H:%M:%f000', 'now'))",
+                Self::Postgres => {
+                    "(TO_CHAR(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'HH24:MI:SS.US'))"
+                }
+                Self::Mysql => "(DATE_FORMAT(UTC_TIMESTAMP(6), '%H:%i:%s.%f'))",
+            },
+            None => "CURRENT_TIMESTAMP",
         }
     }
 }
@@ -359,8 +425,8 @@ pub fn default_service_database_url(service: &ServiceSpec) -> String {
 }
 
 pub fn infer_sql_type(ty: &Type, db: DbBackend) -> String {
-    if is_datetime_type(ty) {
-        return db.datetime_sql().to_owned();
+    if let Some(kind) = structured_scalar_kind(ty) {
+        return kind.sql_type(db).to_owned();
     }
 
     match type_leaf_name(ty).as_deref() {
@@ -431,11 +497,55 @@ pub fn is_i64_field(ty: &Type) -> bool {
     matches!(type_leaf_name(ty).as_deref(), Some("i64"))
 }
 
+pub fn structured_scalar_kind(ty: &Type) -> Option<StructuredScalarKind> {
+    match type_leaf_name(ty).as_deref() {
+        Some("DateTime" | GENERATED_DATETIME_ALIAS) => Some(StructuredScalarKind::DateTime),
+        Some("NaiveDate" | GENERATED_DATE_ALIAS) => Some(StructuredScalarKind::Date),
+        Some("NaiveTime" | GENERATED_TIME_ALIAS) => Some(StructuredScalarKind::Time),
+        Some("Uuid" | GENERATED_UUID_ALIAS) => Some(StructuredScalarKind::Uuid),
+        Some("Decimal" | GENERATED_DECIMAL_ALIAS) => Some(StructuredScalarKind::Decimal),
+        _ => None,
+    }
+}
+
+pub fn temporal_scalar_kind(ty: &Type) -> Option<GeneratedTemporalKind> {
+    structured_scalar_kind(ty).and_then(|kind| kind.generated_temporal_kind())
+}
+
+pub fn supports_range_filters(ty: &Type) -> bool {
+    structured_scalar_kind(ty)
+        .map(|kind| kind.supports_range_filters())
+        .unwrap_or(false)
+}
+
+pub fn supports_sort(ty: &Type) -> bool {
+    structured_scalar_kind(ty)
+        .map(|kind| kind.supports_sort())
+        .unwrap_or(true)
+}
+
+pub fn is_structured_scalar_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty).is_some()
+}
+
 pub fn is_datetime_type(ty: &Type) -> bool {
-    matches!(
-        type_leaf_name(ty).as_deref(),
-        Some("DateTime" | GENERATED_DATETIME_ALIAS)
-    )
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::DateTime)
+}
+
+pub fn is_date_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::Date)
+}
+
+pub fn is_time_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::Time)
+}
+
+pub fn is_uuid_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::Uuid)
+}
+
+pub fn is_decimal_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::Decimal)
 }
 
 pub fn infer_generated_value(field_name: &str, is_id: bool) -> GeneratedValue {
@@ -524,6 +634,16 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
         let validation = &field.validation;
         if validation.is_empty() {
             continue;
+        }
+
+        if is_structured_scalar_type(&field.ty) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "field `{}` does not support validation constraints",
+                    field.name()
+                ),
+            ));
         }
 
         if let (Some(min), Some(max)) = (validation.min_length, validation.max_length) {

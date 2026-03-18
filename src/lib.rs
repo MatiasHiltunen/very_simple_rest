@@ -185,9 +185,11 @@ pub use base64;
 pub use chrono;
 pub use env_logger;
 pub use log;
+pub use rust_decimal;
 pub use serde;
 pub use serde_json;
 pub use sqlx;
+pub use uuid;
 
 pub mod prelude {
     pub use crate::auth;

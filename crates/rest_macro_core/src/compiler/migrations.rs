@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use proc_macro2::Span;
 
 use super::model::{
-    GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_datetime_type, is_optional_type,
+    GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_optional_type, temporal_scalar_kind,
 };
 
 pub fn render_service_migration_sql(service: &ServiceSpec) -> syn::Result<String> {
@@ -247,7 +247,7 @@ fn render_field_definition(resource: &ResourceSpec, field: &super::model::FieldS
                 field.sql_type,
                 resource
                     .db
-                    .generated_time_expression(is_datetime_type(&field.ty))
+                    .generated_temporal_expression(temporal_scalar_kind(&field.ty))
             )
         }
         GeneratedValue::None | GeneratedValue::AutoIncrement => {

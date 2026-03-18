@@ -5,6 +5,7 @@ rest_api_from_eon!("tests/fixtures/owned_api.eon");
 rest_api_from_eon!("tests/fixtures/tenant_api.eon");
 rest_api_from_eon!("tests/fixtures/paged_api.eon");
 rest_api_from_eon!("tests/fixtures/datetime_api.eon");
+rest_api_from_eon!("tests/fixtures/scalar_types_api.eon");
 rest_api_from_eon!("tests/fixtures/security_api.eon");
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_api.eon");
@@ -272,6 +273,49 @@ fn eon_macro_generates_datetime_types_and_range_filters() {
     let _query = datetime_api::EventListQuery {
         filter_starts_at_gte: Some(starts_at),
         filter_starts_at_lt: Some(ends_at),
+        ..Default::default()
+    };
+}
+
+#[test]
+fn eon_macro_generates_portable_scalar_types() {
+    let run_on = "2026-03-17"
+        .parse::<very_simple_rest::chrono::NaiveDate>()
+        .expect("date should parse");
+    let run_at = "08:00:00"
+        .parse::<very_simple_rest::chrono::NaiveTime>()
+        .expect("time should parse");
+    let external_id = "33333333-3333-4333-8333-333333333333"
+        .parse::<very_simple_rest::uuid::Uuid>()
+        .expect("uuid should parse");
+    let amount = "12.34"
+        .parse::<very_simple_rest::rust_decimal::Decimal>()
+        .expect("decimal should parse");
+
+    let _schedule = scalar_types_api::Schedule {
+        id: Some(1),
+        run_on,
+        run_at,
+        external_id,
+        amount: amount.clone(),
+    };
+    let _create = scalar_types_api::ScheduleCreate {
+        run_on,
+        run_at,
+        external_id,
+        amount: amount.clone(),
+    };
+    let _update = scalar_types_api::ScheduleUpdate {
+        run_on,
+        run_at,
+        external_id,
+        amount: amount.clone(),
+    };
+    let _query = scalar_types_api::ScheduleListQuery {
+        filter_run_on_gte: Some(run_on),
+        filter_run_at_lt: Some(run_at),
+        filter_external_id: Some(external_id),
+        filter_amount: Some(amount),
         ..Default::default()
     };
 }

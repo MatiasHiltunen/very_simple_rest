@@ -9,8 +9,9 @@ use proc_macro2::Span;
 use syn::{LitStr, Type};
 
 use super::model::{
-    DbBackend, FieldSpec, FieldValidation, GENERATED_DATETIME_ALIAS, GeneratedValue, ListConfig,
-    NumericBound, PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction,
+    DbBackend, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
+    GENERATED_DECIMAL_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
+    ListConfig, NumericBound, PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction,
     ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile,
     StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
@@ -334,6 +335,10 @@ enum ScalarType {
     F64,
     Bool,
     DateTime,
+    Date,
+    Time,
+    Uuid,
+    Decimal,
 }
 
 pub fn load_service_from_file(path: LitStr) -> syn::Result<LoadedService> {
@@ -1022,6 +1027,10 @@ impl ScalarType {
             Self::F64 => "f64",
             Self::Bool => "bool",
             Self::DateTime => GENERATED_DATETIME_ALIAS,
+            Self::Date => GENERATED_DATE_ALIAS,
+            Self::Time => GENERATED_TIME_ALIAS,
+            Self::Uuid => GENERATED_UUID_ALIAS,
+            Self::Decimal => GENERATED_DECIMAL_ALIAS,
         }
     }
 }
@@ -1437,6 +1446,91 @@ mod tests {
             .expect("starts_at field should exist");
         assert_eq!(starts_at.sql_type, "TEXT");
         assert!(super::super::model::is_datetime_type(&starts_at.ty));
+    }
+
+    #[test]
+    fn parses_portable_scalar_types_as_typed_fields() {
+        let resources = build_resources(
+            DbBackend::Sqlite,
+            vec![ResourceDocument {
+                name: "Schedule".to_owned(),
+                table: None,
+                id_field: None,
+                roles: RoleRequirements::default(),
+                policies: RowPoliciesDocument::default(),
+                list: ListConfigDocument::default(),
+                fields: vec![
+                    FieldDocument {
+                        name: "id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        nullable: false,
+                        id: true,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "run_on".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Date),
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "run_at".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Time),
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "external_id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Uuid),
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "amount".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Decimal),
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                ],
+            }],
+        )
+        .expect("resources should build");
+
+        let run_on = resources[0]
+            .find_field("run_on")
+            .expect("run_on field should exist");
+        let run_at = resources[0]
+            .find_field("run_at")
+            .expect("run_at field should exist");
+        let external_id = resources[0]
+            .find_field("external_id")
+            .expect("external_id field should exist");
+        let amount = resources[0]
+            .find_field("amount")
+            .expect("amount field should exist");
+
+        assert_eq!(run_on.sql_type, "TEXT");
+        assert_eq!(run_at.sql_type, "TEXT");
+        assert_eq!(external_id.sql_type, "TEXT");
+        assert_eq!(amount.sql_type, "TEXT");
+        assert!(super::super::model::is_date_type(&run_on.ty));
+        assert!(super::super::model::is_time_type(&run_at.ty));
+        assert!(super::super::model::is_uuid_type(&external_id.ty));
+        assert!(super::super::model::is_decimal_type(&amount.ty));
     }
 
     #[test]

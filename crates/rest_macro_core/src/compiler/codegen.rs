@@ -49,9 +49,21 @@ pub fn expand_service_module(
 ) -> syn::Result<TokenStream> {
     let module_ident = &service.module_ident;
     let datetime_alias_ident = format_ident!("{}", super::model::GENERATED_DATETIME_ALIAS);
-    let datetime_alias = quote! {
+    let date_alias_ident = format_ident!("{}", super::model::GENERATED_DATE_ALIAS);
+    let time_alias_ident = format_ident!("{}", super::model::GENERATED_TIME_ALIAS);
+    let uuid_alias_ident = format_ident!("{}", super::model::GENERATED_UUID_ALIAS);
+    let decimal_alias_ident = format_ident!("{}", super::model::GENERATED_DECIMAL_ALIAS);
+    let type_aliases = quote! {
         #[allow(non_camel_case_types)]
         type #datetime_alias_ident = #runtime_crate::chrono::DateTime<#runtime_crate::chrono::Utc>;
+        #[allow(non_camel_case_types)]
+        type #date_alias_ident = #runtime_crate::chrono::NaiveDate;
+        #[allow(non_camel_case_types)]
+        type #time_alias_ident = #runtime_crate::chrono::NaiveTime;
+        #[allow(non_camel_case_types)]
+        type #uuid_alias_ident = #runtime_crate::uuid::Uuid;
+        #[allow(non_camel_case_types)]
+        type #decimal_alias_ident = #runtime_crate::rust_decimal::Decimal;
     };
     let include_path_lit = Literal::string(include_path);
     let resources = service
@@ -139,7 +151,7 @@ pub fn expand_service_module(
         pub mod #module_ident {
             const _: &str = include_str!(#include_path_lit);
 
-            #datetime_alias
+            #type_aliases
 
             use #runtime_crate::actix_web::{web, HttpResponse, Responder};
             use #runtime_crate::db::DbPool;
@@ -519,6 +531,49 @@ fn resource_struct_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Toke
     }
 }
 
+fn structured_scalar_type_tokens(
+    kind: super::model::StructuredScalarKind,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match kind {
+        super::model::StructuredScalarKind::DateTime => {
+            quote!(#runtime_crate::chrono::DateTime<#runtime_crate::chrono::Utc>)
+        }
+        super::model::StructuredScalarKind::Date => quote!(#runtime_crate::chrono::NaiveDate),
+        super::model::StructuredScalarKind::Time => quote!(#runtime_crate::chrono::NaiveTime),
+        super::model::StructuredScalarKind::Uuid => quote!(#runtime_crate::uuid::Uuid),
+        super::model::StructuredScalarKind::Decimal => {
+            quote!(#runtime_crate::rust_decimal::Decimal)
+        }
+    }
+}
+
+fn structured_scalar_to_text_tokens(
+    ty: &syn::Type,
+    value: TokenStream,
+    runtime_crate: &Path,
+) -> Option<TokenStream> {
+    match super::model::structured_scalar_kind(ty)? {
+        super::model::StructuredScalarKind::DateTime => Some(quote! {
+            #value.to_rfc3339_opts(#runtime_crate::chrono::SecondsFormat::Micros, false)
+        }),
+        super::model::StructuredScalarKind::Date => {
+            Some(quote!(#value.format("%Y-%m-%d").to_string()))
+        }
+        super::model::StructuredScalarKind::Time => {
+            Some(quote!(#value.format("%H:%M:%S.%6f").to_string()))
+        }
+        super::model::StructuredScalarKind::Uuid => {
+            Some(quote!(#value.as_hyphenated().to_string()))
+        }
+        super::model::StructuredScalarKind::Decimal => Some(quote!(#value.normalize().to_string())),
+    }
+}
+
+fn field_supports_sort(field: &super::model::FieldSpec) -> bool {
+    super::model::supports_sort(&field.ty)
+}
+
 fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {
     let struct_ident = &resource.struct_ident;
     let field_extracts = resource.fields.iter().map(|field| {
@@ -526,7 +581,7 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
         let ty = &field.ty;
         let field_name_lit = Literal::string(&field.name());
 
-        if super::model::is_datetime_type(&field.ty) {
+        if super::model::is_structured_scalar_type(&field.ty) {
             let base_ty = super::model::base_type(&field.ty);
             if super::model::is_optional_type(&field.ty) {
                 quote! {
@@ -579,21 +634,11 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     let cursor_value_ident = list_cursor_value_ident(resource);
     let cursor_payload_ident = list_cursor_payload_ident(resource);
     let struct_ident = &resource.struct_ident;
-    let datetime_ty = quote!(#runtime_crate::chrono::DateTime<#runtime_crate::chrono::Utc>);
-    let has_datetime_filters = resource
+    let sortable_fields = resource
         .fields
         .iter()
-        .any(|field| super::model::is_datetime_type(&field.ty));
-    let datetime_bind_variant = if has_datetime_filters {
-        quote!(DateTime(#datetime_ty),)
-    } else {
-        quote!()
-    };
-    let datetime_cursor_variant = if has_datetime_filters {
-        quote!(DateTime(#datetime_ty),)
-    } else {
-        quote!()
-    };
+        .filter(|field| field_supports_sort(field))
+        .collect::<Vec<_>>();
     let filter_fields = resource.fields.iter().flat_map(|field| {
         let filter_ident = format_ident!("filter_{}", field.ident);
         let base_ty = list_filter_field_ty(field, runtime_crate);
@@ -601,18 +646,19 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             pub #filter_ident: Option<#base_ty>,
         }];
 
-        if super::model::is_datetime_type(&field.ty) {
+        if super::model::supports_range_filters(&field.ty) {
             for suffix in ["gt", "gte", "lt", "lte"] {
                 let ident = format_ident!("filter_{}_{}", field.ident, suffix);
+                let range_ty = base_ty.clone();
                 tokens.push(quote! {
-                    pub #ident: Option<#datetime_ty>,
+                    pub #ident: Option<#range_ty>,
                 });
             }
         }
 
         tokens
     });
-    let sort_variants = resource.fields.iter().map(|field| {
+    let sort_variants = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name = Literal::string(&field.name());
         quote! {
@@ -620,21 +666,21 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             #variant_ident,
         }
     });
-    let sort_variant_sql = resource.fields.iter().map(|field| {
+    let sort_variant_sql = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name = Literal::string(&field.name());
         quote! {
             Self::#variant_ident => #field_name,
         }
     });
-    let sort_variant_name = resource.fields.iter().map(|field| {
+    let sort_variant_name = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name = Literal::string(&field.name());
         quote! {
             Self::#variant_ident => #field_name,
         }
     });
-    let sort_variant_parse = resource.fields.iter().map(|field| {
+    let sort_variant_parse = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name = Literal::string(&field.name());
         quote! {
@@ -716,7 +762,6 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             Integer(i64),
             Real(f64),
             Boolean(bool),
-            #datetime_bind_variant
             Text(String),
         }
 
@@ -725,7 +770,6 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             Integer(i64),
             Real(f64),
             Boolean(bool),
-            #datetime_cursor_variant
             Text(String),
         }
 
@@ -877,7 +921,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         }
     };
     let read_policy_list_conditions = read_list_policy_condition_tokens(resource, runtime_crate);
-    let query_filter_conditions = list_query_condition_tokens(resource);
+    let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
     let list_bind_matches = list_bind_match_tokens(resource, "q");
     let count_bind_matches = list_bind_match_tokens(resource, "count_query");
     let sort_field_ty = {
@@ -917,7 +961,12 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     };
     let default_sort_variant =
         super::model::sanitize_struct_ident(&id_field_spec.name(), id_field_spec.ident.span());
-    let cursor_support_arms = resource.fields.iter().map(|field| {
+    let sortable_fields = resource
+        .fields
+        .iter()
+        .filter(|field| field_supports_sort(field))
+        .collect::<Vec<_>>();
+    let cursor_support_arms = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let supported =
             field.name() == resource.id_field || !super::model::is_optional_type(&field.ty);
@@ -925,7 +974,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             #sort_field_ty::#variant_ident => #supported,
         }
     });
-    let cursor_value_for_item_arms = resource.fields.iter().map(|field| {
+    let cursor_value_for_item_arms = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let ident = &field.ident;
         let field_name_lit = Literal::string(&field.name());
@@ -952,13 +1001,11 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 )),
             }
         } else {
-            if super::model::is_datetime_type(&field.ty) {
+            if let Some(text_value) =
+                structured_scalar_to_text_tokens(&field.ty, quote!((&item.#ident)), runtime_crate)
+            {
                 quote! {
-                    #sort_field_ty::#variant_ident => Ok(
-                        #cursor_value_ty::DateTime(
-                            item.#ident.with_timezone(&#runtime_crate::chrono::Utc)
-                        )
-                    ),
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Text(#text_value)),
                 }
             } else {
                 match field.sql_type.as_str() {
@@ -978,7 +1025,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             }
         }
     });
-    let cursor_condition_arms = resource.fields.iter().map(|field| {
+    let cursor_condition_arms = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name_lit = Literal::string(&field.name());
         if field.name() == resource.id_field {
@@ -1014,15 +1061,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 }
             }
         } else {
-            let bind_push = if super::model::is_datetime_type(&field.ty) {
-                quote! {
-                    #cursor_value_ty::DateTime(value) => {
-                        select_only_binds.push(#list_bind_ty::DateTime(value.clone()));
-                        select_only_binds.push(#list_bind_ty::DateTime(value.clone()));
-                    }
-                }
-            } else {
-                match field.sql_type.as_str() {
+            let bind_push = match field.sql_type.as_str() {
                 "INTEGER" => quote! {
                     #cursor_value_ty::Integer(value) => {
                         select_only_binds.push(#list_bind_ty::Integer(*value));
@@ -1047,7 +1086,6 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                         select_only_binds.push(#list_bind_ty::Text(value.clone()));
                     }
                 },
-                }
             };
             quote! {
                 #sort_field_ty::#variant_ident => {
@@ -1894,8 +1932,8 @@ fn list_cursor_payload_ident(resource: &ResourceSpec) -> syn::Ident {
 }
 
 fn list_filter_field_ty(field: &super::model::FieldSpec, runtime_crate: &Path) -> TokenStream {
-    if super::model::is_datetime_type(&field.ty) {
-        return quote!(#runtime_crate::chrono::DateTime<#runtime_crate::chrono::Utc>);
+    if let Some(kind) = super::model::structured_scalar_kind(&field.ty) {
+        return structured_scalar_type_tokens(kind, runtime_crate);
     }
 
     match field.sql_type.as_str() {
@@ -1930,7 +1968,7 @@ fn read_list_policy_condition_tokens(
         .collect()
 }
 
-fn list_query_condition_tokens(resource: &ResourceSpec) -> Vec<TokenStream> {
+fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
     let bind_ident = list_bind_ident(resource);
     resource
         .fields
@@ -1938,51 +1976,67 @@ fn list_query_condition_tokens(resource: &ResourceSpec) -> Vec<TokenStream> {
         .map(|field| {
             let field_name = Literal::string(&field.name());
             let filter_ident = format_ident!("filter_{}", field.ident);
-            if super::model::is_datetime_type(&field.ty) {
-                let gt_ident = format_ident!("filter_{}_gt", field.ident);
-                let gte_ident = format_ident!("filter_{}_gte", field.ident);
-                let lt_ident = format_ident!("filter_{}_lt", field.ident);
-                let lte_ident = format_ident!("filter_{}_lte", field.ident);
-                quote! {
-                    if let Some(value) = &query.#filter_ident {
-                        conditions.push(format!(
-                            "{} = {}",
-                            #field_name,
-                            Self::list_placeholder(filter_binds.len() + 1)
-                        ));
-                        filter_binds.push(#bind_ident::DateTime(value.clone()));
+            if super::model::is_structured_scalar_type(&field.ty) {
+                let exact_value =
+                    structured_scalar_to_text_tokens(&field.ty, quote!(value), runtime_crate);
+                let exact_value = exact_value.expect("structured scalar should render as text");
+                if super::model::supports_range_filters(&field.ty) {
+                    let gt_ident = format_ident!("filter_{}_gt", field.ident);
+                    let gte_ident = format_ident!("filter_{}_gte", field.ident);
+                    let lt_ident = format_ident!("filter_{}_lt", field.ident);
+                    let lte_ident = format_ident!("filter_{}_lte", field.ident);
+                    quote! {
+                        if let Some(value) = &query.#filter_ident {
+                            conditions.push(format!(
+                                "{} = {}",
+                                #field_name,
+                                Self::list_placeholder(filter_binds.len() + 1)
+                            ));
+                            filter_binds.push(#bind_ident::Text(#exact_value));
+                        }
+                        if let Some(value) = &query.#gt_ident {
+                            conditions.push(format!(
+                                "{} > {}",
+                                #field_name,
+                                Self::list_placeholder(filter_binds.len() + 1)
+                            ));
+                            filter_binds.push(#bind_ident::Text(#exact_value));
+                        }
+                        if let Some(value) = &query.#gte_ident {
+                            conditions.push(format!(
+                                "{} >= {}",
+                                #field_name,
+                                Self::list_placeholder(filter_binds.len() + 1)
+                            ));
+                            filter_binds.push(#bind_ident::Text(#exact_value));
+                        }
+                        if let Some(value) = &query.#lt_ident {
+                            conditions.push(format!(
+                                "{} < {}",
+                                #field_name,
+                                Self::list_placeholder(filter_binds.len() + 1)
+                            ));
+                            filter_binds.push(#bind_ident::Text(#exact_value));
+                        }
+                        if let Some(value) = &query.#lte_ident {
+                            conditions.push(format!(
+                                "{} <= {}",
+                                #field_name,
+                                Self::list_placeholder(filter_binds.len() + 1)
+                            ));
+                            filter_binds.push(#bind_ident::Text(#exact_value));
+                        }
                     }
-                    if let Some(value) = &query.#gt_ident {
-                        conditions.push(format!(
-                            "{} > {}",
-                            #field_name,
-                            Self::list_placeholder(filter_binds.len() + 1)
-                        ));
-                        filter_binds.push(#bind_ident::DateTime(value.clone()));
-                    }
-                    if let Some(value) = &query.#gte_ident {
-                        conditions.push(format!(
-                            "{} >= {}",
-                            #field_name,
-                            Self::list_placeholder(filter_binds.len() + 1)
-                        ));
-                        filter_binds.push(#bind_ident::DateTime(value.clone()));
-                    }
-                    if let Some(value) = &query.#lt_ident {
-                        conditions.push(format!(
-                            "{} < {}",
-                            #field_name,
-                            Self::list_placeholder(filter_binds.len() + 1)
-                        ));
-                        filter_binds.push(#bind_ident::DateTime(value.clone()));
-                    }
-                    if let Some(value) = &query.#lte_ident {
-                        conditions.push(format!(
-                            "{} <= {}",
-                            #field_name,
-                            Self::list_placeholder(filter_binds.len() + 1)
-                        ));
-                        filter_binds.push(#bind_ident::DateTime(value.clone()));
+                } else {
+                    quote! {
+                        if let Some(value) = &query.#filter_ident {
+                            conditions.push(format!(
+                                "{} = {}",
+                                #field_name,
+                                Self::list_placeholder(filter_binds.len() + 1)
+                            ));
+                            filter_binds.push(#bind_ident::Text(#exact_value));
+                        }
                     }
                 }
             } else {
@@ -2036,7 +2090,7 @@ fn list_query_condition_tokens(resource: &ResourceSpec) -> Vec<TokenStream> {
 fn list_bind_match_tokens(resource: &ResourceSpec, query_ident: &str) -> Vec<TokenStream> {
     let bind_ident = list_bind_ident(resource);
     let query_ident = syn::Ident::new(query_ident, proc_macro2::Span::call_site());
-    let mut matches = vec![
+    vec![
         quote! {
             #bind_ident::Integer(value) => #query_ident.bind(value),
         },
@@ -2049,22 +2103,7 @@ fn list_bind_match_tokens(resource: &ResourceSpec, query_ident: &str) -> Vec<Tok
         quote! {
             #bind_ident::Text(value) => #query_ident.bind(value),
         },
-    ];
-
-    if resource
-        .fields
-        .iter()
-        .any(|field| super::model::is_datetime_type(&field.ty))
-    {
-        matches.insert(
-            3,
-            quote! {
-                #bind_ident::DateTime(value) => #query_ident.bind(value),
-            },
-        );
-    }
-
-    matches
+    ]
 }
 
 fn create_validation_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
@@ -2413,7 +2452,9 @@ fn build_update_plan(resource: &ResourceSpec) -> UpdatePlan {
                     "{field_name} = {}",
                     resource
                         .db
-                        .generated_time_expression(super::model::is_datetime_type(&field.ty))
+                        .generated_temporal_expression(super::model::temporal_scalar_kind(
+                            &field.ty
+                        ))
                 ));
             }
             GeneratedValue::AutoIncrement | GeneratedValue::CreatedAt => {}

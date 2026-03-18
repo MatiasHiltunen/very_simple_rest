@@ -1,7 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, Utc};
+use rust_decimal::Decimal;
 use sqlx::AnyPool;
 use sqlx::any::{Any, AnyPoolOptions, AnyRow};
 use sqlx::{FromRow, Row as _};
@@ -21,6 +22,7 @@ use std::fmt;
 use std::sync::Arc;
 #[cfg(feature = "turso-local")]
 use std::time::Duration;
+use uuid::Uuid;
 
 #[cfg(feature = "turso-local")]
 use crate::database::open_turso_local_database;
@@ -146,6 +148,30 @@ impl IntoDbValue for DateTime<Utc> {
         Ok(DbValue::Text(
             self.to_rfc3339_opts(SecondsFormat::Micros, false),
         ))
+    }
+}
+
+impl IntoDbValue for NaiveDate {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        Ok(DbValue::Text(self.format("%Y-%m-%d").to_string()))
+    }
+}
+
+impl IntoDbValue for NaiveTime {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        Ok(DbValue::Text(self.format("%H:%M:%S.%6f").to_string()))
+    }
+}
+
+impl IntoDbValue for Uuid {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        Ok(DbValue::Text(self.as_hyphenated().to_string()))
+    }
+}
+
+impl IntoDbValue for Decimal {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        Ok(DbValue::Text(self.normalize().to_string()))
     }
 }
 

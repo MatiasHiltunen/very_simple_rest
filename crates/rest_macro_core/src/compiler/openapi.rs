@@ -4,8 +4,8 @@ use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
 use super::model::{
-    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_datetime_type,
-    is_optional_type,
+    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_optional_type,
+    structured_scalar_kind, supports_range_filters, supports_sort,
 };
 
 #[derive(Clone, Debug)]
@@ -490,6 +490,12 @@ fn list_query_parameters(
     resource: &ResourceSpec,
     parent_relation_field: Option<&str>,
 ) -> Vec<Value> {
+    let sortable_fields = resource
+        .fields
+        .iter()
+        .filter(|field| supports_sort(&field.ty))
+        .map(|field| field.name())
+        .collect::<Vec<_>>();
     let mut limit_schema = json!({
         "type": "integer",
         "format": "int64",
@@ -537,7 +543,7 @@ fn list_query_parameters(
             "description": "Field to sort by",
             "schema": {
                 "type": "string",
-                "enum": resource.fields.iter().map(|field| field.name()).collect::<Vec<_>>()
+                "enum": sortable_fields
             }
         }),
         json!({
@@ -569,7 +575,13 @@ fn list_query_parameters(
             "schema": query_parameter_schema(field),
         }));
 
-        if is_datetime_type(&field.ty) {
+        if supports_range_filters(&field.ty) {
+            let kind_label = match structured_scalar_kind(&field.ty) {
+                Some(super::model::StructuredScalarKind::DateTime) => "timestamp",
+                Some(super::model::StructuredScalarKind::Date) => "date",
+                Some(super::model::StructuredScalarKind::Time) => "time",
+                _ => "value",
+            };
             for (suffix, operator, inclusive) in [
                 ("gt", "after", false),
                 ("gte", "after", true),
@@ -582,7 +594,7 @@ fn list_query_parameters(
                     "in": "query",
                     "required": false,
                     "description": format!(
-                        "Filter `{field_name}` values {operator}{qualifier} this timestamp"
+                        "Filter `{field_name}` values {operator}{qualifier} this {kind_label}"
                     ),
                     "schema": query_parameter_schema(field),
                 }));
@@ -713,12 +725,12 @@ fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value 
         }),
     };
 
-    if is_datetime_type(&field.ty)
-        || matches!(
-            field.generated,
-            GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
-        )
-        || field.name().ends_with("_at")
+    if let Some(kind) = structured_scalar_kind(&field.ty) {
+        schema["format"] = json!(kind.openapi_format());
+    } else if matches!(
+        field.generated,
+        GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
+    ) || field.name().ends_with("_at")
     {
         schema["format"] = json!("date-time");
     }
@@ -1009,6 +1021,52 @@ mod tests {
         assert_eq!(
             document["components"]["schemas"]["Event"]["properties"]["starts_at"]["format"],
             json!("date-time")
+        );
+    }
+
+    #[test]
+    fn renders_openapi_portable_scalar_formats_and_sort_constraints() {
+        let service = load_service_from_path(&fixture_path("scalar_types_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Scalar Types API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/schedule"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+
+        let run_on_gte = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_run_on_gte")
+            .expect("date gte filter should exist");
+        let run_at_lte = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_run_at_lte")
+            .expect("time lte filter should exist");
+        let sort = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "sort")
+            .expect("sort parameter should exist");
+        let sort_values = sort["schema"]["enum"]
+            .as_array()
+            .expect("sort enum should be present");
+
+        assert_eq!(run_on_gte["schema"]["format"], json!("date"));
+        assert_eq!(run_at_lte["schema"]["format"], json!("time"));
+        assert_eq!(
+            document["components"]["schemas"]["Schedule"]["properties"]["external_id"]["format"],
+            json!("uuid")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Schedule"]["properties"]["amount"]["format"],
+            json!("decimal")
+        );
+        assert!(
+            !sort_values.iter().any(|value| value == &json!("amount")),
+            "decimal fields should not be listed as sortable"
         );
     }
 

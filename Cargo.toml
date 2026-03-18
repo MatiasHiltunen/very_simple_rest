@@ -15,6 +15,7 @@ base64 = "0.22"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 bcrypt = "0.19"
 chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = "1.40"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 proc-macro2 = "1.0"
@@ -70,6 +71,8 @@ env_logger.workspace = true
 actix-cors.workspace = true
 actix-files.workspace = true
 chrono.workspace = true
+rust_decimal.workspace = true
+uuid.workspace = true
 
 # Feature configuration for the top-level crate
 [features]

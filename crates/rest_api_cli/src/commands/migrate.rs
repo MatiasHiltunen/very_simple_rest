@@ -277,10 +277,10 @@ pub async fn inspect_live_schema(
             if matches!(
                 field.generated,
                 compiler::GeneratedValue::CreatedAt | compiler::GeneratedValue::UpdatedAt
-            ) && !column.default_current_timestamp
+            ) && !generated_default_matches_field(field, column.default_expression.as_deref())
             {
                 issues.push(format!(
-                    "column `{}` on `{}` is missing a current-timestamp default",
+                    "column `{}` on `{}` is missing the expected generated temporal default",
                     field_name, resource.table_name
                 ));
             }
@@ -478,7 +478,7 @@ async fn inspect_sqlite_table(pool: &DbPool, table: &str) -> Result<Option<LiveT
                 sql_type,
                 nullable: notnull == 0 && pk == 0,
                 primary_key: pk != 0,
-                default_current_timestamp: default_is_current_timestamp(default_value.as_deref()),
+                default_expression: default_value,
             },
         );
     }
@@ -569,7 +569,7 @@ async fn inspect_postgres_table(pool: &DbPool, table: &str) -> Result<Option<Liv
                 sql_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 primary_key: primary_keys.contains(&name),
-                default_current_timestamp: default_is_current_timestamp(default_value.as_deref()),
+                default_expression: default_value,
             },
         );
     }
@@ -660,8 +660,12 @@ async fn inspect_mysql_table(pool: &DbPool, table: &str) -> Result<Option<LiveTa
         let default_value: Option<String> = row.try_get("column_default")?;
         let column_key: Option<String> = row.try_get("column_key")?;
         let extra: Option<String> = row.try_get("extra")?;
-        let default_current = default_is_current_timestamp(default_value.as_deref())
-            || default_is_current_timestamp(extra.as_deref());
+        let default_expression = match (default_value, extra) {
+            (Some(default_value), Some(extra)) => Some(format!("{default_value} {extra}")),
+            (Some(default_value), None) => Some(default_value),
+            (None, Some(extra)) => Some(extra),
+            (None, None) => None,
+        };
 
         schema.columns.insert(
             name,
@@ -669,7 +673,7 @@ async fn inspect_mysql_table(pool: &DbPool, table: &str) -> Result<Option<LiveTa
                 sql_type,
                 nullable: nullable.eq_ignore_ascii_case("YES"),
                 primary_key: column_key.as_deref() == Some("PRI"),
-                default_current_timestamp: default_current,
+                default_expression,
             },
         );
     }
@@ -758,6 +762,40 @@ fn default_is_current_timestamp(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+fn default_is_current_date(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized.contains("current_date")
+                || normalized.contains("utc_date")
+                || normalized.contains("curdate()")
+                || normalized.contains("date('now')")
+        })
+        .unwrap_or(false)
+}
+
+fn default_is_current_time(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized.contains("current_time")
+                || normalized.contains("curtime()")
+                || normalized.contains("utc_timestamp")
+                || (normalized.contains("strftime(") && normalized.contains("%h:%m:%f"))
+                || normalized.contains("to_char(")
+        })
+        .unwrap_or(false)
+}
+
+fn generated_default_matches_field(field: &compiler::FieldSpec, value: Option<&str>) -> bool {
+    match compiler::temporal_scalar_kind(&field.ty) {
+        Some(compiler::GeneratedTemporalKind::DateTime) => default_is_current_timestamp(value),
+        Some(compiler::GeneratedTemporalKind::Date) => default_is_current_date(value),
+        Some(compiler::GeneratedTemporalKind::Time) => default_is_current_time(value),
+        None => default_is_current_timestamp(value),
+    }
+}
+
 fn normalize_live_delete_rule(value: Option<&str>) -> Option<String> {
     value.and_then(|value| {
         let normalized = value.trim().replace('_', " ").to_ascii_uppercase();
@@ -794,7 +832,7 @@ struct LiveColumnSchema {
     sql_type: String,
     nullable: bool,
     primary_key: bool,
-    default_current_timestamp: bool,
+    default_expression: Option<String>,
 }
 
 struct LiveRelationSchema {

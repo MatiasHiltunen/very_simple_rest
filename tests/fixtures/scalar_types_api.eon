@@ -1,0 +1,17 @@
+module: "scalar_types_api"
+resources: [
+    {
+        name: "Schedule"
+        list: {
+            default_limit: 1
+            max_limit: 10
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "run_on", type: Date }
+            { name: "run_at", type: Time }
+            { name: "external_id", type: Uuid }
+            { name: "amount", type: Decimal }
+        ]
+    }
+]

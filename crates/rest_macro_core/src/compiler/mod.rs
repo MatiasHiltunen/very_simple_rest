@@ -11,9 +11,12 @@ use std::path::Path as FsPath;
 use syn::{DeriveInput, LitStr, Path};
 
 pub use model::{
-    DbBackend, GeneratedValue, ReferentialAction, RelationSpec, ResourceSpec, RoleRequirements,
-    RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
-    default_service_database_url, is_optional_type,
+    DbBackend, FieldSpec, GeneratedTemporalKind, GeneratedValue, ReferentialAction, RelationSpec,
+    ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode,
+    StaticMountSpec, StructuredScalarKind, default_service_database_url, is_date_type,
+    is_datetime_type, is_decimal_type, is_optional_type, is_structured_scalar_type, is_time_type,
+    is_uuid_type, structured_scalar_kind, supports_range_filters, supports_sort,
+    temporal_scalar_kind,
 };
 pub use openapi::OpenApiSpecOptions;
 
