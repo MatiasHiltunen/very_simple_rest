@@ -23,6 +23,11 @@ struct EnvTemplateConfig {
     trusted_proxies_var: Option<String>,
     log_filter_env: String,
     log_default_filter: String,
+    bind_addr: String,
+    tls_cert_path_env: Option<String>,
+    tls_key_path_env: Option<String>,
+    tls_cert_path: Option<String>,
+    tls_key_path: Option<String>,
 }
 
 fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> {
@@ -36,6 +41,11 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
             trusted_proxies_var: None,
             log_filter_env: "RUST_LOG".to_owned(),
             log_default_filter: "info".to_owned(),
+            bind_addr: "127.0.0.1:8080".to_owned(),
+            tls_cert_path_env: None,
+            tls_key_path_env: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         });
     };
 
@@ -68,6 +78,15 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
         trusted_proxies_var: service.security.trusted_proxies.proxies_env.clone(),
         log_filter_env: service.logging.filter_env.clone(),
         log_default_filter: service.logging.default_filter.clone(),
+        bind_addr: if service.tls.is_enabled() {
+            "127.0.0.1:8443".to_owned()
+        } else {
+            "127.0.0.1:8080".to_owned()
+        },
+        tls_cert_path_env: service.tls.cert_path_env.clone(),
+        tls_key_path_env: service.tls.key_path_env.clone(),
+        tls_cert_path: service.tls.cert_path.clone(),
+        tls_key_path: service.tls.key_path.clone(),
     })
 }
 
@@ -100,6 +119,23 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
             "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
         )
         .unwrap();
+        writeln!(&mut output).unwrap();
+    }
+
+    if let (Some(cert_env), Some(key_env), Some(cert_path), Some(key_path)) = (
+        config.tls_cert_path_env.as_deref(),
+        config.tls_key_path_env.as_deref(),
+        config.tls_cert_path.as_deref(),
+        config.tls_key_path.as_deref(),
+    ) {
+        writeln!(&mut output, "# TLS (Rustls)").unwrap();
+        writeln!(
+            &mut output,
+            "# This service defaults to HTTPS + HTTP/2. Generate local certs with `vsr tls self-signed`."
+        )
+        .unwrap();
+        writeln!(&mut output, "# {cert_env}={cert_path}").unwrap();
+        writeln!(&mut output, "# {key_env}={key_path}").unwrap();
         writeln!(&mut output).unwrap();
     }
 
@@ -168,7 +204,7 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     writeln!(&mut output, "# ADMIN_TENANT_ID=1").unwrap();
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "# Server Configuration").unwrap();
-    writeln!(&mut output, "BIND_ADDR=127.0.0.1:8080").unwrap();
+    writeln!(&mut output, "BIND_ADDR={}", config.bind_addr).unwrap();
     writeln!(&mut output).unwrap();
 
     if let Some(var_name) = &config.cors_origins_var {

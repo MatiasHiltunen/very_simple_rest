@@ -29,6 +29,7 @@ colored = "3.1"
 rand.workspace = true
 regex = "1.12.3"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
+rcgen.workspace = true
 
 [lib]
 name = "rest_api_cli"

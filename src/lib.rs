@@ -184,6 +184,14 @@ pub mod logging {
     pub use rest_macro_core::logging::{LogTimestampPrecision, LoggingConfig};
 }
 
+pub mod tls {
+    pub use rest_macro_core::tls::{
+        DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
+        DEFAULT_TLS_KEY_PATH_ENV, ResolvedTlsPaths, TlsConfig, load_rustls_server_config,
+        resolve_tls_config,
+    };
+}
+
 pub use actix_cors;
 pub use actix_files;
 pub use actix_web;
@@ -204,6 +212,7 @@ pub mod prelude {
     pub use crate::database;
     pub use crate::db;
     pub use crate::logging;
+    pub use crate::tls;
     pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 
     pub use actix_web::{

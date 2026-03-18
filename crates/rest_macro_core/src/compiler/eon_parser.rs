@@ -16,7 +16,7 @@ use super::model::{
     StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
     validate_field_validations, validate_list_config, validate_logging_config, validate_relations,
-    validate_row_policies, validate_security_config, validate_sql_identifier,
+    validate_row_policies, validate_security_config, validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
@@ -30,6 +30,10 @@ use crate::{
     security::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
+    },
+    tls::{
+        DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
+        DEFAULT_TLS_KEY_PATH_ENV, TlsConfig,
     },
 };
 
@@ -48,6 +52,8 @@ struct ServiceDocument {
     database: Option<DatabaseDocument>,
     #[serde(default)]
     logging: Option<LoggingDocument>,
+    #[serde(default)]
+    tls: Option<TlsDocument>,
     #[serde(default, rename = "static")]
     static_config: Option<StaticConfigDocument>,
     #[serde(default)]
@@ -229,6 +235,18 @@ struct LoggingDocument {
     default_filter: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TlsDocument {
+    #[serde(default)]
+    cert_path: Option<String>,
+    #[serde(default)]
+    key_path: Option<String>,
+    #[serde(default)]
+    cert_path_env: Option<String>,
+    #[serde(default)]
+    key_path_env: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -439,8 +457,10 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         span,
     )?;
     let logging = parse_logging_document(document.logging)?;
+    let tls = parse_tls_document(document.tls)?;
     let security = parse_security_document(document.security, span)?;
     validate_logging_config(&logging, span)?;
+    validate_tls_config(&tls, span)?;
     validate_security_config(&security, span)?;
 
     let resources = build_resources(document.db, document.resources)?;
@@ -459,6 +479,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             database,
             logging,
             security,
+            tls,
         },
         include_path,
     })
@@ -708,6 +729,39 @@ fn parse_logging_document(document: Option<LoggingDocument>) -> syn::Result<Logg
     })
 }
 
+fn parse_tls_document(document: Option<TlsDocument>) -> syn::Result<TlsConfig> {
+    let Some(document) = document else {
+        return Ok(TlsConfig::default());
+    };
+
+    let cert_path = validate_tls_path(
+        document
+            .cert_path
+            .as_deref()
+            .unwrap_or(DEFAULT_TLS_CERT_PATH),
+        "tls.cert_path",
+    )?;
+    let key_path = validate_tls_path(
+        document.key_path.as_deref().unwrap_or(DEFAULT_TLS_KEY_PATH),
+        "tls.key_path",
+    )?;
+
+    Ok(TlsConfig {
+        cert_path: Some(cert_path),
+        key_path: Some(key_path),
+        cert_path_env: Some(
+            document
+                .cert_path_env
+                .unwrap_or_else(|| DEFAULT_TLS_CERT_PATH_ENV.to_owned()),
+        ),
+        key_path_env: Some(
+            document
+                .key_path_env
+                .unwrap_or_else(|| DEFAULT_TLS_KEY_PATH_ENV.to_owned()),
+        ),
+    })
+}
+
 fn parse_log_timestamp_precision(value: &str) -> Option<LogTimestampPrecision> {
     match value.trim().to_ascii_lowercase().as_str() {
         "none" | "off" => Some(LogTimestampPrecision::None),
@@ -716,6 +770,22 @@ fn parse_log_timestamp_precision(value: &str) -> Option<LogTimestampPrecision> {
         "micros" | "microseconds" | "microsecond" | "us" => Some(LogTimestampPrecision::Micros),
         "nanos" | "nanoseconds" | "nanosecond" | "ns" => Some(LogTimestampPrecision::Nanos),
         _ => None,
+    }
+}
+
+fn validate_tls_path(value: &str, label: &str) -> syn::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("`{label}` cannot be empty"),
+        ));
+    }
+
+    if Path::new(trimmed).is_absolute() {
+        Ok(trimmed.to_owned())
+    } else {
+        validate_relative_path(trimmed, label)
     }
 }
 
@@ -1734,6 +1804,7 @@ mod tests {
                 .expect("database config should parse"),
                 logging: LoggingConfig::default(),
                 security: SecurityConfig::default(),
+                tls: TlsConfig::default(),
             },
             include_path: path.value(),
         };
@@ -1921,6 +1992,56 @@ mod tests {
                 include_subdomains: true,
             })
         );
+    }
+
+    #[test]
+    fn parses_tls_config_from_eon() {
+        let document = parse_document(
+            r#"
+            tls: {
+                cert_path: "certs/local-cert.pem"
+                key_path: "certs/local-key.pem"
+                cert_path_env: "APP_TLS_CERT_PATH"
+                key_path_env: "APP_TLS_KEY_PATH"
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let tls = parse_tls_document(document.tls).expect("tls config should parse");
+        assert_eq!(tls.cert_path.as_deref(), Some("certs/local-cert.pem"));
+        assert_eq!(tls.key_path.as_deref(), Some("certs/local-key.pem"));
+        assert_eq!(tls.cert_path_env.as_deref(), Some("APP_TLS_CERT_PATH"));
+        assert_eq!(tls.key_path_env.as_deref(), Some("APP_TLS_KEY_PATH"));
+    }
+
+    #[test]
+    fn tls_block_defaults_to_dev_cert_paths_and_env_names() {
+        let document = parse_document(
+            r#"
+            tls: {}
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let tls = parse_tls_document(document.tls).expect("tls config should parse");
+        assert_eq!(tls.cert_path.as_deref(), Some(DEFAULT_TLS_CERT_PATH));
+        assert_eq!(tls.key_path.as_deref(), Some(DEFAULT_TLS_KEY_PATH));
+        assert_eq!(
+            tls.cert_path_env.as_deref(),
+            Some(DEFAULT_TLS_CERT_PATH_ENV)
+        );
+        assert_eq!(tls.key_path_env.as_deref(), Some(DEFAULT_TLS_KEY_PATH_ENV));
     }
 
     #[test]

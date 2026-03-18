@@ -1,0 +1,14 @@
+module: "tls_api"
+tls: {
+    cert_path: "certs/dev-cert.pem"
+    key_path: "certs/dev-key.pem"
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

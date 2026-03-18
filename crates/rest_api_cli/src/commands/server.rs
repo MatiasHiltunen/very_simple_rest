@@ -10,6 +10,10 @@ use rest_macro_core::auth::{
 };
 use rest_macro_core::compiler::{self, DbBackend, OpenApiSpecOptions, ServiceSpec};
 use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
+use rest_macro_core::tls::{
+    DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
+    DEFAULT_TLS_KEY_PATH_ENV,
+};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -197,7 +201,7 @@ fn emit_server_project_inner(
     )?;
     write_file(
         &output_dir.join("src/main.rs"),
-        &render_main_rs(&module_name, &eon_file_name, include_builtin_auth),
+        &render_main_rs(&service, &module_name, &eon_file_name, include_builtin_auth),
     )?;
     write_file(&output_dir.join(&eon_file_name), &input_content)?;
     write_file(
@@ -206,7 +210,7 @@ fn emit_server_project_inner(
     )?;
     write_file(
         &output_dir.join(".gitignore"),
-        "target/\n.env\n*.db\n*.db-shm\n*.db-wal\n",
+        "target/\n.env\ncerts/\n*.db\n*.db-shm\n*.db-wal\n",
     )?;
     write_file(
         &output_dir.join("README.md"),
@@ -214,6 +218,7 @@ fn emit_server_project_inner(
     )?;
     write_file(&output_dir.join("openapi.json"), &openapi_json)?;
     copy_configured_static_dirs(input, output_dir, &service)?;
+    copy_configured_tls_files(input, output_dir, &service)?;
     if include_builtin_auth {
         write_file(
             &output_dir.join("migrations/0000_auth.sql"),
@@ -272,6 +277,7 @@ fn export_generated_runtime_artifacts(
     }
 
     copy_generated_static_artifacts(project_dir, &artifact_dir)?;
+    copy_generated_tls_artifacts(project_dir, &artifact_dir)?;
 
     Ok(artifact_dir)
 }
@@ -308,6 +314,22 @@ fn copy_generated_static_artifacts(project_dir: &Path, artifact_dir: &Path) -> R
 
         copy_dir_recursive(&source, &artifact_dir.join(&relative_dir))?;
         copied.push(relative_dir);
+    }
+
+    Ok(())
+}
+
+fn copy_generated_tls_artifacts(project_dir: &Path, artifact_dir: &Path) -> Result<()> {
+    let Some(service) = load_emitted_service_spec(project_dir)? else {
+        return Ok(());
+    };
+
+    for relative_path in configured_tls_relative_paths(&service) {
+        let source = project_dir.join(&relative_path);
+        if !source.exists() {
+            continue;
+        }
+        copy_runtime_file(&source, &artifact_dir.join(&relative_path), "TLS asset")?;
     }
 
     Ok(())
@@ -433,6 +455,65 @@ fn copy_configured_static_dirs(
     Ok(())
 }
 
+fn copy_configured_tls_files(input: &Path, output_dir: &Path, service: &ServiceSpec) -> Result<()> {
+    let service_root = input.parent().unwrap_or_else(|| Path::new("."));
+
+    for relative_path in configured_tls_relative_paths(service) {
+        let source = service_root.join(&relative_path);
+        if !source.exists() {
+            continue;
+        }
+        copy_runtime_file(&source, &output_dir.join(&relative_path), "TLS asset")?;
+    }
+
+    Ok(())
+}
+
+fn configured_tls_relative_paths(service: &ServiceSpec) -> Vec<PathBuf> {
+    let mut paths = Vec::<PathBuf>::new();
+
+    for path in [
+        service.tls.cert_path.as_deref(),
+        service.tls.key_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let candidate = Path::new(path);
+        if candidate.is_absolute() {
+            continue;
+        }
+
+        let relative = candidate.to_path_buf();
+        if !paths.iter().any(|existing| existing == &relative) {
+            paths.push(relative);
+        }
+    }
+
+    paths
+}
+
+fn copy_runtime_file(source: &Path, destination: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(source).map_err(Error::Io)?;
+    if metadata.file_type().is_symlink() {
+        return Err(Error::Config(format!(
+            "{label} path contains a symlink and cannot be emitted safely: {}",
+            source.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(Error::Config(format!(
+            "{label} path must be a regular file: {}",
+            source.display()
+        )));
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(Error::Io)?;
+    }
+    fs::copy(source, destination).map_err(Error::Io)?;
+    Ok(())
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination).map_err(Error::Io)?;
     for entry in fs::read_dir(source).map_err(Error::Io)? {
@@ -553,6 +634,11 @@ fn render_cargo_toml(
 ) -> Result<String> {
     let dependency = render_runtime_dependency(service, backend)?;
     let backend_feature = backend_feature_name(backend);
+    let actix_web_dependency = if service.tls.is_enabled() {
+        "actix-web = { version = \"4\", features = [\"rustls-0_23\"] }"
+    } else {
+        "actix-web = \"4\""
+    };
     Ok(format!(
         r#"[package]
 name = "{package_name}"
@@ -562,7 +648,7 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-actix-web = "4"
+{actix_web_dependency}
 dotenv = "0.15"
 env_logger = "0.11"
 log = "0.4"
@@ -600,7 +686,12 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
     ))
 }
 
-fn render_main_rs(module_name: &str, eon_file_name: &str, include_builtin_auth: bool) -> String {
+fn render_main_rs(
+    service: &ServiceSpec,
+    module_name: &str,
+    eon_file_name: &str,
+    include_builtin_auth: bool,
+) -> String {
     let auth_config = if include_builtin_auth {
         "                    .configure(|cfg| auth::auth_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
     } else {
@@ -610,6 +701,19 @@ fn render_main_rs(module_name: &str, eon_file_name: &str, include_builtin_auth: 
         "    very_simple_rest::auth::ensure_jwt_secret_configured()\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
     } else {
         ""
+    };
+    let bind_addr_default = default_bind_addr(service);
+    let tls_setup = if service.tls.is_enabled() {
+        format!(
+            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = {module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
+        )
+    } else {
+        String::new()
+    };
+    let server_bind = if service.tls.is_enabled() {
+        "    let server = server.bind_rustls_0_23(&bind_addr, rustls_config)?;\n\n    info!(\"Server listening on https://{}\", bind_addr);\n"
+    } else {
+        "    let server = server.bind(&bind_addr)?;\n\n    info!(\"Server listening on http://{}\", bind_addr);\n"
     };
 
     format!(
@@ -669,16 +773,14 @@ async fn main() -> std::io::Result<()> {{
     let logging = {module_name}::logging();
     logging.init_env_logger();
 
-{auth_startup_check}    let database_base_dir = env::current_exe()
-        .ok()
-        .and_then(|path| {{
-            let bundle_dir = path.with_extension("bundle");
-            if bundle_dir.is_dir() {{
-                path.parent().map(|dir| dir.to_path_buf())
-            }} else {{
-                None
-            }}
-        }})
+{auth_startup_check}    let current_exe = env::current_exe().ok();
+    let bundle_dir = current_exe
+        .as_ref()
+        .map(|path| path.with_extension("bundle"))
+        .filter(|dir| dir.is_dir());
+    let database_base_dir = bundle_dir
+        .as_ref()
+        .and_then(|_| current_exe.as_ref().and_then(|path| path.parent().map(|dir| dir.to_path_buf())))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let database_config = very_simple_rest::core::database::resolve_database_config(
@@ -698,13 +800,13 @@ async fn main() -> std::io::Result<()> {{
             default_database_url
         }}
     }};
-    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "{bind_addr_default}".to_owned());
 
     let pool = very_simple_rest::db::connect_with_config(&database_url, &database_config)
         .await
         .map_err(|error| std::io::Error::other(format!("database connection failed: {{error}}")))?;
 
-    let api_security = {module_name}::security();
+{tls_setup}    let api_security = {module_name}::security();
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {{
         let api_security = api_security.clone();
@@ -719,14 +821,19 @@ async fn main() -> std::io::Result<()> {{
 {auth_config}                    .configure(|cfg| {module_name}::configure(cfg, server_pool.clone()))
             )
             .configure({module_name}::configure_static)
-    }})
-    .bind(&bind_addr)?;
-
-    info!("Server listening on http://{{}}", bind_addr);
-    server.run().await
+    }});
+{server_bind}    server.run().await
 }}
 "##
     )
+}
+
+fn default_bind_addr(service: &ServiceSpec) -> &'static str {
+    if service.tls.is_enabled() {
+        "127.0.0.1:8443"
+    } else {
+        "127.0.0.1:8080"
+    }
 }
 
 fn render_env_example(
@@ -760,18 +867,52 @@ fn render_env_example(
             )
         }
     };
+    let tls_block = render_tls_env_example(service);
     let security_block = render_security_env_example(service);
     let logging_env_var = &service.logging.filter_env;
     let logging_default_filter = &service.logging.default_filter;
 
     format!(
-        "{}DATABASE_URL={}\nBIND_ADDR=127.0.0.1:8080\n{}{}{}={}\n",
+        "{}DATABASE_URL={}\nBIND_ADDR={}\n{}{}{}{}={}\n",
         engine_block,
         default_database_url(service, backend),
+        default_bind_addr(service),
+        tls_block,
         auth_block,
         security_block,
         logging_env_var,
         logging_default_filter
+    )
+}
+
+fn render_tls_env_example(service: &ServiceSpec) -> String {
+    if !service.tls.is_enabled() {
+        return String::new();
+    }
+
+    let cert_path = service
+        .tls
+        .cert_path
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_CERT_PATH);
+    let key_path = service
+        .tls
+        .key_path
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_KEY_PATH);
+    let cert_path_env = service
+        .tls
+        .cert_path_env
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_CERT_PATH_ENV);
+    let key_path_env = service
+        .tls
+        .key_path_env
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_KEY_PATH_ENV);
+
+    format!(
+        "# Rustls TLS is enabled for HTTPS + HTTP/2\n# Generate local certs with `vsr tls self-signed`\n# {cert_path_env}={cert_path}\n# {key_path_env}={key_path}\n"
     )
 }
 
@@ -825,12 +966,19 @@ fn render_project_readme(
             )
         }
     };
+    let tls_note = render_project_tls_note(service);
     let security_note = render_project_security_note(service);
     let logging_note = render_project_logging_note(service);
+    let run_hint = if service.tls.is_enabled() {
+        "cargo run\n# Then open https://127.0.0.1:8443\n"
+    } else {
+        "cargo run\n# Then open http://127.0.0.1:8080\n"
+    };
 
     format!(
         "# {package_name}\n\nGenerated by `vsr server emit`.\n\n\
 Backend: `{}`\n\n\
+{}\
 {}\
 {}\
 {}\
@@ -840,14 +988,45 @@ The generated server serves `openapi.json` at `/openapi.json` and Swagger UI at 
 Apply the SQL files in `migrations/` before starting the server, then run:\n\n\
 ```bash\n\
 cp .env.example .env\n\
-cargo run\n\
-```\n",
+{run_hint}```\n",
         backend_feature_name(backend),
         database_note,
+        tls_note,
         logging_note,
         security_note,
         auth_note,
         openapi_note
+    )
+}
+
+fn render_project_tls_note(service: &ServiceSpec) -> String {
+    if !service.tls.is_enabled() {
+        return String::new();
+    }
+
+    let cert_path = service
+        .tls
+        .cert_path
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_CERT_PATH);
+    let key_path = service
+        .tls
+        .key_path
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_KEY_PATH);
+    let cert_path_env = service
+        .tls
+        .cert_path_env
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_CERT_PATH_ENV);
+    let key_path_env = service
+        .tls
+        .key_path_env
+        .as_deref()
+        .unwrap_or(DEFAULT_TLS_KEY_PATH_ENV);
+
+    format!(
+        "Transport: Rustls TLS is enabled for HTTPS + HTTP/2.\nCompiled certificate defaults: `{cert_path}` and `{key_path}`.\nOverride them with `{cert_path_env}` and `{key_path_env}`, or run `vsr tls self-signed` to generate local certs.\n"
     )
 }
 
@@ -1067,6 +1246,7 @@ mod tests {
     };
     use crate::commands::db::database_url_from_service_config;
     use crate::commands::setup::run_setup;
+    use crate::commands::tls::generate_self_signed_certificate;
     use reqwest::blocking::Client;
     use serde_json::{Value, json};
     use std::fs;
@@ -1422,6 +1602,39 @@ mod tests {
     }
 
     #[test]
+    fn emit_server_project_wires_rustls_tls_when_configured() {
+        let root = test_root();
+        emit_server_project(
+            &fixture_path("tls_api.eon"),
+            &root,
+            Some("tls-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("tls-enabled server project should emit");
+
+        let main_rs = read_to_string(&root.join("src/main.rs"));
+        assert!(main_rs.contains("let tls_config = tls_api::tls();"));
+        assert!(main_rs.contains("load_rustls_server_config(&tls_config, &tls_base_dir)"));
+        assert!(main_rs.contains("bind_rustls_0_23"));
+        assert!(main_rs.contains("Server listening on https://"));
+
+        let cargo_toml = read_to_string(&root.join("Cargo.toml"));
+        assert!(
+            cargo_toml.contains("actix-web = { version = \"4\", features = [\"rustls-0_23\"] }")
+        );
+
+        let env_example = read_to_string(&root.join(".env.example"));
+        assert!(env_example.contains("BIND_ADDR=127.0.0.1:8443"));
+        assert!(env_example.contains("# TLS_CERT_PATH=certs/dev-cert.pem"));
+        assert!(env_example.contains("# TLS_KEY_PATH=certs/dev-key.pem"));
+
+        let readme = read_to_string(&root.join("README.md"));
+        assert!(readme.contains("Rustls TLS is enabled"));
+        assert!(readme.contains("vsr tls self-signed"));
+    }
+
+    #[test]
     fn emit_server_project_copies_configured_static_directories() {
         let root = test_root();
         emit_server_project(
@@ -1611,6 +1824,51 @@ mod tests {
 
         assert!(artifact_dir.join("static_site/index.html").exists());
         assert!(artifact_dir.join("static_site/assets/app.js").exists());
+    }
+
+    #[test]
+    fn export_generated_runtime_artifacts_copies_tls_files_into_bundle() {
+        let root = test_root();
+        let source = root.join("source");
+        fs::create_dir_all(&source).expect("source dir should exist");
+        let config_path = source.join("service.eon");
+        fs::write(
+            &config_path,
+            r#"
+            module: "tls_service"
+            tls: {}
+            resources: [
+                {
+                    name: "Note"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+
+        generate_self_signed_certificate(Some(&config_path), None, None, &[], false)
+            .expect("self-signed certs should generate");
+
+        let project_dir = root.join("project");
+        emit_server_project(
+            &config_path,
+            &project_dir,
+            Some("tls-service-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("tls server project should emit");
+
+        assert!(project_dir.join("certs/dev-cert.pem").exists());
+        assert!(project_dir.join("certs/dev-key.pem").exists());
+
+        let output = root.join("dist/tls-service-server");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+            .expect("runtime artifacts should export");
+
+        assert!(artifact_dir.join("certs/dev-cert.pem").exists());
+        assert!(artifact_dir.join("certs/dev-key.pem").exists());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::auth::{AuthEmailProvider, SessionCookieSameSite};
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
 use crate::security::SecurityConfig;
+use crate::tls::TlsConfig;
 use url::Url;
 
 pub const GENERATED_DATETIME_ALIAS: &str = "__VsrDateTimeUtc";
@@ -403,6 +404,7 @@ pub struct ServiceSpec {
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
     pub security: SecurityConfig,
+    pub tls: TlsConfig,
 }
 
 impl ResourceSpec {
@@ -452,6 +454,7 @@ impl std::fmt::Debug for ServiceSpec {
             .field("database", &self.database)
             .field("logging", &self.logging)
             .field("security", &self.security)
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -1158,6 +1161,60 @@ pub fn validate_logging_config(logging: &LoggingConfig, span: Span) -> syn::Resu
         return Err(syn::Error::new(
             span,
             "`logging.default_filter` cannot be empty",
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_tls_config(tls: &TlsConfig, span: Span) -> syn::Result<()> {
+    if !tls.is_enabled() {
+        return Ok(());
+    }
+
+    if tls
+        .cert_path
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(syn::Error::new(span, "`tls.cert_path` cannot be empty"));
+    }
+
+    if tls
+        .key_path
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(syn::Error::new(span, "`tls.key_path` cannot be empty"));
+    }
+
+    if tls
+        .cert_path_env
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(syn::Error::new(span, "`tls.cert_path_env` cannot be empty"));
+    }
+
+    if tls
+        .key_path_env
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(syn::Error::new(span, "`tls.key_path_env` cannot be empty"));
+    }
+
+    if tls.cert_path.is_none() && tls.cert_path_env.is_none() {
+        return Err(syn::Error::new(
+            span,
+            "`tls.cert_path` or `tls.cert_path_env` must be configured when TLS is enabled",
+        ));
+    }
+
+    if tls.key_path.is_none() && tls.key_path_env.is_none() {
+        return Err(syn::Error::new(
+            span,
+            "`tls.key_path` or `tls.key_path_env` must be configured when TLS is enabled",
         ));
     }
 

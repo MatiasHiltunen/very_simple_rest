@@ -14,6 +14,7 @@ use super::{
 };
 use crate::database::DatabaseConfig;
 use crate::logging::LoggingConfig;
+use crate::tls::TlsConfig;
 
 pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
     let mut rust_files = collect_rust_files(path)?;
@@ -68,6 +69,7 @@ pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
         database: DatabaseConfig::default(),
         logging: LoggingConfig::default(),
         security: crate::security::SecurityConfig::default(),
+        tls: TlsConfig::default(),
     })
 }
 

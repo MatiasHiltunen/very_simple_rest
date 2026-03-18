@@ -8,3 +8,4 @@ pub mod openapi;
 pub(crate) mod schema;
 pub mod server;
 pub mod setup;
+pub mod tls;

@@ -146,6 +146,7 @@ pub fn expand_service_module(
     let default_database_url = Literal::string(&default_service_database_url(service));
     let logging = logging_tokens(service, runtime_crate);
     let security = security_tokens(service, runtime_crate);
+    let tls = tls_tokens(service, runtime_crate);
 
     Ok(quote! {
         pub mod #module_ident {
@@ -182,6 +183,10 @@ pub fn expand_service_module(
 
             pub fn security() -> #runtime_crate::core::security::SecurityConfig {
                 #security
+            }
+
+            pub fn tls() -> #runtime_crate::core::tls::TlsConfig {
+                #tls
             }
 
             pub fn configure_security(cfg: &mut web::ServiceConfig) {
@@ -246,6 +251,22 @@ fn logging_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
             filter_env: #filter_env.to_owned(),
             default_filter: #default_filter.to_owned(),
             timestamp: #timestamp,
+        }
+    }
+}
+
+fn tls_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    let cert_path = option_string_tokens(service.tls.cert_path.as_deref());
+    let key_path = option_string_tokens(service.tls.key_path.as_deref());
+    let cert_path_env = option_string_tokens(service.tls.cert_path_env.as_deref());
+    let key_path_env = option_string_tokens(service.tls.key_path_env.as_deref());
+
+    quote! {
+        #runtime_crate::core::tls::TlsConfig {
+            cert_path: #cert_path,
+            key_path: #key_path,
+            cert_path_env: #cert_path_env,
+            key_path_env: #key_path_env,
         }
     }
 }

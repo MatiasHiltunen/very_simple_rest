@@ -132,7 +132,7 @@ with `--without-auth` because the built-in auth migration owns that table name.
 
 `vsr build` also exports the generated runtime artifacts next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file, `README.md`,
-and `migrations/`.
+`migrations/`, and relative TLS certificate files when they exist at build time.
 
 The generated server fails fast if built-in auth is enabled and `JWT_SECRET` is missing. `vsr
 gen-env` and emitted `.env.example` files still help by generating or surfacing the required env
@@ -147,7 +147,28 @@ automatically. When a `.eon` service defines `database.engine`, the emitted serv
 that runtime engine config into the project, including encrypted local Turso bootstrap by default
 for bare SQLite `.eon` services. When a `.eon` service defines `logging`, the emitted server also
 uses the compiled log env var, default filter, and timestamp precision instead of hard-coded
-logger defaults.
+logger defaults. When a `.eon` service defines `tls`, the emitted server binds HTTPS with Rustls
+and HTTP/2, defaults `BIND_ADDR` to `127.0.0.1:8443`, and can use `vsr tls self-signed` to
+generate local certificate PEM files.
+
+### TLS Certificate Generation
+
+Generate a self-signed certificate and private key for local development:
+
+```bash
+vsr tls self-signed
+vsr --config api.eon tls self-signed --force
+vsr tls self-signed --cert-path certs/dev-cert.pem --key-path certs/dev-key.pem --host localhost --host 127.0.0.1
+```
+
+Behavior:
+
+- with `--config api.eon`, the command uses the configured `.eon` `tls.cert_path` and
+  `tls.key_path`
+- with no config and no explicit output paths, it defaults to `certs/dev-cert.pem` and
+  `certs/dev-key.pem` in the current directory
+- default SANs are `localhost`, `127.0.0.1`, and `::1`
+- private keys are written with restrictive permissions on Unix
 
 ### OpenAPI Generation
 

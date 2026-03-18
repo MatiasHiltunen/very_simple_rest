@@ -7,6 +7,7 @@ pub mod logging;
 mod secret;
 pub mod security;
 pub mod static_files;
+pub mod tls;
 
 #[cfg(feature = "codegen")]
 pub mod compiler;

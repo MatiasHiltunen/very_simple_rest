@@ -172,6 +172,12 @@ enum Commands {
         #[arg(short, long)]
         path: Option<String>,
     },
+
+    /// Manage local TLS certificates for generated servers
+    Tls {
+        #[command(subcommand)]
+        command: TlsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -357,6 +363,28 @@ enum ServerCommand {
         keep_build_dir: bool,
 
         /// Overwrite the output binary if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TlsCommand {
+    /// Generate a self-signed certificate and private key for local development
+    SelfSigned {
+        /// Output certificate PEM path
+        #[arg(long, value_name = "FILE")]
+        cert_path: Option<PathBuf>,
+
+        /// Output private key PEM path
+        #[arg(long, value_name = "FILE")]
+        key_path: Option<PathBuf>,
+
+        /// Subject alternative name to include; may be repeated
+        #[arg(long = "host", value_name = "NAME")]
+        hosts: Vec<String>,
+
+        /// Overwrite existing certificate and key files
         #[arg(long)]
         force: bool,
     },
@@ -646,6 +674,27 @@ async fn main() -> Result<()> {
             println!("{}", "Generating environment file...".green().bold());
             commands::gen_env::generate_env_file(path.clone(), config_path.as_deref())?;
         }
+
+        Commands::Tls { command } => match command {
+            TlsCommand::SelfSigned {
+                cert_path,
+                key_path,
+                hosts,
+                force,
+            } => {
+                println!(
+                    "{}",
+                    "Generating self-signed TLS certificate...".green().bold()
+                );
+                commands::tls::generate_self_signed_certificate(
+                    config_path.as_deref(),
+                    cert_path.clone(),
+                    key_path.clone(),
+                    hosts,
+                    *force,
+                )?;
+            }
+        },
     }
 
     Ok(())
@@ -718,6 +767,25 @@ mod tests {
     #[test]
     fn build_command_accepts_positional_service_input() {
         assert!(Cli::try_parse_from(["vsr", "build", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn tls_command_accepts_self_signed_subcommand() {
+        assert!(Cli::try_parse_from(["vsr", "tls", "self-signed"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "tls",
+                "self-signed",
+                "--cert-path",
+                "certs/dev-cert.pem",
+                "--key-path",
+                "certs/dev-key.pem",
+                "--host",
+                "localhost",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

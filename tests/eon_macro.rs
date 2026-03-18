@@ -10,6 +10,7 @@ rest_api_from_eon!("tests/fixtures/security_api.eon");
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_encrypted_api.eon");
+rest_api_from_eon!("tests/fixtures/tls_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -196,6 +197,21 @@ fn eon_macro_generates_database_config_function() {
     assert_eq!(
         turso_local_api::default_database_url(),
         "sqlite:var/data/turso_local.db?mode=rwc"
+    );
+}
+
+#[test]
+fn eon_macro_generates_tls_config_function() {
+    let tls = tls_api::tls();
+    assert_eq!(tls.cert_path.as_deref(), Some("certs/dev-cert.pem"));
+    assert_eq!(tls.key_path.as_deref(), Some("certs/dev-key.pem"));
+    assert_eq!(
+        tls.cert_path_env.as_deref(),
+        Some(very_simple_rest::core::tls::DEFAULT_TLS_CERT_PATH_ENV)
+    );
+    assert_eq!(
+        tls.key_path_env.as_deref(),
+        Some(very_simple_rest::core::tls::DEFAULT_TLS_KEY_PATH_ENV)
     );
 }
 

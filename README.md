@@ -244,7 +244,7 @@ same default name.
 
 The build command also exports the generated runtime assets next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file,
-`README.md`, and `migrations/`.
+`README.md`, `migrations/`, and relative TLS certificate files when they exist at build time.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and a Swagger UI page at
 `/docs`.
@@ -255,6 +255,10 @@ the generated project so the emitted server can serve them without extra setup.
 When a `.eon` service defines `security`, `vsr server emit` also applies the compiled JSON body
 limits, CORS policy, trusted-proxy handling, auth rate limits, security headers, and built-in
 auth token settings automatically in the emitted server.
+
+When a `.eon` service defines `tls`, `vsr server emit` also wires Rustls-based HTTPS with HTTP/2
+in the emitted server, defaults `BIND_ADDR` to `127.0.0.1:8443`, and lets you generate local
+certificate PEM files with `vsr tls self-signed`.
 
 `vsr server emit` also carries the compiled `.eon` database engine config into the generated
 project. SQLite services now default to encrypted `database.engine = TursoLocal`, using
@@ -374,6 +378,29 @@ Current support:
 Current limitation:
 
 - This is still a project-local runtime adapter, not a true upstream SQLx `Any` driver.
+
+## TLS In `.eon`
+
+Bare `.eon` services can also enable Rustls-based HTTPS for generated Actix servers:
+
+```eon
+tls: {
+    cert_path: "certs/dev-cert.pem"
+    key_path: "certs/dev-key.pem"
+    cert_path_env: "TLS_CERT_PATH"
+    key_path_env: "TLS_KEY_PATH"
+}
+```
+
+Notes:
+
+- When `tls` is present, generated servers bind with Rustls and enable HTTP/2 automatically.
+- Relative certificate paths are resolved from the emitted project directory, or from
+  `<binary>.bundle/` for built binaries.
+- `vsr tls self-signed --config service.eon` generates compatible local PEM files using those
+  configured paths. With a single `.eon` file in the current directory, `vsr tls self-signed`
+  auto-discovers it.
+- `BIND_ADDR` defaults to `127.0.0.1:8443` for TLS-enabled services.
 
 ## Security In `.eon`
 
