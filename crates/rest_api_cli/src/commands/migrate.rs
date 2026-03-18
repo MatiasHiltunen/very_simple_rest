@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
-use rest_macro_core::auth::{AuthDbBackend, auth_migration_sql};
+use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
 use rest_macro_core::compiler;
 use rest_macro_core::db::{DbPool, query, query_scalar};
 use sqlx::Row;
@@ -15,6 +15,7 @@ use crate::commands::schema::{load_filtered_derive_service, load_schema_service}
 
 const MIGRATIONS_TABLE: &str = "_vsr_migrations";
 const BUILTIN_AUTH_MIGRATION: &str = "0000_builtin_auth.sql";
+const BUILTIN_AUTH_MANAGEMENT_MIGRATION: &str = "0001_builtin_auth_management.sql";
 
 pub fn generate_migration(input: &Path, output: &Path, force: bool) -> Result<()> {
     if output.exists() && !force {
@@ -93,7 +94,11 @@ pub fn generate_auth_migration(database_url: &str, output: &Path, force: bool) -
 
     let backend = AuthDbBackend::from_database_url(database_url)
         .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
-    let sql = auth_migration_sql(backend);
+    let sql = format!(
+        "{}\n{}",
+        auth_migration_sql(backend),
+        auth_management_migration_sql(backend)
+    );
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
@@ -391,19 +396,23 @@ pub async fn apply_migrations(
 pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>) -> Result<()> {
     let pool = connect_pool(database_url, config_path).await?;
     let backend = detect_runtime_backend(&pool).await?;
-    let sql = auth_migration_sql(backend);
-
-    match apply_named_migration(&pool, backend, BUILTIN_AUTH_MIGRATION, &sql).await? {
-        ApplyResult::Skipped => println!(
-            "{} {}",
-            "Auth migration already applied".yellow().bold(),
-            BUILTIN_AUTH_MIGRATION
+    for (name, sql) in [
+        (BUILTIN_AUTH_MIGRATION, auth_migration_sql(backend)),
+        (
+            BUILTIN_AUTH_MANAGEMENT_MIGRATION,
+            auth_management_migration_sql(backend),
         ),
-        ApplyResult::Applied => println!(
-            "{} {}",
-            "Applied auth migration".green().bold(),
-            BUILTIN_AUTH_MIGRATION
-        ),
+    ] {
+        match apply_named_migration(&pool, backend, name, &sql).await? {
+            ApplyResult::Skipped => println!(
+                "{} {}",
+                "Auth migration already applied".yellow().bold(),
+                name
+            ),
+            ApplyResult::Applied => {
+                println!("{} {}", "Applied auth migration".green().bold(), name)
+            }
+        }
     }
 
     Ok(())
@@ -967,8 +976,9 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        BUILTIN_AUTH_MIGRATION, apply_auth_migration, apply_migrations, check_derive_migration,
-        generate_derive_migration, generate_diff_migration, inspect_live_schema, migration_files,
+        BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, apply_auth_migration,
+        apply_migrations, check_derive_migration, generate_derive_migration,
+        generate_diff_migration, inspect_live_schema, migration_files,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1083,7 +1093,10 @@ mod tests {
             .into_iter()
             .map(|row| row.get::<String, _>("name"))
             .collect::<Vec<_>>();
-        assert_eq!(names, vec![BUILTIN_AUTH_MIGRATION]);
+        assert_eq!(
+            names,
+            vec![BUILTIN_AUTH_MIGRATION, BUILTIN_AUTH_MANAGEMENT_MIGRATION]
+        );
     }
 
     #[test]

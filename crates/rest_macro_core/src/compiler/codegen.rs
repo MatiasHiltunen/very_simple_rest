@@ -314,8 +314,17 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
     let issuer = option_string_tokens(security.auth.issuer.as_deref());
     let audience = option_string_tokens(security.auth.audience.as_deref());
     let access_token_ttl_seconds = Literal::i64_unsuffixed(security.auth.access_token_ttl_seconds);
+    let require_email_verification = security.auth.require_email_verification;
+    let verification_token_ttl_seconds =
+        Literal::i64_unsuffixed(security.auth.verification_token_ttl_seconds);
+    let password_reset_token_ttl_seconds =
+        Literal::i64_unsuffixed(security.auth.password_reset_token_ttl_seconds);
     let session_cookie =
         option_session_cookie_tokens(security.auth.session_cookie.as_ref(), runtime_crate);
+    let email = option_auth_email_tokens(security.auth.email.as_ref(), runtime_crate);
+    let portal = option_auth_ui_page_tokens(security.auth.portal.as_ref(), runtime_crate);
+    let admin_dashboard =
+        option_auth_ui_page_tokens(security.auth.admin_dashboard.as_ref(), runtime_crate);
     let content_type_options = security.headers.content_type_options;
 
     quote! {
@@ -350,7 +359,13 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 issuer: #issuer,
                 audience: #audience,
                 access_token_ttl_seconds: #access_token_ttl_seconds,
+                require_email_verification: #require_email_verification,
+                verification_token_ttl_seconds: #verification_token_ttl_seconds,
+                password_reset_token_ttl_seconds: #password_reset_token_ttl_seconds,
                 session_cookie: #session_cookie,
+                email: #email,
+                portal: #portal,
+                admin_dashboard: #admin_dashboard,
             },
         }
     }
@@ -433,6 +448,72 @@ fn option_session_cookie_tokens(
                     path: #path.to_owned(),
                     secure: #secure,
                     same_site: #same_site,
+                })
+            }
+        }
+        None => quote!(None),
+    }
+}
+
+fn option_auth_email_tokens(
+    value: Option<&crate::auth::AuthEmailSettings>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        Some(value) => {
+            let from_email = Literal::string(&value.from_email);
+            let from_name = option_string_tokens(value.from_name.as_deref());
+            let reply_to = option_string_tokens(value.reply_to.as_deref());
+            let public_base_url = option_string_tokens(value.public_base_url.as_deref());
+            let provider = match &value.provider {
+                crate::auth::AuthEmailProvider::Resend {
+                    api_key_env,
+                    api_base_url,
+                } => {
+                    let api_key_env = Literal::string(api_key_env);
+                    let api_base_url = option_string_tokens(api_base_url.as_deref());
+                    quote!(
+                        #runtime_crate::core::auth::AuthEmailProvider::Resend {
+                            api_key_env: #api_key_env.to_owned(),
+                            api_base_url: #api_base_url,
+                        }
+                    )
+                }
+                crate::auth::AuthEmailProvider::Smtp { connection_url_env } => {
+                    let connection_url_env = Literal::string(connection_url_env);
+                    quote!(
+                        #runtime_crate::core::auth::AuthEmailProvider::Smtp {
+                            connection_url_env: #connection_url_env.to_owned(),
+                        }
+                    )
+                }
+            };
+            quote! {
+                Some(#runtime_crate::core::auth::AuthEmailSettings {
+                    from_email: #from_email.to_owned(),
+                    from_name: #from_name,
+                    reply_to: #reply_to,
+                    public_base_url: #public_base_url,
+                    provider: #provider,
+                })
+            }
+        }
+        None => quote!(None),
+    }
+}
+
+fn option_auth_ui_page_tokens(
+    value: Option<&crate::auth::AuthUiPageSettings>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        Some(value) => {
+            let path = Literal::string(&value.path);
+            let title = Literal::string(&value.title);
+            quote! {
+                Some(#runtime_crate::core::auth::AuthUiPageSettings {
+                    path: #path.to_owned(),
+                    title: #title.to_owned(),
                 })
             }
         }

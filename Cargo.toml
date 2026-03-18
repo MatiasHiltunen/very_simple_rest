@@ -32,6 +32,10 @@ env_logger = "0.11"
 actix-cors = "0.7"
 actix-files = "0.6"
 turso = "0.6.0-pre.2"
+reqwest = { version = "0.13", features = ["json"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
+sha2 = "0.10"
+hex = "0.4"
 
 [workspace.package]
 version = "0.1.0"

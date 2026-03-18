@@ -2,6 +2,7 @@ use crate::error::Result;
 use colored::Colorize;
 use rand::distr::{Alphanumeric, SampleString};
 use rand::rng;
+use rest_macro_core::auth::AuthEmailProvider;
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
 use std::fmt::Write as _;
@@ -16,6 +17,8 @@ fn generate_random_secret(length: usize) -> String {
 struct EnvTemplateConfig {
     database_url: String,
     turso_encryption_var: Option<String>,
+    auth_email_env_var: Option<String>,
+    auth_email_env_comment: Option<String>,
     cors_origins_var: Option<String>,
     trusted_proxies_var: Option<String>,
     log_filter_env: String,
@@ -27,6 +30,8 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
         return Ok(EnvTemplateConfig {
             database_url: "sqlite:var/data/app.db?mode=rwc".to_owned(),
             turso_encryption_var: None,
+            auth_email_env_var: None,
+            auth_email_env_comment: None,
             cors_origins_var: None,
             trusted_proxies_var: None,
             log_filter_env: "RUST_LOG".to_owned(),
@@ -40,10 +45,25 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
         DatabaseEngine::TursoLocal(engine) => engine.encryption_key_env.clone(),
         DatabaseEngine::Sqlx => None,
     };
+    let (auth_email_env_var, auth_email_env_comment) = match service.security.auth.email.as_ref() {
+        Some(email) => match &email.provider {
+            AuthEmailProvider::Resend { api_key_env, .. } => (
+                Some(api_key_env.clone()),
+                Some("Built-in auth email delivery via Resend".to_owned()),
+            ),
+            AuthEmailProvider::Smtp { connection_url_env } => (
+                Some(connection_url_env.clone()),
+                Some("Built-in auth email delivery via SMTP/lettre".to_owned()),
+            ),
+        },
+        None => (None, None),
+    };
 
     Ok(EnvTemplateConfig {
         database_url: default_service_database_url(&service),
         turso_encryption_var,
+        auth_email_env_var,
+        auth_email_env_comment,
         cors_origins_var: service.security.cors.origins_env.clone(),
         trusted_proxies_var: service.security.trusted_proxies.proxies_env.clone(),
         log_filter_env: service.logging.filter_env.clone(),
@@ -101,6 +121,37 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     )
     .unwrap();
     writeln!(&mut output).unwrap();
+    if let Some(var_name) = &config.auth_email_env_var {
+        writeln!(
+            &mut output,
+            "# {}",
+            config
+                .auth_email_env_comment
+                .as_deref()
+                .unwrap_or("Built-in auth email delivery")
+        )
+        .unwrap();
+        if config
+            .auth_email_env_comment
+            .as_deref()
+            .unwrap_or_default()
+            .contains("SMTP")
+        {
+            writeln!(
+                &mut output,
+                "{var_name}=smtp://user:password@smtp.example.com:587"
+            )
+            .unwrap();
+        } else {
+            writeln!(&mut output, "{var_name}=change-me").unwrap();
+        }
+        writeln!(
+            &mut output,
+            "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
+        )
+        .unwrap();
+        writeln!(&mut output).unwrap();
+    }
     writeln!(&mut output, "# Admin User (optional)").unwrap();
     writeln!(
         &mut output,
@@ -205,5 +256,15 @@ mod tests {
             .expect("encrypted fixture should render");
         assert!(content.contains("DATABASE_URL=sqlite:var/data/turso_encrypted.db?mode=rwc"));
         assert!(content.contains("TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
+    }
+
+    #[test]
+    fn rendered_env_template_includes_auth_email_provider_env_hints() {
+        let content = render_env_template(Some(&fixture_path("auth_management_api.eon")))
+            .expect("auth management fixture should render");
+        assert!(content.contains("RESEND_API_KEY=change-me"));
+        assert!(content.contains(
+            "# Or mount a secret file and set RESEND_API_KEY_FILE=/run/secrets/RESEND_API_KEY"
+        ));
     }
 }

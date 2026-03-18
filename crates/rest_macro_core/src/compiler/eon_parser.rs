@@ -19,7 +19,10 @@ use super::model::{
     validate_row_policies, validate_security_config, validate_sql_identifier,
 };
 use crate::{
-    auth::{AuthSettings, SessionCookieSameSite, SessionCookieSettings},
+    auth::{
+        AuthEmailProvider, AuthEmailSettings, AuthSettings, AuthUiPageSettings,
+        SessionCookieSameSite, SessionCookieSettings,
+    },
     database::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
     },
@@ -157,7 +160,19 @@ struct AuthSecurityDocument {
     #[serde(default)]
     access_token_ttl_seconds: Option<i64>,
     #[serde(default)]
+    require_email_verification: Option<bool>,
+    #[serde(default)]
+    verification_token_ttl_seconds: Option<i64>,
+    #[serde(default)]
+    password_reset_token_ttl_seconds: Option<i64>,
+    #[serde(default)]
     session_cookie: Option<SessionCookieDocument>,
+    #[serde(default)]
+    email: Option<AuthEmailDocument>,
+    #[serde(default)]
+    portal: Option<AuthUiPageDocument>,
+    #[serde(default)]
+    admin_dashboard: Option<AuthUiPageDocument>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -174,6 +189,36 @@ struct SessionCookieDocument {
     secure: Option<bool>,
     #[serde(default)]
     same_site: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthEmailDocument {
+    from_email: String,
+    #[serde(default)]
+    from_name: Option<String>,
+    #[serde(default)]
+    reply_to: Option<String>,
+    #[serde(default)]
+    public_base_url: Option<String>,
+    provider: AuthEmailProviderDocument,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthEmailProviderDocument {
+    kind: String,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    api_base_url: Option<String>,
+    #[serde(default)]
+    connection_url_env: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthUiPageDocument {
+    path: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -595,17 +640,38 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         .unwrap_or_default();
 
     let auth = match document.auth {
-        Some(auth) => AuthSettings {
-            issuer: auth.issuer,
-            audience: auth.audience,
-            access_token_ttl_seconds: auth
-                .access_token_ttl_seconds
-                .unwrap_or(AuthSettings::default().access_token_ttl_seconds),
-            session_cookie: auth
-                .session_cookie
-                .map(parse_session_cookie_document)
-                .transpose()?,
-        },
+        Some(auth) => {
+            let defaults = AuthSettings::default();
+            AuthSettings {
+                issuer: auth.issuer,
+                audience: auth.audience,
+                access_token_ttl_seconds: auth
+                    .access_token_ttl_seconds
+                    .unwrap_or(defaults.access_token_ttl_seconds),
+                require_email_verification: auth
+                    .require_email_verification
+                    .unwrap_or(defaults.require_email_verification),
+                verification_token_ttl_seconds: auth
+                    .verification_token_ttl_seconds
+                    .unwrap_or(defaults.verification_token_ttl_seconds),
+                password_reset_token_ttl_seconds: auth
+                    .password_reset_token_ttl_seconds
+                    .unwrap_or(defaults.password_reset_token_ttl_seconds),
+                session_cookie: auth
+                    .session_cookie
+                    .map(parse_session_cookie_document)
+                    .transpose()?,
+                email: auth.email.map(parse_auth_email_document).transpose()?,
+                portal: auth
+                    .portal
+                    .map(|page| parse_auth_ui_page_document(page, "Account Portal"))
+                    .transpose()?,
+                admin_dashboard: auth
+                    .admin_dashboard
+                    .map(|page| parse_auth_ui_page_document(page, "Admin Dashboard"))
+                    .transpose()?,
+            }
+        }
         None => AuthSettings::default(),
     };
 
@@ -678,6 +744,54 @@ fn parse_session_cookie_document(
         path: document.path.unwrap_or(defaults.path),
         secure: document.secure.unwrap_or(defaults.secure),
         same_site,
+    })
+}
+
+fn parse_auth_email_document(document: AuthEmailDocument) -> syn::Result<AuthEmailSettings> {
+    Ok(AuthEmailSettings {
+        from_email: document.from_email,
+        from_name: document.from_name,
+        reply_to: document.reply_to,
+        public_base_url: document.public_base_url,
+        provider: parse_auth_email_provider_document(document.provider)?,
+    })
+}
+
+fn parse_auth_email_provider_document(
+    document: AuthEmailProviderDocument,
+) -> syn::Result<AuthEmailProvider> {
+    match document.kind.trim().to_ascii_lowercase().as_str() {
+        "resend" => Ok(AuthEmailProvider::Resend {
+            api_key_env: document.api_key_env.ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    "`security.auth.email.provider.api_key_env` is required for `kind = Resend`",
+                )
+            })?,
+            api_base_url: document.api_base_url,
+        }),
+        "smtp" => Ok(AuthEmailProvider::Smtp {
+            connection_url_env: document.connection_url_env.ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    "`security.auth.email.provider.connection_url_env` is required for `kind = Smtp`",
+                )
+            })?,
+        }),
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!("unsupported `security.auth.email.provider.kind` value `{other}`"),
+        )),
+    }
+}
+
+fn parse_auth_ui_page_document(
+    document: AuthUiPageDocument,
+    default_title: &str,
+) -> syn::Result<AuthUiPageSettings> {
+    Ok(AuthUiPageSettings {
+        path: document.path,
+        title: document.title.unwrap_or_else(|| default_title.to_owned()),
     })
 }
 

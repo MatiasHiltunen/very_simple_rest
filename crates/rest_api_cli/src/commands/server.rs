@@ -5,7 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 use colored::Colorize;
-use rest_macro_core::auth::{AuthDbBackend, auth_migration_sql};
+use rest_macro_core::auth::{
+    AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
+};
 use rest_macro_core::compiler::{self, DbBackend, OpenApiSpecOptions, ServiceSpec};
 use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
 use uuid::Uuid;
@@ -212,17 +214,24 @@ fn emit_server_project_inner(
     )?;
     write_file(&output_dir.join("openapi.json"), &openapi_json)?;
     copy_configured_static_dirs(input, output_dir, &service)?;
-    write_file(
-        &output_dir.join("migrations/0001_service.sql"),
-        &migration_sql,
-    )?;
-
     if include_builtin_auth {
         write_file(
             &output_dir.join("migrations/0000_auth.sql"),
             &auth_migration_sql(auth_backend(backend)),
         )?;
+        write_file(
+            &output_dir.join("migrations/0001_auth_management.sql"),
+            &auth_management_migration_sql(auth_backend(backend)),
+        )?;
     }
+    write_file(
+        &output_dir.join(if include_builtin_auth {
+            "migrations/0002_service.sql"
+        } else {
+            "migrations/0001_service.sql"
+        }),
+        &migration_sql,
+    )?;
 
     Ok(EmittedProject {
         project_dir: output_dir.to_path_buf(),
@@ -706,9 +715,12 @@ fn render_env_example(
     include_builtin_auth: bool,
 ) -> String {
     let auth_block = if include_builtin_auth {
-        "# Required when built-in auth is enabled\nJWT_SECRET=change-me\n# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/jwt_secret\n# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
+        format!(
+            "# Required when built-in auth is enabled\nJWT_SECRET=change-me\n# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/jwt_secret\n{}# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n",
+            render_auth_email_env_example(service)
+        )
     } else {
-        "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n"
+        "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n".to_owned()
     };
     let engine_block = match &service.database.engine {
         DatabaseEngine::Sqlx => String::new(),
@@ -743,6 +755,21 @@ fn render_env_example(
     )
 }
 
+fn render_auth_email_env_example(service: &ServiceSpec) -> String {
+    let Some(email) = service.security.auth.email.as_ref() else {
+        return String::new();
+    };
+
+    match &email.provider {
+        AuthEmailProvider::Resend { api_key_env, .. } => format!(
+            "# Built-in auth email delivery via Resend\n{api_key_env}=change-me\n# Or mount a secret file and set {api_key_env}_FILE=/run/secrets/{api_key_env}\n"
+        ),
+        AuthEmailProvider::Smtp { connection_url_env } => format!(
+            "# Built-in auth email delivery via SMTP/lettre\n{connection_url_env}=smtp://user:password@smtp.example.com:587\n# Or mount a secret file and set {connection_url_env}_FILE=/run/secrets/{connection_url_env}\n"
+        ),
+    }
+}
+
 fn render_project_readme(
     package_name: &str,
     service: &ServiceSpec,
@@ -750,7 +777,7 @@ fn render_project_readme(
     include_builtin_auth: bool,
 ) -> String {
     let auth_note = if include_builtin_auth {
-        "The generated project includes built-in auth/account routes and `migrations/0000_auth.sql`. Set `JWT_SECRET` before starting the server.\n"
+        "The generated project includes built-in auth/account routes plus `migrations/0000_auth.sql` and `migrations/0001_auth_management.sql`. Set `JWT_SECRET` before starting the server.\n"
     } else {
         "The generated project does not include built-in auth/account routes by default.\n"
     };
@@ -1176,12 +1203,15 @@ mod tests {
         .expect("server project should emit");
 
         assert!(root.join("migrations/0000_auth.sql").exists());
+        assert!(root.join("migrations/0001_auth_management.sql").exists());
+        assert!(root.join("migrations/0002_service.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("auth::auth_routes_with_settings"));
         assert!(main_rs.contains("ensure_jwt_secret_configured"));
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"/auth/login\""));
         assert!(openapi.contains("\"Account\""));
+        assert!(openapi.contains("\"/auth/password-reset/request\""));
     }
 
     #[test]
@@ -1322,6 +1352,27 @@ mod tests {
     }
 
     #[test]
+    fn emit_server_project_surfaces_auth_email_env_hints() {
+        let root = test_root();
+        emit_server_project(
+            &fixture_path("auth_management_api.eon"),
+            &root,
+            Some("auth-management-server".to_owned()),
+            true,
+            false,
+        )
+        .expect("auth management server project should emit");
+
+        let env_example = read_to_string(&root.join(".env.example"));
+        assert!(env_example.contains("RESEND_API_KEY=change-me"));
+        assert!(env_example.contains("RESEND_API_KEY_FILE=/run/secrets/RESEND_API_KEY"));
+
+        let openapi = read_to_string(&root.join("openapi.json"));
+        assert!(openapi.contains("\"/auth/account/password\""));
+        assert!(openapi.contains("\"/auth/admin/users/{id}/verification\""));
+    }
+
+    #[test]
     fn export_generated_runtime_artifacts_writes_sidecar_bundle() {
         let root = test_root();
         let project_dir = root.join("project");
@@ -1337,6 +1388,11 @@ mod tests {
         )
         .expect("eon should write");
         fs::write(migrations.join("0000_auth.sql"), "-- auth\n").expect("migration should write");
+        fs::write(
+            migrations.join("0001_auth_management.sql"),
+            "-- auth management\n",
+        )
+        .expect("management migration should write");
 
         let output = root.join("dist/api-server");
         let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
@@ -1351,6 +1407,11 @@ mod tests {
         assert!(artifact_dir.join("openapi.json").exists());
         assert!(artifact_dir.join("service.eon").exists());
         assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
+        assert!(
+            artifact_dir
+                .join("migrations/0001_auth_management.sql")
+                .exists()
+        );
     }
 
     #[test]

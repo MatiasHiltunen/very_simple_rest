@@ -267,6 +267,101 @@ fn append_builtin_auth_components(
             "additionalProperties": true
         }),
     );
+    schemas.insert(
+        "VerifyEmailInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "token": { "type": "string" }
+            },
+            "required": ["token"]
+        }),
+    );
+    schemas.insert(
+        "VerificationResendInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "email": { "type": "string", "format": "email" }
+            },
+            "required": ["email"]
+        }),
+    );
+    schemas.insert(
+        "PasswordResetRequestInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "email": { "type": "string", "format": "email" }
+            },
+            "required": ["email"]
+        }),
+    );
+    schemas.insert(
+        "PasswordResetConfirmInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "token": { "type": "string" },
+                "new_password": { "type": "string" }
+            },
+            "required": ["token", "new_password"]
+        }),
+    );
+    schemas.insert(
+        "ChangePasswordInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "current_password": { "type": "string" },
+                "new_password": { "type": "string" }
+            },
+            "required": ["current_password", "new_password"]
+        }),
+    );
+    schemas.insert(
+        "ManagedUserPatchInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "role": { "type": "string" },
+                "email_verified": { "type": "boolean" }
+            }
+        }),
+    );
+    schemas.insert(
+        "AuthAccountResponse".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer", "format": "int64" },
+                "email": { "type": "string", "format": "email" },
+                "role": { "type": "string" },
+                "roles": { "type": "array", "items": { "type": "string" } },
+                "email_verified": { "type": "boolean" },
+                "email_verified_at": { "type": "string", "format": "date-time" },
+                "created_at": { "type": "string", "format": "date-time" },
+                "updated_at": { "type": "string", "format": "date-time" }
+            },
+            "required": ["id", "email", "role", "roles", "email_verified"],
+            "additionalProperties": true
+        }),
+    );
+    schemas.insert(
+        "AuthAdminUserListResponse".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": schema_ref("AuthAccountResponse")
+                },
+                "limit": { "type": "integer", "format": "int32" },
+                "offset": { "type": "integer", "format": "int32" }
+            },
+            "required": ["items", "limit", "offset"]
+        }),
+    );
 
     paths.insert(
         "/auth/register".to_owned(),
@@ -331,6 +426,242 @@ fn append_builtin_auth_components(
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthMeResponse")),
                     "401": api_error_response("Authentication required")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/account".to_owned(),
+        json!({
+            "get": {
+                "tags": ["Account"],
+                "summary": "Get the authenticated account record",
+                "operationId": "getAccountRecord",
+                "security": bearer_security(),
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthAccountResponse")),
+                    "401": api_error_response("Authentication required")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/account/password".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Account"],
+                "summary": "Change the authenticated account password",
+                "operationId": "changeAccountPassword",
+                "security": bearer_security(),
+                "requestBody": json_request_body("ChangePasswordInput"),
+                "responses": {
+                    "204": plain_response("Password updated"),
+                    "400": api_error_response("Invalid request body"),
+                    "401": api_error_response("Authentication required"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/account/verification".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Account"],
+                "summary": "Resend the authenticated account verification email",
+                "operationId": "resendAccountVerificationEmail",
+                "security": bearer_security(),
+                "responses": {
+                    "202": plain_response("Verification email sent"),
+                    "204": plain_response("Already verified"),
+                    "401": api_error_response("Authentication required"),
+                    "503": api_error_response("Email delivery unavailable")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/verify-email".to_owned(),
+        json!({
+            "get": {
+                "tags": ["Auth"],
+                "summary": "Open the built-in email verification page",
+                "operationId": "openVerifyEmailPage",
+                "parameters": [{
+                    "name": "token",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "string" }
+                }],
+                "responses": {
+                    "200": plain_response("Verification result page")
+                }
+            },
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Verify an email address with a token",
+                "operationId": "verifyEmailAddress",
+                "requestBody": json_request_body("VerifyEmailInput"),
+                "responses": {
+                    "204": plain_response("Email verified"),
+                    "400": api_error_response("Invalid or expired token"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/verification/resend".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Resend a verification email by email address",
+                "operationId": "resendVerificationEmail",
+                "requestBody": json_request_body("VerificationResendInput"),
+                "responses": {
+                    "202": plain_response("Verification email sent"),
+                    "400": api_error_response("Invalid request body"),
+                    "503": api_error_response("Email delivery unavailable")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/password-reset".to_owned(),
+        json!({
+            "get": {
+                "tags": ["Auth"],
+                "summary": "Open the built-in password reset page",
+                "operationId": "openPasswordResetPage",
+                "parameters": [{
+                    "name": "token",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "string" }
+                }],
+                "responses": {
+                    "200": plain_response("Password reset page")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/password-reset/request".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Request a password reset email",
+                "operationId": "requestPasswordReset",
+                "requestBody": json_request_body("PasswordResetRequestInput"),
+                "responses": {
+                    "202": plain_response("Password reset email sent"),
+                    "400": api_error_response("Invalid request body"),
+                    "503": api_error_response("Email delivery unavailable")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/password-reset/confirm".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Confirm a password reset with a token",
+                "operationId": "confirmPasswordReset",
+                "requestBody": json_request_body("PasswordResetConfirmInput"),
+                "responses": {
+                    "204": plain_response("Password updated"),
+                    "400": api_error_response("Invalid or expired token"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/admin/users".to_owned(),
+        json!({
+            "get": {
+                "tags": ["Admin"],
+                "summary": "List built-in auth users",
+                "operationId": "listBuiltinAuthUsers",
+                "security": bearer_security(),
+                "parameters": [
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "required": false,
+                        "schema": { "type": "integer", "format": "int32" }
+                    },
+                    {
+                        "name": "offset",
+                        "in": "query",
+                        "required": false,
+                        "schema": { "type": "integer", "format": "int32" }
+                    },
+                    {
+                        "name": "email",
+                        "in": "query",
+                        "required": false,
+                        "schema": { "type": "string" }
+                    }
+                ],
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthAdminUserListResponse")),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/admin/users/{id}".to_owned(),
+        json!({
+            "get": {
+                "tags": ["Admin"],
+                "summary": "Get a built-in auth user",
+                "operationId": "getBuiltinAuthUser",
+                "security": bearer_security(),
+                "parameters": [id_parameter("id", "user")],
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthAccountResponse")),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("User not found")
+                }
+            },
+            "patch": {
+                "tags": ["Admin"],
+                "summary": "Update a built-in auth user",
+                "operationId": "updateBuiltinAuthUser",
+                "security": bearer_security(),
+                "parameters": [id_parameter("id", "user")],
+                "requestBody": json_request_body("ManagedUserPatchInput"),
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthAccountResponse")),
+                    "400": api_error_response("Invalid request body"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("User not found")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        "/auth/admin/users/{id}/verification".to_owned(),
+        json!({
+            "post": {
+                "tags": ["Admin"],
+                "summary": "Resend verification email for a built-in auth user",
+                "operationId": "resendBuiltinAuthUserVerification",
+                "security": bearer_security(),
+                "parameters": [id_parameter("id", "user")],
+                "responses": {
+                    "202": plain_response("Verification email sent"),
+                    "204": plain_response("Already verified"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("User not found"),
+                    "503": api_error_response("Email delivery unavailable")
                 }
             }
         }),

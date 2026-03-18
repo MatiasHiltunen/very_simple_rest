@@ -1,0 +1,42 @@
+module: "auth_management_api"
+security: {
+    auth: {
+        issuer: "auth_management_tests"
+        audience: "auth_management_clients"
+        require_email_verification: true
+        session_cookie: {
+            secure: false
+        }
+        email: {
+            from_email: "noreply@example.com"
+            from_name: "VSR Auth"
+            provider: {
+                kind: Resend
+                api_key_env: "RESEND_API_KEY"
+            }
+        }
+        portal: {
+            path: "/auth/portal"
+            title: "Account Portal"
+        }
+        admin_dashboard: {
+            path: "/auth/admin"
+            title: "Admin Dashboard"
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

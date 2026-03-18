@@ -3,12 +3,14 @@ use std::{collections::HashSet, net::IpAddr, str::FromStr};
 use actix_web::http::{Method, Uri, header::HeaderName};
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::Span;
+use quote::ToTokens;
 use syn::{Ident, Type};
 
-use crate::auth::SessionCookieSameSite;
+use crate::auth::{AuthEmailProvider, SessionCookieSameSite};
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
 use crate::security::SecurityConfig;
+use url::Url;
 
 pub const GENERATED_DATETIME_ALIAS: &str = "__VsrDateTimeUtc";
 pub const GENERATED_DATE_ALIAS: &str = "__VsrNaiveDate";
@@ -409,6 +411,51 @@ impl ResourceSpec {
     }
 }
 
+impl std::fmt::Debug for FieldSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldSpec")
+            .field("ident", &self.ident)
+            .field("name", &self.name())
+            .field("ty", &self.ty.to_token_stream().to_string())
+            .field("sql_type", &self.sql_type)
+            .field("is_id", &self.is_id)
+            .field("generated", &self.generated)
+            .field("relation", &self.relation)
+            .field("validation", &self.validation)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ResourceSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceSpec")
+            .field("struct_ident", &self.struct_ident)
+            .field("impl_module_ident", &self.impl_module_ident)
+            .field("table_name", &self.table_name)
+            .field("id_field", &self.id_field)
+            .field("db", &self.db)
+            .field("roles", &self.roles)
+            .field("policies", &self.policies)
+            .field("list", &self.list)
+            .field("fields", &self.fields)
+            .field("write_style", &self.write_style)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ServiceSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceSpec")
+            .field("module_ident", &self.module_ident)
+            .field("resources", &self.resources)
+            .field("static_mounts", &self.static_mounts)
+            .field("database", &self.database)
+            .field("logging", &self.logging)
+            .field("security", &self.security)
+            .finish()
+    }
+}
+
 pub fn default_service_database_url(service: &ServiceSpec) -> String {
     match &service.database.engine {
         DatabaseEngine::TursoLocal(engine) => sqlite_url_for_path(&engine.path),
@@ -799,6 +846,27 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         ));
     }
 
+    if security.auth.verification_token_ttl_seconds <= 0 {
+        return Err(syn::Error::new(
+            span,
+            "`security.auth.verification_token_ttl_seconds` must be greater than 0",
+        ));
+    }
+
+    if security.auth.password_reset_token_ttl_seconds <= 0 {
+        return Err(syn::Error::new(
+            span,
+            "`security.auth.password_reset_token_ttl_seconds` must be greater than 0",
+        ));
+    }
+
+    if security.auth.require_email_verification && security.auth.email.is_none() {
+        return Err(syn::Error::new(
+            span,
+            "`security.auth.require_email_verification = true` requires `security.auth.email`",
+        ));
+    }
+
     if matches!(security.cors.max_age_seconds, Some(0)) {
         return Err(syn::Error::new(
             span,
@@ -946,6 +1014,120 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
                     ),
                 ));
             }
+        }
+    }
+
+    if let Some(email) = &security.auth.email {
+        if email.from_email.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.email.from_email` cannot be empty",
+            ));
+        }
+        if !email.from_email.contains('@') {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.email.from_email` must look like an email address",
+            ));
+        }
+        if matches!(email.reply_to.as_deref(), Some("")) {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.email.reply_to` cannot be empty",
+            ));
+        }
+        if let Some(public_base_url) = &email.public_base_url {
+            Url::parse(public_base_url).map_err(|_| {
+                syn::Error::new(
+                    span,
+                    "`security.auth.email.public_base_url` must be a valid absolute URL",
+                )
+            })?;
+        }
+
+        match &email.provider {
+            AuthEmailProvider::Resend {
+                api_key_env,
+                api_base_url,
+            } => {
+                if api_key_env.trim().is_empty() {
+                    return Err(syn::Error::new(
+                        span,
+                        "`security.auth.email.provider.api_key_env` cannot be empty",
+                    ));
+                }
+                if let Some(api_base_url) = api_base_url {
+                    Url::parse(api_base_url).map_err(|_| {
+                        syn::Error::new(
+                            span,
+                            "`security.auth.email.provider.api_base_url` must be a valid absolute URL",
+                        )
+                    })?;
+                }
+            }
+            AuthEmailProvider::Smtp { connection_url_env } => {
+                if connection_url_env.trim().is_empty() {
+                    return Err(syn::Error::new(
+                        span,
+                        "`security.auth.email.provider.connection_url_env` cannot be empty",
+                    ));
+                }
+            }
+        }
+    }
+
+    let reserved_auth_paths = [
+        "/auth/register",
+        "/auth/login",
+        "/auth/logout",
+        "/auth/me",
+        "/auth/account",
+        "/auth/account/password",
+        "/auth/account/verification",
+        "/auth/verify-email",
+        "/auth/verification/resend",
+        "/auth/password-reset",
+        "/auth/password-reset/request",
+        "/auth/password-reset/confirm",
+        "/auth/admin/users",
+    ];
+    let mut custom_paths = std::collections::HashSet::<String>::new();
+    for (label, page) in [
+        ("portal", security.auth.portal.as_ref()),
+        ("admin_dashboard", security.auth.admin_dashboard.as_ref()),
+    ] {
+        let Some(page) = page else {
+            continue;
+        };
+        if page.path.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!("`security.auth.{label}.path` cannot be empty"),
+            ));
+        }
+        if !page.path.starts_with('/') {
+            return Err(syn::Error::new(
+                span,
+                format!("`security.auth.{label}.path` must start with `/`"),
+            ));
+        }
+        if page.title.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!("`security.auth.{label}.title` cannot be empty"),
+            ));
+        }
+        if reserved_auth_paths.contains(&page.path.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`security.auth.{label}.path` conflicts with a built-in auth route: `{}`",
+                    page.path
+                ),
+            ));
+        }
+        if !custom_paths.insert(page.path.clone()) {
+            return Err(syn::Error::new(span, "custom auth UI paths must be unique"));
         }
     }
 
