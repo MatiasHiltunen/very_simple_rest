@@ -22,7 +22,7 @@
     <div class="page-grid" aria-hidden="true"></div>
 
     <div class="site-shell">
-        <header class="site-header">
+        <header class="site-header" id="siteHeader">
             <a href="/" data-link class="brand" aria-label="Bridgeboard home">
                 <span class="brand-mark"></span>
                 <span class="brand-copy">
@@ -65,6 +65,85 @@
                     Open account
                 </button>
                 <div id="sessionChip" class="session-chip">Guest session</div>
+            </div>
+
+            <div class="mobile-header-actions">
+                <button id="mobileAccountShortcut" class="header-link ghost" type="button">
+                    Account
+                </button>
+                <button
+                    id="mobileMenuButton"
+                    class="header-link ghost mobile-menu-toggle"
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls="mobileNavTray"
+                    aria-label="Toggle navigation menu"
+                >
+                    <span class="mobile-menu-icon" aria-hidden="true"></span>
+                    <span>Menu</span>
+                </button>
+            </div>
+
+            <div id="mobileNavTray" class="mobile-nav-tray" hidden>
+                <div class="mobile-nav-shell">
+                    <div class="mobile-nav-summary">
+                        <div id="mobileSessionChip" class="session-chip">Guest session</div>
+                        <p id="mobileSessionHint" class="mobile-nav-hint">
+                            Browse the public catalog or open account tools to sign in.
+                        </p>
+                    </div>
+
+                    <nav class="mobile-nav-list" aria-label="Mobile navigation">
+                        <a href="/" data-link data-nav="home">Overview</a>
+                        <a href="/organizations" data-link data-nav="organizations">Organizations</a>
+                        <a href="/topics" data-link data-nav="topics">Thesis topics</a>
+                        <a href="/requests" data-link data-nav="requests">Requests</a>
+                        <a href="/account" data-link data-nav="account">Account</a>
+                        <a
+                            href="/admin/content"
+                            data-link
+                            data-nav="admin-content"
+                            id="mobileNavAdminContent"
+                            hidden
+                        >
+                            Admin content
+                        </a>
+                        <a
+                            href="/admin/users"
+                            data-link
+                            data-nav="admin-users"
+                            id="mobileNavAdminUsers"
+                            hidden
+                        >
+                            Admin users
+                        </a>
+                    </nav>
+
+                    <div class="mobile-nav-tools">
+                        <a
+                            id="mobilePortalLink"
+                            class="header-link ghost"
+                            href="/api/auth/portal"
+                            target="_blank"
+                            rel="noreferrer"
+                        >
+                            Open portal
+                        </a>
+                        <a
+                            id="mobileBuiltinAdminLink"
+                            class="header-link ghost"
+                            href="/api/auth/admin"
+                            target="_blank"
+                            rel="noreferrer"
+                            hidden
+                        >
+                            Built-in admin
+                        </a>
+                        <button id="mobileDrawerAccountButton" class="header-link primary" type="button">
+                            Open account
+                        </button>
+                    </div>
+                </div>
             </div>
         </header>
 

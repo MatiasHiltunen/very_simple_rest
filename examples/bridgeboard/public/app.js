@@ -2,6 +2,7 @@ const API_BASE = "/api";
 const AUTH_PORTAL_URL = "/api/auth/portal";
 const AUTH_ADMIN_URL = "/api/auth/admin";
 const CSRF_COOKIE_NAME = "vsr_csrf";
+const MOBILE_NAV_BREAKPOINT = 980;
 
 const DEMO_DATA = {
   organizations: [
@@ -104,28 +105,54 @@ const state = {
   currentUser: null,
   account: null,
   organizationOptions: [],
+  mobileNavOpen: false,
   route: null,
   view: null,
 };
 
 const elements = {
+  siteHeader: document.getElementById("siteHeader"),
   app: document.getElementById("app"),
   noticeBar: document.getElementById("noticeBar"),
   sessionChip: document.getElementById("sessionChip"),
   navAdminContent: document.getElementById("navAdminContent"),
   navAdminUsers: document.getElementById("navAdminUsers"),
+  mobileSessionChip: document.getElementById("mobileSessionChip"),
+  mobileSessionHint: document.getElementById("mobileSessionHint"),
+  mobileNavAdminContent: document.getElementById("mobileNavAdminContent"),
+  mobileNavAdminUsers: document.getElementById("mobileNavAdminUsers"),
   builtinAdminLink: document.getElementById("builtinAdminLink"),
+  mobileBuiltinAdminLink: document.getElementById("mobileBuiltinAdminLink"),
   portalLink: document.getElementById("portalLink"),
+  mobilePortalLink: document.getElementById("mobilePortalLink"),
   accountShortcut: document.getElementById("accountShortcut"),
+  mobileAccountShortcut: document.getElementById("mobileAccountShortcut"),
+  mobileDrawerAccountButton: document.getElementById("mobileDrawerAccountButton"),
+  mobileMenuButton: document.getElementById("mobileMenuButton"),
+  mobileNavTray: document.getElementById("mobileNavTray"),
 };
 
 document.addEventListener("click", handleClick);
 document.addEventListener("submit", handleSubmit);
+document.addEventListener("keydown", handleKeydown);
 window.addEventListener("popstate", () => {
   void navigateToCurrentLocation({ preserveScroll: true });
 });
+window.addEventListener("resize", handleResize);
 elements.accountShortcut.addEventListener("click", () => {
+  closeMobileNav();
   navigate("/account");
+});
+elements.mobileAccountShortcut.addEventListener("click", () => {
+  closeMobileNav();
+  navigate("/account");
+});
+elements.mobileDrawerAccountButton.addEventListener("click", () => {
+  closeMobileNav();
+  navigate("/account");
+});
+elements.mobileMenuButton.addEventListener("click", () => {
+  toggleMobileNav();
 });
 
 bootstrap();
@@ -137,7 +164,50 @@ async function bootstrap() {
   await navigateToCurrentLocation({ preserveScroll: true });
 }
 
+function isMobileShell() {
+  return window.innerWidth <= MOBILE_NAV_BREAKPOINT;
+}
+
+function openMobileNav() {
+  if (!isMobileShell()) {
+    return;
+  }
+  state.mobileNavOpen = true;
+  syncHeader();
+}
+
+function closeMobileNav() {
+  if (!state.mobileNavOpen) {
+    return;
+  }
+  state.mobileNavOpen = false;
+  syncHeader();
+}
+
+function toggleMobileNav() {
+  if (state.mobileNavOpen) {
+    closeMobileNav();
+  } else {
+    openMobileNav();
+  }
+}
+
+function handleKeydown(event) {
+  if (event.key === "Escape") {
+    closeMobileNav();
+  }
+}
+
+function handleResize() {
+  if (!isMobileShell()) {
+    closeMobileNav();
+  } else {
+    syncHeader();
+  }
+}
+
 async function navigateToCurrentLocation({ preserveScroll = false } = {}) {
+  closeMobileNav();
   state.route = parseRoute(window.location.pathname, window.location.search);
   syncHeader();
   renderLoading(state.route.title, state.route.description);
@@ -1720,6 +1790,14 @@ function renderCollection(items, renderItem, emptyMessage) {
 }
 
 async function handleClick(event) {
+  if (
+    state.mobileNavOpen &&
+    elements.siteHeader &&
+    !elements.siteHeader.contains(event.target)
+  ) {
+    closeMobileNav();
+  }
+
   const link = event.target.closest("a[data-link]");
   if (link) {
     const targetUrl = new URL(link.href, window.location.origin);
@@ -2287,17 +2365,51 @@ function syncHeader() {
 
   const authenticated = Boolean(state.account);
   const admin = isAdmin();
-  elements.sessionChip.textContent = authenticated
+  const sessionLabel = authenticated
     ? `${state.account.email} · ${state.account.role}`
     : "Guest session";
+  const sessionHint = authenticated
+    ? state.account.email_verified
+      ? "Your account is verified and ready for collaboration workflows."
+      : "Your account is signed in, but email verification is still pending."
+    : "Browse the public catalog or open account tools to sign in.";
+
+  elements.sessionChip.textContent = sessionLabel;
+  elements.mobileSessionChip.textContent = sessionLabel;
   elements.sessionChip.classList.toggle("is-authenticated", authenticated);
+  elements.mobileSessionChip.classList.toggle("is-authenticated", authenticated);
+  elements.mobileSessionHint.textContent = sessionHint;
+
   elements.navAdminContent.hidden = !admin;
   elements.navAdminUsers.hidden = !admin;
+  elements.mobileNavAdminContent.hidden = !admin;
+  elements.mobileNavAdminUsers.hidden = !admin;
   elements.builtinAdminLink.hidden = !admin;
+  elements.mobileBuiltinAdminLink.hidden = !admin;
   elements.portalLink.href = AUTH_PORTAL_URL;
+  elements.mobilePortalLink.href = AUTH_PORTAL_URL;
   elements.accountShortcut.textContent = authenticated
     ? "Account workspace"
     : "Open account";
+  elements.mobileAccountShortcut.textContent = authenticated
+    ? "Workspace"
+    : "Account";
+  elements.mobileDrawerAccountButton.textContent = authenticated
+    ? "Open account workspace"
+    : "Open account";
+
+  const mobileNavOpen = state.mobileNavOpen && isMobileShell();
+  elements.siteHeader.classList.toggle("is-mobile-nav-open", mobileNavOpen);
+  elements.mobileMenuButton.setAttribute(
+    "aria-expanded",
+    mobileNavOpen ? "true" : "false",
+  );
+  elements.mobileMenuButton.setAttribute(
+    "aria-label",
+    mobileNavOpen ? "Close navigation menu" : "Open navigation menu",
+  );
+  elements.mobileNavTray.hidden = !mobileNavOpen;
+  document.body.classList.toggle("mobile-nav-open", mobileNavOpen);
 }
 
 function activeNavKey(routeName) {
