@@ -1065,8 +1065,16 @@ mod tests {
         export_generated_runtime_artifacts, is_text_file_busy_failure, resolve_binary_output_path,
         resolve_generated_package_name, sanitize_package_name,
     };
+    use crate::commands::db::database_url_from_service_config;
+    use crate::commands::setup::run_setup;
+    use reqwest::blocking::Client;
+    use serde_json::{Value, json};
     use std::fs;
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
     use uuid::Uuid;
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -1089,6 +1097,120 @@ mod tests {
 
     fn read_to_string(path: &Path) -> String {
         fs::read_to_string(path).expect("generated file should be readable")
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn capture_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = fs::read_dir(dir)
+            .expect("capture dir should exist")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    fn extract_token_from_text(text: &str) -> String {
+        let start = text
+            .find("token=")
+            .expect("email should contain a token parameter")
+            + "token=".len();
+        text[start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect()
+    }
+
+    fn token_from_capture(path: &Path) -> String {
+        let body = read_to_string(path);
+        let payload: Value = serde_json::from_str(&body).expect("capture file should be JSON");
+        let text_body = payload
+            .get("text_body")
+            .and_then(Value::as_str)
+            .expect("capture payload should contain text_body");
+        extract_token_from_text(text_body)
+    }
+
+    fn free_bind_addr() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
+        let addr = listener
+            .local_addr()
+            .expect("listener address should resolve");
+        drop(listener);
+        format!("127.0.0.1:{}", addr.port())
+    }
+
+    fn wait_for_http_ready(client: &Client, url: &str, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut last_error = None;
+
+        while Instant::now() < deadline {
+            match client.get(url).send() {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) => {
+                    last_error = Some(format!("server responded with {}", response.status()));
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        Err(last_error.unwrap_or_else(|| "server never became ready".to_owned()))
+    }
+
+    fn wait_for_capture_count(dir: &Path, expected: usize, timeout: Duration) -> Vec<PathBuf> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let files = capture_files(dir);
+            if files.len() >= expected {
+                return files;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        panic!(
+            "expected at least {expected} captured emails in {}, found {}",
+            dir.display(),
+            capture_files(dir).len()
+        );
+    }
+
+    struct SpawnedBinary {
+        child: Child,
+        stdout_log: PathBuf,
+        stderr_log: PathBuf,
+    }
+
+    impl SpawnedBinary {
+        fn new(child: Child, stdout_log: PathBuf, stderr_log: PathBuf) -> Self {
+            Self {
+                child,
+                stdout_log,
+                stderr_log,
+            }
+        }
+
+        fn logs(&self) -> String {
+            let stdout = fs::read_to_string(&self.stdout_log).unwrap_or_default();
+            let stderr = fs::read_to_string(&self.stderr_log).unwrap_or_default();
+            format!(
+                "stdout:\n{stdout}\n\nstderr:\n{stderr}\nlog files:\n- {}\n- {}",
+                self.stdout_log.display(),
+                self.stderr_log.display()
+            )
+        }
+    }
+
+    impl Drop for SpawnedBinary {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 
     #[test]
@@ -1455,6 +1577,280 @@ mod tests {
 
         assert!(artifact_dir.join("static_site/index.html").exists());
         assert!(artifact_dir.join("static_site/assets/app.js").exists());
+    }
+
+    #[test]
+    fn build_server_binary_bridgeboard_supports_clean_room_e2e() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let root = test_root();
+        let dist_dir = root.join("dist");
+        fs::create_dir_all(&dist_dir).expect("dist dir should exist");
+
+        let output = dist_dir.join(binary_file_name("bridgeboard"));
+        build_server_binary(
+            &example_path("bridgeboard/bridgeboard.eon"),
+            &output,
+            None,
+            Some(root.join("build")),
+            true,
+            false,
+            None,
+            false,
+            false,
+        )
+        .expect("bridgeboard binary should build");
+
+        let artifact_dir = build_artifact_dir(&output).expect("artifact dir should resolve");
+        let bundle_eon = artifact_dir.join("bridgeboard.eon");
+        let database_url = database_url_from_service_config(&bundle_eon)
+            .expect("bundle config should resolve a database url");
+        assert_eq!(database_url, "sqlite:var/data/bridgeboard.db?mode=rwc");
+
+        let capture_dir = root.join("capture");
+        fs::create_dir_all(&capture_dir).expect("capture dir should exist");
+        let jwt_secret = "bridgeboard-e2e-secret";
+        let turso_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        unsafe {
+            std::env::set_var("JWT_SECRET", jwt_secret);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", turso_key);
+            std::env::set_var("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir);
+            std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+            std::env::set_var("ADMIN_PASSWORD", "password123");
+        }
+
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime should initialize")
+            .block_on(run_setup(&database_url, Some(&bundle_eon), true))
+            .expect("setup should initialize the bridgeboard database");
+
+        assert!(
+            dist_dir.join("var/data/bridgeboard.db").exists(),
+            "setup should create the bundle-relative bridgeboard database"
+        );
+        assert!(
+            !dist_dir.join("app.db").exists(),
+            "setup should not create a stray app.db alongside the built binary"
+        );
+
+        let bind_addr = free_bind_addr();
+        let base_url = format!("http://{bind_addr}");
+        let stdout_log = root.join("bridgeboard.stdout.log");
+        let stderr_log = root.join("bridgeboard.stderr.log");
+        let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+        let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+        let child = Command::new(&output)
+            .current_dir(&root)
+            .env("BIND_ADDR", &bind_addr)
+            .env("JWT_SECRET", jwt_secret)
+            .env("TURSO_ENCRYPTION_KEY", turso_key)
+            .env("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("built binary should start");
+        let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("http client should build");
+        if let Err(error) =
+            wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+        {
+            panic!(
+                "bridgeboard binary never became ready: {error}\n{}",
+                server.logs()
+            );
+        }
+
+        let root_response = client
+            .get(format!("{base_url}/"))
+            .send()
+            .expect("root page should load");
+        assert!(root_response.status().is_success());
+        let root_body = root_response.text().expect("root page body should read");
+        assert!(root_body.contains("Bridgeboard"));
+
+        let app_js_response = client
+            .get(format!("{base_url}/app.js"))
+            .send()
+            .expect("app.js should load");
+        assert!(app_js_response.status().is_success());
+
+        let public_catalog_response = client
+            .get(format!("{base_url}/api/organization"))
+            .send()
+            .expect("organization list should load");
+        assert!(public_catalog_response.status().is_success());
+        let public_catalog: Value = public_catalog_response
+            .json()
+            .expect("organization list should decode");
+        assert_eq!(public_catalog.get("total").and_then(Value::as_i64), Some(0));
+
+        let admin_login_response = client
+            .post(format!("{base_url}/api/auth/login"))
+            .json(&json!({
+                "email": "admin@example.com",
+                "password": "password123",
+            }))
+            .send()
+            .expect("admin login should succeed");
+        assert_eq!(admin_login_response.status(), reqwest::StatusCode::OK);
+        let admin_login: Value = admin_login_response
+            .json()
+            .expect("admin login response should decode");
+        let admin_token = admin_login
+            .get("token")
+            .and_then(Value::as_str)
+            .expect("admin login should return a token")
+            .to_owned();
+
+        let create_org_response = client
+            .post(format!("{base_url}/api/organization"))
+            .bearer_auth(&admin_token)
+            .json(&json!({
+                "slug": "nordic-bridge",
+                "name": "Nordic Bridge Institute",
+                "country": "Finland",
+                "city": "Oulu",
+                "website_url": "https://bridge.example",
+                "contact_email": "hello@bridge.example",
+                "collaboration_stage": "Open call",
+                "summary": "Coordinates cross-border thesis work between applied research labs and regional industry partners."
+            }))
+            .send()
+            .expect("organization create should succeed");
+        assert_eq!(create_org_response.status(), reqwest::StatusCode::CREATED);
+        let organization_location = create_org_response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok())
+            .expect("organization create should expose a location")
+            .to_owned();
+        let organization: Value = create_org_response
+            .json()
+            .expect("organization create response should decode");
+        let organization_id = organization
+            .get("id")
+            .and_then(Value::as_i64)
+            .expect("organization create should return an id");
+        assert_eq!(
+            organization_location,
+            format!("/api/organization/{organization_id}")
+        );
+
+        let register_response = client
+            .post(format!("{base_url}/api/auth/register"))
+            .json(&json!({
+                "email": "alice@example.com",
+                "password": "password123",
+            }))
+            .send()
+            .expect("user registration should succeed");
+        assert_eq!(register_response.status(), reqwest::StatusCode::CREATED);
+
+        let captured = wait_for_capture_count(&capture_dir, 1, Duration::from_secs(10));
+        let verification_token = token_from_capture(&captured[0]);
+
+        let verify_response = client
+            .post(format!("{base_url}/api/auth/verify-email"))
+            .json(&json!({ "token": verification_token }))
+            .send()
+            .expect("email verification should succeed");
+        assert_eq!(verify_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let user_login_response = client
+            .post(format!("{base_url}/api/auth/login"))
+            .json(&json!({
+                "email": "alice@example.com",
+                "password": "password123",
+            }))
+            .send()
+            .expect("verified user login should succeed");
+        assert_eq!(user_login_response.status(), reqwest::StatusCode::OK);
+        let user_login: Value = user_login_response
+            .json()
+            .expect("user login response should decode");
+        let user_token = user_login
+            .get("token")
+            .and_then(Value::as_str)
+            .expect("user login should return a token")
+            .to_owned();
+
+        let create_request_response = client
+            .post(format!("{base_url}/api/collaboration_request"))
+            .bearer_auth(&user_token)
+            .json(&json!({
+                "organization_id": organization_id,
+                "title": "Applied AI thesis partnership",
+                "message": "We want to connect a student team with the organization to shape a shared supervision track around applied AI validation.",
+                "status": "submitted",
+                "preferred_start_on": "2026-09-15"
+            }))
+            .send()
+            .expect("collaboration request create should succeed");
+        assert_eq!(
+            create_request_response.status(),
+            reqwest::StatusCode::CREATED
+        );
+        let request_location = create_request_response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok())
+            .expect("collaboration request create should expose a location")
+            .to_owned();
+        let collaboration_request: Value = create_request_response
+            .json()
+            .expect("collaboration request response should decode");
+        let request_id = collaboration_request
+            .get("id")
+            .and_then(Value::as_i64)
+            .expect("collaboration request should include an id");
+        assert_eq!(
+            collaboration_request
+                .get("requester_user_id")
+                .and_then(Value::as_i64),
+            Some(2)
+        );
+        assert_eq!(
+            request_location,
+            format!("/api/collaboration_request/{request_id}")
+        );
+
+        let admin_requests_response = client
+            .get(format!("{base_url}/api/collaboration_request"))
+            .bearer_auth(&admin_token)
+            .send()
+            .expect("admin should be able to list collaboration requests");
+        assert_eq!(admin_requests_response.status(), reqwest::StatusCode::OK);
+        let admin_requests: Value = admin_requests_response
+            .json()
+            .expect("admin collaboration list should decode");
+        assert_eq!(admin_requests.get("total").and_then(Value::as_i64), Some(1));
+
+        let portal_response = client
+            .get(format!("{base_url}/api/auth/portal"))
+            .send()
+            .expect("account portal should load");
+        assert_eq!(portal_response.status(), reqwest::StatusCode::OK);
+        let portal_body = portal_response.text().expect("portal body should read");
+        assert!(portal_body.contains("Bridgeboard Account"));
+
+        let dashboard_response = client
+            .get(format!("{base_url}/api/auth/admin"))
+            .bearer_auth(&admin_token)
+            .send()
+            .expect("admin dashboard should load");
+        assert_eq!(dashboard_response.status(), reqwest::StatusCode::OK);
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("VSR_AUTH_EMAIL_CAPTURE_DIR");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
     }
 
     #[test]

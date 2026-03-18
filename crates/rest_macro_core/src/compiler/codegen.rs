@@ -929,60 +929,66 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         .map(|(index, _)| resource.db.placeholder(index + 1))
         .collect::<Vec<_>>()
         .join(", ");
-    let bind_fields_insert = insert_fields.iter().map(|field| {
-        let ident = &field.ident;
-        let field_name = field.name();
-        if let Some(source) = create_assignment_source(resource, &field_name) {
-            let value = policy_source_value(source, runtime_crate);
-            quote! {
-                q = q.bind(#value);
+    let bind_fields_insert = insert_fields
+        .iter()
+        .map(|field| {
+            let ident = &field.ident;
+            let field_name = field.name();
+            if let Some(source) = create_assignment_source(resource, &field_name) {
+                let value = policy_source_value(source, runtime_crate);
+                quote! {
+                    q = q.bind(#value);
+                }
+            } else {
+                quote! {
+                    q = q.bind(&item.#ident);
+                }
             }
-        } else {
-            quote! {
-                q = q.bind(&item.#ident);
-            }
-        }
-    });
-    let bind_fields_insert_admin = insert_fields.iter().map(|field| {
-        let ident = &field.ident;
-        let field_name = field.name();
-        if let Some(source) = create_assignment_source(resource, &field_name) {
-            match source {
-                PolicyValueSource::Claim(_) => {
-                    let value = optional_policy_source_value(source);
-                    let field_name_lit = Literal::string(&field_name);
-                    quote! {
-                        match &item.#ident {
-                            Some(value) => {
-                                q = q.bind(value);
-                            }
-                            None => match #value {
+        })
+        .collect::<Vec<_>>();
+    let bind_fields_insert_admin = insert_fields
+        .iter()
+        .map(|field| {
+            let ident = &field.ident;
+            let field_name = field.name();
+            if let Some(source) = create_assignment_source(resource, &field_name) {
+                match source {
+                    PolicyValueSource::Claim(_) => {
+                        let value = optional_policy_source_value(source);
+                        let field_name_lit = Literal::string(&field_name);
+                        quote! {
+                            match &item.#ident {
                                 Some(value) => {
                                     q = q.bind(value);
                                 }
-                                None => {
-                                    return #runtime_crate::core::errors::validation_error(
-                                        #field_name_lit,
-                                        format!("Missing required create field `{}`", #field_name_lit),
-                                    );
-                                }
-                            },
+                                None => match #value {
+                                    Some(value) => {
+                                        q = q.bind(value);
+                                    }
+                                    None => {
+                                        return #runtime_crate::core::errors::validation_error(
+                                            #field_name_lit,
+                                            format!("Missing required create field `{}`", #field_name_lit),
+                                        );
+                                    }
+                                },
+                            }
+                        }
+                    }
+                    PolicyValueSource::UserId => {
+                        let value = policy_source_value(source, runtime_crate);
+                        quote! {
+                            q = q.bind(#value);
                         }
                     }
                 }
-                PolicyValueSource::UserId => {
-                    let value = policy_source_value(source, runtime_crate);
-                    quote! {
-                        q = q.bind(#value);
-                    }
+            } else {
+                quote! {
+                    q = q.bind(&item.#ident);
                 }
             }
-        } else {
-            quote! {
-                q = q.bind(&item.#ident);
-            }
-        }
-    });
+        })
+        .collect::<Vec<_>>();
 
     let update_plan = build_update_plan(resource);
     let update_sql = update_plan
@@ -1000,7 +1006,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             }
         })
         .collect::<Vec<_>>();
-    let read_filter_binds = bind_policy_filters(&resource.policies.read, runtime_crate);
+    let read_filter_optional_binds =
+        bind_policy_optional_filters(&resource.policies.read, runtime_crate);
     let update_filter_binds = bind_policy_filters(&resource.policies.update, runtime_crate);
     let delete_filter_binds = bind_policy_filters(&resource.policies.delete, runtime_crate);
     let list_placeholder_body = match resource.db {
@@ -1013,6 +1020,21 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
     let list_bind_matches = list_bind_match_tokens(resource, "q");
     let count_bind_matches = list_bind_match_tokens(resource, "count_query");
+    let create_admin_override =
+        resource.policies.admin_bypass && resource.policies.create.iter().next().is_some();
+    let create_insert_binds = if create_admin_override {
+        quote! {
+            if #is_admin {
+                #(#bind_fields_insert_admin)*
+            } else {
+                #(#bind_fields_insert)*
+            }
+        }
+    } else {
+        quote! {
+            #(#bind_fields_insert)*
+        }
+    };
     let contains_filter_helper = if resource
         .fields
         .iter()
@@ -1247,75 +1269,115 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         }
     });
 
-    let get_one_body = if resource.policies.read.is_empty() {
+    let can_read_body = match resource.roles.read.as_deref() {
+        Some(role) => quote! {
+            user.roles
+                .iter()
+                .any(|candidate| candidate == "admin" || candidate == #role)
+        },
+        None => quote!(true),
+    };
+    let fetch_readable_by_id_body = if resource.policies.read.is_empty() {
         let id_placeholder = resource.db.placeholder(1);
         quote! {
-            let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-            match #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                .bind(path.into_inner())
-                .fetch_optional(db.get_ref())
-                .await
-            {
-                Ok(Some(item)) => HttpResponse::Ok().json(item),
-                Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
-                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+            if !Self::can_read(user) {
+                return Ok(None);
             }
+
+            let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
+            #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
+                .bind(id)
+                .fetch_optional(db)
+                .await
         }
     } else {
         let id_placeholder = resource.db.placeholder(1);
         let filtered_sql = filtered_select_by_id_sql(resource, &resource.policies.read);
         quote! {
+            if !Self::can_read(user) {
+                return Ok(None);
+            }
+
             let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
             let filtered_sql = #filtered_sql;
 
             let query = if #admin_bypass && #is_admin {
-                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                    .bind(path.into_inner())
+                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql).bind(id)
             } else {
                 let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(filtered_sql)
-                    .bind(path.into_inner());
-                #(#read_filter_binds)*
+                    .bind(id);
+                #(#read_filter_optional_binds)*
                 q
             };
 
-            match query.fetch_optional(db.get_ref()).await {
-                Ok(Some(item)) => HttpResponse::Ok().json(item),
-                Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
-                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-            }
+            query.fetch_optional(db).await
         }
     };
 
-    let create_body = if insert_fields.is_empty() {
-        quote! {
-            let sql = format!("INSERT INTO {} DEFAULT VALUES", #table_name);
-            match #runtime_crate::db::query(&sql).execute(db.get_ref()).await {
-                Ok(_) => HttpResponse::Created().finish(),
-                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-            }
+    let get_one_body = quote! {
+        match Self::fetch_readable_by_id(path.into_inner(), &user, db.get_ref()).await {
+            Ok(Some(item)) => HttpResponse::Ok().json(item),
+            Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
         }
-    } else {
-        if resource.policies.admin_bypass && resource.policies.create.iter().next().is_some() {
+    };
+
+    let create_body = match (resource.db, insert_fields.is_empty()) {
+        (super::model::DbBackend::Postgres | super::model::DbBackend::Sqlite, true) => {
             quote! {
-                let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                let mut q = #runtime_crate::db::query(&sql);
-                if #is_admin {
-                    #(#bind_fields_insert_admin)*
-                } else {
-                    #(#bind_fields_insert)*
-                }
-                match q.execute(db.get_ref()).await {
-                    Ok(_) => HttpResponse::Created().finish(),
+                let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #table_name, #id_field);
+                match #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql)
+                    .fetch_one(db.get_ref())
+                    .await
+                {
+                    Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref()).await,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
-        } else {
+        }
+        (super::model::DbBackend::Postgres | super::model::DbBackend::Sqlite, false) => {
+            quote! {
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+                    #table_name,
+                    #insert_fields_csv,
+                    #insert_placeholders,
+                    #id_field
+                );
+                let mut q = #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql);
+                #create_insert_binds
+                match q.fetch_one(db.get_ref()).await {
+                    Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref()).await,
+                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                }
+            }
+        }
+        (_, true) => {
+            quote! {
+                let sql = format!("INSERT INTO {} DEFAULT VALUES", #table_name);
+                match #runtime_crate::db::query(&sql).execute(db.get_ref()).await {
+                    Ok(result) => match result.last_insert_rowid() {
+                        Some(created_id) => {
+                            Self::created_response(created_id, &req, &user, db.get_ref()).await
+                        }
+                        None => HttpResponse::Created().finish(),
+                    },
+                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                }
+            }
+        }
+        (_, false) => {
             quote! {
                 let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
                 let mut q = #runtime_crate::db::query(&sql);
-                #(#bind_fields_insert)*
+                #create_insert_binds
                 match q.execute(db.get_ref()).await {
-                    Ok(_) => HttpResponse::Created().finish(),
+                    Ok(result) => match result.last_insert_rowid() {
+                        Some(created_id) => {
+                            Self::created_response(created_id, &req, &user, db.get_ref()).await
+                        }
+                        None => HttpResponse::Created().finish(),
+                    },
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
@@ -1645,13 +1707,14 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 path: web::Path<i64>,
                 db: web::Data<DbPool>,
             ) -> impl Responder {
+                let user = Self::anonymous_user_context();
                 #get_one_body
             }
         }
     };
 
     quote! {
-        use #runtime_crate::actix_web::{web, HttpResponse, Responder};
+        use #runtime_crate::actix_web::{web, HttpRequest, HttpResponse, Responder};
         use #runtime_crate::db::DbPool;
 
         impl #struct_ident {
@@ -1678,6 +1741,37 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             #anonymous_user_context_fn
 
             #contains_filter_helper
+
+            fn can_read(user: &#runtime_crate::core::auth::UserContext) -> bool {
+                #can_read_body
+            }
+
+            async fn fetch_readable_by_id(
+                id: i64,
+                user: &#runtime_crate::core::auth::UserContext,
+                db: &DbPool,
+            ) -> Result<Option<Self>, #runtime_crate::sqlx::Error> {
+                #fetch_readable_by_id_body
+            }
+
+            fn created_location(req: &HttpRequest, id: i64) -> String {
+                format!("{}/{}", req.uri().path().trim_end_matches('/'), id)
+            }
+
+            async fn created_response(
+                id: i64,
+                req: &HttpRequest,
+                user: &#runtime_crate::core::auth::UserContext,
+                db: &DbPool,
+            ) -> HttpResponse {
+                match Self::fetch_readable_by_id(id, user, db).await {
+                    Ok(Some(item)) => HttpResponse::Created()
+                        .append_header(("Location", Self::created_location(req, id)))
+                        .json(item),
+                    Ok(None) => HttpResponse::Created().finish(),
+                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                }
+            }
 
             fn list_placeholder(index: usize) -> String {
                 #list_placeholder_body
@@ -1993,6 +2087,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             #get_one_handler
 
             async fn create(
+                req: HttpRequest,
                 item: web::Json<#create_payload_ty>,
                 user: #runtime_crate::core::auth::UserContext,
                 db: web::Data<DbPool>,
@@ -2545,6 +2640,21 @@ fn bind_policy_filters(filters: &[PolicyFilter], runtime_crate: &Path) -> Vec<To
         .collect()
 }
 
+fn bind_policy_optional_filters(
+    filters: &[PolicyFilter],
+    runtime_crate: &Path,
+) -> Vec<TokenStream> {
+    filters
+        .iter()
+        .map(|filter| {
+            let value = policy_source_optional_value(&filter.source, runtime_crate);
+            quote! {
+                q = q.bind(#value);
+            }
+        })
+        .collect()
+}
+
 fn policy_source_value(source: &PolicyValueSource, runtime_crate: &Path) -> TokenStream {
     match source {
         PolicyValueSource::UserId => quote!(user.id),
@@ -2578,6 +2688,23 @@ fn policy_source_result_value(source: &PolicyValueSource, runtime_crate: &Path) 
                             "missing_claim",
                             format!("Missing required claim `{}`", #claim_name),
                         )),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn policy_source_optional_value(source: &PolicyValueSource, _runtime_crate: &Path) -> TokenStream {
+    match source {
+        PolicyValueSource::UserId => quote!(user.id),
+        PolicyValueSource::Claim(name) => {
+            let claim_name = Literal::string(name);
+            quote! {
+                {
+                    match user.claim_i64(#claim_name) {
+                        Some(value) => value,
+                        None => return Ok(None),
                     }
                 }
             }

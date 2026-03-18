@@ -700,7 +700,7 @@ where
         .await?;
     Ok(DbQueryResult {
         rows_affected: result.rows_affected(),
-        last_insert_rowid: None,
+        last_insert_rowid: result.last_insert_id(),
     })
 }
 
@@ -722,7 +722,7 @@ async fn execute_sqlx_tx(
         .await?;
     Ok(DbQueryResult {
         rows_affected: result.rows_affected(),
-        last_insert_rowid: None,
+        last_insert_rowid: result.last_insert_id(),
     })
 }
 

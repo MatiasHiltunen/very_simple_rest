@@ -205,6 +205,18 @@ async fn bridgeboard_example_serves_public_catalog_static_assets_and_owner_scope
         .to_request();
     let create_response = test::call_service(&app, create_request).await;
     assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_location = create_response
+        .headers()
+        .get("Location")
+        .and_then(|value| value.to_str().ok())
+        .expect("created collaboration request should expose a location")
+        .to_owned();
+    let created_request: bridgeboard::CollaborationRequest =
+        test::read_body_json(create_response).await;
+    assert_eq!(created_request.id, Some(1));
+    assert_eq!(created_request.requester_user_id, 7);
+    assert_eq!(created_request.title, "Applied AI thesis partnership");
+    assert_eq!(create_location, "/api/collaboration_request/1");
 
     let own_list_request = test::TestRequest::get()
         .uri("/api/collaboration_request?sort=created_at&order=desc")

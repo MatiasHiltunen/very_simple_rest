@@ -1,0 +1,17 @@
+module: "create_visibility_api"
+resources: [
+    {
+        name: "Lead"
+        roles: {
+            read: "admin"
+            create: "user"
+            update: "admin"
+            delete: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+            { name: "message", type: String }
+        ]
+    }
+]

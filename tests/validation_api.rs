@@ -122,6 +122,17 @@ async fn generated_handlers_enforce_field_validation_rules() {
         .to_request();
     let valid_create_response = test::call_service(&app, valid_create).await;
     assert_eq!(valid_create_response.status(), StatusCode::CREATED);
+    let created_location = valid_create_response
+        .headers()
+        .get("Location")
+        .and_then(|value| value.to_str().ok())
+        .expect("created resource should expose a location")
+        .to_owned();
+    let created_widget: validated_api::Widget = test::read_body_json(valid_create_response).await;
+    assert_eq!(created_widget.id, Some(1));
+    assert_eq!(created_widget.title, "valid");
+    assert_eq!(created_widget.score, 5);
+    assert_eq!(created_location, "/api/widget/1");
 
     query("INSERT INTO widget (title, score) VALUES (?, ?), (?, ?)")
         .bind("alpha")
