@@ -305,6 +305,34 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     assert_eq!(patch_bob_body.role, "moderator");
     assert!(patch_bob_body.email_verified);
 
+    let create_carol_request = test::TestRequest::post()
+        .uri("/api/auth/admin/users")
+        .insert_header(("Authorization", format!("Bearer {}", token_body.token)))
+        .set_json(&auth::CreateManagedUserInput {
+            email: "carol@example.com".to_owned(),
+            password: "password789".to_owned(),
+            role: Some("reviewer".to_owned()),
+            email_verified: Some(false),
+            send_verification_email: Some(true),
+        })
+        .to_request();
+    let create_carol_response = test::call_service(&app, create_carol_request).await;
+    assert_eq!(create_carol_response.status(), StatusCode::CREATED);
+    let create_carol_location = create_carol_response
+        .headers()
+        .get("Location")
+        .and_then(|value| value.to_str().ok())
+        .expect("created managed user should expose a location")
+        .to_owned();
+    let carol_body: AccountInfo = test::read_body_json(create_carol_response).await;
+    assert_eq!(carol_body.email, "carol@example.com");
+    assert_eq!(carol_body.role, "reviewer");
+    assert!(!carol_body.email_verified);
+    assert_eq!(
+        create_carol_location,
+        format!("/api/auth/admin/users/{}", carol_body.id)
+    );
+
     let admin_page_request = test::TestRequest::get()
         .uri("/api/auth/admin")
         .insert_header(("Authorization", format!("Bearer {}", token_body.token)))
@@ -314,6 +342,36 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     let admin_page_body = String::from_utf8(test::read_body(admin_page_response).await.to_vec())
         .expect("admin HTML should decode");
     assert!(admin_page_body.contains("Admin Dashboard"));
+    assert!(admin_page_body.contains("Create user"));
+
+    let captured = capture_files(&capture_dir);
+    assert_eq!(captured.len(), 3);
+    let carol_verification_capture = captured
+        .iter()
+        .find(|path| {
+            let path_text = std::fs::read_to_string(path).expect("capture file should be readable");
+            path_text.contains("carol@example.com")
+        })
+        .expect("admin-created user verification email should be captured");
+    let carol_verification_url = url_from_capture(carol_verification_capture);
+    assert!(
+        carol_verification_url.contains("/api/auth/verify-email?token="),
+        "unexpected verification url: {carol_verification_url}"
+    );
+
+    let delete_carol_request = test::TestRequest::delete()
+        .uri(&format!("/api/auth/admin/users/{}", carol_body.id))
+        .insert_header(("Authorization", format!("Bearer {}", token_body.token)))
+        .to_request();
+    let delete_carol_response = test::call_service(&app, delete_carol_request).await;
+    assert_eq!(delete_carol_response.status(), StatusCode::NO_CONTENT);
+
+    let get_deleted_carol_request = test::TestRequest::get()
+        .uri(&format!("/api/auth/admin/users/{}", carol_body.id))
+        .insert_header(("Authorization", format!("Bearer {}", token_body.token)))
+        .to_request();
+    let get_deleted_carol_response = test::call_service(&app, get_deleted_carol_request).await;
+    assert_eq!(get_deleted_carol_response.status(), StatusCode::NOT_FOUND);
 
     let password_reset_request = test::TestRequest::post()
         .uri("/api/auth/password-reset/request")
@@ -325,7 +383,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     assert_eq!(password_reset_response.status(), StatusCode::ACCEPTED);
 
     let captured = capture_files(&capture_dir);
-    assert_eq!(captured.len(), 3);
+    assert_eq!(captured.len(), 4);
     let reset_capture = captured
         .iter()
         .find(|path| url_from_capture(path).contains("/password-reset?token="))

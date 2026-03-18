@@ -155,10 +155,11 @@ pub use rest_macro_core as core;
 pub mod auth {
     pub use rest_macro_core::auth::{
         AccountInfo, AuthEmailProvider, AuthEmailSettings, AuthSettings, AuthUiPageSettings,
-        ChangePasswordInput, LoginInput, PasswordResetConfirmInput, PasswordResetRequestInput,
-        RegisterInput, SessionCookieSameSite, SessionCookieSettings, UpdateManagedUserInput, User,
-        UserContext, VerificationResendInput, VerifyEmailInput, account, auth_routes,
-        auth_routes_with_settings, change_password, confirm_password_reset, ensure_admin_exists,
+        ChangePasswordInput, CreateManagedUserInput, LoginInput, PasswordResetConfirmInput,
+        PasswordResetRequestInput, RegisterInput, SessionCookieSameSite, SessionCookieSettings,
+        UpdateManagedUserInput, User, UserContext, VerificationResendInput, VerifyEmailInput,
+        account, auth_routes, auth_routes_with_settings, change_password, confirm_password_reset,
+        create_managed_user, delete_managed_user, ensure_admin_exists,
         ensure_jwt_secret_configured, list_managed_users, login, login_with_request, logout,
         managed_user, me, register, request_password_reset, resend_account_verification,
         resend_managed_user_verification, resend_verification, update_managed_user,

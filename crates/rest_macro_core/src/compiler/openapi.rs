@@ -339,6 +339,20 @@ fn append_builtin_auth_components(
         }),
     );
     schemas.insert(
+        "ManagedUserCreateInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "email": { "type": "string", "format": "email" },
+                "password": { "type": "string" },
+                "role": { "type": "string" },
+                "email_verified": { "type": "boolean" },
+                "send_verification_email": { "type": "boolean" }
+            },
+            "required": ["email", "password"]
+        }),
+    );
+    schemas.insert(
         "AuthAccountResponse".to_owned(),
         json!({
             "type": "object",
@@ -619,6 +633,21 @@ fn append_builtin_auth_components(
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required")
                 }
+            },
+            "post": {
+                "tags": ["Admin"],
+                "summary": "Create a built-in auth user",
+                "operationId": "createBuiltinAuthUser",
+                "security": bearer_security(),
+                "requestBody": json_request_body("ManagedUserCreateInput"),
+                "responses": {
+                    "201": json_response("Created", schema_ref("AuthAccountResponse")),
+                    "400": api_error_response("Invalid request body"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "409": api_error_response("Email already exists"),
+                    "503": api_error_response("Email delivery unavailable")
+                }
             }
         }),
     );
@@ -648,6 +677,20 @@ fn append_builtin_auth_components(
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthAccountResponse")),
                     "400": api_error_response("Invalid request body"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("User not found")
+                }
+            },
+            "delete": {
+                "tags": ["Admin"],
+                "summary": "Delete a built-in auth user",
+                "operationId": "deleteBuiltinAuthUser",
+                "security": bearer_security(),
+                "parameters": [id_parameter("id", "user")],
+                "responses": {
+                    "204": plain_response("User deleted"),
+                    "400": api_error_response("Invalid delete request"),
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required"),
                     "404": api_error_response("User not found")
