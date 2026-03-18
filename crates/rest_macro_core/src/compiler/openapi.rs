@@ -5,7 +5,8 @@ use serde_json::{Map, Value, json};
 
 use super::model::{
     FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_optional_type,
-    structured_scalar_kind, supports_range_filters, supports_sort,
+    read_requires_auth, structured_scalar_kind, supports_contains_filters, supports_range_filters,
+    supports_sort,
 };
 
 #[derive(Clone, Debug)]
@@ -144,15 +145,19 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
 }
 
 fn collection_path_item(resource: &ResourceSpec) -> Value {
+    let mut get = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("List {}", resource_name(resource)),
+        "operationId": format!("list{}", resource_name(resource)),
+        "parameters": list_query_parameters(resource, None),
+        "responses": list_responses(resource),
+    });
+    if read_requires_auth(resource) {
+        get["security"] = bearer_security();
+    }
+
     json!({
-        "get": {
-            "tags": [resource_name(resource)],
-            "summary": format!("List {}", resource_name(resource)),
-            "operationId": format!("list{}", resource_name(resource)),
-            "parameters": list_query_parameters(resource, None),
-            "security": bearer_security(),
-            "responses": list_responses(resource),
-        },
+        "get": get,
         "post": {
             "tags": [resource_name(resource)],
             "summary": format!("Create {}", resource_name(resource)),
@@ -166,16 +171,19 @@ fn collection_path_item(resource: &ResourceSpec) -> Value {
 
 fn item_path_item(resource: &ResourceSpec) -> Value {
     let id_parameter = id_parameter("id", &resource.id_field);
+    let mut get = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("Get {}", resource_name(resource)),
+        "operationId": format!("get{}", resource_name(resource)),
+        "parameters": [id_parameter.clone()],
+        "responses": get_one_responses(resource),
+    });
+    if read_requires_auth(resource) {
+        get["security"] = bearer_security();
+    }
 
     json!({
-        "get": {
-            "tags": [resource_name(resource)],
-            "summary": format!("Get {}", resource_name(resource)),
-            "operationId": format!("get{}", resource_name(resource)),
-            "parameters": [id_parameter.clone()],
-            "security": bearer_security(),
-            "responses": get_one_responses(resource),
-        },
+        "get": get,
         "put": {
             "tags": [resource_name(resource)],
             "summary": format!("Update {}", resource_name(resource)),
@@ -203,16 +211,17 @@ fn nested_collection_path_item(
 ) -> Value {
     let mut parameters = vec![id_parameter("parent_id", relation_field)];
     parameters.extend(list_query_parameters(resource, Some(relation_field)));
-    json!({
-        "get": {
-            "tags": [resource_name(resource)],
-            "summary": format!("List {} by {}", resource_name(resource), parent_table),
-            "operationId": format!("list{}By{}", resource_name(resource), parent_table.to_case(CaseKind::Pascal)),
-            "parameters": parameters,
-            "security": bearer_security(),
-            "responses": nested_list_responses(resource),
-        }
-    })
+    let mut get = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("List {} by {}", resource_name(resource), parent_table),
+        "operationId": format!("list{}By{}", resource_name(resource), parent_table.to_case(CaseKind::Pascal)),
+        "parameters": parameters,
+        "responses": nested_list_responses(resource),
+    });
+    if read_requires_auth(resource) {
+        get["security"] = bearer_security();
+    }
+    json!({ "get": get })
 }
 
 fn append_builtin_auth_components(
@@ -906,6 +915,20 @@ fn list_query_parameters(
             "schema": query_parameter_schema(field),
         }));
 
+        if supports_contains_filters(field) {
+            parameters.push(json!({
+                "name": format!("filter_{field_name}_contains"),
+                "in": "query",
+                "required": false,
+                "description": format!(
+                    "Case-insensitive substring filter for `{field_name}`. `%`, `_`, and `\\` are treated literally."
+                ),
+                "schema": {
+                    "type": "string"
+                },
+            }));
+        }
+
         if supports_range_filters(&field.ty) {
             let kind_label = match structured_scalar_kind(&field.ty) {
                 Some(super::model::StructuredScalarKind::DateTime) => "timestamp",
@@ -1320,6 +1343,50 @@ mod tests {
             document["paths"]["/post/{parent_id}/comment"]["get"]["responses"]["400"]["content"]["application/json"]
                 ["schema"]["$ref"],
             "#/components/schemas/ApiErrorResponse"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_public_reads_without_bearer_security_and_with_contains_filters() {
+        let service = load_service_from_path(&fixture_path("public_catalog_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Public Catalog API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/organization"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+
+        let contains = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_name_contains")
+            .expect("contains filter should exist");
+
+        assert!(
+            document["paths"]["/organization"]["get"]["security"].is_null(),
+            "public list routes should not advertise bearer auth"
+        );
+        assert!(
+            document["paths"]["/organization/{id}"]["get"]["security"].is_null(),
+            "public item routes should not advertise bearer auth"
+        );
+        assert!(
+            document["paths"]["/organization/{parent_id}/interest"]["get"]["security"].is_null(),
+            "public nested list routes should not advertise bearer auth"
+        );
+        assert_eq!(
+            document["paths"]["/organization"]["post"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert_eq!(contains["schema"]["type"], json!("string"));
+        assert!(
+            contains["description"]
+                .as_str()
+                .expect("contains description should be a string")
+                .contains("treated literally")
         );
     }
 

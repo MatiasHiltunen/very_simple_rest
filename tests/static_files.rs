@@ -1,14 +1,29 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use very_simple_rest::actix_web::{App, HttpResponse, http::StatusCode, test, web};
-use very_simple_rest::db::connect;
+use very_simple_rest::db::{connect, query};
 use very_simple_rest::rest_api_from_eon;
 
 rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 
 #[actix_web::test]
 async fn eon_static_config_serves_assets_and_spa_routes() {
-    let pool = connect("sqlite::memory:")
+    let pool = connect(&unique_sqlite_url("static_site"))
         .await
         .expect("database should connect");
+    query(
+        "CREATE TABLE page (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("page schema should apply");
+    query("INSERT INTO page (title) VALUES ('Landing page copy')")
+        .execute(&pool)
+        .await
+        .expect("page seed should apply");
 
     let app = test::init_service(
         App::new()
@@ -70,5 +85,16 @@ async fn eon_static_config_serves_assets_and_spa_routes() {
 
     let api_request = test::TestRequest::get().uri("/api/page").to_request();
     let api_response = test::call_service(&app, api_request).await;
-    assert_eq!(api_response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(api_response.status(), StatusCode::OK);
+    let api_body = test::read_body(api_response).await;
+    assert!(String::from_utf8_lossy(&api_body).contains("Landing page copy"));
+}
+
+fn unique_sqlite_url(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be monotonic enough")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("vsr_{prefix}_{nanos}.db"));
+    format!("sqlite:{}?mode=rwc", path.display())
 }

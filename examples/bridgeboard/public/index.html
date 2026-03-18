@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bridgeboard</title>
+    <meta
+        name="description"
+        content="Cross-border collaboration platform for education and industry, powered by a single .eon API."
+    >
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,700&family=Space+Grotesk:wght@400;500;700&display=swap"
+        rel="stylesheet"
+    >
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+</head>
+<body>
+    <div class="backdrop"></div>
+    <main class="shell">
+        <header class="hero panel" data-reveal>
+            <div class="eyebrow">Bridgeboard</div>
+            <div class="hero-grid">
+                <div>
+                    <h1>Build thesis pipelines across borders.</h1>
+                    <p class="lead">
+                        Discover organizations, live collaboration signals, and thesis topics from
+                        universities, applied sciences campuses, and industry partners in one shared
+                        workspace.
+                    </p>
+                    <div class="hero-actions">
+                        <a class="button primary" href="#catalog">Explore the catalog</a>
+                        <a class="button secondary" href="#account">Open account tools</a>
+                    </div>
+                </div>
+                <div class="hero-aside">
+                    <div class="metric">
+                        <span class="metric-label">Organizations</span>
+                        <strong id="organizationCount">0</strong>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Thesis topics</span>
+                        <strong id="topicCount">0</strong>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Your pipeline</span>
+                        <strong id="requestCount">0</strong>
+                    </div>
+                </div>
+            </div>
+            <p id="statusBar" class="status info">Loading Bridgeboard...</p>
+        </header>
+
+        <section id="account" class="panel account-panel" data-reveal>
+            <div class="section-head">
+                <div>
+                    <div class="eyebrow">Account</div>
+                    <h2>Sign in, verify your email, and manage your access.</h2>
+                </div>
+                <div class="link-row">
+                    <a class="button ghost" id="portalLink" href="/api/auth/portal" target="_blank" rel="noreferrer">Account portal</a>
+                    <a class="button ghost" id="adminLink" href="/api/auth/admin" target="_blank" rel="noreferrer" hidden>Admin dashboard</a>
+                </div>
+            </div>
+            <div class="account-grid">
+                <form id="authForm" class="stack">
+                    <label for="emailInput">Email</label>
+                    <input id="emailInput" type="email" autocomplete="email" placeholder="name@campus.example">
+
+                    <label for="passwordInput">Password</label>
+                    <input id="passwordInput" type="password" autocomplete="current-password" placeholder="At least 8 characters">
+
+                    <div class="button-row">
+                        <button class="button primary" id="registerBtn" type="submit">Register</button>
+                        <button class="button secondary" id="loginBtn" type="button">Log in</button>
+                        <button class="button ghost" id="logoutBtn" type="button">Log out</button>
+                    </div>
+
+                    <div class="button-row compact">
+                        <button class="button ghost" id="resetLinkBtn" type="button">Email reset link</button>
+                        <button class="button ghost" id="resendVerificationBtn" type="button">Resend verification</button>
+                        <button class="button ghost" id="refreshSessionBtn" type="button">Refresh session</button>
+                    </div>
+                </form>
+
+                <div class="session-card">
+                    <div class="eyebrow">Current session</div>
+                    <h3 id="sessionHeading">Not signed in</h3>
+                    <p id="sessionSummary" class="muted">
+                        Use built-in auth to register, verify your email, and open the account portal.
+                    </p>
+                    <dl class="session-meta">
+                        <div>
+                            <dt>Email</dt>
+                            <dd id="sessionEmail">-</dd>
+                        </div>
+                        <div>
+                            <dt>Role</dt>
+                            <dd id="sessionRole">-</dd>
+                        </div>
+                        <div>
+                            <dt>Email verified</dt>
+                            <dd id="sessionVerified">-</dd>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+        </section>
+
+        <section id="catalog" class="panel" data-reveal>
+            <div class="section-head">
+                <div>
+                    <div class="eyebrow">Discovery</div>
+                    <h2>Search organizations, signals, and thesis topics.</h2>
+                </div>
+            </div>
+            <form id="searchForm" class="filters">
+                <label>
+                    <span>Organization search</span>
+                    <input id="orgSearchInput" type="search" placeholder="Name or cluster keyword">
+                </label>
+                <label>
+                    <span>Country search</span>
+                    <input id="countrySearchInput" type="search" placeholder="Finland, Estonia, Germany">
+                </label>
+                <label>
+                    <span>Interest search</span>
+                    <input id="interestSearchInput" type="search" placeholder="Mobility, AI, decarbonization">
+                </label>
+                <label>
+                    <span>Thesis topic search</span>
+                    <input id="topicSearchInput" type="search" placeholder="Data trust, robotics, circularity">
+                </label>
+                <div class="button-row">
+                    <button class="button primary" type="submit">Apply filters</button>
+                    <button class="button ghost" id="clearFiltersBtn" type="button">Clear filters</button>
+                </div>
+            </form>
+        </section>
+
+        <section class="panel" data-reveal>
+            <div class="section-head">
+                <div>
+                    <div class="eyebrow">Organizations</div>
+                    <h2>Public collaboration profiles</h2>
+                </div>
+                <p class="muted">
+                    Expand a profile to inspect live interest signals through a nested route.
+                </p>
+            </div>
+            <div id="organizationsGrid" class="card-grid"></div>
+        </section>
+
+        <section class="panel" data-reveal>
+            <div class="section-head">
+                <div>
+                    <div class="eyebrow">Thesis topics</div>
+                    <h2>Current opportunities from the network</h2>
+                </div>
+            </div>
+            <div id="topicsGrid" class="card-grid topics-grid"></div>
+        </section>
+
+        <section class="panel request-panel" data-reveal>
+            <div class="section-head">
+                <div>
+                    <div class="eyebrow">Your proposal</div>
+                    <h2>Submit a collaboration request</h2>
+                </div>
+                <p class="muted">
+                    Requests are owner-scoped for regular users and visible to admins for review.
+                </p>
+            </div>
+            <div class="request-grid">
+                <form id="requestForm" class="stack">
+                    <label for="requestOrganizationInput">Organization</label>
+                    <select id="requestOrganizationInput"></select>
+
+                    <label for="requestTitleInput">Proposal title</label>
+                    <input id="requestTitleInput" type="text" maxlength="160" placeholder="Joint supervision for applied AI thesis">
+
+                    <label for="requestPreferredDateInput">Preferred start date</label>
+                    <input id="requestPreferredDateInput" type="date">
+
+                    <label for="requestMessageInput">Proposal summary</label>
+                    <textarea id="requestMessageInput" rows="6" placeholder="Describe the problem space, expected student profile, and intended outcome."></textarea>
+
+                    <button class="button primary" type="submit">Send collaboration request</button>
+                </form>
+
+                <div>
+                    <div class="eyebrow">Pipeline view</div>
+                    <h3 id="requestsHeading">Sign in to load your requests</h3>
+                    <div id="requestsList" class="stack"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="adminStudio" class="panel" data-reveal hidden>
+            <div class="section-head">
+                <div>
+                    <div class="eyebrow">Admin studio</div>
+                    <h2>Curate the catalog and seed demo content.</h2>
+                </div>
+                <div class="button-row">
+                    <button class="button secondary" id="loadDemoBtn" type="button">Load demo dataset</button>
+                </div>
+            </div>
+            <div class="admin-grid">
+                <details class="editor-card" open>
+                    <summary>Create organization</summary>
+                    <form id="organizationForm" class="stack">
+                        <input id="organizationSlugInput" type="text" placeholder="slug">
+                        <input id="organizationNameInput" type="text" placeholder="Organization name">
+                        <div class="split">
+                            <input id="organizationCountryInput" type="text" placeholder="Country">
+                            <input id="organizationCityInput" type="text" placeholder="City">
+                        </div>
+                        <input id="organizationWebsiteInput" type="url" placeholder="https://example.org">
+                        <input id="organizationEmailInput" type="email" placeholder="partnerships@example.org">
+                        <input id="organizationStageInput" type="text" placeholder="Collaboration stage">
+                        <textarea id="organizationSummaryInput" rows="5" placeholder="What does this organization want to build across borders?"></textarea>
+                        <button class="button primary" type="submit">Create organization</button>
+                    </form>
+                </details>
+
+                <details class="editor-card">
+                    <summary>Create interest signal</summary>
+                    <form id="interestForm" class="stack">
+                        <select id="interestOrganizationInput"></select>
+                        <input id="interestTitleInput" type="text" placeholder="Interest title">
+                        <input id="interestWorkModeInput" type="text" placeholder="Hybrid workshop, virtual supervision, on-site sprint">
+                        <input id="interestStartInput" type="date">
+                        <textarea id="interestSummaryInput" rows="5" placeholder="Describe the signal in a way that helps schools or labs react quickly."></textarea>
+                        <button class="button primary" type="submit">Create interest</button>
+                    </form>
+                </details>
+
+                <details class="editor-card">
+                    <summary>Create thesis topic</summary>
+                    <form id="topicForm" class="stack">
+                        <select id="topicOrganizationInput"></select>
+                        <input id="topicTitleInput" type="text" placeholder="Topic title">
+                        <div class="split">
+                            <input id="topicDisciplineInput" type="text" placeholder="Discipline">
+                            <input id="topicLocationInput" type="text" placeholder="Location">
+                        </div>
+                        <input id="topicEmailInput" type="email" placeholder="mentor@example.org">
+                        <input id="topicDeadlineInput" type="date">
+                        <textarea id="topicSummaryInput" rows="5" placeholder="Frame the thesis scope, expected methods, and intended impact."></textarea>
+                        <button class="button primary" type="submit">Create thesis topic</button>
+                    </form>
+                </details>
+            </div>
+        </section>
+    </main>
+</body>
+</html>

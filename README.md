@@ -517,6 +517,10 @@ resources, see `examples/fine_grained_policies/`.
 For a minimal `.eon`-only app with built-in auth, owner-scoped todos, admin visibility across all
 rows, and a static browser client, see `examples/todo_app/`.
 
+For a real-world single-`.eon` example with public catalog discovery, built-in account
+management, admin-curated thesis topics, owner-scoped collaboration requests, and a same-origin
+browser client, see `examples/bridgeboard/`.
+
 ## RBAC Attributes
 
 Protect your endpoints with declarative role requirements:

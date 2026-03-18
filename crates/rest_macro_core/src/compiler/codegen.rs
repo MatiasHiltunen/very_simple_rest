@@ -727,6 +727,13 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             pub #filter_ident: Option<#base_ty>,
         }];
 
+        if super::model::supports_contains_filters(field) {
+            let contains_ident = format_ident!("filter_{}_contains", field.ident);
+            tokens.push(quote! {
+                pub #contains_ident: Option<String>,
+            });
+        }
+
         if super::model::supports_range_filters(&field.ty) {
             for suffix in ["gt", "gte", "lt", "lte"] {
                 let ident = format_ident!("filter_{}_{}", field.ident, suffix);
@@ -892,6 +899,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     let struct_ident = &resource.struct_ident;
     let table_name = &resource.table_name;
     let id_field = &resource.id_field;
+    let read_requires_auth = super::model::read_requires_auth(resource);
     let create_payload_ty = create_payload_type(resource);
     let update_payload_ty = update_payload_type(resource);
     let list_query_ty = list_query_type(resource);
@@ -1005,6 +1013,45 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
     let list_bind_matches = list_bind_match_tokens(resource, "q");
     let count_bind_matches = list_bind_match_tokens(resource, "count_query");
+    let contains_filter_helper = if resource
+        .fields
+        .iter()
+        .any(super::model::supports_contains_filters)
+    {
+        quote! {
+            fn list_contains_pattern(value: &str) -> String {
+                let lowered = value.to_lowercase();
+                let mut pattern = String::with_capacity(lowered.len() + 2);
+                pattern.push('%');
+                for ch in lowered.chars() {
+                    match ch {
+                        '%' | '_' | '\\' => {
+                            pattern.push('\\');
+                            pattern.push(ch);
+                        }
+                        _ => pattern.push(ch),
+                    }
+                }
+                pattern.push('%');
+                pattern
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let anonymous_user_context_fn = if read_requires_auth {
+        quote! {}
+    } else {
+        quote! {
+            fn anonymous_user_context() -> #runtime_crate::core::auth::UserContext {
+                #runtime_crate::core::auth::UserContext {
+                    id: 0,
+                    roles: Vec::new(),
+                    claims: ::std::collections::BTreeMap::new(),
+                }
+            }
+        }
+    };
     let sort_field_ty = {
         let ident = list_sort_field_ident(resource);
         quote!(#ident)
@@ -1411,22 +1458,108 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
     });
     let nested_handlers = relation_routes.map(|(field_ident, _)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
+        if read_requires_auth {
+            quote! {
+                async fn #handler_ident(
+                    path: web::Path<i64>,
+                    query: web::Query<#list_query_ty>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                ) -> impl Responder {
+                    #read_check
+
+                    let parent_id = path.into_inner();
+                    let query = query.into_inner();
+                    let plan = match Self::build_list_plan(
+                        &query,
+                        &user,
+                        Some((stringify!(#field_ident), parent_id)),
+                    ) {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
+                    };
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    let total = match count_query.fetch_one(db.get_ref()).await {
+                        Ok(total) => total,
+                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                    };
+                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                    for bind in &plan.select_binds {
+                        q = match bind.clone() {
+                            #(#list_bind_matches)*
+                        };
+                    }
+                    match q.fetch_all(db.get_ref()).await {
+                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                            Ok(response) => HttpResponse::Ok().json(response),
+                            Err(response) => response,
+                        },
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                }
+            }
+        } else {
+            quote! {
+                async fn #handler_ident(
+                    path: web::Path<i64>,
+                    query: web::Query<#list_query_ty>,
+                    db: web::Data<DbPool>,
+                ) -> impl Responder {
+                    let parent_id = path.into_inner();
+                    let query = query.into_inner();
+                    let user = Self::anonymous_user_context();
+                    let plan = match Self::build_list_plan(
+                        &query,
+                        &user,
+                        Some((stringify!(#field_ident), parent_id)),
+                    ) {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
+                    };
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    let total = match count_query.fetch_one(db.get_ref()).await {
+                        Ok(total) => total,
+                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                    };
+                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                    for bind in &plan.select_binds {
+                        q = match bind.clone() {
+                            #(#list_bind_matches)*
+                        };
+                    }
+                    match q.fetch_all(db.get_ref()).await {
+                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                            Ok(response) => HttpResponse::Ok().json(response),
+                            Err(response) => response,
+                        },
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                }
+            }
+        }
+    });
+    let get_all_handler = if read_requires_auth {
         quote! {
-            async fn #handler_ident(
-                path: web::Path<i64>,
+            async fn get_all(
                 query: web::Query<#list_query_ty>,
                 user: #runtime_crate::core::auth::UserContext,
                 db: web::Data<DbPool>,
             ) -> impl Responder {
                 #read_check
-
-                let parent_id = path.into_inner();
                 let query = query.into_inner();
-                let plan = match Self::build_list_plan(
-                    &query,
-                    &user,
-                    Some((stringify!(#field_ident), parent_id)),
-                ) {
+                let plan = match Self::build_list_plan(&query, &user, None) {
                     Ok(parts) => parts,
                     Err(response) => return response,
                 };
@@ -1456,7 +1589,66 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 }
             }
         }
-    });
+    } else {
+        quote! {
+            async fn get_all(
+                query: web::Query<#list_query_ty>,
+                db: web::Data<DbPool>,
+            ) -> impl Responder {
+                let query = query.into_inner();
+                let user = Self::anonymous_user_context();
+                let plan = match Self::build_list_plan(&query, &user, None) {
+                    Ok(parts) => parts,
+                    Err(response) => return response,
+                };
+                let mut count_query =
+                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                for bind in &plan.filter_binds {
+                    count_query = match bind.clone() {
+                        #(#count_bind_matches)*
+                    };
+                }
+                let total = match count_query.fetch_one(db.get_ref()).await {
+                    Ok(total) => total,
+                    Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                };
+                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                for bind in &plan.select_binds {
+                    q = match bind.clone() {
+                        #(#list_bind_matches)*
+                    };
+                }
+                match q.fetch_all(db.get_ref()).await {
+                    Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                        Ok(response) => HttpResponse::Ok().json(response),
+                        Err(response) => response,
+                    },
+                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                }
+            }
+        }
+    };
+    let get_one_handler = if read_requires_auth {
+        quote! {
+            async fn get_one(
+                path: web::Path<i64>,
+                user: #runtime_crate::core::auth::UserContext,
+                db: web::Data<DbPool>,
+            ) -> impl Responder {
+                #read_check
+                #get_one_body
+            }
+        }
+    } else {
+        quote! {
+            async fn get_one(
+                path: web::Path<i64>,
+                db: web::Data<DbPool>,
+            ) -> impl Responder {
+                #get_one_body
+            }
+        }
+    };
 
     quote! {
         use #runtime_crate::actix_web::{web, HttpResponse, Responder};
@@ -1482,6 +1674,10 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
 
                 #(#nested_route_registrations)*
             }
+
+            #anonymous_user_context_fn
+
+            #contains_filter_helper
 
             fn list_placeholder(index: usize) -> String {
                 #list_placeholder_body
@@ -1792,51 +1988,9 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 })
             }
 
-            async fn get_all(
-                query: web::Query<#list_query_ty>,
-                user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
-            ) -> impl Responder {
-                #read_check
-                let query = query.into_inner();
-                let plan = match Self::build_list_plan(&query, &user, None) {
-                    Ok(parts) => parts,
-                    Err(response) => return response,
-                };
-                let mut count_query =
-                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                for bind in &plan.filter_binds {
-                    count_query = match bind.clone() {
-                        #(#count_bind_matches)*
-                    };
-                }
-                let total = match count_query.fetch_one(db.get_ref()).await {
-                    Ok(total) => total,
-                    Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                };
-                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                for bind in &plan.select_binds {
-                    q = match bind.clone() {
-                        #(#list_bind_matches)*
-                    };
-                }
-                match q.fetch_all(db.get_ref()).await {
-                    Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                        Ok(response) => HttpResponse::Ok().json(response),
-                        Err(response) => response,
-                    },
-                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                }
-            }
+            #get_all_handler
 
-            async fn get_one(
-                path: web::Path<i64>,
-                user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
-            ) -> impl Responder {
-                #read_check
-                #get_one_body
-            }
+            #get_one_handler
 
             async fn create(
                 item: web::Json<#create_payload_ty>,
@@ -2057,6 +2211,21 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
         .map(|field| {
             let field_name = Literal::string(&field.name());
             let filter_ident = format_ident!("filter_{}", field.ident);
+            let contains_filter_tokens = if super::model::supports_contains_filters(field) {
+                let contains_ident = format_ident!("filter_{}_contains", field.ident);
+                quote! {
+                    if let Some(value) = &query.#contains_ident {
+                        conditions.push(format!(
+                            "LOWER({}) LIKE {} ESCAPE '\\'",
+                            #field_name,
+                            Self::list_placeholder(filter_binds.len() + 1)
+                        ));
+                        filter_binds.push(#bind_ident::Text(Self::list_contains_pattern(value)));
+                    }
+                }
+            } else {
+                quote! {}
+            };
             if super::model::is_structured_scalar_type(&field.ty) {
                 let exact_value =
                     structured_scalar_to_text_tokens(&field.ty, quote!(value), runtime_crate);
@@ -2161,6 +2330,7 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                             ));
                             filter_binds.push(#bind_ident::Text(value.clone()));
                         }
+                        #contains_filter_tokens
                     },
                 }
             }

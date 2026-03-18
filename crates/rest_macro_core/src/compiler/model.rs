@@ -565,6 +565,18 @@ pub fn supports_range_filters(ty: &Type) -> bool {
         .unwrap_or(false)
 }
 
+pub fn supports_contains_filters(field: &FieldSpec) -> bool {
+    if is_structured_scalar_type(&field.ty) {
+        return false;
+    }
+
+    !matches!(field.sql_type.as_str(), "INTEGER" | "REAL" | "BOOLEAN")
+}
+
+pub fn read_requires_auth(resource: &ResourceSpec) -> bool {
+    resource.roles.read.is_some() || !resource.policies.read.is_empty()
+}
+
 pub fn supports_sort(ty: &Type) -> bool {
     structured_scalar_kind(ty)
         .map(|kind| kind.supports_sort())

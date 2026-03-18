@@ -1,0 +1,39 @@
+module: "public_catalog_api"
+resources: [
+    {
+        name: "Organization"
+        roles: {
+            create: "admin"
+            update: "admin"
+            delete: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "name", type: String }
+            { name: "country", type: String }
+            { name: "website_url", type: String }
+            { name: "summary", type: String }
+        ]
+    }
+    {
+        name: "Interest"
+        roles: {
+            create: "admin"
+            update: "admin"
+            delete: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+            { name: "summary", type: String }
+            {
+                name: "organization_id"
+                type: I64
+                relation: {
+                    references: "organization.id"
+                    nested_route: true
+                }
+            }
+        ]
+    }
+]

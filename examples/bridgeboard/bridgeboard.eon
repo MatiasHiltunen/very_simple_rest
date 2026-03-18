@@ -1,0 +1,321 @@
+module: "bridgeboard"
+logging: {
+    filter_env: "APP_LOG"
+    default_filter: "info,sqlx=warn"
+    timestamp: Millis
+}
+security: {
+    requests: {
+        json_max_bytes: 262144
+    }
+    trusted_proxies: {
+        proxies: ["127.0.0.1", "::1"]
+        proxies_env: "TRUSTED_PROXIES"
+    }
+    rate_limits: {
+        login: { requests: 10, window_seconds: 60 }
+        register: { requests: 5, window_seconds: 300 }
+    }
+    headers: {
+        frame_options: Deny
+        content_type_options: true
+        referrer_policy: StrictOriginWhenCrossOrigin
+    }
+    auth: {
+        issuer: "bridgeboard"
+        audience: "bridgeboard_clients"
+        access_token_ttl_seconds: 3600
+        require_email_verification: true
+        session_cookie: {
+            secure: false
+            same_site: Strict
+        }
+        email: {
+            from_email: "noreply@example.com"
+            from_name: "Bridgeboard"
+            public_base_url: "http://127.0.0.1:8080"
+            provider: {
+                kind: Resend
+                api_key_env: "RESEND_API_KEY"
+            }
+        }
+        portal: {
+            path: "/auth/portal"
+            title: "Bridgeboard Account"
+        }
+        admin_dashboard: {
+            path: "/auth/admin"
+            title: "Bridgeboard Admin"
+        }
+    }
+}
+static: {
+    mounts: [
+        {
+            mount: "/"
+            dir: "public"
+            mode: Spa
+            index_file: "index.html"
+            fallback_file: "index.html"
+            cache: NoStore
+        }
+    ]
+}
+resources: [
+    {
+        name: "Organization"
+        list: {
+            default_limit: 24
+            max_limit: 100
+        }
+        roles: {
+            create: "admin"
+            update: "admin"
+            delete: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "slug"
+                type: String
+                validate: {
+                    min_length: 3
+                    max_length: 48
+                }
+            }
+            {
+                name: "name"
+                type: String
+                validate: {
+                    min_length: 3
+                    max_length: 120
+                }
+            }
+            {
+                name: "country"
+                type: String
+                validate: {
+                    min_length: 2
+                    max_length: 64
+                }
+            }
+            {
+                name: "city"
+                type: String
+                validate: {
+                    min_length: 2
+                    max_length: 64
+                }
+            }
+            {
+                name: "website_url"
+                type: String
+                validate: {
+                    min_length: 8
+                    max_length: 200
+                }
+            }
+            {
+                name: "contact_email"
+                type: String
+                validate: {
+                    min_length: 5
+                    max_length: 160
+                }
+            }
+            {
+                name: "collaboration_stage"
+                type: String
+                validate: {
+                    min_length: 3
+                    max_length: 64
+                }
+            }
+            {
+                name: "summary"
+                type: String
+                validate: {
+                    min_length: 24
+                    max_length: 800
+                }
+            }
+            { name: "created_at", type: DateTime }
+            { name: "updated_at", type: DateTime }
+        ]
+    }
+    {
+        name: "Interest"
+        list: {
+            default_limit: 48
+            max_limit: 200
+        }
+        roles: {
+            create: "admin"
+            update: "admin"
+            delete: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "organization_id"
+                type: I64
+                relation: {
+                    references: "organization.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "title"
+                type: String
+                validate: {
+                    min_length: 4
+                    max_length: 140
+                }
+            }
+            {
+                name: "work_mode"
+                type: String
+                validate: {
+                    min_length: 4
+                    max_length: 48
+                }
+            }
+            {
+                name: "summary"
+                type: String
+                validate: {
+                    min_length: 24
+                    max_length: 800
+                }
+            }
+            { name: "desired_start_on", type: Date, nullable: true }
+            { name: "created_at", type: DateTime }
+            { name: "updated_at", type: DateTime }
+        ]
+    }
+    {
+        name: "ThesisTopic"
+        list: {
+            default_limit: 48
+            max_limit: 200
+        }
+        roles: {
+            create: "admin"
+            update: "admin"
+            delete: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "organization_id"
+                type: I64
+                relation: {
+                    references: "organization.id"
+                    nested_route: true
+                }
+            }
+            {
+                name: "title"
+                type: String
+                validate: {
+                    min_length: 5
+                    max_length: 160
+                }
+            }
+            {
+                name: "discipline"
+                type: String
+                validate: {
+                    min_length: 3
+                    max_length: 80
+                }
+            }
+            {
+                name: "location"
+                type: String
+                validate: {
+                    min_length: 2
+                    max_length: 80
+                }
+            }
+            {
+                name: "contact_email"
+                type: String
+                validate: {
+                    min_length: 5
+                    max_length: 160
+                }
+            }
+            {
+                name: "summary"
+                type: String
+                validate: {
+                    min_length: 24
+                    max_length: 900
+                }
+            }
+            { name: "application_deadline", type: Date, nullable: true }
+            { name: "created_at", type: DateTime }
+            { name: "updated_at", type: DateTime }
+        ]
+    }
+    {
+        name: "CollaborationRequest"
+        list: {
+            default_limit: 24
+            max_limit: 100
+        }
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        policies: {
+            admin_bypass: true
+            read: { kind: Owner, field: "requester_user_id" }
+            create: { kind: SetOwner, field: "requester_user_id" }
+            update: { kind: Owner, field: "requester_user_id" }
+            delete: { kind: Owner, field: "requester_user_id" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "organization_id"
+                type: I64
+                relation: {
+                    references: "organization.id"
+                    nested_route: true
+                }
+            }
+            { name: "requester_user_id", type: I64 }
+            {
+                name: "title"
+                type: String
+                validate: {
+                    min_length: 5
+                    max_length: 160
+                }
+            }
+            {
+                name: "message"
+                type: String
+                validate: {
+                    min_length: 32
+                    max_length: 1600
+                }
+            }
+            {
+                name: "status"
+                type: String
+                validate: {
+                    min_length: 4
+                    max_length: 32
+                }
+            }
+            { name: "preferred_start_on", type: Date, nullable: true }
+            { name: "created_at", type: DateTime }
+            { name: "updated_at", type: DateTime }
+        ]
+    }
+]

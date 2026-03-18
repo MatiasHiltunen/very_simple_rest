@@ -223,6 +223,7 @@ fn eon_macro_generates_list_query_and_response_types() {
         cursor: None,
         filter_id: None,
         filter_title: None,
+        filter_title_contains: None,
         filter_score: None,
     };
     let _response = paged_api::ItemListResponse {
