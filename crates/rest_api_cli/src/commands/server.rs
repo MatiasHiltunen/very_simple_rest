@@ -1124,6 +1124,30 @@ mod tests {
             .collect()
     }
 
+    fn extract_url_from_text(text: &str) -> String {
+        let start = text
+            .find("http://")
+            .or_else(|| text.find("https://"))
+            .expect("email should contain an absolute URL");
+        text[start..]
+            .lines()
+            .next()
+            .expect("email URL line should exist")
+            .trim()
+            .to_owned()
+    }
+
+    fn path_and_query_from_url(url: &str) -> String {
+        let authority_start = url.find("://").map(|index| index + 3).unwrap_or(0);
+        let path_start = url[authority_start..]
+            .find('/')
+            .map(|index| authority_start + index);
+        match path_start {
+            Some(index) => url[index..].to_owned(),
+            None => "/".to_owned(),
+        }
+    }
+
     fn token_from_capture(path: &Path) -> String {
         let body = read_to_string(path);
         let payload: Value = serde_json::from_str(&body).expect("capture file should be JSON");
@@ -1132,6 +1156,16 @@ mod tests {
             .and_then(Value::as_str)
             .expect("capture payload should contain text_body");
         extract_token_from_text(text_body)
+    }
+
+    fn url_from_capture(path: &Path) -> String {
+        let body = read_to_string(path);
+        let payload: Value = serde_json::from_str(&body).expect("capture file should be JSON");
+        let text_body = payload
+            .get("text_body")
+            .and_then(Value::as_str)
+            .expect("capture payload should contain text_body");
+        extract_url_from_text(text_body)
     }
 
     fn free_bind_addr() -> String {
@@ -1769,13 +1803,84 @@ mod tests {
             .send()
             .expect("verified user login should succeed");
         assert_eq!(user_login_response.status(), reqwest::StatusCode::OK);
+
+        let password_reset_response = client
+            .post(format!("{base_url}/api/auth/password-reset/request"))
+            .json(&json!({
+                "email": "alice@example.com",
+            }))
+            .send()
+            .expect("password reset request should succeed");
+        assert_eq!(
+            password_reset_response.status(),
+            reqwest::StatusCode::ACCEPTED
+        );
+
+        let captured = wait_for_capture_count(&capture_dir, 2, Duration::from_secs(10));
+        let reset_capture = captured
+            .iter()
+            .find(|path| url_from_capture(path).contains("/password-reset?token="))
+            .expect("reset email should be captured");
+        let reset_token = token_from_capture(reset_capture);
+        let reset_url = url_from_capture(reset_capture);
+        let reset_path_and_query = path_and_query_from_url(&reset_url);
+        assert!(
+            reset_path_and_query.starts_with("/api/auth/password-reset?token="),
+            "unexpected reset link path: {reset_path_and_query}"
+        );
+
+        let reset_page_response = client
+            .get(format!("{base_url}{reset_path_and_query}"))
+            .send()
+            .expect("password reset page should load");
+        assert_eq!(reset_page_response.status(), reqwest::StatusCode::OK);
+        let reset_page_body = reset_page_response
+            .text()
+            .expect("password reset page body should read");
+        assert!(reset_page_body.contains("Choose A New Password"));
+
+        let confirm_reset_response = client
+            .post(format!("{base_url}/api/auth/password-reset/confirm"))
+            .json(&json!({
+                "token": reset_token,
+                "new_password": "password456",
+            }))
+            .send()
+            .expect("password reset confirmation should succeed");
+        assert_eq!(
+            confirm_reset_response.status(),
+            reqwest::StatusCode::NO_CONTENT
+        );
+
+        let old_password_login_response = client
+            .post(format!("{base_url}/api/auth/login"))
+            .json(&json!({
+                "email": "alice@example.com",
+                "password": "password123",
+            }))
+            .send()
+            .expect("old password login response should return");
+        assert_eq!(
+            old_password_login_response.status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+
+        let user_login_response = client
+            .post(format!("{base_url}/api/auth/login"))
+            .json(&json!({
+                "email": "alice@example.com",
+                "password": "password456",
+            }))
+            .send()
+            .expect("login with reset password should succeed");
+        assert_eq!(user_login_response.status(), reqwest::StatusCode::OK);
         let user_login: Value = user_login_response
             .json()
             .expect("user login response should decode");
         let user_token = user_login
             .get("token")
             .and_then(Value::as_str)
-            .expect("user login should return a token")
+            .expect("reset-password login should return a token")
             .to_owned();
 
         let create_request_response = client

@@ -749,21 +749,45 @@ fn build_public_auth_url(
     current_route_path: Option<&str>,
     query_pairs: &[(&str, &str)],
 ) -> Result<String, String> {
-    let mut base = if let Some(public_base_url) = settings
+    let scope_prefix = req
+        .map(|req| scope_prefix_from_request(req, current_route_path))
+        .unwrap_or_default();
+    let mut base_url = if let Some(public_base_url) = settings
         .email
         .as_ref()
         .and_then(|email| email.public_base_url.clone())
     {
-        public_base_url.trim_end_matches('/').to_owned()
+        let mut url = url::Url::parse(&public_base_url)
+            .map_err(|error| format!("invalid security.auth.email.public_base_url: {error}"))?;
+        url.set_query(None);
+        url.set_fragment(None);
+
+        let base_path = url.path().trim_end_matches('/');
+        let scope_prefix = scope_prefix.trim_end_matches('/');
+        let scoped_path = if scope_prefix.is_empty() {
+            base_path.to_owned()
+        } else if base_path.is_empty() || base_path == "/" {
+            scope_prefix.to_owned()
+        } else if base_path.ends_with(scope_prefix) {
+            base_path.to_owned()
+        } else {
+            format!("{base_path}{scope_prefix}")
+        };
+        if scoped_path.is_empty() {
+            url.set_path("/");
+        } else {
+            url.set_path(&scoped_path);
+        }
+        url
     } else if let Some(req) = req {
         let info = req.connection_info();
-        let scope_prefix = scope_prefix_from_request(req, current_route_path);
-        format!(
+        url::Url::parse(&format!(
             "{}://{}{}",
             info.scheme(),
             info.host(),
             scope_prefix.trim_end_matches('/')
-        )
+        ))
+        .map_err(|error| format!("failed to build auth base URL from request: {error}"))?
     } else {
         return Err(
             "security.auth.email.public_base_url is required when auth emails are sent outside an HTTP request context"
@@ -771,21 +795,21 @@ fn build_public_auth_url(
         );
     };
 
-    if !base.ends_with('/') {
-        base.push('/');
-    }
-    base.push_str(auth_path.trim_start_matches('/'));
+    let base_path = base_url.path().trim_end_matches('/');
+    let next_path = format!("{base_path}/{}", auth_path.trim_start_matches('/'));
+    base_url.set_path(&next_path);
 
     if !query_pairs.is_empty() {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
         for (key, value) in query_pairs {
             serializer.append_pair(key, value);
         }
-        base.push('?');
-        base.push_str(&serializer.finish());
+        base_url.set_query(Some(&serializer.finish()));
+    } else {
+        base_url.set_query(None);
     }
 
-    Ok(base)
+    Ok(base_url.to_string())
 }
 
 fn user_roles(role: &str) -> Vec<String> {
@@ -2912,7 +2936,8 @@ impl AuthRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthDbBackend, AuthSettings, LoginInput, auth_management_migration_sql, auth_migration_sql,
+        AuthDbBackend, AuthEmailProvider, AuthEmailSettings, AuthSettings, LoginInput,
+        auth_management_migration_sql, auth_migration_sql, build_public_auth_url,
         ensure_admin_exists_with_claim_prompt_mode, load_jwt_secret_from_env, login_with_settings,
     };
     #[cfg(feature = "turso-local")]
@@ -2920,6 +2945,7 @@ mod tests {
     #[cfg(feature = "turso-local")]
     use crate::db::connect_with_config;
     use crate::db::{connect, query, query_scalar};
+    use actix_web::test::TestRequest;
     use actix_web::{body::to_bytes, http::StatusCode, web};
     use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
@@ -3012,6 +3038,70 @@ mod tests {
             std::env::remove_var("JWT_SECRET_FILE");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn public_auth_url_uses_request_scope_with_public_base_url() {
+        let settings = AuthSettings {
+            email: Some(AuthEmailSettings {
+                from_email: "noreply@example.com".to_owned(),
+                from_name: Some("VSR".to_owned()),
+                reply_to: None,
+                public_base_url: Some("https://app.example".to_owned()),
+                provider: AuthEmailProvider::Resend {
+                    api_key_env: "RESEND_API_KEY".to_owned(),
+                    api_base_url: None,
+                },
+            }),
+            ..AuthSettings::default()
+        };
+        let request = TestRequest::with_uri("/api/auth/password-reset/request").to_http_request();
+
+        let url = build_public_auth_url(
+            Some(&request),
+            &settings,
+            "/auth/password-reset",
+            Some("/auth/password-reset/request"),
+            &[("token", "abc123")],
+        )
+        .expect("password reset url should build");
+
+        assert_eq!(
+            url,
+            "https://app.example/api/auth/password-reset?token=abc123"
+        );
+    }
+
+    #[test]
+    fn public_auth_url_does_not_duplicate_existing_scope_prefix() {
+        let settings = AuthSettings {
+            email: Some(AuthEmailSettings {
+                from_email: "noreply@example.com".to_owned(),
+                from_name: Some("VSR".to_owned()),
+                reply_to: None,
+                public_base_url: Some("https://app.example/app/api".to_owned()),
+                provider: AuthEmailProvider::Resend {
+                    api_key_env: "RESEND_API_KEY".to_owned(),
+                    api_base_url: None,
+                },
+            }),
+            ..AuthSettings::default()
+        };
+        let request = TestRequest::with_uri("/api/auth/verify-email").to_http_request();
+
+        let url = build_public_auth_url(
+            Some(&request),
+            &settings,
+            "/auth/verify-email",
+            Some("/auth/verify-email"),
+            &[("token", "xyz")],
+        )
+        .expect("verification url should build");
+
+        assert_eq!(
+            url,
+            "https://app.example/app/api/auth/verify-email?token=xyz"
+        );
     }
 
     #[actix_web::test]

@@ -79,6 +79,30 @@ fn extract_token_from_text(text: &str) -> String {
         .collect()
 }
 
+fn extract_url_from_text(text: &str) -> String {
+    let start = text
+        .find("http://")
+        .or_else(|| text.find("https://"))
+        .expect("email should contain an absolute URL");
+    text[start..]
+        .lines()
+        .next()
+        .expect("email URL line should exist")
+        .trim()
+        .to_owned()
+}
+
+fn path_and_query_from_url(url: &str) -> String {
+    let authority_start = url.find("://").map(|index| index + 3).unwrap_or(0);
+    let path_start = url[authority_start..]
+        .find('/')
+        .map(|index| authority_start + index);
+    match path_start {
+        Some(index) => url[index..].to_owned(),
+        None => "/".to_owned(),
+    }
+}
+
 fn token_from_capture(path: &Path) -> String {
     let body = std::fs::read_to_string(path).expect("capture file should be readable");
     let payload: Value = serde_json::from_str(&body).expect("capture file should be JSON");
@@ -87,6 +111,16 @@ fn token_from_capture(path: &Path) -> String {
         .and_then(Value::as_str)
         .expect("capture payload should contain text_body");
     extract_token_from_text(text_body)
+}
+
+fn url_from_capture(path: &Path) -> String {
+    let body = std::fs::read_to_string(path).expect("capture file should be readable");
+    let payload: Value = serde_json::from_str(&body).expect("capture file should be JSON");
+    let text_body = payload
+        .get("text_body")
+        .and_then(Value::as_str)
+        .expect("capture payload should contain text_body");
+    extract_url_from_text(text_body)
 }
 
 #[actix_web::test]
@@ -130,7 +164,13 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
             .expect("auth management migration should apply");
     }
 
-    let security = auth_management_api::security();
+    let mut security = auth_management_api::security();
+    security
+        .auth
+        .email
+        .as_mut()
+        .expect("auth management fixture should define email settings")
+        .public_base_url = Some("https://app.example".to_owned());
     let app = test::init_service(App::new().service(scope("/api").configure(|cfg| {
         auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
         auth_management_api::configure(cfg, pool.clone());
@@ -286,7 +326,23 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
 
     let captured = capture_files(&capture_dir);
     assert_eq!(captured.len(), 3);
-    let reset_token = token_from_capture(captured.last().expect("reset email should be captured"));
+    let reset_capture = captured
+        .iter()
+        .find(|path| url_from_capture(path).contains("/password-reset?token="))
+        .expect("reset email should be captured");
+    let reset_token = token_from_capture(reset_capture);
+    let reset_url = url_from_capture(reset_capture);
+    let reset_page_path = path_and_query_from_url(&reset_url);
+    assert!(
+        reset_page_path.starts_with("/api/auth/password-reset?token="),
+        "unexpected reset url: {reset_url}"
+    );
+    let reset_page_request = test::TestRequest::get().uri(&reset_page_path).to_request();
+    let reset_page_response = test::call_service(&app, reset_page_request).await;
+    assert_eq!(reset_page_response.status(), StatusCode::OK);
+    let reset_page_body = String::from_utf8(test::read_body(reset_page_response).await.to_vec())
+        .expect("password reset page HTML should decode");
+    assert!(reset_page_body.contains("Choose A New Password"));
 
     let confirm_reset_request = test::TestRequest::post()
         .uri("/api/auth/password-reset/confirm")
