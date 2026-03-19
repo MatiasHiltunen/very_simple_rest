@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Bridgeboard</title>
+    <meta name="theme-color" content="#edf3f7">
     <meta
         name="description"
         content="Bridgeboard is a cross-border collaboration platform for education and industry, powered by a single .eon API."
@@ -11,23 +12,29 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-        href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
         rel="stylesheet"
     >
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
 </head>
 <body>
-    <div class="page-bg" aria-hidden="true"></div>
-    <div class="page-grid" aria-hidden="true"></div>
+    <div class="page-ambient" aria-hidden="true">
+        <div class="page-orbit page-orbit-a"></div>
+        <div class="page-orbit page-orbit-b"></div>
+        <div class="page-grid"></div>
+    </div>
+    <div class="scroll-progress" aria-hidden="true"></div>
 
     <div class="site-shell">
         <header class="site-header" id="siteHeader">
             <a href="/" data-link class="brand" aria-label="Bridgeboard home">
-                <span class="brand-mark"></span>
+                <span class="brand-mark">
+                    <span class="brand-mark-core"></span>
+                </span>
                 <span class="brand-copy">
                     <strong>Bridgeboard</strong>
-                    <span>Education x industry collaboration</span>
+                    <span>European thesis and collaboration portal</span>
                 </span>
             </a>
 
@@ -42,29 +49,34 @@
             </nav>
 
             <div class="header-tools">
-                <a
-                    id="portalLink"
-                    class="header-link ghost"
-                    href="/api/auth/portal"
-                    target="_blank"
-                    rel="noreferrer"
-                >
-                    Portal
-                </a>
-                <a
-                    id="builtinAdminLink"
-                    class="header-link ghost"
-                    href="/api/auth/admin"
-                    target="_blank"
-                    rel="noreferrer"
-                    hidden
-                >
-                    Built-in admin
-                </a>
-                <button id="accountShortcut" class="header-link primary" type="button">
-                    Open account
-                </button>
-                <div id="sessionChip" class="session-chip">Guest session</div>
+                <div class="header-session">
+                    <span class="header-session-label">Workspace</span>
+                    <div id="sessionChip" class="session-chip">Guest session</div>
+                </div>
+                <div class="header-actions">
+                    <a
+                        id="portalLink"
+                        class="header-link ghost"
+                        href="/api/auth/portal"
+                        target="_blank"
+                        rel="noreferrer"
+                    >
+                        Portal
+                    </a>
+                    <a
+                        id="builtinAdminLink"
+                        class="header-link ghost"
+                        href="/api/auth/admin"
+                        target="_blank"
+                        rel="noreferrer"
+                        hidden
+                    >
+                        Built-in admin
+                    </a>
+                    <button id="accountShortcut" class="header-link primary" type="button">
+                        Open account
+                    </button>
+                </div>
             </div>
 
             <div class="mobile-header-actions">
@@ -75,18 +87,21 @@
                     id="mobileMenuButton"
                     class="header-link ghost mobile-menu-toggle"
                     type="button"
+                    popovertarget="mobileNavTray"
+                    popovertargetaction="toggle"
                     aria-expanded="false"
                     aria-controls="mobileNavTray"
-                    aria-label="Toggle navigation menu"
+                    aria-label="Open navigation menu"
                 >
                     <span class="mobile-menu-icon" aria-hidden="true"></span>
                     <span>Menu</span>
                 </button>
             </div>
 
-            <div id="mobileNavTray" class="mobile-nav-tray" hidden>
+            <div id="mobileNavTray" class="mobile-nav-tray" popover="auto">
                 <div class="mobile-nav-shell">
                     <div class="mobile-nav-summary">
+                        <span class="mobile-nav-eyebrow">Workspace</span>
                         <div id="mobileSessionChip" class="session-chip">Guest session</div>
                         <p id="mobileSessionHint" class="mobile-nav-hint">
                             Browse the public catalog or open account tools to sign in.
@@ -147,8 +162,10 @@
             </div>
         </header>
 
-        <div id="noticeBar" class="notice-bar info" role="status" aria-live="polite">
-            Loading Bridgeboard…
+        <div class="notice-wrap">
+            <div id="noticeBar" class="notice-bar info" role="status" aria-live="polite">
+                Loading Bridgeboard…
+            </div>
         </div>
 
         <main id="app" class="app-root" aria-live="polite"></main>

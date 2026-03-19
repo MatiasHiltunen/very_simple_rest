@@ -3,6 +3,16 @@ const AUTH_PORTAL_URL = "/api/auth/portal";
 const AUTH_ADMIN_URL = "/api/auth/admin";
 const CSRF_COOKIE_NAME = "vsr_csrf";
 const MOBILE_NAV_BREAKPOINT = 980;
+const ROUTE_ORDER = new Map([
+  ["home", 0],
+  ["organizations", 1],
+  ["topics", 2],
+  ["requests", 3],
+  ["account", 4],
+  ["admin-content", 5],
+  ["admin-users", 6],
+]);
+const DETAIL_ROUTES = new Set(["organization-detail", "topic-detail"]);
 
 const DEMO_DATA = {
   organizations: [
@@ -106,6 +116,7 @@ const state = {
   account: null,
   organizationOptions: [],
   mobileNavOpen: false,
+  navigationToken: 0,
   route: null,
   view: null,
 };
@@ -139,6 +150,7 @@ window.addEventListener("popstate", () => {
   void navigateToCurrentLocation({ preserveScroll: true });
 });
 window.addEventListener("resize", handleResize);
+elements.mobileNavTray.addEventListener("toggle", handleMobileNavToggle);
 elements.accountShortcut.addEventListener("click", () => {
   closeMobileNav();
   navigate("/account");
@@ -151,17 +163,16 @@ elements.mobileDrawerAccountButton.addEventListener("click", () => {
   closeMobileNav();
   navigate("/account");
 });
-elements.mobileMenuButton.addEventListener("click", () => {
-  toggleMobileNav();
-});
 
 bootstrap();
 
 async function bootstrap() {
   syncHeader();
+  renderLoading("Bridgeboard", "Loading collaboration workspace…");
   setNotice("Loading Bridgeboard…", "info");
   await refreshSession({ silent: true });
   await navigateToCurrentLocation({ preserveScroll: true });
+  applyDefaultNotice();
 }
 
 function isMobileShell() {
@@ -172,11 +183,23 @@ function openMobileNav() {
   if (!isMobileShell()) {
     return;
   }
+  if (typeof elements.mobileNavTray.showPopover === "function") {
+    if (!elements.mobileNavTray.matches(":popover-open")) {
+      elements.mobileNavTray.showPopover();
+    }
+    return;
+  }
   state.mobileNavOpen = true;
   syncHeader();
 }
 
 function closeMobileNav() {
+  if (typeof elements.mobileNavTray.hidePopover === "function") {
+    if (elements.mobileNavTray.matches(":popover-open")) {
+      elements.mobileNavTray.hidePopover();
+      return;
+    }
+  }
   if (!state.mobileNavOpen) {
     return;
   }
@@ -198,6 +221,11 @@ function handleKeydown(event) {
   }
 }
 
+function handleMobileNavToggle() {
+  state.mobileNavOpen = elements.mobileNavTray.matches(":popover-open");
+  syncHeader();
+}
+
 function handleResize() {
   if (!isMobileShell()) {
     closeMobileNav();
@@ -208,25 +236,40 @@ function handleResize() {
 
 async function navigateToCurrentLocation({ preserveScroll = false } = {}) {
   closeMobileNav();
-  state.route = parseRoute(window.location.pathname, window.location.search);
+  const previousRoute = state.route;
+  const nextRoute = parseRoute(window.location.pathname, window.location.search);
+  const navigationToken = ++state.navigationToken;
+  state.route = nextRoute;
   syncHeader();
-  renderLoading(state.route.title, state.route.description);
+  setPageLoading(true);
 
   try {
-    state.view = await loadView(state.route);
-    renderView();
+    const nextView = await loadView(nextRoute);
+    if (navigationToken !== state.navigationToken) {
+      return;
+    }
+    await swapView(nextView, { types: viewTransitionTypes(previousRoute, nextRoute) });
     if (!preserveScroll) {
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     }
   } catch (error) {
+    if (navigationToken !== state.navigationToken) {
+      return;
+    }
     const message = error.message || "Something went wrong while loading the page.";
-    state.view = {
-      kind: "error",
-      title: "Could not load Bridgeboard",
-      detail: message,
-    };
-    renderView();
+    await swapView(
+      {
+        kind: "error",
+        title: "Could not load Bridgeboard",
+        detail: message,
+      },
+      { types: viewTransitionTypes(previousRoute, nextRoute) },
+    );
     setNotice(message, "error");
+  } finally {
+    if (navigationToken === state.navigationToken) {
+      setPageLoading(false);
+    }
   }
 }
 
@@ -613,6 +656,7 @@ function renderLoading(title, detail) {
 
 function renderView() {
   syncHeader();
+  document.body.dataset.route = state.route?.name || "";
   switch (state.view.kind) {
     case "home":
       document.title = "Bridgeboard";
@@ -688,11 +732,10 @@ function renderHomeView(view) {
         <div class="hero-grid">
           <div>
             <p class="eyebrow">Bridgeboard</p>
-            <h1>Cross-border thesis collaboration, finally legible.</h1>
+            <h1>Cross-border collaboration with room to think.</h1>
             <p class="lead">
-              Bridgeboard brings universities, applied sciences campuses, labs, and industry
-              partners into one shared operating surface for collaboration signals, thesis topics,
-              and live request pipelines.
+              Bridgeboard turns partner discovery, thesis opportunities, and proposal intake into
+              one calm public service portal for campuses, labs, and industry teams.
             </p>
             <div class="page-actions">
               <a class="button primary" href="/organizations" data-link>Explore organizations</a>
@@ -724,8 +767,8 @@ function renderHomeView(view) {
           <div class="panel-header">
             <div>
               <p class="eyebrow">Featured organizations</p>
-              <h2>Where collaboration is active right now</h2>
-              <p class="muted">Public partner profiles make current intent visible before outreach starts.</p>
+              <h2>Organizations currently open for collaboration</h2>
+              <p class="muted">Public partner profiles make live demand visible before outreach becomes noisy.</p>
             </div>
             <a class="text-link" href="/organizations" data-link>Open the full directory</a>
           </div>
@@ -741,12 +784,12 @@ function renderHomeView(view) {
         <aside class="aside-stack">
           <section class="panel">
             <p class="eyebrow">Session</p>
-            <h2>${state.account ? "Your workspace is active" : "Sign in to start building requests"}</h2>
+            <h2>${state.account ? "Your workspace is active" : "Sign in to start a proposal workspace"}</h2>
             <p class="muted">
               ${
                 state.account
                   ? `Signed in as ${escapeHtml(state.account.email)} with ${escapeHtml(state.account.role)} access.`
-                  : "Register with a verified email to submit requests, manage your password, and open the built-in account portal."
+                  : "Create a verified account to submit proposals, manage credentials, and open the account portal."
               }
             </p>
             <div class="summary-grid">
@@ -775,18 +818,18 @@ function renderHomeView(view) {
 
           <section class="panel">
             <p class="eyebrow">Operating model</p>
-            <h2>Designed for real collaboration programs</h2>
+            <h2>Built for actual collaboration programs</h2>
             <div class="data-list">
               <article class="data-block">
-                <h4>Public signal layer</h4>
-                <p class="muted">Organizations can publish current interests and thesis-ready opportunities without exposing private pipeline data.</p>
+                <h4>Public opportunity layer</h4>
+                <p class="muted">Organizations can publish current interests and thesis-ready opportunities without exposing internal workflow noise.</p>
               </article>
               <article class="data-block">
-                <h4>Owner-scoped proposals</h4>
-                <p class="muted">Collaboration requests remain private to the requester by default while admins can review the shared pipeline.</p>
+                <h4>Protected proposal workspace</h4>
+                <p class="muted">Requests stay attached to verified accounts so every proposal keeps its context, owner, and timeline.</p>
               </article>
               <article class="data-block">
-                <h4>Built-in auth workflows</h4>
+                <h4>Built-in identity flows</h4>
                 <p class="muted">Registration, verification, password reset, and account management already ship with the generated API.</p>
               </article>
             </div>
@@ -835,7 +878,7 @@ function renderHomeView(view) {
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Request pipeline</p>
-                  <h2>${isAdmin() ? "Latest requests in the admin pipeline" : "Your latest proposals"}</h2>
+                  <h2>${isAdmin() ? "Latest requests in the review queue" : "Your latest proposals"}</h2>
                 </div>
                 <a class="text-link" href="/requests" data-link>Open requests</a>
               </div>
@@ -1142,10 +1185,10 @@ function renderRequestsView(view) {
           <div class="hero-grid">
             <div>
               <p class="eyebrow">Requests</p>
-              <h1>Private proposal flow for real collaboration work.</h1>
+              <h1>Verified proposal flow for real collaboration work.</h1>
               <p class="lead">
-                Collaboration requests are tied to verified accounts so proposals stay owner-scoped
-                for regular users and visible to administrators for shared review.
+                Collaboration requests are tied to verified accounts so proposals stay structured,
+                traceable, and connected to the right organization context from day one.
               </p>
               <div class="page-actions">
                 <a class="button primary" href="/account" data-link>Register or sign in</a>
@@ -1154,16 +1197,16 @@ function renderRequestsView(view) {
             </div>
             <div class="metric-grid">
               <article class="metric-card">
-                <span>Privacy model</span>
-                <strong>Owner scoped</strong>
+                <span>Workspace model</span>
+                <strong>Verified access</strong>
               </article>
               <article class="metric-card">
                 <span>Verification</span>
                 <strong>Email first</strong>
               </article>
               <article class="metric-card">
-                <span>Admin review</span>
-                <strong>Built in</strong>
+                <span>Handover</span>
+                <strong>Structured</strong>
               </article>
             </div>
           </div>
@@ -1178,12 +1221,12 @@ function renderRequestsView(view) {
         <div class="hero-grid">
           <div>
             <p class="eyebrow">Requests</p>
-            <h1>${isAdmin() ? "Run the shared collaboration pipeline." : "Turn discovery into a real proposal."}</h1>
+            <h1>${isAdmin() ? "Run the shared collaboration pipeline." : "Turn discovery into a structured proposal."}</h1>
             <p class="lead">
               ${
                 isAdmin()
                   ? "As an administrator, you can review every collaboration request and move proposals through review, matching, and archival states."
-                  : "Requests are private to you and administrators. Use them to frame supervision models, desired start dates, and partner expectations."
+                  : "Use requests to frame supervision models, desired start dates, and partner expectations inside one dedicated workspace."
               }
             </p>
           </div>
@@ -1266,7 +1309,11 @@ function renderAccountView() {
             <p class="eyebrow">Account</p>
             <h1>${state.account ? "Manage a verified collaboration identity." : "Create the account layer for your collaboration work."}</h1>
             <p class="lead">
-              Bridgeboard uses built-in auth for registration, verification, password reset, and account administration. The generated API already handles the heavy lifting.
+              ${
+                isAdmin()
+                  ? "Bridgeboard uses built-in auth for registration, verification, password reset, and administrator workflows. The generated API already handles the identity layer."
+                  : "Bridgeboard uses built-in auth for registration, verification, and password reset. The generated API already handles the identity layer."
+              }
             </p>
             <div class="page-actions">
               <a class="button primary" href="${AUTH_PORTAL_URL}" target="_blank" rel="noreferrer">Open built-in portal</a>
@@ -1790,14 +1837,6 @@ function renderCollection(items, renderItem, emptyMessage) {
 }
 
 async function handleClick(event) {
-  if (
-    state.mobileNavOpen &&
-    elements.siteHeader &&
-    !elements.siteHeader.contains(event.target)
-  ) {
-    closeMobileNav();
-  }
-
   const link = event.target.closest("a[data-link]");
   if (link) {
     const targetUrl = new URL(link.href, window.location.origin);
@@ -2365,13 +2404,16 @@ function syncHeader() {
 
   const authenticated = Boolean(state.account);
   const admin = isAdmin();
+  const roleLabel = state.account?.role || (admin ? "admin" : "member");
   const sessionLabel = authenticated
-    ? `${state.account.email} · ${state.account.role}`
+    ? `${state.account.email} · ${roleLabel}`
     : "Guest session";
   const sessionHint = authenticated
-    ? state.account.email_verified
-      ? "Your account is verified and ready for collaboration workflows."
-      : "Your account is signed in, but email verification is still pending."
+    ? admin
+      ? "Admin tools are enabled for this workspace."
+      : state.account.email_verified
+        ? "Your account is verified and ready for proposals."
+        : "Your account is signed in, but email verification is still pending."
     : "Browse the public catalog or open account tools to sign in.";
 
   elements.sessionChip.textContent = sessionLabel;
@@ -2398,7 +2440,9 @@ function syncHeader() {
     ? "Open account workspace"
     : "Open account";
 
-  const mobileNavOpen = state.mobileNavOpen && isMobileShell();
+  const mobileNavOpen =
+    isMobileShell() &&
+    (state.mobileNavOpen || elements.mobileNavTray.matches(":popover-open"));
   elements.siteHeader.classList.toggle("is-mobile-nav-open", mobileNavOpen);
   elements.mobileMenuButton.setAttribute(
     "aria-expanded",
@@ -2408,8 +2452,36 @@ function syncHeader() {
     "aria-label",
     mobileNavOpen ? "Close navigation menu" : "Open navigation menu",
   );
-  elements.mobileNavTray.hidden = !mobileNavOpen;
+  document.body.dataset.authenticated = authenticated ? "true" : "false";
+  document.body.dataset.admin = admin ? "true" : "false";
   document.body.classList.toggle("mobile-nav-open", mobileNavOpen);
+}
+
+function setPageLoading(isLoading) {
+  elements.app.classList.toggle("is-loading", isLoading);
+  elements.app.setAttribute("aria-busy", isLoading ? "true" : "false");
+}
+
+async function swapView(nextView, { types = ["route"] } = {}) {
+  const commit = () => {
+    state.view = nextView;
+    renderView();
+  };
+
+  if (!state.view || typeof document.startViewTransition !== "function") {
+    commit();
+    return;
+  }
+
+  try {
+    const transition = document.startViewTransition({
+      update: commit,
+      types,
+    });
+    await transition.finished.catch(() => {});
+  } catch (error) {
+    commit();
+  }
 }
 
 function activeNavKey(routeName) {
@@ -2435,9 +2507,61 @@ function activeNavKey(routeName) {
   }
 }
 
+function viewTransitionTypes(previousRoute, nextRoute) {
+  const types = ["route"];
+  if (!previousRoute || !nextRoute) {
+    return types;
+  }
+
+  const previousKey = activeNavKey(previousRoute.name);
+  const nextKey = activeNavKey(nextRoute.name);
+
+  if (previousKey === nextKey && previousRoute.name !== nextRoute.name) {
+    if (DETAIL_ROUTES.has(nextRoute.name)) {
+      types.push("drill-in");
+    } else if (DETAIL_ROUTES.has(previousRoute.name)) {
+      types.push("drill-out");
+    }
+    return types;
+  }
+
+  if (previousKey !== nextKey) {
+    types.push(
+      (ROUTE_ORDER.get(nextKey) ?? Number.MAX_SAFE_INTEGER) >=
+        (ROUTE_ORDER.get(previousKey) ?? Number.MAX_SAFE_INTEGER)
+        ? "forwards"
+        : "backwards",
+    );
+  }
+
+  return types;
+}
+
 function setNotice(message, kind = "info") {
   elements.noticeBar.textContent = message;
   elements.noticeBar.className = `notice-bar ${kind}`;
+}
+
+function applyDefaultNotice() {
+  if (isAdmin()) {
+    setNotice("Admin workspace ready. Public catalog and access tools are available.", "info");
+    return;
+  }
+
+  if (state.account) {
+    setNotice(
+      state.account.email_verified
+        ? "Workspace ready. Browse opportunities and submit proposals."
+        : "Signed in. Verify your email to unlock the full proposal workflow.",
+      "info",
+    );
+    return;
+  }
+
+  setNotice(
+    "Guest workspace ready. Browse organizations and thesis topics or open account tools to sign in.",
+    "info",
+  );
 }
 
 function syncCsrfToken() {
