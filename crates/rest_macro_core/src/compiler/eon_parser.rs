@@ -6,6 +6,7 @@ use std::{
 
 use heck::ToSnakeCase;
 use proc_macro2::Span;
+use serde::de::{self, Deserializer, Error as _, MapAccess, Visitor};
 use syn::{LitStr, Type};
 
 use super::model::{
@@ -58,6 +59,7 @@ struct ServiceDocument {
     static_config: Option<StaticConfigDocument>,
     #[serde(default)]
     security: SecurityDocument,
+    #[serde(deserialize_with = "deserialize_resource_documents")]
     resources: Vec<ResourceDocument>,
 }
 
@@ -282,6 +284,7 @@ struct ResourceDocument {
     policies: RowPoliciesDocument,
     #[serde(default)]
     list: ListConfigDocument,
+    #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
 
@@ -402,6 +405,209 @@ enum ScalarType {
     Time,
     Uuid,
     Decimal,
+}
+
+#[derive(serde::Deserialize)]
+struct ResourceMapValueDocument {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    table: Option<String>,
+    #[serde(default)]
+    id_field: Option<String>,
+    #[serde(default)]
+    roles: RoleRequirements,
+    #[serde(default)]
+    policies: RowPoliciesDocument,
+    #[serde(default)]
+    list: ListConfigDocument,
+    #[serde(deserialize_with = "deserialize_field_documents")]
+    fields: Vec<FieldDocument>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum FieldMapValueDocument {
+    Type(FieldTypeDocument),
+    Config(FieldMapConfigDocument),
+}
+
+#[derive(serde::Deserialize)]
+struct FieldMapConfigDocument {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(rename = "type")]
+    ty: FieldTypeDocument,
+    #[serde(default)]
+    nullable: bool,
+    #[serde(default)]
+    id: bool,
+    #[serde(default)]
+    generated: GeneratedValue,
+    #[serde(default)]
+    relation: Option<RelationDocument>,
+    #[serde(default)]
+    validate: Option<FieldValidationDocument>,
+}
+
+fn deserialize_resource_documents<'de, D>(deserializer: D) -> Result<Vec<ResourceDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(ResourceDocumentsVisitor)
+}
+
+fn deserialize_field_documents<'de, D>(deserializer: D) -> Result<Vec<FieldDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(FieldDocumentsVisitor)
+}
+
+impl ResourceMapValueDocument {
+    fn into_document<E>(self, key: String) -> Result<ResourceDocument, E>
+    where
+        E: de::Error,
+    {
+        if let Some(name) = self.name.as_deref() {
+            if name != key {
+                return Err(E::custom(format!(
+                    "resource map entry `{key}` has mismatched `name` value `{name}`"
+                )));
+            }
+        }
+
+        Ok(ResourceDocument {
+            name: key,
+            table: self.table,
+            id_field: self.id_field,
+            roles: self.roles,
+            policies: self.policies,
+            list: self.list,
+            fields: self.fields,
+        })
+    }
+}
+
+impl FieldMapValueDocument {
+    fn into_document<E>(self, key: String) -> Result<FieldDocument, E>
+    where
+        E: de::Error,
+    {
+        match self {
+            Self::Type(ty) => Ok(FieldDocument {
+                name: key,
+                ty,
+                nullable: false,
+                id: false,
+                generated: GeneratedValue::None,
+                relation: None,
+                validate: None,
+            }),
+            Self::Config(field) => field.into_document::<E>(key),
+        }
+    }
+}
+
+impl FieldMapConfigDocument {
+    fn into_document<E>(self, key: String) -> Result<FieldDocument, E>
+    where
+        E: de::Error,
+    {
+        if let Some(name) = self.name.as_deref() {
+            if name != key {
+                return Err(E::custom(format!(
+                    "field map entry `{key}` has mismatched `name` value `{name}`"
+                )));
+            }
+        }
+
+        Ok(FieldDocument {
+            name: key,
+            ty: self.ty,
+            nullable: self.nullable,
+            id: self.id,
+            generated: self.generated,
+            relation: self.relation,
+            validate: self.validate,
+        })
+    }
+}
+
+struct ResourceDocumentsVisitor;
+
+impl<'de> Visitor<'de> for ResourceDocumentsVisitor {
+    type Value = Vec<ResourceDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a list or map of resource definitions")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut resources = Vec::new();
+        while let Some(resource) = seq.next_element::<ResourceDocument>()? {
+            resources.push(resource);
+        }
+        Ok(resources)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = HashSet::new();
+        let mut resources = Vec::new();
+
+        while let Some((key, value)) = map.next_entry::<String, ResourceMapValueDocument>()? {
+            if !seen.insert(key.clone()) {
+                return Err(A::Error::custom(format!("duplicate resource `{key}`")));
+            }
+            resources.push(value.into_document::<A::Error>(key)?);
+        }
+
+        Ok(resources)
+    }
+}
+
+struct FieldDocumentsVisitor;
+
+impl<'de> Visitor<'de> for FieldDocumentsVisitor {
+    type Value = Vec<FieldDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a list or map of field definitions")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut fields = Vec::new();
+        while let Some(field) = seq.next_element::<FieldDocument>()? {
+            fields.push(field);
+        }
+        Ok(fields)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = HashSet::new();
+        let mut fields = Vec::new();
+
+        while let Some((key, value)) = map.next_entry::<String, FieldMapValueDocument>()? {
+            if !seen.insert(key.clone()) {
+                return Err(A::Error::custom(format!("duplicate field `{key}`")));
+            }
+            fields.push(value.into_document::<A::Error>(key)?);
+        }
+
+        Ok(fields)
+    }
 }
 
 pub fn load_service_from_file(path: LitStr) -> syn::Result<LoadedService> {
@@ -2256,6 +2462,114 @@ mod tests {
             build_resources(document.db, document.resources).expect("resources should build");
         assert_eq!(resources[0].list.default_limit, Some(25));
         assert_eq!(resources[0].list.max_limit, Some(100));
+    }
+
+    #[test]
+    fn parses_resource_and_field_maps_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: {
+                Post: {
+                    list: {
+                        default_limit: 25
+                        max_limit: 100
+                    }
+                    fields: {
+                        id: I64
+                        title: String
+                        subtitle: {
+                            type: String
+                            nullable: true
+                        }
+                        author_id: {
+                            type: I64
+                            relation: {
+                                references: "user.id"
+                                nested_route: true
+                            }
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].struct_ident.to_string(), "Post");
+        assert_eq!(resources[0].list.default_limit, Some(25));
+        assert_eq!(resources[0].list.max_limit, Some(100));
+
+        let subtitle = resources[0]
+            .find_field("subtitle")
+            .expect("subtitle should exist");
+        assert!(super::super::model::is_optional_type(&subtitle.ty));
+
+        let author_id = resources[0]
+            .find_field("author_id")
+            .expect("author_id should exist");
+        let relation = author_id
+            .relation
+            .as_ref()
+            .expect("author_id relation should exist");
+        assert_eq!(relation.references_table, "user");
+        assert_eq!(relation.references_field, "id");
+        assert!(relation.nested_route);
+    }
+
+    #[test]
+    fn rejects_mismatched_resource_name_in_map_entry() {
+        let error = match eon::from_str::<ServiceDocument>(
+            r#"
+            resources: {
+                Post: {
+                    name: "Comment"
+                    fields: {
+                        id: I64
+                    }
+                }
+            }
+            "#,
+        ) {
+            Ok(_) => panic!("mismatched resource name should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("resource map entry `Post` has mismatched `name` value `Comment`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_field_name_in_map_entry() {
+        let error = match eon::from_str::<ServiceDocument>(
+            r#"
+            resources: {
+                Post: {
+                    fields: {
+                        title: {
+                            name: "headline"
+                            type: String
+                        }
+                    }
+                }
+            }
+            "#,
+        ) {
+            Ok(_) => panic!("mismatched field name should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("field map entry `title` has mismatched `name` value `headline`"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

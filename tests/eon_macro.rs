@@ -11,6 +11,7 @@ rest_api_from_eon!("tests/fixtures/static_site_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_encrypted_api.eon");
 rest_api_from_eon!("tests/fixtures/tls_api.eon");
+rest_api_from_eon!("tests/fixtures/mapped_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -251,6 +252,41 @@ fn eon_macro_generates_list_query_and_response_types() {
         next_offset: None,
         next_cursor: None,
     };
+}
+
+#[test]
+fn eon_macro_supports_resource_and_field_map_definitions() {
+    let post = mapped_api::Post {
+        id: Some(1),
+        title: "Mapped".to_owned(),
+        published: false,
+    };
+    let create = mapped_api::PostCreate {
+        title: "Mapped".to_owned(),
+        published: false,
+    };
+    let query = mapped_api::PostListQuery {
+        limit: Some(10),
+        offset: Some(0),
+        sort: None,
+        order: None,
+        cursor: None,
+        filter_id: None,
+        filter_title: None,
+        filter_title_contains: None,
+        filter_published: None,
+    };
+    let response = mapped_api::PostListResponse {
+        items: Vec::new(),
+        total: 0,
+        count: 0,
+        limit: Some(10),
+        offset: 0,
+        next_offset: None,
+        next_cursor: None,
+    };
+
+    let _ = (post, create, query, response);
 }
 
 #[test]
