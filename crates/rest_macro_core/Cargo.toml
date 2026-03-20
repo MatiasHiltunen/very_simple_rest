@@ -3,7 +3,12 @@ name = "rest_macro_core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+description = "Core compiler and runtime support for very_simple_rest and the vsr CLI"
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [features]
 default = []

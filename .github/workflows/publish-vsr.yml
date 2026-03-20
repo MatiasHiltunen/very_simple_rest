@@ -1,0 +1,138 @@
+name: Publish VSR CLI
+
+on:
+  push:
+    tags:
+      - "vsra-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify root CLI default
+        run: cargo run -- --help
+
+      - name: Test CLI crate
+        run: cargo test -p vsra -- --skip build_server_binary_bridgeboard_supports_clean_room_e2e
+
+      - name: Package core publish dependency
+        run: cargo package -p rest_macro_core --features codegen,turso-local
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/vsra-v')
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches CLI version
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          metadata = json.loads(
+              subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+          )
+          cli = next(pkg for pkg in metadata["packages"] if pkg["name"] == "vsra")
+          expected = f"vsra-v{cli['version']}"
+          actual = os.environ["GITHUB_REF_NAME"]
+          if actual != expected:
+              print(f"tag mismatch: expected {expected}, got {actual}", file=sys.stderr)
+              sys.exit(1)
+          print(f"publishing {cli['name']} {cli['version']}")
+          PY
+
+      - name: Publish core dependency if needed
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(python - <<'PY'
+          import json, subprocess
+          metadata = json.loads(
+              subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+          )
+          pkg = next(pkg for pkg in metadata["packages"] if pkg["name"] == "rest_macro_core")
+          print(pkg["version"])
+          PY
+          )"
+
+          if curl -fsSL "https://crates.io/api/v1/crates/rest_macro_core/${version}" > /dev/null; then
+            echo "rest_macro_core ${version} already published"
+          else
+            cargo publish -p rest_macro_core --features codegen,turso-local --locked
+          fi
+
+      - name: Wait for core dependency to propagate
+        run: |
+          set -euo pipefail
+          version="$(python - <<'PY'
+          import json, subprocess
+          metadata = json.loads(
+              subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+          )
+          pkg = next(pkg for pkg in metadata["packages"] if pkg["name"] == "rest_macro_core")
+          print(pkg["version"])
+          PY
+          )"
+
+          for attempt in $(seq 1 20); do
+            if curl -fsSL "https://crates.io/api/v1/crates/rest_macro_core/${version}" > /dev/null; then
+              echo "rest_macro_core ${version} is available"
+              exit 0
+            fi
+            echo "waiting for rest_macro_core ${version} to appear on crates.io (${attempt}/20)"
+            sleep 15
+          done
+
+          echo "rest_macro_core ${version} did not appear on crates.io in time" >&2
+          exit 1
+
+      - name: Publish CLI crate if needed
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(python - <<'PY'
+          import json, subprocess
+          metadata = json.loads(
+              subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+          )
+          pkg = next(pkg for pkg in metadata["packages"] if pkg["name"] == "vsra")
+          print(pkg["version"])
+          PY
+          )"
+
+          if curl -fsSL "https://crates.io/api/v1/crates/vsra/${version}" > /dev/null; then
+            echo "vsra ${version} already published"
+          else
+            cargo publish -p vsra --locked
+          fi

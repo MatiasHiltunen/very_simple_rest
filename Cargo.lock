@@ -3544,32 +3544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rest_api_cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bcrypt",
- "chrono",
- "clap",
- "colored",
- "console",
- "dialoguer",
- "dotenv",
- "indicatif",
- "rand 0.10.0",
- "rcgen",
- "regex",
- "reqwest",
- "rest_macro_core",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "rest_macro"
 version = "0.1.0"
 dependencies = [
@@ -5317,6 +5291,32 @@ dependencies = [
  "serde_json",
  "sqlx",
  "trybuild",
+ "uuid",
+]
+
+[[package]]
+name = "vsra"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bcrypt",
+ "chrono",
+ "clap",
+ "colored",
+ "console",
+ "dialoguer",
+ "dotenv",
+ "indicatif",
+ "rand 0.10.0",
+ "rcgen",
+ "regex",
+ "reqwest",
+ "rest_macro_core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 

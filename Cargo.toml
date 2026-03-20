@@ -4,6 +4,7 @@ members = [ "crates/rest_api_cli",
     "crates/rest_macro_core",
     "examples/demo"
 ]
+default-members = ["crates/rest_api_cli"]
 resolver = "2"
 
 [workspace.dependencies]

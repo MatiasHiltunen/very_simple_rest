@@ -21,6 +21,29 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 
 ## Installation
 
+### CLI
+
+Install the `vsr` command-line tool from crates.io:
+
+```bash
+cargo install vsra
+```
+
+If you are working from a checkout of this repository, the workspace defaults to the CLI package,
+so a plain root build produces `target/release/vsr`:
+
+```bash
+git clone https://github.com/MatiasHiltunen/very_simple_rest.git
+cd very_simple_rest
+cargo build --release
+./target/release/vsr --help
+```
+
+Use `cargo build --workspace` when you want all workspace crates, or
+`cargo build -p very_simple_rest` when you want only the library package.
+
+### Library
+
 You can include this library in your project by adding it as a git dependency in your `Cargo.toml`:
 
 _Note that you need to add the other dependencies aswell_

@@ -16,13 +16,23 @@ git clone https://github.com/MatiasHiltunen/very_simple_rest.git
 cd very_simple_rest
 
 # Build the CLI tool
-cargo build --release -p rest_api_cli
+cargo build --release
 
 # Run the CLI
 ./target/release/vsr --help
 ```
 
+The workspace default member is the CLI package, so `cargo build` and `cargo run` from the
+repository root target `vsr`. Use `cargo build --workspace` when you want the full workspace, or
+`cargo build -p very_simple_rest` for the library package.
+
 ### Cargo Install
+
+```bash
+cargo install vsra
+```
+
+For an unpublished local checkout:
 
 ```bash
 cargo install --path crates/rest_api_cli

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use rest_api_cli::commands;
+use vsra::commands;
 use std::path::PathBuf;
 
 #[derive(Parser)]

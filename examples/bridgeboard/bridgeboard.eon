@@ -71,9 +71,8 @@ static: {
 		}
 	]
 }
-resources: [
-	{
-		name: "Organization"
+resources: {
+	Organization: {
 		list: {
 			default_limit: 24
 			max_limit: 100
@@ -83,88 +82,72 @@ resources: [
 			update: "admin"
 			delete: "admin"
 		}
-		fields: [
-			{
-				name: "id"
+		fields: {
+			id: {
 				type: I64
 				id: true
 			}
-			{
-				name: "slug"
+			slug: {
 				type: String
 				validate: {
 					min_length: 3
 					max_length: 48
 				}
 			}
-			{
-				name: "name"
+			name: {
 				type: String
 				validate: {
 					min_length: 3
 					max_length: 120
 				}
 			}
-			{
-				name: "country"
+			country: {
 				type: String
 				validate: {
 					min_length: 2
 					max_length: 64
 				}
 			}
-			{
-				name: "city"
+			city: {
 				type: String
 				validate: {
 					min_length: 2
 					max_length: 64
 				}
 			}
-			{
-				name: "website_url"
+			website_url: {
 				type: String
 				validate: {
 					min_length: 8
 					max_length: 200
 				}
 			}
-			{
-				name: "contact_email"
+			contact_email: {
 				type: String
 				validate: {
 					min_length: 5
 					max_length: 160
 				}
 			}
-			{
-				name: "collaboration_stage"
+			collaboration_stage: {
 				type: String
 				validate: {
 					min_length: 3
 					max_length: 64
 				}
 			}
-			{
-				name: "summary"
+			summary: {
 				type: String
 				validate: {
 					min_length: 24
 					max_length: 800
 				}
 			}
-			{
-				name: "created_at"
-				type: DateTime
-			}
-			{
-				name: "updated_at"
-				type: DateTime
-			}
-		]
+			created_at: DateTime
+			updated_at: DateTime
+		}
 	}
-	{
-		name: "Interest"
+	Interest: {
 		list: {
 			default_limit: 48
 			max_limit: 200
@@ -174,61 +157,48 @@ resources: [
 			update: "admin"
 			delete: "admin"
 		}
-		fields: [
-			{
-				name: "id"
+		fields: {
+			id: {
 				type: I64
 				id: true
 			}
-			{
-				name: "organization_id"
+			organization_id: {
 				type: I64
 				relation: {
 					references: "organization.id"
 					nested_route: true
 				}
 			}
-			{
-				name: "title"
+			title: {
 				type: String
 				validate: {
 					min_length: 4
 					max_length: 140
 				}
 			}
-			{
-				name: "work_mode"
+			work_mode: {
 				type: String
 				validate: {
 					min_length: 4
 					max_length: 48
 				}
 			}
-			{
-				name: "summary"
+			summary: {
 				type: String
 				validate: {
 					min_length: 24
 					max_length: 800
 				}
 			}
-			{
-				name: "desired_start_on"
+			desired_start_on: {
 				type: Date
 				nullable: true
 			}
-			{
-				name: "created_at"
-				type: DateTime
-			}
-			{
-				name: "updated_at"
-				type: DateTime
-			}
-		]
+			created_at: DateTime
+			updated_at: DateTime
+		}
 	}
-	{
-		name: "ThesisTopic"
+	ThesisTopic: {
 		list: {
 			default_limit: 48
 			max_limit: 200
@@ -238,77 +208,62 @@ resources: [
 			update: "admin"
 			delete: "admin"
 		}
-		fields: [
-			{
-				name: "id"
+		fields: {
+			id: {
 				type: I64
 				id: true
 			}
-			{
-				name: "organization_id"
+			organization_id: {
 				type: I64
 				relation: {
 					references: "organization.id"
 					nested_route: true
 				}
 			}
-			{
-				name: "title"
+			title: {
 				type: String
 				validate: {
 					min_length: 5
 					max_length: 160
 				}
 			}
-			{
-				name: "discipline"
+			discipline: {
 				type: String
 				validate: {
 					min_length: 3
 					max_length: 80
 				}
 			}
-			{
-				name: "location"
+			location: {
 				type: String
 				validate: {
 					min_length: 2
 					max_length: 80
 				}
 			}
-			{
-				name: "contact_email"
+			contact_email: {
 				type: String
 				validate: {
 					min_length: 5
 					max_length: 160
 				}
 			}
-			{
-				name: "summary"
+			summary: {
 				type: String
 				validate: {
 					min_length: 24
 					max_length: 900
 				}
 			}
-			{
-				name: "application_deadline"
+			application_deadline: {
 				type: Date
 				nullable: true
 			}
-			{
-				name: "created_at"
-				type: DateTime
-			}
-			{
-				name: "updated_at"
-				type: DateTime
-			}
-		]
+			created_at: DateTime
+			updated_at: DateTime
+		}
 	}
-	{
-		name: "CollaborationRequest"
+	CollaborationRequest: {
 		list: {
 			default_limit: 24
 			max_limit: 100
@@ -338,61 +293,46 @@ resources: [
 				field: "requester_user_id"
 			}
 		}
-		fields: [
-			{
-				name: "id"
+		fields: {
+			id: {
 				type: I64
 				id: true
 			}
-			{
-				name: "organization_id"
+			organization_id: {
 				type: I64
 				relation: {
 					references: "organization.id"
 					nested_route: true
 				}
 			}
-			{
-				name: "requester_user_id"
-				type: I64
-			}
-			{
-				name: "title"
+			requester_user_id: I64
+			title: {
 				type: String
 				validate: {
 					min_length: 5
 					max_length: 160
 				}
 			}
-			{
-				name: "message"
+			message: {
 				type: String
 				validate: {
 					min_length: 32
 					max_length: 1600
 				}
 			}
-			{
-				name: "status"
+			status: {
 				type: String
 				validate: {
 					min_length: 4
 					max_length: 32
 				}
 			}
-			{
-				name: "preferred_start_on"
+			preferred_start_on: {
 				type: Date
 				nullable: true
 			}
-			{
-				name: "created_at"
-				type: DateTime
-			}
-			{
-				name: "updated_at"
-				type: DateTime
-			}
-		]
+			created_at: DateTime
+			updated_at: DateTime
+		}
 	}
-]
+}

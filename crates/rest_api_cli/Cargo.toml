@@ -1,13 +1,15 @@
 [package]
-name = "rest_api_cli"
+name = "vsra"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "CLI tool for managing very_simple_rest API setups"
+description = "The vsr command-line interface for very_simple_rest"
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
+default-run = "vsr"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -32,7 +34,7 @@ reqwest = { version = "0.13", features = ["blocking", "json"] }
 rcgen.workspace = true
 
 [lib]
-name = "rest_api_cli"
+name = "vsra"
 path = "src/lib.rs"
 
 [[bin]]
