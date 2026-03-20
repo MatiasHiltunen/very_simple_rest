@@ -85,7 +85,7 @@ jobs:
           PY
           )"
 
-          if curl -fsSL "https://crates.io/api/v1/crates/rest_macro_core/${version}" > /dev/null; then
+          if cargo info --index https://github.com/rust-lang/crates.io-index "rest_macro_core@${version}" > /dev/null 2>&1; then
             echo "rest_macro_core ${version} already published"
           else
             cargo publish -p rest_macro_core --features codegen,turso-local --locked
@@ -105,7 +105,7 @@ jobs:
           )"
 
           for attempt in $(seq 1 20); do
-            if curl -fsSL "https://crates.io/api/v1/crates/rest_macro_core/${version}" > /dev/null; then
+            if cargo info --index https://github.com/rust-lang/crates.io-index "rest_macro_core@${version}" > /dev/null 2>&1; then
               echo "rest_macro_core ${version} is available"
               exit 0
             fi
@@ -131,7 +131,7 @@ jobs:
           PY
           )"
 
-          if curl -fsSL "https://crates.io/api/v1/crates/vsra/${version}" > /dev/null; then
+          if cargo info --index https://github.com/rust-lang/crates.io-index "vsra@${version}" > /dev/null 2>&1; then
             echo "vsra ${version} already published"
           else
             cargo publish -p vsra --locked
