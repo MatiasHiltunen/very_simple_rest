@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod db;
+pub mod docs;
 pub mod env;
 pub mod gen_env;
 pub mod init;

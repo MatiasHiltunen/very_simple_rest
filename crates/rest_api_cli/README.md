@@ -202,6 +202,16 @@ Useful options:
 - `--without-auth` removes those built-in auth/account routes from the document
 - `--exclude-table` removes specific tables from the document
 
+### `.eon` Reference Docs
+
+Generate a Markdown reference for the currently supported `.eon` feature set:
+
+```bash
+vsr docs --output docs/eon-reference.md
+```
+
+The checked-in reference document lives at `docs/eon-reference.md`.
+
 ### Static Files In `.eon`
 
 Bare `.eon` services can define service-level static mounts:

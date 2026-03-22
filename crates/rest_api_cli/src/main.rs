@@ -173,6 +173,17 @@ enum Commands {
         path: Option<String>,
     },
 
+    /// Generate Markdown reference documentation for the `.eon` format
+    Docs {
+        /// Output Markdown file
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Manage local TLS certificates for generated servers
     Tls {
         #[command(subcommand)]
@@ -675,6 +686,11 @@ async fn main() -> Result<()> {
             commands::gen_env::generate_env_file(path.clone(), config_path.as_deref())?;
         }
 
+        Commands::Docs { output, force } => {
+            println!("{}", "Generating `.eon` reference docs...".green().bold());
+            commands::docs::generate_eon_reference(output, *force)?;
+        }
+
         Commands::Tls { command } => match command {
             TlsCommand::SelfSigned {
                 cert_path,
@@ -767,6 +783,11 @@ mod tests {
     #[test]
     fn build_command_accepts_positional_service_input() {
         assert!(Cli::try_parse_from(["vsr", "build", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn docs_command_accepts_output_file() {
+        assert!(Cli::try_parse_from(["vsr", "docs", "--output", "docs/eon-reference.md"]).is_ok());
     }
 
     #[test]

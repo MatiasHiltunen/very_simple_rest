@@ -1,0 +1,1590 @@
+use std::{fs, path::Path};
+
+use anyhow::{Context, Result, bail};
+use colored::Colorize;
+use rest_macro_core::{
+    auth::{AuthSettings, SessionCookieSettings},
+    database::DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV,
+    logging::LoggingConfig,
+    tls::{
+        DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
+        DEFAULT_TLS_KEY_PATH_ENV,
+    },
+};
+
+pub fn generate_eon_reference(output: &Path, force: bool) -> Result<()> {
+    if output.exists() && !force {
+        bail!(
+            "Markdown file already exists at {} (use --force to overwrite)",
+            output.display()
+        );
+    }
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    fs::write(output, render_eon_reference_markdown())
+        .with_context(|| format!("failed to write Markdown to {}", output.display()))?;
+
+    println!(
+        "{} {}",
+        "Generated `.eon` reference docs:".green().bold(),
+        output.display()
+    );
+
+    Ok(())
+}
+
+pub fn render_eon_reference_markdown() -> String {
+    let logging_defaults = LoggingConfig::default();
+    let auth_defaults = AuthSettings::default();
+    let session_cookie_defaults = SessionCookieSettings::default();
+
+    let mut markdown = String::new();
+    markdown.push_str("# `.eon` Configuration Reference\n\n");
+    markdown.push_str(
+        "This document maps the currently supported `.eon` configuration surface in \
+`very_simple_rest` / `vsr`. It is intended to be machine-scannable for AI agents and readable \
+for humans.\n\n",
+    );
+    markdown.push_str(
+        "Generated with `vsr docs --output <file.md>`.\n\n\
+Current parser guarantees covered here:\n\n\
+- service-level configuration blocks\n\
+- resource and field list syntax\n\
+- resource and field keyed-map syntax\n\
+- shorthand field type syntax in field maps\n\
+- current validation rules, defaults, and derived behavior\n\n",
+    );
+
+    push_section(
+        &mut markdown,
+        "Supported Input Shapes",
+        "The parser accepts both the original list-based syntax and the newer keyed-map syntax \
+for resources and fields.",
+        &[
+            row(
+                "resources",
+                "List<Resource> or Map<ResourceName, Resource>",
+                "Required",
+                "Yes",
+                "List entries or keyed map entries",
+                "Resource names must be unique. In map form the key is the canonical resource name. \
+If `name` is also present inside the value, it must match the key.",
+            ),
+            row(
+                "resources[].fields",
+                "List<Field> or Map<FieldName, Field | Type>",
+                "Required",
+                "Yes",
+                "List entries, keyed objects, or shorthand type values",
+                "Field names must be unique per resource. In map form the value may be a full field \
+object or just a type such as `title: String`.",
+            ),
+            row(
+                "resources.<resource>.fields.<field>",
+                "Field object or scalar type",
+                "Shorthand defaults to a non-null, non-id, non-generated field",
+                "No",
+                "`String`, `I64`, `Bool`, or any other supported field type",
+                "Map shorthand is only available for field maps, not list entries.",
+            ),
+        ],
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"resources: {
+    Post: {
+        fields: {
+            id: { type: I64, id: true }
+            title: String
+            published: { type: Bool }
+        }
+    }
+}"#,
+    );
+
+    push_section(
+        &mut markdown,
+        "Top-Level Keys",
+        "These keys are read from the service root.",
+        &[
+            row(
+                "module",
+                "String",
+                "The `.eon` file stem, sanitized to a Rust module identifier",
+                "No",
+                "Any non-empty string",
+                "Controls the generated Rust module name.",
+            ),
+            row(
+                "db",
+                "Enum",
+                "Sqlite",
+                "No",
+                "Sqlite, Postgres, Mysql",
+                "Selects the SQL dialect and resource backend used for generated SQL and handlers.",
+            ),
+            row(
+                "database",
+                "Map",
+                "Backend-dependent runtime engine defaults",
+                "No",
+                "See Database Engine",
+                "Overrides the runtime database engine without changing the resource SQL dialect.",
+            ),
+            row(
+                "logging",
+                "Map",
+                "Enabled with built-in defaults",
+                "No",
+                "See Logging",
+                "Controls the emitted server logger configuration.",
+            ),
+            row(
+                "runtime",
+                "Map",
+                "Compression disabled",
+                "No",
+                "See Runtime",
+                "Controls runtime-only behavior such as HTTP compression.",
+            ),
+            row(
+                "tls",
+                "Map",
+                "Disabled unless the block is present",
+                "No",
+                "See TLS",
+                "Any configured TLS field enables HTTPS/Rustls handling in emitted servers.",
+            ),
+            row(
+                "static",
+                "Map",
+                "No static mounts",
+                "No",
+                "See Static Mounts",
+                "Declares filesystem-backed static directories and SPA mounts.",
+            ),
+            row(
+                "security",
+                "Map",
+                "All optional features off / empty",
+                "No",
+                "See Security",
+                "Controls request limits, CORS, trusted proxies, auth settings, headers, and rate limits.",
+            ),
+            row(
+                "resources",
+                "List or keyed map",
+                "None",
+                "Yes",
+                "Resource definitions",
+                "A service must contain at least one resource.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Resource Keys",
+        "Each resource describes one generated REST model and its CRUD surface.",
+        &[
+            row(
+                "resources[].name",
+                "String",
+                "Required in list form; implied by the key in map form",
+                "Yes in list form",
+                "Any name that can sanitize to a Rust struct identifier",
+                "The generated Rust struct uses UpperCamelCase. Duplicate names are rejected after sanitization.",
+            ),
+            row(
+                "resources[].table",
+                "String",
+                "The snake_case form of `name`",
+                "No",
+                "Valid SQL identifier",
+                "Controls the SQL table name and API path segment.",
+            ),
+            row(
+                "resources[].id_field",
+                "String",
+                "`id`",
+                "No",
+                "Field name",
+                "The named field must exist on the resource.",
+            ),
+            row(
+                "resources[].roles",
+                "Map",
+                "No role checks",
+                "No",
+                "See Resource Roles",
+                "Declares coarse role gates for read/create/update/delete.",
+            ),
+            row(
+                "resources[].policies",
+                "Map",
+                "`admin_bypass = true`; no row policies",
+                "No",
+                "See Row Policies",
+                "Declares row-level filters and assignments using `user.id` or `claim.<name>` sources.",
+            ),
+            row(
+                "resources[].list",
+                "Map",
+                "No custom limit caps",
+                "No",
+                "See List Settings",
+                "Controls generated list endpoint defaults and hard caps.",
+            ),
+            row(
+                "resources[].fields",
+                "List or keyed map",
+                "None",
+                "Yes",
+                "Field definitions",
+                "Each resource must define its fields explicitly.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Resource Roles",
+        "Role checks are string comparisons against the authenticated user's role list.",
+        &[
+            row(
+                "resources[].roles.read",
+                "String",
+                "None",
+                "No",
+                "Role name",
+                "When set, reads require the named role.",
+            ),
+            row(
+                "resources[].roles.create",
+                "String",
+                "Falls back to `roles.update` when `create` is omitted and `update` is set",
+                "No",
+                "Role name",
+                "Write-role compatibility with the original shorthand is preserved.",
+            ),
+            row(
+                "resources[].roles.update",
+                "String",
+                "None",
+                "No",
+                "Role name",
+                "When set, updates require the named role.",
+            ),
+            row(
+                "resources[].roles.delete",
+                "String",
+                "None",
+                "No",
+                "Role name",
+                "When set, deletes require the named role.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "List Settings",
+        "List settings tune generated list endpoint defaults.",
+        &[
+            row(
+                "resources[].list.default_limit",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Must be greater than 0. If both limits are set, `default_limit <= max_limit`.",
+            ),
+            row(
+                "resources[].list.max_limit",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Must be greater than 0.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Row Policies",
+        "Row policies support both the newer explicit form and older owner/set-owner shorthands.",
+        &[
+            row(
+                "resources[].policies.admin_bypass",
+                "Bool",
+                "true",
+                "No",
+                "true, false",
+                "When true, admin-role users bypass the configured row-level policies.",
+            ),
+            row(
+                "resources[].policies.read",
+                "Policy, [Policy]",
+                "None",
+                "No",
+                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`",
+                "Filters read queries. `SetOwner` syntax is rejected here.",
+            ),
+            row(
+                "resources[].policies.create",
+                "Policy, [Policy]",
+                "None",
+                "No",
+                "`field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field`",
+                "Assigns values during create operations. `Owner` syntax is rejected here.",
+            ),
+            row(
+                "resources[].policies.update",
+                "Policy, [Policy]",
+                "None",
+                "No",
+                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`",
+                "Filters update queries.",
+            ),
+            row(
+                "resources[].policies.delete",
+                "Policy, [Policy]",
+                "None",
+                "No",
+                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`",
+                "Filters delete queries.",
+            ),
+        ],
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"policies: {
+    admin_bypass: true
+    read: "tenant_id=claim.tenant_id"
+    create: "tenant_id=claim.tenant_id"
+    update: [{ field: "tenant_id", equals: "claim.tenant_id" }]
+    delete: "Owner:owner_id"
+}"#,
+    );
+
+    push_section(
+        &mut markdown,
+        "Field Keys",
+        "Field configuration controls generated Rust types, SQL columns, validations, and relations.",
+        &[
+            row(
+                "resources[].fields[].name",
+                "String",
+                "Required in list form; implied by the key in map form",
+                "Yes in list form",
+                "Valid Rust identifier",
+                "Duplicate field names are rejected per resource.",
+            ),
+            row(
+                "resources[].fields[].type",
+                "Enum or raw Rust type string",
+                "None",
+                "Yes",
+                "See Scalar Types",
+                "Supported scalar keywords are listed below. Raw Rust types are parsed with `syn` and inferred to SQL best-effort.",
+            ),
+            row(
+                "resources[].fields[].nullable",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Wraps the generated Rust field type in `Option<T>`. `generated` fields are also emitted as optional even when `nullable` is false.",
+            ),
+            row(
+                "resources[].fields[].id",
+                "Bool",
+                "false, but the field matching `id_field` is treated as the ID",
+                "No",
+                "true, false",
+                "Primary key semantics are inferred when the field name matches the resource `id_field`.",
+            ),
+            row(
+                "resources[].fields[].generated",
+                "Enum",
+                "Auto-inferred from the field name and ID role when omitted",
+                "No",
+                "None, AutoIncrement, CreatedAt, UpdatedAt",
+                "If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`.",
+            ),
+            row(
+                "resources[].fields[].relation",
+                "Map",
+                "None",
+                "No",
+                "See Relations",
+                "Declares a foreign-key style relationship and optional nested route generation.",
+            ),
+            row(
+                "resources[].fields[].validate",
+                "Map",
+                "None",
+                "No",
+                "See Field Validation",
+                "Validation is supported for text, integer, and real fields only.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Relations",
+        "Relations annotate fields that reference another table.",
+        &[
+            row(
+                "resources[].fields[].relation.references",
+                "String",
+                "None",
+                "Yes",
+                "`table.field`",
+                "Must be exactly one table name and one field name, both valid SQL identifiers.",
+            ),
+            row(
+                "resources[].fields[].relation.on_delete",
+                "Enum",
+                "None",
+                "No",
+                "Cascade, Restrict, SetNull, NoAction",
+                "Accepted case-insensitive aliases include `set_null`, `set-null`, `no_action`, and `no-action`. `SetNull` requires the field to be nullable.",
+            ),
+            row(
+                "resources[].fields[].relation.nested_route",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Enables the generated nested-route behavior for this relation.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Field Validation",
+        "Validation is checked at compile time and only certain combinations are allowed.",
+        &[
+            row(
+                "resources[].fields[].validate.min_length",
+                "usize",
+                "None",
+                "No",
+                "Non-negative integer",
+                "Only valid for text-like fields. Must be `<= max_length` when both are set.",
+            ),
+            row(
+                "resources[].fields[].validate.max_length",
+                "usize",
+                "None",
+                "No",
+                "Non-negative integer",
+                "Only valid for text-like fields. Must be `>= min_length` when both are set.",
+            ),
+            row(
+                "resources[].fields[].validate.minimum",
+                "i64 or f64",
+                "None",
+                "No",
+                "Integer or float literal",
+                "Only valid for integer and real fields. Integer SQL fields require integer bounds.",
+            ),
+            row(
+                "resources[].fields[].validate.maximum",
+                "i64 or f64",
+                "None",
+                "No",
+                "Integer or float literal",
+                "Only valid for integer and real fields. Must be `>= minimum` when both are set.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Static Mounts",
+        "Static mounts are resolved relative to the `.eon` file and must stay inside the service directory.",
+        &[
+            row(
+                "static.mounts",
+                "List<Mount>",
+                "No static mounts",
+                "No",
+                "Mount objects",
+                "Duplicate mount paths are rejected.",
+            ),
+            row(
+                "static.mounts[].mount",
+                "String",
+                "None",
+                "Yes",
+                "Absolute URL path beginning with `/`",
+                "Cannot conflict with `/api`, `/auth`, `/docs`, or `/openapi.json`. Trailing slashes are normalized except for `/`.",
+            ),
+            row(
+                "static.mounts[].dir",
+                "String",
+                "None",
+                "Yes",
+                "Relative directory path",
+                "Must resolve under the service root and point to an existing directory.",
+            ),
+            row(
+                "static.mounts[].mode",
+                "Enum",
+                "Directory",
+                "No",
+                "Directory, Spa",
+                "Case-insensitive parsing is supported. `Spa` auto-defaults `index_file` and `fallback_file` to `index.html`.",
+            ),
+            row(
+                "static.mounts[].index_file",
+                "String",
+                "None for `Directory`; `index.html` for `Spa`",
+                "No",
+                "Relative file path",
+                "Resolved under the mount directory and must point to an existing file.",
+            ),
+            row(
+                "static.mounts[].fallback_file",
+                "String",
+                "None for `Directory`; `index.html` for `Spa`",
+                "No",
+                "Relative file path",
+                "Only used for SPA fallback behavior.",
+            ),
+            row(
+                "static.mounts[].cache",
+                "Enum",
+                "Revalidate",
+                "No",
+                "NoStore, Revalidate, Immutable",
+                "Accepted aliases include `no_store` and `no-store`.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Database Engine",
+        "The top-level `db` controls SQL generation. `database.engine` controls the runtime connection strategy.",
+        &[
+            row(
+                "database.engine.kind",
+                "Enum",
+                "If omitted: `TursoLocal` for `db: Sqlite`; `Sqlx` for `db: Postgres|Mysql`",
+                "No",
+                "Sqlx, TursoLocal",
+                "Accepted aliases include `turso_local` and `turso-local`. `TursoLocal` requires `db: Sqlite`.",
+            ),
+            row(
+                "database.engine.path",
+                "String",
+                "For the implicit SQLite runtime engine: `var/data/<module>.db`",
+                "Required for explicit `kind = TursoLocal`",
+                "Relative path, absolute path, or `:memory:`",
+                "The `vsr` runtime resolves relative paths against the service or bundle base directory.",
+            ),
+            row(
+                "database.engine.encryption_key_env",
+                "String",
+                format!(
+                    "For the implicit SQLite runtime engine: `{}`",
+                    DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV
+                ),
+                "No",
+                "Environment variable name",
+                "Used only by `TursoLocal`. When set, the runtime loads the key from `<VAR>` or `<VAR>_FILE`.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Logging",
+        "Logging settings are carried into emitted servers and generated projects.",
+        &[
+            row(
+                "logging.filter_env",
+                "String",
+                logging_defaults.filter_env.clone(),
+                "No",
+                "Environment variable name",
+                "Used with `env_logger::Env::filter_or`.",
+            ),
+            row(
+                "logging.default_filter",
+                "String",
+                logging_defaults.default_filter.clone(),
+                "No",
+                "Any env_logger filter string",
+                "Fallback when the filter env var is absent.",
+            ),
+            row(
+                "logging.timestamp",
+                "Enum",
+                format!("{:?}", logging_defaults.timestamp),
+                "No",
+                "None, Seconds, Millis, Micros, Nanos",
+                "Aliases such as `off`, `sec`, `ms`, `us`, and `ns` are also accepted case-insensitively.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Runtime",
+        "Runtime settings affect server behavior without changing the data model.",
+        &[
+            row(
+                "runtime.compression.enabled",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Enables dynamic HTTP response compression middleware in emitted servers.",
+            ),
+            row(
+                "runtime.compression.static_precompressed",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Enables `.br` / `.gz` companion lookup for generated static mounts and causes `vsr build` to generate those companion files into `<binary>.bundle/`.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "TLS",
+        "Any configured TLS field enables HTTPS/Rustls support in emitted servers.",
+        &[
+            row(
+                "tls.cert_path",
+                "String",
+                DEFAULT_TLS_CERT_PATH,
+                "Required when TLS is enabled unless `tls.cert_path_env` resolves",
+                "Relative or absolute PEM path",
+                "Relative paths are resolved against the service or bundle base directory.",
+            ),
+            row(
+                "tls.key_path",
+                "String",
+                DEFAULT_TLS_KEY_PATH,
+                "Required when TLS is enabled unless `tls.key_path_env` resolves",
+                "Relative or absolute PEM path",
+                "Relative paths are resolved against the service or bundle base directory.",
+            ),
+            row(
+                "tls.cert_path_env",
+                "String",
+                DEFAULT_TLS_CERT_PATH_ENV,
+                "No",
+                "Environment variable name",
+                "Overrides `tls.cert_path` at runtime when the env var is present.",
+            ),
+            row(
+                "tls.key_path_env",
+                "String",
+                DEFAULT_TLS_KEY_PATH_ENV,
+                "No",
+                "Environment variable name",
+                "Overrides `tls.key_path` at runtime when the env var is present.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Security Overview",
+        "Every key inside `security` is optional. Unset blocks keep the default open behavior.",
+        &[
+            row(
+                "security.requests",
+                "Map",
+                "No custom extractor limits",
+                "No",
+                "See Request Security",
+                "Currently used for JSON body size limits.",
+            ),
+            row(
+                "security.cors",
+                "Map",
+                "No custom CORS policy",
+                "No",
+                "See CORS",
+                "Empty methods/headers lists fall back to runtime defaults.",
+            ),
+            row(
+                "security.trusted_proxies",
+                "Map",
+                "No trusted proxies",
+                "No",
+                "See Trusted Proxies",
+                "Used when extracting the client IP from forwarded headers.",
+            ),
+            row(
+                "security.rate_limits",
+                "Map",
+                "No auth rate limits",
+                "No",
+                "See Rate Limits",
+                "Currently applies to built-in auth login and register flows.",
+            ),
+            row(
+                "security.headers",
+                "Map",
+                "No additional security headers",
+                "No",
+                "See Security Headers",
+                "Controls X-Frame-Options, nosniff, Referrer-Policy, and HSTS.",
+            ),
+            row(
+                "security.auth",
+                "Map",
+                "Built-in auth defaults",
+                "No",
+                "See Auth Settings",
+                "Controls JWT claims, TTLs, email flows, session cookies, and custom UI pages.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Request Security",
+        "",
+        &[row(
+            "security.requests.json_max_bytes",
+            "usize",
+            "None",
+            "No",
+            "Positive integer",
+            "Sets the generated JSON extractor limit. Must be greater than 0 when provided.",
+        )],
+    );
+
+    push_section(
+        &mut markdown,
+        "CORS",
+        "Runtime behavior when lists are empty: methods default to `GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD`; allowed headers default to `authorization, content-type, accept`.",
+        &[
+            row(
+                "security.cors.origins",
+                "List<String>",
+                "[]",
+                "No",
+                "Absolute origins or `*`",
+                "Origins are validated as URIs. `*` cannot be combined with `allow_credentials = true`.",
+            ),
+            row(
+                "security.cors.origins_env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "The runtime splits the env value on commas and appends it to `origins`.",
+            ),
+            row(
+                "security.cors.allow_credentials",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Cannot be combined with wildcard `*` origins.",
+            ),
+            row(
+                "security.cors.allow_methods",
+                "List<String>",
+                "[]",
+                "No",
+                "HTTP methods or `*`",
+                "Methods are validated using Actix/Web HTTP method parsing.",
+            ),
+            row(
+                "security.cors.allow_headers",
+                "List<String>",
+                "[]",
+                "No",
+                "Header names or `*`",
+                "Header names are validated using HTTP header parsing.",
+            ),
+            row(
+                "security.cors.expose_headers",
+                "List<String>",
+                "[]",
+                "No",
+                "Header names or `*`",
+                "Header names are validated using HTTP header parsing.",
+            ),
+            row(
+                "security.cors.max_age_seconds",
+                "usize",
+                "None",
+                "No",
+                "Positive integer",
+                "Must be greater than 0 when provided.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Trusted Proxies",
+        "",
+        &[
+            row(
+                "security.trusted_proxies.proxies",
+                "List<String>",
+                "[]",
+                "No",
+                "IP addresses",
+                "Every entry must parse as an IP address.",
+            ),
+            row(
+                "security.trusted_proxies.proxies_env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "The runtime splits the env value on commas and appends valid IPs to `proxies`.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Rate Limits",
+        "Rate-limit rules are currently applied only to built-in auth endpoints.",
+        &[
+            row(
+                "security.rate_limits.login.requests",
+                "u32",
+                "None",
+                "Required when `security.rate_limits.login` is set",
+                "Positive integer",
+                "Maximum requests allowed per window.",
+            ),
+            row(
+                "security.rate_limits.login.window_seconds",
+                "u64",
+                "None",
+                "Required when `security.rate_limits.login` is set",
+                "Positive integer",
+                "Sliding window length in seconds.",
+            ),
+            row(
+                "security.rate_limits.register.requests",
+                "u32",
+                "None",
+                "Required when `security.rate_limits.register` is set",
+                "Positive integer",
+                "Maximum requests allowed per window.",
+            ),
+            row(
+                "security.rate_limits.register.window_seconds",
+                "u64",
+                "None",
+                "Required when `security.rate_limits.register` is set",
+                "Positive integer",
+                "Sliding window length in seconds.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Security Headers",
+        "",
+        &[
+            row(
+                "security.headers.frame_options",
+                "Enum",
+                "None",
+                "No",
+                "Deny, SameOrigin",
+                "Accepted aliases include `same-origin` and `same_origin`.",
+            ),
+            row(
+                "security.headers.content_type_options",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "When true, adds `X-Content-Type-Options: nosniff`.",
+            ),
+            row(
+                "security.headers.referrer_policy",
+                "Enum",
+                "None",
+                "No",
+                "NoReferrer, SameOrigin, StrictOriginWhenCrossOrigin, NoReferrerWhenDowngrade, Origin, OriginWhenCrossOrigin, UnsafeUrl",
+                "Snake_case and hyphenated aliases are also accepted.",
+            ),
+            row(
+                "security.headers.hsts.max_age_seconds",
+                "u64",
+                "None",
+                "Required when `security.headers.hsts` is set",
+                "Positive integer",
+                "Must be greater than 0.",
+            ),
+            row(
+                "security.headers.hsts.include_subdomains",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Appends `includeSubDomains` to the HSTS header.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Auth Settings",
+        "These settings configure the built-in auth/account routes. They do not affect custom resources unless you explicitly use auth-derived claims in row policies.",
+        &[
+            row(
+                "security.auth.issuer",
+                "String",
+                format_option(auth_defaults.issuer.as_deref()),
+                "No",
+                "JWT issuer string",
+                "Included in generated JWTs and enforced during token validation when set.",
+            ),
+            row(
+                "security.auth.audience",
+                "String",
+                format_option(auth_defaults.audience.as_deref()),
+                "No",
+                "JWT audience string",
+                "Included in generated JWTs and enforced during token validation when set.",
+            ),
+            row(
+                "security.auth.access_token_ttl_seconds",
+                "i64",
+                auth_defaults.access_token_ttl_seconds.to_string(),
+                "No",
+                "Positive integer",
+                "Access-token lifetime in seconds.",
+            ),
+            row(
+                "security.auth.require_email_verification",
+                "Bool",
+                auth_defaults.require_email_verification.to_string(),
+                "No",
+                "true, false",
+                "When true, registration/login flows require email verification and `security.auth.email` must also be configured.",
+            ),
+            row(
+                "security.auth.verification_token_ttl_seconds",
+                "i64",
+                auth_defaults.verification_token_ttl_seconds.to_string(),
+                "No",
+                "Positive integer",
+                "Verification-token lifetime in seconds.",
+            ),
+            row(
+                "security.auth.password_reset_token_ttl_seconds",
+                "i64",
+                auth_defaults.password_reset_token_ttl_seconds.to_string(),
+                "No",
+                "Positive integer",
+                "Password-reset token lifetime in seconds.",
+            ),
+            row(
+                "security.auth.session_cookie",
+                "Map",
+                "None",
+                "No",
+                "See Session Cookie",
+                "Enables cookie-based session auth in addition to bearer tokens.",
+            ),
+            row(
+                "security.auth.email",
+                "Map",
+                "None",
+                "No",
+                "See Auth Email",
+                "Configures transactional email for verification and password reset flows.",
+            ),
+            row(
+                "security.auth.portal",
+                "Map",
+                "None",
+                "No",
+                "See Auth UI Pages",
+                "Configures a custom account portal page path and title.",
+            ),
+            row(
+                "security.auth.admin_dashboard",
+                "Map",
+                "None",
+                "No",
+                "See Auth UI Pages",
+                "Configures a custom admin dashboard page path and title.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Session Cookie",
+        "Cookie-session auth is opt-in. Once the block exists, defaults are filled for any omitted keys.",
+        &[
+            row(
+                "security.auth.session_cookie.name",
+                "String",
+                session_cookie_defaults.name.clone(),
+                "No",
+                "Cookie name",
+                "Cannot be empty. `__Host-` prefixed names require `secure = true` and `path = \"/\"`.",
+            ),
+            row(
+                "security.auth.session_cookie.csrf_cookie_name",
+                "String",
+                session_cookie_defaults.csrf_cookie_name.clone(),
+                "No",
+                "Cookie name",
+                "Must differ from `name`. `__Host-` prefix has the same constraints as the main cookie.",
+            ),
+            row(
+                "security.auth.session_cookie.csrf_header_name",
+                "String",
+                session_cookie_defaults.csrf_header_name.clone(),
+                "No",
+                "HTTP header name",
+                "Used for CSRF validation on non-safe HTTP methods.",
+            ),
+            row(
+                "security.auth.session_cookie.path",
+                "String",
+                session_cookie_defaults.path.clone(),
+                "No",
+                "Cookie path beginning with `/`",
+                "Must start with `/`.",
+            ),
+            row(
+                "security.auth.session_cookie.secure",
+                "Bool",
+                session_cookie_defaults.secure.to_string(),
+                "No",
+                "true, false",
+                "Must be true when `same_site = None`.",
+            ),
+            row(
+                "security.auth.session_cookie.same_site",
+                "Enum",
+                format!("{:?}", session_cookie_defaults.same_site),
+                "No",
+                "Strict, Lax, None",
+                "Parsed case-insensitively using lowercase/string aliases.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Auth Email",
+        "This block is required when email verification is mandatory.",
+        &[
+            row(
+                "security.auth.email.from_email",
+                "String",
+                "None",
+                "Yes when the block is present",
+                "Email-like string",
+                "Must contain `@`.",
+            ),
+            row(
+                "security.auth.email.from_name",
+                "String",
+                "None",
+                "No",
+                "Display name",
+                "Optional sender display name.",
+            ),
+            row(
+                "security.auth.email.reply_to",
+                "String",
+                "None",
+                "No",
+                "Email-like string",
+                "Cannot be empty when provided.",
+            ),
+            row(
+                "security.auth.email.public_base_url",
+                "String",
+                "None",
+                "No",
+                "Absolute URL",
+                "Used when generating absolute links in auth emails.",
+            ),
+            row(
+                "security.auth.email.provider",
+                "Map",
+                "None",
+                "Yes when the block is present",
+                "See Auth Email Provider",
+                "Selects the outbound email provider implementation.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Auth Email Provider",
+        "",
+        &[
+            row(
+                "security.auth.email.provider.kind",
+                "Enum",
+                "None",
+                "Yes",
+                "Resend, Smtp",
+                "Parsed case-insensitively.",
+            ),
+            row(
+                "security.auth.email.provider.api_key_env",
+                "String",
+                "None",
+                "Required for `kind = Resend`",
+                "Environment variable name",
+                "Loaded from `<VAR>` or `<VAR>_FILE` by the runtime.",
+            ),
+            row(
+                "security.auth.email.provider.api_base_url",
+                "String",
+                "None",
+                "No",
+                "Absolute URL",
+                "Optional override for the Resend API base URL.",
+            ),
+            row(
+                "security.auth.email.provider.connection_url_env",
+                "String",
+                "None",
+                "Required for `kind = Smtp`",
+                "Environment variable name",
+                "Expected to resolve to an SMTP connection URL for lettre.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Auth UI Pages",
+        "Custom auth UI pages must not collide with built-in auth routes and each path must be unique.",
+        &[
+            row(
+                "security.auth.portal.path",
+                "String",
+                "None",
+                "Yes when the block is present",
+                "Absolute path beginning with `/`",
+                "Cannot be empty or conflict with built-in auth paths such as `/auth/login`.",
+            ),
+            row(
+                "security.auth.portal.title",
+                "String",
+                "Account Portal",
+                "No",
+                "Display title",
+                "Defaults to `Account Portal` when omitted.",
+            ),
+            row(
+                "security.auth.admin_dashboard.path",
+                "String",
+                "None",
+                "Yes when the block is present",
+                "Absolute path beginning with `/`",
+                "Cannot be empty or conflict with built-in auth paths such as `/auth/login`.",
+            ),
+            row(
+                "security.auth.admin_dashboard.title",
+                "String",
+                "Admin Dashboard",
+                "No",
+                "Display title",
+                "Defaults to `Admin Dashboard` when omitted.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Scalar Types",
+        "These are the canonical field type keywords accepted by `.eon`. Raw Rust type strings are also allowed.",
+        &[
+            row(
+                "String",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "String",
+                "Stored as `TEXT`. Supports equality filters, `contains`, and sort.",
+            ),
+            row(
+                "I32",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "i32",
+                "Stored as `INTEGER`. Supports equality filters and sort.",
+            ),
+            row(
+                "I64",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "i64",
+                "Stored as `INTEGER`. Supports equality filters and sort.",
+            ),
+            row(
+                "F32",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "f32",
+                "Stored as `REAL`. Supports equality filters and sort.",
+            ),
+            row(
+                "F64",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "f64",
+                "Stored as `REAL`. Supports equality filters and sort.",
+            ),
+            row(
+                "Bool",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "bool",
+                "Stored as `BOOLEAN`. Supports equality filters and sort.",
+            ),
+            row(
+                "DateTime",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "chrono::DateTime<Utc>",
+                "Stored as text-compatible values. Supports equality filters, range filters, and sort.",
+            ),
+            row(
+                "Date",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "chrono::NaiveDate",
+                "Stored as text-compatible values. Supports equality filters, range filters, and sort.",
+            ),
+            row(
+                "Time",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "chrono::NaiveTime",
+                "Stored as text-compatible values. Supports equality filters, range filters, and sort.",
+            ),
+            row(
+                "Uuid",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "uuid::Uuid",
+                "Stored as text/char values depending on backend. Supports equality filters and sort.",
+            ),
+            row(
+                "Decimal",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "rust_decimal::Decimal",
+                "Stored as text/varchar values. Supports equality filters but not generated sort helpers.",
+            ),
+            row(
+                "\"<raw Rust type>\"",
+                "Rust field type",
+                "n/a",
+                "n/a",
+                "Any type parsable by `syn`",
+                "SQL type inference is best-effort. Structured-scalar-specific validation and filter helpers only apply to the built-in scalar keywords above.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Derived Behavior",
+        "These behaviors are not separate config keys, but they are part of the current `.eon` contract.",
+        &[
+            row(
+                "Resource naming",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "Resource names sanitize to Rust struct identifiers; table names default to the snake_case resource name.",
+            ),
+            row(
+                "ID handling",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "The field matching `id_field` is treated as the resource ID even if `id: true` is omitted.",
+            ),
+            row(
+                "Generated fields",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "Generated fields (`AutoIncrement`, `CreatedAt`, `UpdatedAt`) become optional in generated Rust types and are skipped from normal write payloads.",
+            ),
+            row(
+                "Field map shorthand",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "A field map entry like `title: String` is equivalent to `{ name: \"title\", type: String, nullable: false, id: false, generated: None }`.",
+            ),
+            row(
+                "Static SPA defaults",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "SPA mounts default both `index_file` and `fallback_file` to `index.html`.",
+            ),
+            row(
+                "SQLite runtime defaults",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "When `db: Sqlite` and `database.engine` is omitted, the runtime defaults to `TursoLocal(var/data/<module>.db)` with encrypted-local support via `TURSO_ENCRYPTION_KEY`.",
+            ),
+            row(
+                "Static precompression",
+                "Derived rule",
+                "n/a",
+                "n/a",
+                "n/a",
+                "When `runtime.compression.static_precompressed = true`, generated static mounts serve `.br`/`.gz` companion assets and `vsr build` generates those companions into the sidecar bundle.",
+            ),
+        ],
+    );
+
+    markdown.push_str("## Examples\n\n");
+    markdown.push_str("### Minimal service\n\n");
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"module: "blog_api"
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "published", type: Bool }
+        ]
+    }
+]"#,
+    );
+
+    markdown.push_str("### Map-based resource and field syntax\n\n");
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"resources: {
+    Post: {
+        list: { default_limit: 20, max_limit: 100 }
+        fields: {
+            id: { type: I64, id: true }
+            title: { type: String, validate: { min_length: 3, max_length: 120 } }
+            created_at: { type: DateTime, generated: CreatedAt }
+        }
+    }
+}"#,
+    );
+
+    markdown.push_str("### Service-level runtime, static, and security config\n\n");
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"runtime: {
+    compression: {
+        enabled: true
+        static_precompressed: true
+    }
+}
+static: {
+    mounts: [
+        {
+            mount: "/"
+            dir: "web/dist"
+            mode: Spa
+            cache: NoStore
+        }
+        {
+            mount: "/assets"
+            dir: "web/dist/assets"
+            mode: Directory
+            cache: Immutable
+        }
+    ]
+}
+security: {
+    requests: { json_max_bytes: 1048576 }
+    cors: {
+        origins: ["https://app.example.com"]
+        allow_credentials: true
+    }
+    auth: {
+        issuer: "vsr"
+        session_cookie: { same_site: Strict }
+    }
+}"#,
+    );
+
+    markdown
+}
+
+#[derive(Clone, Debug)]
+struct TableRow {
+    path: String,
+    value_type: String,
+    default: String,
+    required: String,
+    values: String,
+    notes: String,
+}
+
+fn row(
+    path: impl Into<String>,
+    value_type: impl Into<String>,
+    default: impl Into<String>,
+    required: impl Into<String>,
+    values: impl Into<String>,
+    notes: impl Into<String>,
+) -> TableRow {
+    TableRow {
+        path: path.into(),
+        value_type: value_type.into(),
+        default: default.into(),
+        required: required.into(),
+        values: values.into(),
+        notes: notes.into(),
+    }
+}
+
+fn push_section(markdown: &mut String, title: &str, intro: &str, rows: &[TableRow]) {
+    markdown.push_str(&format!("## {title}\n\n"));
+    if !intro.trim().is_empty() {
+        markdown.push_str(intro);
+        markdown.push_str("\n\n");
+    }
+    markdown.push_str("| Path | Type / Shape | Default | Required | Accepted Values | Notes |\n");
+    markdown.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for row in rows {
+        markdown.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            markdown_cell(&row.path),
+            markdown_cell(&row.value_type),
+            markdown_cell(&row.default),
+            markdown_cell(&row.required),
+            markdown_cell(&row.values),
+            markdown_cell(&row.notes),
+        ));
+    }
+    markdown.push('\n');
+}
+
+fn push_code_block(markdown: &mut String, language: &str, code: &str) {
+    markdown.push_str(&format!("```{language}\n{code}\n```\n\n"));
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', "<br>")
+}
+
+fn format_option(value: Option<&str>) -> String {
+    value.unwrap_or("None").to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use uuid::Uuid;
+
+    use super::{generate_eon_reference, render_eon_reference_markdown};
+
+    fn test_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/docs_tests")
+            .join(Uuid::new_v4().to_string())
+    }
+
+    fn repo_reference_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs")
+            .join("eon-reference.md")
+    }
+
+    fn read_to_string(path: &Path) -> String {
+        fs::read_to_string(path).expect("file should be readable")
+    }
+
+    #[test]
+    fn render_eon_reference_mentions_core_sections() {
+        let markdown = render_eon_reference_markdown();
+
+        assert!(markdown.contains("# `.eon` Configuration Reference"));
+        assert!(markdown.contains("## Top-Level Keys"));
+        assert!(markdown.contains("## Resource Keys"));
+        assert!(markdown.contains("## Security Overview"));
+        assert!(markdown.contains("runtime.compression.static_precompressed"));
+        assert!(markdown.contains("fields: {"));
+    }
+
+    #[test]
+    fn generate_eon_reference_writes_markdown_file() {
+        let root = test_root();
+        let output = root.join("eon-reference.md");
+
+        generate_eon_reference(&output, false).expect("docs should generate");
+
+        let markdown = read_to_string(&output);
+        assert!(markdown.contains("## Runtime"));
+        assert!(markdown.contains("## Auth Email Provider"));
+    }
+
+    #[test]
+    fn checked_in_reference_matches_generator() {
+        assert_eq!(
+            read_to_string(&repo_reference_path()),
+            render_eon_reference_markdown()
+        );
+    }
+}

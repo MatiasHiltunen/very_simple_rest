@@ -314,6 +314,17 @@ Collection and nested collection routes also document their typed list query par
 paged response envelopes, including pagination, sorting, cursor pagination, exact-match field
 filters, `total`, `next_offset`, and `next_cursor`.
 
+## `.eon` Reference Docs
+
+You can generate a Markdown reference for the full currently supported `.eon` surface:
+
+```bash
+vsr docs --output docs/eon-reference.md
+```
+
+The generated document is intended to be precise enough for AI agents and still readable for
+humans. The checked-in reference lives at `docs/eon-reference.md`.
+
 ## Static Files In `.eon`
 
 Bare `.eon` services can configure static file serving at the service level:
