@@ -1,8 +1,10 @@
-# REST Macro - Opinionated API Builder
+# VSR
 
 > **Note**: This project is currently very much in progress and under active development. APIs will change, and features are incomplete.
 
 A Rust library providing an opinionated higher-level macro wrapper for Actix Web and SQLx, designed for rapid API prototyping.
+
+> VSR was originally intented to be an easy way to introduce end-to-end route handlers for prototyping using only RestApi macros with rust structs. The focus has now shifted to the be able to produce complete working API and data layer with built-in auth and user management using only the declared configuration. The config format might raise some questions and it could be changed easily to more common such as yaml/json etc. but personally I really like the .eon format and I see great potential in using it (https://github.com/emilk/eon)
 
 ## Features
 
