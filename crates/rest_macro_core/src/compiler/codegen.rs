@@ -9,6 +9,10 @@ use super::model::{
     StaticMode, WriteModelStyle, default_service_database_url,
 };
 use crate::{
+    authorization::{
+        ActionAuthorization, AuthorizationAssignment, AuthorizationCondition, AuthorizationMatch,
+        AuthorizationModel, AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
+    },
     database::DatabaseEngine,
     logging::LogTimestampPrecision,
     security::{FrameOptions, ReferrerPolicy},
@@ -152,6 +156,7 @@ pub fn expand_service_module(
     let logging = logging_tokens(service, runtime_crate);
     let runtime = runtime_tokens(service, runtime_crate);
     let security = security_tokens(service, runtime_crate);
+    let authorization = authorization_tokens(service, runtime_crate);
     let tls = tls_tokens(service, runtime_crate);
 
     Ok(quote! {
@@ -167,6 +172,7 @@ pub fn expand_service_module(
 
             pub fn configure(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
                 let db = db.into();
+                cfg.app_data(web::Data::new(authorization_runtime(db.clone())));
                 #(#configure_calls)*
                 configure_security(cfg);
             }
@@ -195,6 +201,19 @@ pub fn expand_service_module(
                 #security
             }
 
+            pub fn authorization() -> #runtime_crate::core::authorization::AuthorizationModel {
+                #authorization
+            }
+
+            pub fn authorization_runtime(
+                db: impl Into<DbPool>,
+            ) -> #runtime_crate::core::authorization::AuthorizationRuntime {
+                #runtime_crate::core::authorization::AuthorizationRuntime::new(
+                    authorization(),
+                    db,
+                )
+            }
+
             pub fn tls() -> #runtime_crate::core::tls::TlsConfig {
                 #tls
             }
@@ -203,8 +222,279 @@ pub fn expand_service_module(
                 let security = security();
                 #runtime_crate::core::security::configure_scope_security(cfg, &security);
             }
+
+            pub fn configure_authorization_management(
+                cfg: &mut web::ServiceConfig,
+                db: impl Into<DbPool>,
+            ) {
+                let db = db.into();
+                cfg.app_data(web::Data::new(authorization_runtime(db)));
+                #runtime_crate::core::authorization::authorization_management_routes(cfg);
+            }
         }
     })
+}
+
+fn authorization_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    let model = super::authorization::compile_service_authorization(service);
+    authorization_model_tokens(&model, runtime_crate)
+}
+
+fn authorization_model_tokens(model: &AuthorizationModel, runtime_crate: &Path) -> TokenStream {
+    let scopes = model.contract.scopes.iter().map(|scope| {
+        let name = Literal::string(&scope.name);
+        let description = option_string_tokens(scope.description.as_deref());
+        let parent = option_string_tokens(scope.parent.as_deref());
+        quote!(#runtime_crate::core::authorization::AuthorizationScope {
+            name: #name.to_owned(),
+            description: #description,
+            parent: #parent,
+        })
+    });
+    let permissions = model.contract.permissions.iter().map(|permission| {
+        let name = Literal::string(&permission.name);
+        let description = option_string_tokens(permission.description.as_deref());
+        let actions = permission
+            .actions
+            .iter()
+            .map(|action| authorization_action_tokens(*action, runtime_crate));
+        let resources = permission.resources.iter().map(|resource| {
+            let resource = Literal::string(resource);
+            quote!(#resource.to_owned())
+        });
+        let scopes = permission.scopes.iter().map(|scope| {
+            let scope = Literal::string(scope);
+            quote!(#scope.to_owned())
+        });
+        quote!(#runtime_crate::core::authorization::AuthorizationPermission {
+            name: #name.to_owned(),
+            description: #description,
+            actions: vec![#(#actions),*],
+            resources: vec![#(#resources),*],
+            scopes: vec![#(#scopes),*],
+        })
+    });
+    let templates = model.contract.templates.iter().map(|template| {
+        let name = Literal::string(&template.name);
+        let description = option_string_tokens(template.description.as_deref());
+        let permissions = template.permissions.iter().map(|permission| {
+            let permission = Literal::string(permission);
+            quote!(#permission.to_owned())
+        });
+        let scopes = template.scopes.iter().map(|scope| {
+            let scope = Literal::string(scope);
+            quote!(#scope.to_owned())
+        });
+        quote!(#runtime_crate::core::authorization::AuthorizationTemplate {
+            name: #name.to_owned(),
+            description: #description,
+            permissions: vec![#(#permissions),*],
+            scopes: vec![#(#scopes),*],
+        })
+    });
+    let resources = model
+        .resources
+        .iter()
+        .map(|resource| resource_authorization_tokens(resource, runtime_crate));
+
+    quote! {
+        #runtime_crate::core::authorization::AuthorizationModel {
+            contract: #runtime_crate::core::authorization::AuthorizationContract {
+                scopes: vec![#(#scopes),*],
+                permissions: vec![#(#permissions),*],
+                templates: vec![#(#templates),*],
+            },
+            resources: vec![#(#resources),*],
+        }
+    }
+}
+
+fn resource_authorization_tokens(
+    resource: &ResourceAuthorization,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let resource_id = Literal::string(&resource.id);
+    let resource_name = Literal::string(&resource.resource);
+    let table = Literal::string(&resource.table);
+    let admin_bypass = resource.admin_bypass;
+    let actions = resource
+        .actions
+        .iter()
+        .map(|action| action_authorization_tokens(action, runtime_crate));
+
+    quote! {
+        #runtime_crate::core::authorization::ResourceAuthorization {
+            id: #resource_id.to_owned(),
+            resource: #resource_name.to_owned(),
+            table: #table.to_owned(),
+            admin_bypass: #admin_bypass,
+            actions: vec![#(#actions),*],
+        }
+    }
+}
+
+fn action_authorization_tokens(action: &ActionAuthorization, runtime_crate: &Path) -> TokenStream {
+    let action_id = Literal::string(&action.id);
+    let action_tokens = authorization_action_tokens(action.action, runtime_crate);
+    let role_rule_id = option_string_tokens(action.role_rule_id.as_deref());
+    let required_role = option_string_tokens(action.required_role.as_deref());
+    let filter = option_condition_tokens(action.filter.as_ref(), runtime_crate);
+    let assignments = action
+        .assignments
+        .iter()
+        .map(|assignment| assignment_tokens(assignment, runtime_crate));
+
+    quote! {
+        #runtime_crate::core::authorization::ActionAuthorization {
+            id: #action_id.to_owned(),
+            action: #action_tokens,
+            role_rule_id: #role_rule_id,
+            required_role: #required_role,
+            filter: #filter,
+            assignments: vec![#(#assignments),*],
+        }
+    }
+}
+
+fn option_condition_tokens(
+    condition: Option<&AuthorizationCondition>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match condition {
+        Some(condition) => {
+            let condition = condition_tokens(condition, runtime_crate);
+            quote!(Some(#condition))
+        }
+        None => quote!(None),
+    }
+}
+
+fn condition_tokens(condition: &AuthorizationCondition, runtime_crate: &Path) -> TokenStream {
+    match condition {
+        AuthorizationCondition::Match(rule) => {
+            let rule = match_tokens(rule, runtime_crate);
+            quote!(#runtime_crate::core::authorization::AuthorizationCondition::Match(#rule))
+        }
+        AuthorizationCondition::All { id, conditions } => {
+            let id = Literal::string(id);
+            let conditions = conditions
+                .iter()
+                .map(|condition| condition_tokens(condition, runtime_crate));
+            quote!(#runtime_crate::core::authorization::AuthorizationCondition::All {
+                id: #id.to_owned(),
+                conditions: vec![#(#conditions),*],
+            })
+        }
+        AuthorizationCondition::Any { id, conditions } => {
+            let id = Literal::string(id);
+            let conditions = conditions
+                .iter()
+                .map(|condition| condition_tokens(condition, runtime_crate));
+            quote!(#runtime_crate::core::authorization::AuthorizationCondition::Any {
+                id: #id.to_owned(),
+                conditions: vec![#(#conditions),*],
+            })
+        }
+        AuthorizationCondition::Not { id, condition } => {
+            let id = Literal::string(id);
+            let condition = condition_tokens(condition, runtime_crate);
+            quote!(#runtime_crate::core::authorization::AuthorizationCondition::Not {
+                id: #id.to_owned(),
+                condition: Box::new(#condition),
+            })
+        }
+    }
+}
+
+fn match_tokens(rule: &AuthorizationMatch, runtime_crate: &Path) -> TokenStream {
+    let id = Literal::string(&rule.id);
+    let field = Literal::string(&rule.field);
+    let operator = authorization_operator_tokens(rule.operator, runtime_crate);
+    let source = value_source_tokens(&rule.source, runtime_crate);
+
+    quote! {
+        #runtime_crate::core::authorization::AuthorizationMatch {
+            id: #id.to_owned(),
+            field: #field.to_owned(),
+            operator: #operator,
+            source: #source,
+        }
+    }
+}
+
+fn assignment_tokens(assignment: &AuthorizationAssignment, runtime_crate: &Path) -> TokenStream {
+    let id = Literal::string(&assignment.id);
+    let field = Literal::string(&assignment.field);
+    let source = value_source_tokens(&assignment.source, runtime_crate);
+
+    quote! {
+        #runtime_crate::core::authorization::AuthorizationAssignment {
+            id: #id.to_owned(),
+            field: #field.to_owned(),
+            source: #source,
+        }
+    }
+}
+
+fn authorization_action_tokens(
+    action: crate::authorization::AuthorizationAction,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match action {
+        crate::authorization::AuthorizationAction::Read => {
+            quote!(#runtime_crate::core::authorization::AuthorizationAction::Read)
+        }
+        crate::authorization::AuthorizationAction::Create => {
+            quote!(#runtime_crate::core::authorization::AuthorizationAction::Create)
+        }
+        crate::authorization::AuthorizationAction::Update => {
+            quote!(#runtime_crate::core::authorization::AuthorizationAction::Update)
+        }
+        crate::authorization::AuthorizationAction::Delete => {
+            quote!(#runtime_crate::core::authorization::AuthorizationAction::Delete)
+        }
+    }
+}
+
+fn authorization_operator_tokens(
+    operator: AuthorizationOperator,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match operator {
+        AuthorizationOperator::Equals => {
+            quote!(#runtime_crate::core::authorization::AuthorizationOperator::Equals)
+        }
+    }
+}
+
+fn value_source_tokens(source: &AuthorizationValueSource, runtime_crate: &Path) -> TokenStream {
+    match source {
+        AuthorizationValueSource::UserId => {
+            quote!(#runtime_crate::core::authorization::AuthorizationValueSource::UserId)
+        }
+        AuthorizationValueSource::Claim { name, ty } => {
+            let name = Literal::string(name);
+            let ty = auth_claim_type_tokens(*ty, runtime_crate);
+            quote!(#runtime_crate::core::authorization::AuthorizationValueSource::Claim {
+                name: #name.to_owned(),
+                ty: #ty,
+            })
+        }
+    }
+}
+
+fn auth_claim_type_tokens(ty: crate::auth::AuthClaimType, runtime_crate: &Path) -> TokenStream {
+    match ty {
+        crate::auth::AuthClaimType::I64 => {
+            quote!(#runtime_crate::core::auth::AuthClaimType::I64)
+        }
+        crate::auth::AuthClaimType::String => {
+            quote!(#runtime_crate::core::auth::AuthClaimType::String)
+        }
+        crate::auth::AuthClaimType::Bool => {
+            quote!(#runtime_crate::core::auth::AuthClaimType::Bool)
+        }
+    }
 }
 
 fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
@@ -364,6 +654,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
         Literal::i64_unsuffixed(security.auth.verification_token_ttl_seconds);
     let password_reset_token_ttl_seconds =
         Literal::i64_unsuffixed(security.auth.password_reset_token_ttl_seconds);
+    let auth_claims = auth_claim_mappings_tokens(&security.auth.claims, runtime_crate);
     let session_cookie =
         option_session_cookie_tokens(security.auth.session_cookie.as_ref(), runtime_crate);
     let email = option_auth_email_tokens(security.auth.email.as_ref(), runtime_crate);
@@ -407,6 +698,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 require_email_verification: #require_email_verification,
                 verification_token_ttl_seconds: #verification_token_ttl_seconds,
                 password_reset_token_ttl_seconds: #password_reset_token_ttl_seconds,
+                claims: #auth_claims,
                 session_cookie: #session_cookie,
                 email: #email,
                 portal: #portal,
@@ -433,6 +725,44 @@ fn option_usize_tokens(value: Option<usize>) -> TokenStream {
             quote!(Some(#value))
         }
         None => quote!(None),
+    }
+}
+
+fn auth_claim_mappings_tokens(
+    claims: &std::collections::BTreeMap<String, crate::auth::AuthClaimMapping>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let entries = claims.iter().map(|(claim_name, mapping)| {
+        let claim_name = Literal::string(claim_name);
+        let column = Literal::string(&mapping.column);
+        let ty = match mapping.ty {
+            crate::auth::AuthClaimType::I64 => {
+                quote!(#runtime_crate::core::auth::AuthClaimType::I64)
+            }
+            crate::auth::AuthClaimType::String => {
+                quote!(#runtime_crate::core::auth::AuthClaimType::String)
+            }
+            crate::auth::AuthClaimType::Bool => {
+                quote!(#runtime_crate::core::auth::AuthClaimType::Bool)
+            }
+        };
+        quote! {
+            claims.insert(
+                #claim_name.to_owned(),
+                #runtime_crate::core::auth::AuthClaimMapping {
+                    column: #column.to_owned(),
+                    ty: #ty,
+                },
+            );
+        }
+    });
+
+    quote! {
+        {
+            let mut claims = ::std::collections::BTreeMap::new();
+            #(#entries)*
+            claims
+        }
     }
 }
 

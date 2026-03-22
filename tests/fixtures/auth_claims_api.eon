@@ -1,0 +1,29 @@
+module: "auth_claims_api"
+security: {
+    auth: {
+        issuer: "auth_claims_tests"
+        audience: "auth_claims_clients"
+        claims: {
+            tenant_id: { column: "tenant_scope", type: I64 }
+            workspace_id: "claim_workspace_id"
+            staff: { column: "is_staff", type: Bool }
+            plan: String
+        }
+    }
+}
+resources: [
+    {
+        name: "ScopedDoc"
+        policies: {
+            read: { field: "tenant_id", equals: "claim.tenant_id" }
+            create: { field: "tenant_id", value: "claim.tenant_id" }
+            update: { field: "tenant_id", equals: "claim.tenant_id" }
+            delete: { field: "tenant_id", equals: "claim.tenant_id" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "tenant_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

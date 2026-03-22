@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
+use rest_macro_core::authorization::authorization_runtime_migration_sql;
 use rest_macro_core::compiler;
 use rest_macro_core::db::{DbPool, query, query_scalar};
 use sqlx::Row;
@@ -111,6 +112,35 @@ pub fn generate_auth_migration(database_url: &str, output: &Path, force: bool) -
     println!(
         "{} {}",
         "Generated auth migration:".green().bold(),
+        output.display()
+    );
+
+    Ok(())
+}
+
+pub fn generate_authz_migration(database_url: &str, output: &Path, force: bool) -> Result<()> {
+    if output.exists() && !force {
+        bail!(
+            "migration file already exists at {} (use --force to overwrite)",
+            output.display()
+        );
+    }
+
+    let backend = AuthDbBackend::from_database_url(database_url)
+        .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
+    let sql = authorization_runtime_migration_sql(backend);
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    fs::write(output, sql)
+        .with_context(|| format!("failed to write migration to {}", output.display()))?;
+
+    println!(
+        "{} {}",
+        "Generated authz migration:".green().bold(),
         output.display()
     );
 
@@ -1065,13 +1095,14 @@ enum ApplyResult {
 mod tests {
     use crate::commands::db::{connect_database, database_url_from_service_config};
     use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
+    use rest_macro_core::authorization::AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE;
     use rest_macro_core::db::query_scalar;
     use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
 
     use super::{
         BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, apply_auth_migration,
-        apply_migrations, apply_setup_migrations, check_derive_migration,
+        apply_migrations, apply_setup_migrations, check_derive_migration, generate_authz_migration,
         generate_derive_migration, generate_diff_migration, inspect_live_schema, migration_files,
     };
 
@@ -1096,6 +1127,27 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["001_first.sql", "002_second.sql"]);
+    }
+
+    #[test]
+    fn generate_authz_migration_writes_runtime_assignment_table_sql() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_generate_authz_migration_{stamp}"));
+        let output = root.join("0002_authz.sql");
+
+        std::fs::create_dir_all(&root).expect("temp dir should exist");
+        generate_authz_migration("sqlite::memory:", &output, false)
+            .expect("authz migration should generate");
+
+        let sql = std::fs::read_to_string(&output).expect("authz migration should be readable");
+        assert!(sql.contains(&format!(
+            "CREATE TABLE {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}"
+        )));
+        assert!(sql.contains("target_kind"));
+        assert!(sql.contains("scope_value"));
     }
 
     #[tokio::test]

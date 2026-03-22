@@ -2,9 +2,10 @@ use crate::error::Result;
 use colored::Colorize;
 use rand::distr::{Alphanumeric, SampleString};
 use rand::rng;
-use rest_macro_core::auth::AuthEmailProvider;
+use rest_macro_core::auth::{AuthClaimType, AuthEmailProvider};
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -19,6 +20,7 @@ struct EnvTemplateConfig {
     turso_encryption_var: Option<String>,
     auth_email_env_var: Option<String>,
     auth_email_env_comment: Option<String>,
+    admin_claim_examples: Vec<AdminClaimEnvExample>,
     cors_origins_var: Option<String>,
     trusted_proxies_var: Option<String>,
     log_filter_env: String,
@@ -30,6 +32,12 @@ struct EnvTemplateConfig {
     tls_key_path: Option<String>,
 }
 
+struct AdminClaimEnvExample {
+    env_var: String,
+    example_value: String,
+    comment: String,
+}
+
 fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> {
     let Some(path) = config_path else {
         return Ok(EnvTemplateConfig {
@@ -37,6 +45,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
             turso_encryption_var: None,
             auth_email_env_var: None,
             auth_email_env_comment: None,
+            admin_claim_examples: Vec::new(),
             cors_origins_var: None,
             trusted_proxies_var: None,
             log_filter_env: "RUST_LOG".to_owned(),
@@ -68,12 +77,14 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
         },
         None => (None, None),
     };
+    let admin_claim_examples = configured_admin_claim_env_examples(&service.security.auth.claims);
 
     Ok(EnvTemplateConfig {
         database_url: default_service_database_url(&service),
         turso_encryption_var,
         auth_email_env_var,
         auth_email_env_comment,
+        admin_claim_examples,
         cors_origins_var: service.security.cors.origins_env.clone(),
         trusted_proxies_var: service.security.trusted_proxies.proxies_env.clone(),
         log_filter_env: service.logging.filter_env.clone(),
@@ -196,12 +207,28 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     .unwrap();
     writeln!(&mut output, "# ADMIN_EMAIL=admin@example.com").unwrap();
     writeln!(&mut output, "# ADMIN_PASSWORD=securepassword").unwrap();
-    writeln!(
-        &mut output,
-        "# Optional auth claim columns use ADMIN_<COLUMN_NAME>, for example:"
-    )
-    .unwrap();
-    writeln!(&mut output, "# ADMIN_TENANT_ID=1").unwrap();
+    if config.admin_claim_examples.is_empty() {
+        writeln!(
+            &mut output,
+            "# Optional auth claim columns use ADMIN_<COLUMN_NAME>, for example:"
+        )
+        .unwrap();
+        writeln!(&mut output, "# ADMIN_TENANT_ID=1").unwrap();
+    } else {
+        writeln!(
+            &mut output,
+            "# Explicit security.auth.claims values are supplied with ADMIN_<COLUMN_NAME>:"
+        )
+        .unwrap();
+        for example in &config.admin_claim_examples {
+            writeln!(
+                &mut output,
+                "# {}={} ({})",
+                example.env_var, example.example_value, example.comment
+            )
+            .unwrap();
+        }
+    }
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "# Server Configuration").unwrap();
     writeln!(&mut output, "BIND_ADDR={}", config.bind_addr).unwrap();
@@ -238,6 +265,64 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     .unwrap();
 
     Ok(output)
+}
+
+fn configured_admin_claim_env_examples(
+    claims: &std::collections::BTreeMap<String, rest_macro_core::auth::AuthClaimMapping>,
+) -> Vec<AdminClaimEnvExample> {
+    let mut seen_columns = BTreeSet::new();
+    let mut examples = Vec::new();
+
+    for (claim_name, mapping) in claims {
+        if !seen_columns.insert(mapping.column.clone()) {
+            continue;
+        }
+
+        let example_value = match mapping.ty {
+            AuthClaimType::I64 => "1",
+            AuthClaimType::String => "pro",
+            AuthClaimType::Bool => "true",
+        };
+        let comment = if claim_name == &mapping.column {
+            format!(
+                "claim.{claim_name} ({})",
+                admin_claim_type_label(mapping.ty)
+            )
+        } else {
+            format!(
+                "claim.{claim_name} from user.{} ({})",
+                mapping.column,
+                admin_claim_type_label(mapping.ty)
+            )
+        };
+        examples.push(AdminClaimEnvExample {
+            env_var: admin_claim_env_var(&mapping.column),
+            example_value: example_value.to_owned(),
+            comment,
+        });
+    }
+
+    examples
+}
+
+fn admin_claim_env_var(column_name: &str) -> String {
+    let mut env_var = String::from("ADMIN_");
+    for ch in column_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            env_var.push(ch.to_ascii_uppercase());
+        } else {
+            env_var.push('_');
+        }
+    }
+    env_var
+}
+
+fn admin_claim_type_label(ty: AuthClaimType) -> &'static str {
+    match ty {
+        AuthClaimType::I64 => "I64",
+        AuthClaimType::String => "String",
+        AuthClaimType::Bool => "Bool",
+    }
 }
 
 /// Generate .env template file
@@ -302,5 +387,15 @@ mod tests {
         assert!(content.contains(
             "# Or mount a secret file and set RESEND_API_KEY_FILE=/run/secrets/RESEND_API_KEY"
         ));
+    }
+
+    #[test]
+    fn rendered_env_template_includes_explicit_auth_claim_examples() {
+        let content = render_env_template(Some(&fixture_path("auth_claims_api.eon")))
+            .expect("auth claims fixture should render");
+        assert!(content.contains("# ADMIN_TENANT_SCOPE=1"));
+        assert!(content.contains("# ADMIN_CLAIM_WORKSPACE_ID=1"));
+        assert!(content.contains("# ADMIN_IS_STAFF=true"));
+        assert!(content.contains("# ADMIN_PLAN=pro"));
     }
 }

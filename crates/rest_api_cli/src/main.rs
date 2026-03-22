@@ -1,5 +1,5 @@
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Result, anyhow};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use std::path::PathBuf;
 use vsra::commands;
@@ -184,6 +184,12 @@ enum Commands {
         force: bool,
     },
 
+    /// Explain the compiled authorization model for a `.eon` service
+    Authz {
+        #[command(subcommand)]
+        command: AuthzCommand,
+    },
+
     /// Manage local TLS certificates for generated servers
     Tls {
         #[command(subcommand)]
@@ -195,6 +201,17 @@ enum Commands {
 enum MigrationCommand {
     /// Generate a migration SQL file for the built-in auth schema
     Auth {
+        /// Output SQL migration file
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Generate a migration SQL file for runtime authorization assignments
+    Authz {
         /// Output SQL migration file
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
@@ -401,6 +418,105 @@ enum TlsCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum AuthzCommand {
+    /// Render the compiled authorization model from a `.eon` service
+    Explain {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Simulate one authorization decision against the compiled model
+    Simulate {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Resource name; when omitted, a single-resource service is auto-selected
+        #[arg(long, value_name = "NAME")]
+        resource: Option<String>,
+
+        /// Action to simulate
+        #[arg(long, value_enum)]
+        action: AuthzActionArg,
+
+        /// Simulated authenticated user id
+        #[arg(long, value_name = "ID")]
+        user_id: Option<i64>,
+
+        /// Simulated roles; may be repeated
+        #[arg(long = "role", value_name = "ROLE")]
+        roles: Vec<String>,
+
+        /// Simulated claims in key=value form; may be repeated
+        #[arg(long = "claim", value_name = "KEY=VALUE")]
+        claims: Vec<String>,
+
+        /// Simulated row fields in key=value form; may be repeated
+        #[arg(long = "row", value_name = "KEY=VALUE")]
+        row: Vec<String>,
+
+        /// Proposed create payload fields in key=value form; may be repeated
+        #[arg(long = "proposed", value_name = "KEY=VALUE")]
+        proposed: Vec<String>,
+
+        /// Simulated scope in ScopeName=value form
+        #[arg(long, value_name = "SCOPE=VALUE")]
+        scope: Option<String>,
+
+        /// Runtime scoped assignments in `permission:Name@Scope=value` or `template:Name@Scope=value` form; may be repeated
+        #[arg(
+            long = "scoped-assignment",
+            alias = "assignment",
+            value_name = "ASSIGNMENT"
+        )]
+        scoped_assignments: Vec<String>,
+
+        /// Load runtime scoped assignments for `--user-id` from the configured database
+        #[arg(long)]
+        load_runtime_assignments: bool,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum AuthzExplainFormatArg {
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum AuthzActionArg {
+    Read,
+    Create,
+    Update,
+    Delete,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if present
@@ -511,6 +627,15 @@ async fn main() -> Result<()> {
             MigrationCommand::Auth { output, force } => {
                 println!("{}", "Generating auth migration SQL...".green().bold());
                 commands::migrate::generate_auth_migration(&database_url, output, *force)?;
+            }
+            MigrationCommand::Authz { output, force } => {
+                println!(
+                    "{}",
+                    "Generating runtime authorization migration SQL..."
+                        .green()
+                        .bold()
+                );
+                commands::migrate::generate_authz_migration(&database_url, output, *force)?;
             }
             MigrationCommand::Derive {
                 input,
@@ -691,6 +816,87 @@ async fn main() -> Result<()> {
             commands::docs::generate_eon_reference(output, *force)?;
         }
 
+        Commands::Authz { command } => match command {
+            AuthzCommand::Explain {
+                input,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Explaining authorization...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("authz explain requires --input or --config"))?;
+                commands::authz::explain_authorization(
+                    &input,
+                    output.as_deref(),
+                    match format {
+                        AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                        AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                    },
+                    *force,
+                )?;
+            }
+            AuthzCommand::Simulate {
+                input,
+                resource,
+                action,
+                user_id,
+                roles,
+                claims,
+                row,
+                proposed,
+                scope,
+                scoped_assignments,
+                load_runtime_assignments,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Simulating authorization...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("authz simulate requires --input or --config"))?;
+                commands::authz::simulate_authorization(
+                    &input,
+                    resource.as_deref(),
+                    match action {
+                        AuthzActionArg::Read => {
+                            rest_macro_core::authorization::AuthorizationAction::Read
+                        }
+                        AuthzActionArg::Create => {
+                            rest_macro_core::authorization::AuthorizationAction::Create
+                        }
+                        AuthzActionArg::Update => {
+                            rest_macro_core::authorization::AuthorizationAction::Update
+                        }
+                        AuthzActionArg::Delete => {
+                            rest_macro_core::authorization::AuthorizationAction::Delete
+                        }
+                    },
+                    *user_id,
+                    roles,
+                    claims,
+                    row,
+                    proposed,
+                    scope.as_deref(),
+                    scoped_assignments,
+                    *load_runtime_assignments,
+                    Some(&database_url),
+                    config_path.as_deref(),
+                    output.as_deref(),
+                    match format {
+                        AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                        AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                    },
+                    *force,
+                )
+                .await?;
+            }
+        },
+
         Commands::Tls { command } => match command {
             TlsCommand::SelfSigned {
                 cert_path,
@@ -788,6 +994,63 @@ mod tests {
     #[test]
     fn docs_command_accepts_output_file() {
         assert!(Cli::try_parse_from(["vsr", "docs", "--output", "docs/eon-reference.md"]).is_ok());
+    }
+
+    #[test]
+    fn authz_explain_accepts_input_and_json_format() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr", "authz", "explain", "--input", "api.eon", "--format", "json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn authz_simulate_accepts_resource_action_and_claims() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "authz",
+                "simulate",
+                "--input",
+                "api.eon",
+                "--resource",
+                "ScopedDoc",
+                "--action",
+                "create",
+                "--user-id",
+                "1",
+                "--role",
+                "admin",
+                "--claim",
+                "tenant_id=7",
+                "--proposed",
+                "tenant_id=42",
+                "--scope",
+                "Family=42",
+                "--scoped-assignment",
+                "template:FamilyMember@Family=42",
+                "--load-runtime-assignments",
+                "--format",
+                "json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn migrate_authz_accepts_output_file() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "migrate",
+                "authz",
+                "--output",
+                "migrations/0002_authz.sql",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

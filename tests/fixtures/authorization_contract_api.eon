@@ -1,0 +1,44 @@
+module: "authorization_contract_api"
+authorization: {
+    scopes: {
+        Family: {
+            description: "Family tenancy scope"
+        }
+        Household: {
+            parent: "Family"
+            description: "Nested household scope"
+        }
+    }
+    permissions: {
+        FamilyRead: {
+            actions: ["Read"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+        FamilyManage: {
+            actions: ["Update", "Delete"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family", "Household"]
+        }
+    }
+    templates: {
+        FamilyMember: {
+            permissions: ["FamilyRead"]
+            scopes: ["Family"]
+        }
+        FamilyManager: {
+            permissions: ["FamilyRead", "FamilyManage"]
+            scopes: ["Family", "Household"]
+        }
+    }
+}
+resources: [
+    {
+        name: "ScopedDoc"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "tenant_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

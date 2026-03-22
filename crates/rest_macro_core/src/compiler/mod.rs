@@ -1,3 +1,4 @@
+mod authorization;
 mod codegen;
 mod derive_parser;
 mod eon_parser;
@@ -10,6 +11,7 @@ use proc_macro2::TokenStream;
 use std::path::Path as FsPath;
 use syn::{DeriveInput, LitStr, Path};
 
+pub use authorization::{compile_resource_authorization, compile_service_authorization};
 pub use model::{
     DbBackend, FieldSpec, GeneratedTemporalKind, GeneratedValue, ReferentialAction, RelationSpec,
     ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode,

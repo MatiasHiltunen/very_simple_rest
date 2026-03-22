@@ -154,9 +154,12 @@ returns:
 ```
 
 When you create built-in admin users through `vsr create-admin` or `vsr setup`, the CLI now
-inspects the live `user` table and also populates numeric claim columns such as `tenant_id`,
-`org_id`, or `claim_workspace_id`. Interactive flows prompt for those values, and non-interactive
-flows accept environment variables named `ADMIN_<COLUMN_NAME>`, such as `ADMIN_TENANT_ID=1`.
+inspects the built-in auth claim columns and can populate them during admin creation. With legacy
+implicit claims, that means numeric columns such as `tenant_id`, `org_id`, or
+`claim_workspace_id`. With explicit `security.auth.claims`, it uses the mapped `user` table
+columns instead, including `String` and `Bool` claim types. Interactive flows prompt for those
+values, and non-interactive flows accept environment variables named `ADMIN_<COLUMN_NAME>`, such
+as `ADMIN_TENANT_ID=1` or `ADMIN_IS_STAFF=true`.
 
 ### JWT Secret Configuration
 
@@ -195,7 +198,12 @@ ADMIN_TENANT_ID=1
 After the built-in auth schema has been migrated, `ensure_admin_exists` can create the first admin
 user automatically with these credentials. If the `user` table also has numeric claim columns such
 as `tenant_id`, `org_id`, or `claim_workspace_id`, `ensure_admin_exists` now reads matching
-`ADMIN_<COLUMN_NAME>` variables and stores them on the admin row too.
+`ADMIN_<COLUMN_NAME>` variables and stores them on the admin row too. The CLI uses the same
+`ADMIN_<COLUMN_NAME>` convention for explicit `security.auth.claims` mappings.
+
+If your app startup already has an explicit `AuthSettings` value, prefer
+`auth::ensure_admin_exists_with_settings(&pool, &settings)` so admin bootstrap follows the same
+configured claim mappings as login and `/api/auth/me`.
 
 ### 2. CLI Tool (Interactive)
 
@@ -204,6 +212,9 @@ The library includes a CLI tool for managing your API, with specific commands fo
 ```bash
 # Generate a migration for the built-in auth schema
 vsr migrate auth --output migrations/0000_auth.sql
+
+# Generate the runtime authorization assignment schema used by authz simulation and future policy APIs
+vsr migrate authz --output migrations/0001_authz.sql
 
 # Emit a standalone Rust server project from a bare .eon service
 vsr server emit --input api.eon --output-dir generated-api
@@ -326,6 +337,67 @@ vsr docs --output docs/eon-reference.md
 
 The generated document is intended to be precise enough for AI agents and still readable for
 humans. The checked-in reference lives at `docs/eon-reference.md`.
+The staged authorization architecture plan lives at `docs/authorization-roadmap.md`.
+
+## Authorization Explain
+
+You can inspect how the current `.eon` roles and row policies compile into the internal
+authorization model:
+
+```bash
+vsr authz explain --input api.eon
+vsr authz explain --input api.eon --format json --output docs/authz.json
+```
+
+This is intended as the first correctness-oriented diagnostic step before richer policy features
+such as simulation and runtime-managed assignments.
+
+You can also simulate one authorization decision against that compiled model:
+
+```bash
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --user-id 7 --claim tenant_id=3 --row tenant_id=3
+vsr authz simulate --input api.eon --resource ScopedDoc --action create --role admin --proposed tenant_id=42 --format json
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --scope Family=42 --scoped-assignment template:FamilyMember@Family=42
+vsr --database-url sqlite:app.db?mode=rwc authz simulate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42 --load-runtime-assignments
+```
+
+`--claim`, `--row`, and `--proposed` accept repeated `key=value` pairs. Values are inferred as
+`null`, `bool`, `i64`, or `String`. `--scope` accepts `ScopeName=value`, and repeated
+`--scoped-assignment` values accept `permission:Name@Scope=value` or
+`template:Name@Scope=value`. `--load-runtime-assignments` fetches stored assignments for
+`--user-id` from the configured database, using the runtime authz table created by
+`vsr migrate authz`. Runtime scoped assignments are resolved and validated against the static
+`authorization` contract in the simulator, but generated handlers do not enforce them yet.
+
+`.eon` also now accepts an optional static `authorization` block for declaring scopes,
+permissions, and templates. That block is contract-only in this slice: it is validated, included
+in the compiled authorization model, and shown by `vsr authz explain`, but it does not change
+request enforcement yet.
+
+Generated `.eon` modules expose the compiled authorization view through `module::authorization()`
+so manual apps or emitted servers can build custom policy-management and diagnostics surfaces on
+top of the same typed model. They also expose `module::authorization_runtime(db)`, and
+`module::configure(...)` now registers that runtime service as Actix app data so custom handlers
+can load, persist, and simulate runtime scoped assignments without duplicating storage logic.
+When you want a basic admin-only runtime assignment API, call
+`module::configure_authorization_management(cfg, db)` to mount:
+
+- `POST /authz/runtime/evaluate`
+- `GET /authz/runtime/assignments?user_id=...`
+- `POST /authz/runtime/assignments`
+- `DELETE /authz/runtime/assignments/{id}`
+
+Those endpoints manage persisted scoped permission/template assignments through the shared
+authorization runtime. `POST /authz/runtime/evaluate` checks which persisted scoped permissions
+apply to an explicit `resource + action + scope` for the current user or an admin-selected user.
+It still does not run static role checks, row policies, or create-time assignments, so CRUD
+enforcement remains unchanged.
+
+For real custom endpoint enforcement, handlers can inject
+`web::Data<very_simple_rest::authorization::AuthorizationRuntime>` and call
+`runtime.enforce_runtime_access(&user, "ResourceName", AuthorizationAction::Read, scope).await`.
+That enforces persisted runtime scoped permissions for the current user, while still leaving
+generated CRUD handlers on their existing static authorization path.
 
 ## Static Files In `.eon`
 
@@ -544,20 +616,23 @@ services, generate explicit SQL and apply it before serving traffic:
 # Generate the built-in auth migration
 vsr migrate auth --output migrations/0000_auth.sql
 
+# Generate the runtime authorization assignment migration
+vsr migrate authz --output migrations/0001_authz.sql
+
 # Generate migrations from Rust `#[derive(RestApi)]` resources
-vsr migrate derive --input src --exclude-table user --output migrations/0001_resources.sql
+vsr migrate derive --input src --exclude-table user --output migrations/0002_resources.sql
 
 # Generate an additive migration between two schema versions
-vsr migrate diff --from schema_v1.eon --to schema_v2.eon --output migrations/0002_additive.sql
+vsr migrate diff --from schema_v1.eon --to schema_v2.eon --output migrations/0003_additive.sql
 
 # Inspect a live database against a schema source
 vsr --database-url sqlite:app.db?mode=rwc migrate inspect --input src --exclude-table user
 
 # Generate a deterministic migration file from a .eon service
-vsr migrate generate --input tests/fixtures/blog_api.eon --output migrations/0001_init.sql
+vsr migrate generate --input tests/fixtures/blog_api.eon --output migrations/0002_init.sql
 
 # Verify that the checked-in SQL still matches the .eon schema
-vsr migrate check --input tests/fixtures/blog_api.eon --output migrations/0001_init.sql
+vsr migrate check --input tests/fixtures/blog_api.eon --output migrations/0002_init.sql
 
 # Apply migrations to the configured database
 vsr --database-url sqlite:app.db?mode=rwc migrate apply --dir migrations
@@ -575,6 +650,7 @@ The generated SQL includes:
 Built-in auth now has the same explicit schema path:
 
 - `vsr migrate auth` generates the `user` table migration
+- `vsr migrate authz` generates the runtime authorization assignment table used by authz diagnostics and future policy-management APIs
 - `vsr setup` applies that auth migration before prompting for the first admin user
 - `ensure_admin_exists` no longer creates tables at server startup
 
@@ -668,13 +744,35 @@ This makes the generated handlers:
 - Apply the same tenant filter to admin users when `admin_bypass = false`
 
 When you use the built-in auth routes, `/auth/login` now emits numeric claims automatically from
-the `user` row:
+the `user` row. You can also make those claim names explicit in `.eon`:
+
+```eon
+security: {
+    auth: {
+        claims: {
+            tenant_id: { column: "tenant_scope", type: I64 }
+            workspace_id: "claim_workspace_id"
+            staff: { column: "is_staff", type: Bool }
+            plan: String
+        }
+    }
+}
+```
+
+Supported claim-mapping forms:
+
+- `tenant_id: I64` means `claim.tenant_id` comes from `user.tenant_id`
+- `workspace_id: "claim_workspace_id"` means `claim.workspace_id` comes from `user.claim_workspace_id`
+- `staff: { column: "is_staff", type: Bool }` uses a custom column and non-integer type
+
+If you do not configure `security.auth.claims`, the legacy implicit behavior still applies:
 
 - Any numeric column ending in `_id` becomes a claim with the same name, such as `tenant_id` or `org_id`
 - Any numeric column named `claim_<name>` becomes a claim named `<name>`
 
 That lets claim-scoped policies work without a custom token issuer, as long as your user records
-carry the relevant columns.
+carry the relevant columns. Current boundary: row policies still require `I64` claims, so
+`claim.<name>` policies must resolve to integer values.
 
 ## Relationships
 

@@ -13,6 +13,8 @@ rest_api_from_eon!("tests/fixtures/turso_local_encrypted_api.eon");
 rest_api_from_eon!("tests/fixtures/tls_api.eon");
 rest_api_from_eon!("tests/fixtures/mapped_api.eon");
 rest_api_from_eon!("tests/fixtures/runtime_api.eon");
+rest_api_from_eon!("tests/fixtures/auth_claims_api.eon");
+rest_api_from_eon!("tests/fixtures/authorization_contract_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -73,6 +75,52 @@ fn eon_macro_exposes_runtime_defaults() {
     let runtime = runtime_api::runtime();
     assert!(runtime.compression.enabled);
     assert!(runtime.compression.static_precompressed);
+}
+
+#[test]
+fn eon_macro_exposes_auth_claim_mappings() {
+    let security = auth_claims_api::security();
+    assert_eq!(
+        security.auth.claims.get("tenant_id"),
+        Some(&very_simple_rest::core::auth::AuthClaimMapping {
+            column: "tenant_scope".to_owned(),
+            ty: very_simple_rest::core::auth::AuthClaimType::I64,
+        })
+    );
+    assert_eq!(
+        security.auth.claims.get("staff"),
+        Some(&very_simple_rest::core::auth::AuthClaimMapping {
+            column: "is_staff".to_owned(),
+            ty: very_simple_rest::core::auth::AuthClaimType::Bool,
+        })
+    );
+}
+
+#[test]
+fn eon_macro_exposes_authorization_model() {
+    let authorization = authorization_contract_api::authorization();
+    assert_eq!(authorization.contract.scopes.len(), 2);
+    assert_eq!(authorization.contract.permissions.len(), 2);
+    assert_eq!(authorization.contract.templates.len(), 2);
+    assert_eq!(authorization.resources.len(), 1);
+    assert_eq!(authorization.resources[0].id, "resource.scoped_doc");
+    assert_eq!(authorization.resources[0].resource, "ScopedDoc");
+    assert_eq!(
+        authorization.resources[0].actions[0].id,
+        "resource.scoped_doc.action.read"
+    );
+    assert_eq!(
+        authorization.resources[0].actions[0].action,
+        very_simple_rest::authorization::AuthorizationAction::Read
+    );
+
+    let _authorization_runtime_with_db_pool =
+        |db: very_simple_rest::db::DbPool| authorization_contract_api::authorization_runtime(db);
+    let _configure_authorization_management_with_db_pool =
+        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
+         db: very_simple_rest::db::DbPool| {
+            authorization_contract_api::configure_authorization_management(cfg, db)
+        };
 }
 
 #[test]

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod authorization;
 pub mod database;
 pub mod db;
 mod email;

@@ -81,6 +81,7 @@ actix-files.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 uuid.workspace = true
+dotenv.workspace = true
 
 # Feature configuration for the top-level crate
 [features]

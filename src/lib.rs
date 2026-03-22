@@ -123,6 +123,16 @@ static mounts can serve `.br` and `.gz` companion assets when
 `runtime.compression.static_precompressed` is enabled. `security`
 covers JSON body limits, CORS, trusted-proxy handling, auth rate limits, security headers, and
 built-in auth token settings through `module::security()` and `module::configure_security(...)`.
+Generated modules also expose the compiled authorization model through `module::authorization()`,
+which is useful when building custom diagnostics or runtime-managed policy APIs on top of the
+static `.eon` contract. They also expose `module::authorization_runtime(db)` and register that
+runtime service as Actix app data from `module::configure(...)`, so custom handlers can load,
+persist, and simulate scoped assignments through one shared runtime object. For a basic opt-in
+runtime assignment API, generated modules also expose
+`module::configure_authorization_management(cfg, db)`, including a request-time runtime access
+evaluation endpoint for explicit `resource + action + scope` checks. Custom handlers can also call
+`AuthorizationRuntime::enforce_runtime_access(...)` for real request-time runtime permission
+enforcement.
 Secrets such as `JWT_SECRET` still belong in the environment.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
@@ -131,6 +141,8 @@ the `/auth/register` and `/auth/login` routes in a fresh database.
 When `ensure_admin_exists` or the CLI admin bootstrap creates the first admin user, numeric auth
 claim columns on `user` such as `tenant_id`, `org_id`, or `claim_workspace_id` can be supplied
 through matching `ADMIN_<COLUMN_NAME>` environment variables.
+When your app uses explicit `AuthSettings`, call `ensure_admin_exists_with_settings` so the admin
+bootstrap path honors configured `security.auth.claims` mappings too.
 
 For derive-based resources, use `vsr migrate derive --input src` and optionally
 `--exclude-table user` when the built-in auth migration already owns that table.
@@ -165,10 +177,29 @@ pub mod auth {
         UpdateManagedUserInput, User, UserContext, VerificationResendInput, VerifyEmailInput,
         account, auth_routes, auth_routes_with_settings, change_password, confirm_password_reset,
         create_managed_user, delete_managed_user, ensure_admin_exists,
-        ensure_jwt_secret_configured, list_managed_users, login, login_with_request, logout,
-        managed_user, me, register, request_password_reset, resend_account_verification,
-        resend_managed_user_verification, resend_verification, update_managed_user,
-        verify_email_page, verify_email_token,
+        ensure_admin_exists_with_settings, ensure_jwt_secret_configured, list_managed_users, login,
+        login_with_request, logout, managed_user, me, register, request_password_reset,
+        resend_account_verification, resend_managed_user_verification, resend_verification,
+        update_managed_user, validate_auth_claim_mappings, verify_email_page, verify_email_token,
+    };
+}
+
+pub mod authorization {
+    pub use rest_macro_core::authorization::{
+        AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE, ActionAuthorization, AuthorizationAction,
+        AuthorizationAssignment, AuthorizationAssignmentTrace, AuthorizationCondition,
+        AuthorizationConditionTrace, AuthorizationContract, AuthorizationMatch, AuthorizationModel,
+        AuthorizationOperator, AuthorizationOutcome, AuthorizationPermission, AuthorizationRuntime,
+        AuthorizationRuntimeAccessInput, AuthorizationRuntimeAccessResult, AuthorizationScope,
+        AuthorizationScopeBinding, AuthorizationScopedAssignment,
+        AuthorizationScopedAssignmentCreateInput, AuthorizationScopedAssignmentListQuery,
+        AuthorizationScopedAssignmentRecord, AuthorizationScopedAssignmentTarget,
+        AuthorizationScopedAssignmentTrace, AuthorizationSimulationInput,
+        AuthorizationSimulationResult, AuthorizationTemplate, AuthorizationValueSource,
+        ResourceAuthorization, authorization_management_routes,
+        authorization_runtime_migration_sql, delete_runtime_assignment, insert_runtime_assignment,
+        list_runtime_assignments_for_user, load_runtime_assignments_for_user,
+        new_runtime_assignment_id,
     };
 }
 
@@ -218,6 +249,7 @@ pub use uuid;
 pub mod prelude {
     pub use crate::auth;
     pub use crate::auth::{AuthSettings, UserContext};
+    pub use crate::authorization;
     pub use crate::core;
     pub use crate::database;
     pub use crate::db;

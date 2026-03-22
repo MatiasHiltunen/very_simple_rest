@@ -106,6 +106,7 @@ fn security_config() -> core::security::SecurityConfig {
             audience: Some("demo-clients".to_owned()),
             access_token_ttl_seconds: 3600,
             session_cookie: None,
+            ..auth::AuthSettings::default()
         },
     }
 }
@@ -200,7 +201,7 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?;
 
     info!("Checking for admin user...");
-    match auth::ensure_admin_exists(&pool).await {
+    match auth::ensure_admin_exists_with_settings(&pool, &security.auth).await {
         Ok(true) => info!("Admin user is ready for login"),
         Ok(false) => {
             error!("Failed to create admin user - shutting down");

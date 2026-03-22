@@ -45,10 +45,77 @@ These keys are read from the service root.
 | database | Map | Backend-dependent runtime engine defaults | No | See Database Engine | Overrides the runtime database engine without changing the resource SQL dialect. |
 | logging | Map | Enabled with built-in defaults | No | See Logging | Controls the emitted server logger configuration. |
 | runtime | Map | Compression disabled | No | See Runtime | Controls runtime-only behavior such as HTTP compression. |
+| authorization | Map | No static authorization contract | No | See Authorization Contract | Declares optional static scopes, permissions, and templates for the compiled authorization model. |
 | tls | Map | Disabled unless the block is present | No | See TLS | Any configured TLS field enables HTTPS/Rustls handling in emitted servers. |
 | static | Map | No static mounts | No | See Static Mounts | Declares filesystem-backed static directories and SPA mounts. |
 | security | Map | All optional features off / empty | No | See Security | Controls request limits, CORS, trusted proxies, auth settings, headers, and rate limits. |
 | resources | List or keyed map | None | Yes | Resource definitions | A service must contain at least one resource. |
+
+## Authorization Contract
+
+The optional `authorization` block declares static scope, permission, and template vocabulary. It does not change runtime enforcement by itself yet, but it is compiled into the authorization model and available through `vsr authz explain`.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| authorization.scopes | Map<ScopeName, Scope> | None | No | Keyed scope map | Scope names must be unique valid identifiers. Use this to declare hierarchical authorization scope vocabulary. |
+| authorization.permissions | Map<PermissionName, Permission> | None | No | Keyed permission map | Permission names must be unique valid identifiers. Each permission must declare at least one action and one resource. |
+| authorization.templates | Map<TemplateName, Template> | None | No | Keyed template map | Template names must be unique valid identifiers. Templates currently reference permissions and scopes only. |
+
+## Authorization Scopes
+
+Scopes define named authorization boundaries and optional parent relationships.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| authorization.scopes.<scope_name>.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
+| authorization.scopes.<scope_name>.parent | String | None | No | Another declared scope name | Parent scopes must exist and cannot form cycles. |
+
+## Authorization Permissions
+
+Permissions declare which resource actions belong to a named permission.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| authorization.permissions.<permission_name>.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
+| authorization.permissions.<permission_name>.actions | [Action] | Required when the permission exists | Yes | Read, Create, Update, Delete | At least one action is required. |
+| authorization.permissions.<permission_name>.resources | [String] | Required when the permission exists | Yes | Declared resource names such as `Post` or `ScopedDoc` | At least one resource is required. References must match declared `.eon` resources. |
+| authorization.permissions.<permission_name>.scopes | [String] | None | No | Declared scope names | Optional static scope hints for future runtime-managed authorization layers. |
+
+## Authorization Templates
+
+Templates group permissions and optional scopes into reusable named bundles.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| authorization.templates.<template_name>.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
+| authorization.templates.<template_name>.permissions | [String] | Required when the template exists | Yes | Declared permission names | At least one permission is required. |
+| authorization.templates.<template_name>.scopes | [String] | None | No | Declared scope names | Optional static scope hints attached to the template. |
+
+```eon
+authorization: {
+    scopes: {
+        Family: {
+            description: "Family tenancy scope"
+        }
+        Household: {
+            parent: "Family"
+        }
+    }
+    permissions: {
+        FamilyRead: {
+            actions: ["Read"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+    templates: {
+        FamilyMember: {
+            permissions: ["FamilyRead"]
+            scopes: ["Family"]
+        }
+    }
+}
+```
 
 ## Resource Keys
 
@@ -268,10 +335,40 @@ These settings configure the built-in auth/account routes. They do not affect cu
 | security.auth.require_email_verification | Bool | false | No | true, false | When true, registration/login flows require email verification and `security.auth.email` must also be configured. |
 | security.auth.verification_token_ttl_seconds | i64 | 86400 | No | Positive integer | Verification-token lifetime in seconds. |
 | security.auth.password_reset_token_ttl_seconds | i64 | 3600 | No | Positive integer | Password-reset token lifetime in seconds. |
+| security.auth.claims | Map<ClaimName, ClaimMapping> | None | No | Keyed map of claim names to claim mappings | Makes built-in auth claims explicit. Claim names must be unique and cannot use reserved fields such as `sub`, `roles`, `iss`, `aud`, `exp`, or `id`. |
 | security.auth.session_cookie | Map | None | No | See Session Cookie | Enables cookie-based session auth in addition to bearer tokens. |
 | security.auth.email | Map | None | No | See Auth Email | Configures transactional email for verification and password reset flows. |
 | security.auth.portal | Map | None | No | See Auth UI Pages | Configures a custom account portal page path and title. |
 | security.auth.admin_dashboard | Map | None | No | See Auth UI Pages | Configures a custom admin dashboard page path and title. |
+
+```eon
+security: {
+    auth: {
+        claims: {
+            tenant_id: I64
+            workspace_id: "claim_workspace_id"
+            staff: { column: "is_staff", type: Bool }
+            plan: String
+        }
+    }
+}
+```
+
+## Auth Claims
+
+Explicit auth claim mappings let built-in auth expose predictable claim names without relying entirely on implicit `_id` / `claim_<name>` discovery. The keyed map name is the emitted JWT claim name.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| security.auth.claims.<claim_name> | I64 \| String \| Bool \| String column name \| Map | If shorthand type is used, the column defaults to `<claim_name>` and the type defaults to the shorthand | No | `tenant_id: I64`, `workspace_id: "claim_workspace_id"`, or a full object | String shorthand means `column = <string>` with the default type `I64`. Use the object form when you need a non-`I64` type on a different column. |
+| security.auth.claims.<claim_name>.column | String | The claim key name | No | SQL identifier in the built-in `user` table | When omitted in the object form, the claim key is also used as the column name. |
+| security.auth.claims.<claim_name>.type | Enum | I64 | No | I64, String, Bool | Controls how built-in auth decodes the `user` column and exposes it in JWTs and `/api/auth/me`. |
+
+Current runtime boundary:
+
+- Row policies can only consume `I64` claims today.
+- When `security.auth.claims` is configured, non-legacy `claim.<name>` references in row policies must be declared there.
+- Legacy numeric `*_id` claims still work even without an explicit mapping.
 
 ## Session Cookie
 

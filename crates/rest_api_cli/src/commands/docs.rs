@@ -154,6 +154,14 @@ object or just a type such as `title: String`.",
                 "Controls runtime-only behavior such as HTTP compression.",
             ),
             row(
+                "authorization",
+                "Map",
+                "No static authorization contract",
+                "No",
+                "See Authorization Contract",
+                "Declares optional static scopes, permissions, and templates for the compiled authorization model.",
+            ),
+            row(
                 "tls",
                 "Map",
                 "Disabled unless the block is present",
@@ -186,6 +194,162 @@ object or just a type such as `title: String`.",
                 "A service must contain at least one resource.",
             ),
         ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Authorization Contract",
+        "The optional `authorization` block declares static scope, permission, and template vocabulary. It does not change runtime enforcement by itself yet, but it is compiled into the authorization model and available through `vsr authz explain`.",
+        &[
+            row(
+                "authorization.scopes",
+                "Map<ScopeName, Scope>",
+                "None",
+                "No",
+                "Keyed scope map",
+                "Scope names must be unique valid identifiers. Use this to declare hierarchical authorization scope vocabulary.",
+            ),
+            row(
+                "authorization.permissions",
+                "Map<PermissionName, Permission>",
+                "None",
+                "No",
+                "Keyed permission map",
+                "Permission names must be unique valid identifiers. Each permission must declare at least one action and one resource.",
+            ),
+            row(
+                "authorization.templates",
+                "Map<TemplateName, Template>",
+                "None",
+                "No",
+                "Keyed template map",
+                "Template names must be unique valid identifiers. Templates currently reference permissions and scopes only.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Authorization Scopes",
+        "Scopes define named authorization boundaries and optional parent relationships.",
+        &[
+            row(
+                "authorization.scopes.<scope_name>.description",
+                "String",
+                "None",
+                "No",
+                "Any non-empty string",
+                "Optional human-readable description for tooling and docs.",
+            ),
+            row(
+                "authorization.scopes.<scope_name>.parent",
+                "String",
+                "None",
+                "No",
+                "Another declared scope name",
+                "Parent scopes must exist and cannot form cycles.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Authorization Permissions",
+        "Permissions declare which resource actions belong to a named permission.",
+        &[
+            row(
+                "authorization.permissions.<permission_name>.description",
+                "String",
+                "None",
+                "No",
+                "Any non-empty string",
+                "Optional human-readable description for tooling and docs.",
+            ),
+            row(
+                "authorization.permissions.<permission_name>.actions",
+                "[Action]",
+                "Required when the permission exists",
+                "Yes",
+                "Read, Create, Update, Delete",
+                "At least one action is required.",
+            ),
+            row(
+                "authorization.permissions.<permission_name>.resources",
+                "[String]",
+                "Required when the permission exists",
+                "Yes",
+                "Declared resource names such as `Post` or `ScopedDoc`",
+                "At least one resource is required. References must match declared `.eon` resources.",
+            ),
+            row(
+                "authorization.permissions.<permission_name>.scopes",
+                "[String]",
+                "None",
+                "No",
+                "Declared scope names",
+                "Optional static scope hints for future runtime-managed authorization layers.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Authorization Templates",
+        "Templates group permissions and optional scopes into reusable named bundles.",
+        &[
+            row(
+                "authorization.templates.<template_name>.description",
+                "String",
+                "None",
+                "No",
+                "Any non-empty string",
+                "Optional human-readable description for tooling and docs.",
+            ),
+            row(
+                "authorization.templates.<template_name>.permissions",
+                "[String]",
+                "Required when the template exists",
+                "Yes",
+                "Declared permission names",
+                "At least one permission is required.",
+            ),
+            row(
+                "authorization.templates.<template_name>.scopes",
+                "[String]",
+                "None",
+                "No",
+                "Declared scope names",
+                "Optional static scope hints attached to the template.",
+            ),
+        ],
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"authorization: {
+    scopes: {
+        Family: {
+            description: "Family tenancy scope"
+        }
+        Household: {
+            parent: "Family"
+        }
+    }
+    permissions: {
+        FamilyRead: {
+            actions: ["Read"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+    templates: {
+        FamilyMember: {
+            permissions: ["FamilyRead"]
+            scopes: ["Family"]
+        }
+    }
+}"#,
     );
 
     push_section(
@@ -1007,6 +1171,14 @@ object or just a type such as `title: String`.",
                 "Password-reset token lifetime in seconds.",
             ),
             row(
+                "security.auth.claims",
+                "Map<ClaimName, ClaimMapping>",
+                "None",
+                "No",
+                "Keyed map of claim names to claim mappings",
+                "Makes built-in auth claims explicit. Claim names must be unique and cannot use reserved fields such as `sub`, `roles`, `iss`, `aud`, `exp`, or `id`.",
+            ),
+            row(
                 "security.auth.session_cookie",
                 "Map",
                 "None",
@@ -1039,6 +1211,59 @@ object or just a type such as `title: String`.",
                 "Configures a custom admin dashboard page path and title.",
             ),
         ],
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"security: {
+    auth: {
+        claims: {
+            tenant_id: I64
+            workspace_id: "claim_workspace_id"
+            staff: { column: "is_staff", type: Bool }
+            plan: String
+        }
+    }
+}"#,
+    );
+
+    push_section(
+        &mut markdown,
+        "Auth Claims",
+        "Explicit auth claim mappings let built-in auth expose predictable claim names without relying entirely on implicit `_id` / `claim_<name>` discovery. The keyed map name is the emitted JWT claim name.",
+        &[
+            row(
+                "security.auth.claims.<claim_name>",
+                "I64 | String | Bool | String column name | Map",
+                "If shorthand type is used, the column defaults to `<claim_name>` and the type defaults to the shorthand",
+                "No",
+                "`tenant_id: I64`, `workspace_id: \"claim_workspace_id\"`, or a full object",
+                "String shorthand means `column = <string>` with the default type `I64`. Use the object form when you need a non-`I64` type on a different column.",
+            ),
+            row(
+                "security.auth.claims.<claim_name>.column",
+                "String",
+                "The claim key name",
+                "No",
+                "SQL identifier in the built-in `user` table",
+                "When omitted in the object form, the claim key is also used as the column name.",
+            ),
+            row(
+                "security.auth.claims.<claim_name>.type",
+                "Enum",
+                "I64",
+                "No",
+                "I64, String, Bool",
+                "Controls how built-in auth decodes the `user` column and exposes it in JWTs and `/api/auth/me`.",
+            ),
+        ],
+    );
+    markdown.push_str(
+        "Current runtime boundary:\n\n\
+- Row policies can only consume `I64` claims today.\n\
+- When `security.auth.claims` is configured, non-legacy `claim.<name>` references in row policies must be declared there.\n\
+- Legacy numeric `*_id` claims still work even without an explicit mapping.\n\n",
     );
 
     push_section(
@@ -1562,9 +1787,13 @@ mod tests {
 
         assert!(markdown.contains("# `.eon` Configuration Reference"));
         assert!(markdown.contains("## Top-Level Keys"));
+        assert!(markdown.contains("## Authorization Contract"));
         assert!(markdown.contains("## Resource Keys"));
         assert!(markdown.contains("## Security Overview"));
+        assert!(markdown.contains("## Auth Claims"));
+        assert!(markdown.contains("authorization.permissions.<permission_name>.actions"));
         assert!(markdown.contains("runtime.compression.static_precompressed"));
+        assert!(markdown.contains("security.auth.claims.<claim_name>"));
         assert!(markdown.contains("fields: {"));
     }
 

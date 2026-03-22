@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Column, FromRow, Row, any::AnyRow};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::{Ready, ready};
 use std::io::{IsTerminal, Write, stdin, stdout};
 use std::sync::{Mutex, OnceLock};
@@ -44,6 +44,8 @@ pub struct AuthSettings {
     pub verification_token_ttl_seconds: i64,
     #[serde(default = "default_password_reset_token_ttl_seconds")]
     pub password_reset_token_ttl_seconds: i64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claims: BTreeMap<String, AuthClaimMapping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_cookie: Option<SessionCookieSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,6 +54,22 @@ pub struct AuthSettings {
     pub portal: Option<AuthUiPageSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_dashboard: Option<AuthUiPageSettings>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthClaimType {
+    #[default]
+    I64,
+    String,
+    Bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthClaimMapping {
+    pub column: String,
+    #[serde(default)]
+    pub ty: AuthClaimType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -119,6 +137,7 @@ impl Default for AuthSettings {
             require_email_verification: false,
             verification_token_ttl_seconds: default_verification_token_ttl_seconds(),
             password_reset_token_ttl_seconds: default_password_reset_token_ttl_seconds(),
+            claims: BTreeMap::new(),
             session_cookie: None,
             email: None,
             portal: None,
@@ -397,6 +416,18 @@ pub struct UserContext {
 impl UserContext {
     pub fn claim_i64(&self, claim: &str) -> Option<i64> {
         self.claims.get(claim).and_then(Value::as_i64)
+    }
+
+    pub fn claim_bool(&self, claim: &str) -> Option<bool> {
+        self.claims.get(claim).and_then(Value::as_bool)
+    }
+
+    pub fn claim_str(&self, claim: &str) -> Option<&str> {
+        self.claims.get(claim).and_then(Value::as_str)
+    }
+
+    pub fn claim_value(&self, claim: &str) -> Option<&Value> {
+        self.claims.get(claim)
     }
 }
 
@@ -862,7 +893,10 @@ fn row_has_column(row: &AnyRow, column: &str) -> bool {
         .any(|candidate| candidate.name().eq_ignore_ascii_case(column))
 }
 
-fn authenticated_user_from_row(row: &AnyRow) -> Result<AuthenticatedUser, sqlx::Error> {
+fn authenticated_user_from_row_with_settings(
+    row: &AnyRow,
+    settings: &AuthSettings,
+) -> Result<AuthenticatedUser, sqlx::Error> {
     Ok(AuthenticatedUser {
         id: row.try_get("id")?,
         email: row.try_get("email")?,
@@ -874,7 +908,7 @@ fn authenticated_user_from_row(row: &AnyRow) -> Result<AuthenticatedUser, sqlx::
         has_email_verified_at_column: row_has_column(row, "email_verified_at"),
         has_created_at_column: row_has_column(row, "created_at"),
         has_updated_at_column: row_has_column(row, "updated_at"),
-        claims: collect_user_claims(row)?,
+        claims: collect_user_claims_with_settings(row, settings)?,
     })
 }
 
@@ -940,7 +974,7 @@ async fn register_with_settings(
         }
     };
 
-    let user = match load_authenticated_user_by_email(&tx, &email).await {
+    let user = match load_authenticated_user_by_email_with_settings(&tx, &email, &settings).await {
         Ok(Some(user)) => user,
         Ok(None) => {
             let _ = tx.rollback().await;
@@ -1011,7 +1045,9 @@ async fn login_with_settings(
         Ok(email) => email,
         Err(response) => return response,
     };
-    let user = match load_authenticated_user_by_email(db.get_ref(), &email).await {
+    let user = match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings)
+        .await
+    {
         Ok(Some(user)) => user,
         Ok(None) => return errors::unauthorized("invalid_credentials", "Invalid credentials"),
         Err(error) => {
@@ -1134,9 +1170,10 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
-async fn load_authenticated_user_by_email<E>(
+async fn load_authenticated_user_by_email_with_settings<E>(
     db: &E,
     email: &str,
+    settings: &AuthSettings,
 ) -> Result<Option<AuthenticatedUser>, sqlx::Error>
 where
     E: crate::db::DbExecutor + ?Sized,
@@ -1149,11 +1186,20 @@ where
         return Ok(None);
     };
 
-    authenticated_user_from_row(&row).map(Some)
+    authenticated_user_from_row_with_settings(&row, settings).map(Some)
 }
 
-fn collect_user_claims(row: &AnyRow) -> Result<BTreeMap<String, Value>, sqlx::Error> {
+fn collect_user_claims_with_settings(
+    row: &AnyRow,
+    settings: &AuthSettings,
+) -> Result<BTreeMap<String, Value>, sqlx::Error> {
     let mut claims = BTreeMap::new();
+
+    for (claim_name, mapping) in &settings.claims {
+        if let Some(value) = optional_claim_column(row, &mapping.column, mapping.ty)? {
+            claims.insert(claim_name.clone(), value);
+        }
+    }
 
     for column in row.columns() {
         let column_name = column.name();
@@ -1180,7 +1226,6 @@ fn collect_user_claims(row: &AnyRow) -> Result<BTreeMap<String, Value>, sqlx::Er
 
     Ok(claims)
 }
-
 fn explicit_claim_name(column: &str) -> Option<String> {
     column
         .strip_prefix("claim_")
@@ -1211,9 +1256,51 @@ fn optional_i64_claim_column(row: &AnyRow, column: &str) -> Result<Option<i64>, 
     }
 }
 
-async fn load_authenticated_user_by_id<E>(
+fn optional_string_claim_column(row: &AnyRow, column: &str) -> Result<Option<String>, sqlx::Error> {
+    match row.try_get::<Option<String>, _>(column) {
+        Ok(value) => Ok(value),
+        Err(sqlx::Error::ColumnNotFound(_)) => Ok(None),
+        Err(sqlx::Error::ColumnDecode { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn optional_bool_claim_column(row: &AnyRow, column: &str) -> Result<Option<bool>, sqlx::Error> {
+    match row.try_get::<Option<bool>, _>(column) {
+        Ok(value) => Ok(value),
+        Err(sqlx::Error::ColumnDecode { .. }) => match row.try_get::<Option<i64>, _>(column) {
+            Ok(value) => Ok(value.map(|value| value != 0)),
+            Err(sqlx::Error::ColumnNotFound(_)) => Ok(None),
+            Err(sqlx::Error::ColumnDecode { .. }) => Ok(None),
+            Err(error) => Err(error),
+        },
+        Err(sqlx::Error::ColumnNotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn optional_claim_column(
+    row: &AnyRow,
+    column: &str,
+    ty: AuthClaimType,
+) -> Result<Option<Value>, sqlx::Error> {
+    match ty {
+        AuthClaimType::I64 => {
+            optional_i64_claim_column(row, column).map(|value| value.map(Value::from))
+        }
+        AuthClaimType::String => {
+            optional_string_claim_column(row, column).map(|value| value.map(Value::from))
+        }
+        AuthClaimType::Bool => {
+            optional_bool_claim_column(row, column).map(|value| value.map(Value::from))
+        }
+    }
+}
+
+async fn load_authenticated_user_by_id_with_settings<E>(
     db: &E,
     user_id: i64,
+    settings: &AuthSettings,
 ) -> Result<Option<AuthenticatedUser>, sqlx::Error>
 where
     E: crate::db::DbExecutor + ?Sized,
@@ -1226,14 +1313,25 @@ where
         return Ok(None);
     };
 
-    authenticated_user_from_row(&row).map(Some)
+    authenticated_user_from_row_with_settings(&row, settings).map(Some)
 }
 
-async fn list_authenticated_users(
+async fn load_authenticated_user_by_id<E>(
+    db: &E,
+    user_id: i64,
+) -> Result<Option<AuthenticatedUser>, sqlx::Error>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
+    load_authenticated_user_by_id_with_settings(db, user_id, &AuthSettings::default()).await
+}
+
+async fn list_authenticated_users_with_settings(
     db: &DbPool,
     limit: u32,
     offset: u32,
     email_filter: Option<&str>,
+    settings: &AuthSettings,
 ) -> Result<Vec<AccountInfo>, sqlx::Error> {
     let rows = if let Some(email_filter) = email_filter {
         query("SELECT * FROM user WHERE email LIKE ? ORDER BY id LIMIT ? OFFSET ?")
@@ -1251,7 +1349,9 @@ async fn list_authenticated_users(
     };
 
     rows.into_iter()
-        .map(|row| authenticated_user_from_row(&row).map(account_info_from_user))
+        .map(|row| {
+            authenticated_user_from_row_with_settings(&row, settings).map(account_info_from_user)
+        })
         .collect()
 }
 
@@ -1652,15 +1752,43 @@ async fn apply_password_reset_token(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdminClaimColumn {
+    claim_name: Option<String>,
     column_name: String,
     env_var: String,
     required: bool,
+    ty: AuthClaimType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct AdminClaimValue {
+enum AdminClaimValue {
+    I64 { column_name: String, value: i64 },
+    String { column_name: String, value: String },
+    Bool { column_name: String, value: bool },
+}
+
+impl AdminClaimValue {
+    fn column_name(&self) -> &str {
+        match self {
+            Self::I64 { column_name, .. }
+            | Self::String { column_name, .. }
+            | Self::Bool { column_name, .. } => column_name,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::I64 { column_name, value } => format!("{column_name}={value}"),
+            Self::String { column_name, value } => format!("{column_name}={value}"),
+            Self::Bool { column_name, value } => format!("{column_name}={value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UserColumnMetadata {
     column_name: String,
-    value: i64,
+    data_type: String,
+    required: bool,
 }
 
 async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, sqlx::Error> {
@@ -1685,10 +1813,10 @@ async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, sqlx::Error
     }
 }
 
-async fn discover_admin_claim_columns(
+async fn user_table_columns(
     pool: &DbPool,
     backend: AuthDbBackend,
-) -> Result<Vec<AdminClaimColumn>, sqlx::Error> {
+) -> Result<Vec<UserColumnMetadata>, sqlx::Error> {
     let rows = match backend {
         AuthDbBackend::Sqlite => query("PRAGMA table_info('user')").fetch_all(pool).await?,
         AuthDbBackend::Postgres => {
@@ -1715,19 +1843,16 @@ async fn discover_admin_claim_columns(
 
     let mut columns = Vec::new();
     for row in rows {
-        let Some(metadata) = admin_claim_column_from_row(&row, backend)? else {
-            continue;
-        };
-        columns.push(metadata);
+        columns.push(user_column_from_row(&row, backend)?);
     }
 
     Ok(columns)
 }
 
-fn admin_claim_column_from_row(
+fn user_column_from_row(
     row: &AnyRow,
     backend: AuthDbBackend,
-) -> Result<Option<AdminClaimColumn>, sqlx::Error> {
+) -> Result<UserColumnMetadata, sqlx::Error> {
     let (column_name, data_type, required) = match backend {
         AuthDbBackend::Sqlite => {
             let column_name: String = row.try_get("name")?;
@@ -1752,15 +1877,73 @@ fn admin_claim_column_from_row(
         }
     };
 
-    if !is_admin_claim_column_name(&column_name) || !is_integer_claim_type(&data_type) {
-        return Ok(None);
+    Ok(UserColumnMetadata {
+        column_name,
+        data_type,
+        required,
+    })
+}
+
+fn legacy_admin_claim_column_from_metadata(
+    metadata: UserColumnMetadata,
+) -> Option<AdminClaimColumn> {
+    if !is_admin_claim_column_name(&metadata.column_name)
+        || !is_integer_claim_type(&metadata.data_type)
+    {
+        return None;
     }
 
-    Ok(Some(AdminClaimColumn {
-        env_var: admin_claim_env_var(&column_name),
-        column_name,
-        required,
-    }))
+    Some(AdminClaimColumn {
+        claim_name: None,
+        env_var: admin_claim_env_var(&metadata.column_name),
+        column_name: metadata.column_name,
+        required: metadata.required,
+        ty: AuthClaimType::I64,
+    })
+}
+
+fn configured_admin_claim_columns(
+    user_columns: &[UserColumnMetadata],
+    configured_claims: &BTreeMap<String, AuthClaimMapping>,
+) -> Result<Vec<AdminClaimColumn>, String> {
+    let columns_by_name = user_columns
+        .iter()
+        .map(|column| (column.column_name.as_str(), column))
+        .collect::<HashMap<_, _>>();
+    let mut columns = Vec::new();
+    let mut seen_columns = HashSet::new();
+
+    for (claim_name, mapping) in configured_claims {
+        let Some(metadata) = columns_by_name.get(mapping.column.as_str()) else {
+            return Err(format!(
+                "Configured auth claim `security.auth.claims.{claim_name}` maps to missing `user.{}` column",
+                mapping.column
+            ));
+        };
+
+        if !claim_type_matches_column(mapping.ty, &metadata.data_type) {
+            return Err(format!(
+                "Configured auth claim `security.auth.claims.{claim_name}` expects `{}` values, but `user.{}` is declared as `{}`",
+                admin_claim_type_label(mapping.ty),
+                mapping.column,
+                metadata.data_type
+            ));
+        }
+
+        if !seen_columns.insert(mapping.column.clone()) {
+            continue;
+        }
+
+        columns.push(AdminClaimColumn {
+            claim_name: Some(claim_name.clone()),
+            column_name: mapping.column.clone(),
+            env_var: admin_claim_env_var(&mapping.column),
+            required: metadata.required,
+            ty: mapping.ty,
+        });
+    }
+
+    Ok(columns)
 }
 
 fn is_admin_claim_column_name(column_name: &str) -> bool {
@@ -1776,6 +1959,31 @@ fn is_admin_claim_column_name(column_name: &str) -> bool {
 
 fn is_integer_claim_type(data_type: &str) -> bool {
     data_type.trim().to_ascii_lowercase().contains("int")
+}
+
+fn is_string_claim_type(data_type: &str) -> bool {
+    let data_type = data_type.trim().to_ascii_lowercase();
+    data_type.is_empty()
+        || data_type.contains("char")
+        || data_type.contains("text")
+        || data_type.contains("clob")
+        || data_type.contains("string")
+}
+
+fn is_bool_claim_type(data_type: &str) -> bool {
+    let data_type = data_type.trim().to_ascii_lowercase();
+    data_type.is_empty()
+        || data_type.contains("bool")
+        || data_type.contains("tinyint")
+        || data_type.contains("int")
+}
+
+fn claim_type_matches_column(ty: AuthClaimType, data_type: &str) -> bool {
+    match ty {
+        AuthClaimType::I64 => is_integer_claim_type(data_type),
+        AuthClaimType::String => is_string_claim_type(data_type),
+        AuthClaimType::Bool => is_bool_claim_type(data_type),
+    }
 }
 
 fn admin_claim_env_var(column_name: &str) -> String {
@@ -1798,19 +2006,13 @@ fn resolve_admin_claim_values(
 
     for column in claim_columns {
         if let Some(value) = claim_value_from_env(column)? {
-            values.push(AdminClaimValue {
-                column_name: column.column_name.clone(),
-                value,
-            });
+            values.push(value);
             continue;
         }
 
         if interactive {
             if let Some(value) = prompt_admin_claim_value(column)? {
-                values.push(AdminClaimValue {
-                    column_name: column.column_name.clone(),
-                    value,
-                });
+                values.push(value);
             }
             continue;
         }
@@ -1826,15 +2028,10 @@ fn resolve_admin_claim_values(
     Ok(values)
 }
 
-fn claim_value_from_env(column: &AdminClaimColumn) -> Result<Option<i64>, String> {
+fn claim_value_from_env(column: &AdminClaimColumn) -> Result<Option<AdminClaimValue>, String> {
     match std::env::var(&column.env_var) {
         Ok(raw) if raw.trim().is_empty() => Ok(None),
-        Ok(raw) => raw.trim().parse::<i64>().map(Some).map_err(|_| {
-            format!(
-                "Environment variable {} must be a valid integer",
-                column.env_var
-            )
-        }),
+        Ok(raw) => parse_admin_claim_value(column, raw.trim()),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(format!(
             "Failed to read environment variable {}: {}",
@@ -1843,13 +2040,18 @@ fn claim_value_from_env(column: &AdminClaimColumn) -> Result<Option<i64>, String
     }
 }
 
-fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<i64>, String> {
+fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<AdminClaimValue>, String> {
     let prompt = if column.required {
-        format!("{} (required admin claim column): ", column.column_name)
+        format!(
+            "{} (required {} admin claim column): ",
+            admin_claim_display_name(column),
+            admin_claim_type_label(column.ty).to_ascii_lowercase()
+        )
     } else {
         format!(
-            "{} (optional admin claim column, press Enter to skip): ",
-            column.column_name
+            "{} (optional {} admin claim column, press Enter to skip): ",
+            admin_claim_display_name(column),
+            admin_claim_type_label(column.ty).to_ascii_lowercase()
         )
     };
 
@@ -1871,10 +2073,71 @@ fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<i64>, St
         return Ok(None);
     }
 
-    value
-        .parse::<i64>()
-        .map(Some)
-        .map_err(|_| format!("{} must be a valid integer", column.column_name))
+    parse_admin_claim_value(column, value)
+}
+
+fn admin_claim_display_name(column: &AdminClaimColumn) -> String {
+    match column.claim_name.as_deref() {
+        Some(claim_name) if claim_name != column.column_name => {
+            format!("{claim_name} (column {})", column.column_name)
+        }
+        Some(claim_name) => claim_name.to_owned(),
+        None => column.column_name.clone(),
+    }
+}
+
+fn admin_claim_type_label(ty: AuthClaimType) -> &'static str {
+    match ty {
+        AuthClaimType::I64 => "I64",
+        AuthClaimType::String => "String",
+        AuthClaimType::Bool => "Bool",
+    }
+}
+
+fn parse_admin_claim_value(
+    column: &AdminClaimColumn,
+    raw: &str,
+) -> Result<Option<AdminClaimValue>, String> {
+    let value = match column.ty {
+        AuthClaimType::I64 => {
+            let value = raw.parse::<i64>().map_err(|_| {
+                format!(
+                    "Environment variable {} must be a valid integer",
+                    column.env_var
+                )
+            })?;
+            AdminClaimValue::I64 {
+                column_name: column.column_name.clone(),
+                value,
+            }
+        }
+        AuthClaimType::String => AdminClaimValue::String {
+            column_name: column.column_name.clone(),
+            value: raw.to_owned(),
+        },
+        AuthClaimType::Bool => {
+            let value = parse_bool_claim(raw).ok_or_else(|| {
+                format!(
+                    "Environment variable {} must be true/false, yes/no, on/off, or 1/0",
+                    column.env_var
+                )
+            })?;
+            AdminClaimValue::Bool {
+                column_name: column.column_name.clone(),
+                value,
+            }
+        }
+    };
+
+    Ok(Some(value))
+}
+
+fn parse_bool_claim(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn placeholder_for_backend(backend: AuthDbBackend, index: usize) -> String {
@@ -1899,7 +2162,7 @@ async fn insert_admin_user(
     columns.extend(
         claim_values
             .iter()
-            .map(|claim| claim.column_name.clone())
+            .map(|claim| claim.column_name().to_owned())
             .collect::<Vec<_>>(),
     );
 
@@ -1921,7 +2184,11 @@ async fn insert_admin_user(
     );
     let mut insert_query = query(&sql).bind(email).bind(password_hash).bind("admin");
     for claim in claim_values {
-        insert_query = insert_query.bind(claim.value);
+        insert_query = match claim {
+            AdminClaimValue::I64 { value, .. } => insert_query.bind(*value),
+            AdminClaimValue::String { value, .. } => insert_query.bind(value),
+            AdminClaimValue::Bool { value, .. } => insert_query.bind(*value),
+        };
     }
     insert_query.execute(pool).await?;
     let verified_at = now_timestamp_string();
@@ -1981,8 +2248,9 @@ fn clear_session_cookie_response(settings: &SessionCookieSettings) -> HttpRespon
         .finish()
 }
 
-pub async fn account(user: UserContext, db: web::Data<DbPool>) -> impl Responder {
-    match load_authenticated_user_by_id(db.get_ref(), user.id).await {
+pub async fn account(req: HttpRequest, user: UserContext, db: web::Data<DbPool>) -> impl Responder {
+    let settings = auth_settings_from_request(&req);
+    match load_authenticated_user_by_id_with_settings(db.get_ref(), user.id, &settings).await {
         Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
         Ok(None) => errors::unauthorized("invalid_token", "Authenticated user not found"),
         Err(_) => errors::internal_error("Database error"),
@@ -2115,7 +2383,9 @@ pub async fn resend_verification(
         Ok(email) => email,
         Err(response) => return response,
     };
-    let user = match load_authenticated_user_by_email(db.get_ref(), &email).await {
+    let user = match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings)
+        .await
+    {
         Ok(user) => user,
         Err(_) => return errors::internal_error("Database error"),
     };
@@ -2159,11 +2429,14 @@ pub async fn resend_account_verification(
         return response;
     }
 
-    let account = match load_authenticated_user_by_id(db.get_ref(), user.id).await {
-        Ok(Some(account)) => account,
-        Ok(None) => return errors::unauthorized("invalid_token", "Authenticated user not found"),
-        Err(_) => return errors::internal_error("Database error"),
-    };
+    let account =
+        match load_authenticated_user_by_id_with_settings(db.get_ref(), user.id, &settings).await {
+            Ok(Some(account)) => account,
+            Ok(None) => {
+                return errors::unauthorized("invalid_token", "Authenticated user not found");
+            }
+            Err(_) => return errors::internal_error("Database error"),
+        };
     if account.email_verified_at.is_some() {
         return HttpResponse::NoContent().finish();
     }
@@ -2205,7 +2478,9 @@ pub async fn request_password_reset(
         Ok(email) => email,
         Err(response) => return response,
     };
-    let user = match load_authenticated_user_by_email(db.get_ref(), &email).await {
+    let user = match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings)
+        .await
+    {
         Ok(user) => user,
         Err(_) => return errors::internal_error("Database error"),
     };
@@ -2338,16 +2613,18 @@ pub async fn create_managed_user(
         }
     }
 
-    let Some(created_user) = (match load_authenticated_user_by_email(&tx, &email).await {
-        Ok(user) => user,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
+    let Some(created_user) =
+        (match load_authenticated_user_by_email_with_settings(&tx, &email, &settings).await {
+            Ok(user) => user,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                if is_missing_auth_management_schema(&error) {
+                    return missing_auth_management_schema_response();
+                }
+                return errors::internal_error("Database error");
             }
-            return errors::internal_error("Database error");
-        }
-    }) else {
+        })
+    else {
         let _ = tx.rollback().await;
         return errors::internal_error("Failed to load created user");
     };
@@ -2387,7 +2664,7 @@ pub async fn create_managed_user(
         return errors::internal_error("Database error");
     }
 
-    match load_authenticated_user_by_email(db.get_ref(), &email).await {
+    match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings).await {
         Ok(Some(account)) => {
             let scope_prefix = scope_prefix_from_request(&req, Some("/auth/admin/users"));
             let location = if scope_prefix.is_empty() {
@@ -2412,6 +2689,7 @@ pub async fn create_managed_user(
 }
 
 pub async fn list_managed_users(
+    req: HttpRequest,
     user: UserContext,
     query_params: web::Query<AdminListQuery>,
     db: web::Data<DbPool>,
@@ -2428,7 +2706,16 @@ pub async fn list_managed_users(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    match list_authenticated_users(db.get_ref(), limit, offset, email_filter).await {
+    let settings = auth_settings_from_request(&req);
+    match list_authenticated_users_with_settings(
+        db.get_ref(),
+        limit,
+        offset,
+        email_filter,
+        &settings,
+    )
+    .await
+    {
         Ok(items) => HttpResponse::Ok().json(serde_json::json!({
             "items": items,
             "limit": limit,
@@ -2439,6 +2726,7 @@ pub async fn list_managed_users(
 }
 
 pub async fn managed_user(
+    req: HttpRequest,
     user: UserContext,
     path: web::Path<i64>,
     db: web::Data<DbPool>,
@@ -2447,7 +2735,10 @@ pub async fn managed_user(
         return errors::forbidden("forbidden", "Admin role is required");
     }
 
-    match load_authenticated_user_by_id(db.get_ref(), path.into_inner()).await {
+    let settings = auth_settings_from_request(&req);
+    match load_authenticated_user_by_id_with_settings(db.get_ref(), path.into_inner(), &settings)
+        .await
+    {
         Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
         Ok(None) => errors::not_found("User not found"),
         Err(_) => errors::internal_error("Database error"),
@@ -2455,6 +2746,7 @@ pub async fn managed_user(
 }
 
 pub async fn update_managed_user(
+    req: HttpRequest,
     user: UserContext,
     path: web::Path<i64>,
     input: web::Json<UpdateManagedUserInput>,
@@ -2479,12 +2771,17 @@ pub async fn update_managed_user(
 
     let user_id = path.into_inner();
     let now = now_timestamp_string();
+    let settings = auth_settings_from_request(&req);
     match update_managed_user_row(db.get_ref(), user_id, &input, &now).await {
-        Ok(true) => match load_authenticated_user_by_id(db.get_ref(), user_id).await {
-            Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
-            Ok(None) => errors::not_found("User not found"),
-            Err(_) => errors::internal_error("Database error"),
-        },
+        Ok(true) => {
+            match load_authenticated_user_by_id_with_settings(db.get_ref(), user_id, &settings)
+                .await
+            {
+                Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
+                Ok(None) => errors::not_found("User not found"),
+                Err(_) => errors::internal_error("Database error"),
+            }
+        }
         Ok(false) => errors::not_found("User not found"),
         Err(error) if is_missing_auth_management_schema(&error) => {
             missing_auth_management_schema_response()
@@ -2531,7 +2828,12 @@ pub async fn resend_managed_user_verification(
         return response;
     }
 
-    let Some(account) = (match load_authenticated_user_by_id(db.get_ref(), path.into_inner()).await
+    let Some(account) = (match load_authenticated_user_by_id_with_settings(
+        db.get_ref(),
+        path.into_inner(),
+        &settings,
+    )
+    .await
     {
         Ok(account) => account,
         Err(_) => return errors::internal_error("Database error"),
@@ -3229,15 +3531,46 @@ fn render_shell(title: &str, subtitle: &str, body: &str, script: &str) -> String
 /// Returns true if an admin exists (either previously or newly created),
 /// false only if there was an error creating the admin user.
 pub async fn ensure_admin_exists(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    ensure_admin_exists_with_claim_prompt_mode(
+    ensure_admin_exists_with_settings_and_claim_prompt_mode(
         pool,
+        &AuthSettings::default(),
         stdin().is_terminal() && stdout().is_terminal(),
     )
     .await
 }
 
-async fn ensure_admin_exists_with_claim_prompt_mode(
+pub async fn ensure_admin_exists_with_settings(
     pool: &DbPool,
+    settings: &AuthSettings,
+) -> Result<bool, sqlx::Error> {
+    ensure_admin_exists_with_settings_and_claim_prompt_mode(
+        pool,
+        settings,
+        stdin().is_terminal() && stdout().is_terminal(),
+    )
+    .await
+}
+
+pub async fn validate_auth_claim_mappings(
+    pool: &DbPool,
+    settings: &AuthSettings,
+) -> Result<(), String> {
+    if settings.claims.is_empty() {
+        return Ok(());
+    }
+
+    let backend = detect_auth_backend(pool)
+        .await
+        .map_err(|error| format!("Failed to detect auth backend: {error}"))?;
+    let user_columns = user_table_columns(pool, backend)
+        .await
+        .map_err(|error| format!("Failed to inspect auth schema: {error}"))?;
+    configured_admin_claim_columns(&user_columns, &settings.claims).map(|_| ())
+}
+
+async fn ensure_admin_exists_with_settings_and_claim_prompt_mode(
+    pool: &DbPool,
+    settings: &AuthSettings,
     interactive_claims: bool,
 ) -> Result<bool, sqlx::Error> {
     // Check if any admin exists
@@ -3295,11 +3628,25 @@ async fn ensure_admin_exists_with_claim_prompt_mode(
             return Err(error);
         }
     };
-    let claim_columns = match discover_admin_claim_columns(pool, backend).await {
+    let user_columns = match user_table_columns(pool, backend).await {
         Ok(columns) => columns,
         Err(error) => {
             eprintln!("[ERROR] Failed to inspect auth schema: {}", error);
             return Err(error);
+        }
+    };
+    let claim_columns = if settings.claims.is_empty() {
+        user_columns
+            .into_iter()
+            .filter_map(legacy_admin_claim_column_from_metadata)
+            .collect::<Vec<_>>()
+    } else {
+        match configured_admin_claim_columns(&user_columns, &settings.claims) {
+            Ok(columns) => columns,
+            Err(error) => {
+                eprintln!("[ERROR] {}", error);
+                return Ok(false);
+            }
         }
     };
     let claim_values = match resolve_admin_claim_values(&claim_columns, interactive_claims) {
@@ -3321,7 +3668,7 @@ async fn ensure_admin_exists_with_claim_prompt_mode(
             if !claim_values.is_empty() {
                 let rendered_claims = claim_values
                     .iter()
-                    .map(|claim| format!("{}={}", claim.column_name, claim.value))
+                    .map(AdminClaimValue::render)
                     .collect::<Vec<_>>()
                     .join(", ");
                 println!("Claims: {}", rendered_claims);
@@ -3560,9 +3907,10 @@ impl AuthRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthDbBackend, AuthEmailProvider, AuthEmailSettings, AuthSettings, LoginInput,
-        auth_management_migration_sql, auth_migration_sql, build_public_auth_url,
-        ensure_admin_exists_with_claim_prompt_mode, load_jwt_secret_from_env, login_with_settings,
+        AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
+        AuthSettings, LoginInput, auth_management_migration_sql, auth_migration_sql,
+        build_public_auth_url, ensure_admin_exists_with_settings_and_claim_prompt_mode,
+        load_jwt_secret_from_env, login_with_settings, validate_auth_claim_mappings,
     };
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
@@ -3572,6 +3920,7 @@ mod tests {
     use actix_web::test::TestRequest;
     use actix_web::{body::to_bytes, http::StatusCode, web};
     use sqlx::Row;
+    use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3758,9 +4107,13 @@ mod tests {
         .await
         .expect("user table should be created");
 
-        let created = ensure_admin_exists_with_claim_prompt_mode(&pool, false)
-            .await
-            .expect("ensure_admin_exists should not error");
+        let created = ensure_admin_exists_with_settings_and_claim_prompt_mode(
+            &pool,
+            &AuthSettings::default(),
+            false,
+        )
+        .await
+        .expect("ensure_admin_exists should not error");
         assert!(created);
 
         let row = query("SELECT tenant_id, claim_workspace_id FROM user WHERE role = 'admin'")
@@ -3810,9 +4163,13 @@ mod tests {
         .await
         .expect("user table should be created");
 
-        let created = ensure_admin_exists_with_claim_prompt_mode(&pool, false)
-            .await
-            .expect("ensure_admin_exists should not error");
+        let created = ensure_admin_exists_with_settings_and_claim_prompt_mode(
+            &pool,
+            &AuthSettings::default(),
+            false,
+        )
+        .await
+        .expect("ensure_admin_exists should not error");
         assert!(!created);
 
         let count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM user")
@@ -3933,9 +4290,13 @@ mod tests {
                 .expect("auth schema should apply");
         }
 
-        let created = ensure_admin_exists_with_claim_prompt_mode(&pool, false)
-            .await
-            .expect("ensure_admin_exists should not error");
+        let created = ensure_admin_exists_with_settings_and_claim_prompt_mode(
+            &pool,
+            &AuthSettings::default(),
+            false,
+        )
+        .await
+        .expect("ensure_admin_exists should not error");
         assert!(created);
 
         let count: i64 =
@@ -3951,5 +4312,159 @@ mod tests {
             std::env::remove_var(&env_var);
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[actix_web::test]
+    async fn ensure_admin_exists_uses_explicit_auth_claim_mappings() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+        unsafe {
+            std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+            std::env::set_var("ADMIN_PASSWORD", "password123");
+            std::env::set_var("ADMIN_TENANT_SCOPE", "7");
+            std::env::set_var("ADMIN_CLAIM_WORKSPACE_ID", "42");
+            std::env::set_var("ADMIN_IS_STAFF", "true");
+            std::env::set_var("ADMIN_PLAN", "pro");
+        }
+
+        let database_url = unique_sqlite_url("ensure_admin_explicit_claims");
+        let pool = connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        query(
+            "CREATE TABLE user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tenant_scope INTEGER NOT NULL,
+                claim_workspace_id INTEGER,
+                is_staff BOOLEAN NOT NULL,
+                plan TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("user table should be created");
+
+        let settings = AuthSettings {
+            claims: BTreeMap::from([
+                (
+                    "tenant_id".to_owned(),
+                    AuthClaimMapping {
+                        column: "tenant_scope".to_owned(),
+                        ty: AuthClaimType::I64,
+                    },
+                ),
+                (
+                    "workspace_id".to_owned(),
+                    AuthClaimMapping {
+                        column: "claim_workspace_id".to_owned(),
+                        ty: AuthClaimType::I64,
+                    },
+                ),
+                (
+                    "staff".to_owned(),
+                    AuthClaimMapping {
+                        column: "is_staff".to_owned(),
+                        ty: AuthClaimType::Bool,
+                    },
+                ),
+                (
+                    "plan".to_owned(),
+                    AuthClaimMapping {
+                        column: "plan".to_owned(),
+                        ty: AuthClaimType::String,
+                    },
+                ),
+            ]),
+            ..AuthSettings::default()
+        };
+
+        let created =
+            ensure_admin_exists_with_settings_and_claim_prompt_mode(&pool, &settings, false)
+                .await
+                .expect("ensure_admin_exists should not error");
+        assert!(created);
+
+        let row = query(
+            "SELECT tenant_scope, claim_workspace_id, CAST(is_staff AS INTEGER) AS is_staff_value, plan \
+             FROM user WHERE role = 'admin'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("admin row should exist");
+        let tenant_scope: i64 = row
+            .try_get("tenant_scope")
+            .expect("tenant scope should decode");
+        let workspace_id: Option<i64> = row
+            .try_get("claim_workspace_id")
+            .expect("workspace claim should decode");
+        let is_staff: i64 = row
+            .try_get("is_staff_value")
+            .expect("is_staff should decode");
+        let plan: String = row.try_get("plan").expect("plan should decode");
+        assert_eq!(tenant_scope, 7);
+        assert_eq!(workspace_id, Some(42));
+        assert_eq!(is_staff, 1);
+        assert_eq!(plan, "pro");
+
+        unsafe {
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+            std::env::remove_var("ADMIN_TENANT_SCOPE");
+            std::env::remove_var("ADMIN_CLAIM_WORKSPACE_ID");
+            std::env::remove_var("ADMIN_IS_STAFF");
+            std::env::remove_var("ADMIN_PLAN");
+        }
+    }
+
+    #[actix_web::test]
+    async fn validate_auth_claim_mappings_rejects_mismatched_column_types() {
+        let database_url = unique_sqlite_url("validate_auth_claims");
+        let pool = connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        query(
+            "CREATE TABLE user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tenant_scope INTEGER NOT NULL,
+                is_staff TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("user table should be created");
+
+        let settings = AuthSettings {
+            claims: BTreeMap::from([
+                (
+                    "tenant_id".to_owned(),
+                    AuthClaimMapping {
+                        column: "tenant_scope".to_owned(),
+                        ty: AuthClaimType::I64,
+                    },
+                ),
+                (
+                    "staff".to_owned(),
+                    AuthClaimMapping {
+                        column: "is_staff".to_owned(),
+                        ty: AuthClaimType::Bool,
+                    },
+                ),
+            ]),
+            ..AuthSettings::default()
+        };
+
+        let error = validate_auth_claim_mappings(&pool, &settings)
+            .await
+            .expect_err("mismatched claim type should fail");
+        assert!(error.contains("security.auth.claims.staff"));
+        assert!(error.contains("is_staff"));
     }
 }

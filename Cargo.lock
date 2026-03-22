@@ -5281,6 +5281,7 @@ dependencies = [
  "actix-web",
  "base64",
  "chrono",
+ "dotenv",
  "env_logger",
  "jsonwebtoken",
  "log",

@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod authz;
 pub mod db;
 pub mod docs;
 pub mod env;

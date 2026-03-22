@@ -4,8 +4,13 @@ use colored::Colorize;
 use console::style;
 use dialoguer::{Input, Password};
 use regex::Regex;
-use rest_macro_core::db::{DbPool, query, query_scalar};
+use rest_macro_core::{
+    auth::{AuthClaimMapping, AuthClaimType},
+    compiler,
+    db::{DbPool, query, query_scalar},
+};
 use sqlx::Row;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{IsTerminal, stdin, stdout};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -52,15 +57,43 @@ async fn user_exists(pool: &DbPool, backend: DbBackend, email: &str) -> Result<b
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdminClaimColumn {
+    claim_name: Option<String>,
     column_name: String,
     env_var: String,
     required: bool,
+    ty: AuthClaimType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct AdminClaimValue {
+enum AdminClaimValue {
+    I64 { column_name: String, value: i64 },
+    String { column_name: String, value: String },
+    Bool { column_name: String, value: bool },
+}
+
+impl AdminClaimValue {
+    fn column_name(&self) -> &str {
+        match self {
+            Self::I64 { column_name, .. }
+            | Self::String { column_name, .. }
+            | Self::Bool { column_name, .. } => column_name,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::I64 { column_name, value } => format!("{column_name}={value}"),
+            Self::String { column_name, value } => format!("{column_name}={value}"),
+            Self::Bool { column_name, value } => format!("{column_name}={value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UserColumnMetadata {
     column_name: String,
-    value: i64,
+    data_type: String,
+    required: bool,
 }
 
 /// Asks for admin credentials interactively
@@ -125,7 +158,15 @@ pub async fn create_admin_with_options(
 ) -> Result<()> {
     println!("Connecting to database...");
     let pool = connect_database(database_url, config_path).await?;
-    create_admin_in_pool(&pool, email, password, interactive_claims).await
+    let configured_claims = configured_auth_claims(config_path)?;
+    create_admin_in_pool(
+        &pool,
+        email,
+        password,
+        interactive_claims,
+        &configured_claims,
+    )
+    .await
 }
 
 async fn create_admin_in_pool(
@@ -133,6 +174,7 @@ async fn create_admin_in_pool(
     email: String,
     password: String,
     interactive_claims: bool,
+    configured_claims: &BTreeMap<String, AuthClaimMapping>,
 ) -> Result<()> {
     let backend = detect_backend(pool).await?;
 
@@ -145,7 +187,7 @@ async fn create_admin_in_pool(
         return Ok(());
     }
 
-    let claim_columns = discover_admin_claim_columns(pool, backend).await?;
+    let claim_columns = discover_admin_claim_columns(pool, backend, configured_claims).await?;
     let claim_values = resolve_admin_claim_values(&claim_columns, interactive_claims)?;
 
     // Insert the admin user
@@ -154,7 +196,11 @@ async fn create_admin_in_pool(
         "password_hash".to_owned(),
         "role".to_owned(),
     ];
-    columns.extend(claim_values.iter().map(|claim| claim.column_name.clone()));
+    columns.extend(
+        claim_values
+            .iter()
+            .map(|claim| claim.column_name().to_owned()),
+    );
     let placeholders = (1..=columns.len())
         .map(|index| placeholder_for_backend(backend, index))
         .collect::<Vec<_>>()
@@ -175,7 +221,11 @@ async fn create_admin_in_pool(
         .bind(&hashed_password)
         .bind("admin");
     for claim in &claim_values {
-        query = query.bind(claim.value);
+        query = match claim {
+            AdminClaimValue::I64 { value, .. } => query.bind(*value),
+            AdminClaimValue::String { value, .. } => query.bind(value),
+            AdminClaimValue::Bool { value, .. } => query.bind(*value),
+        };
     }
     query.execute(pool).await?;
     initialize_admin_management_fields(pool, &email).await?;
@@ -188,7 +238,7 @@ async fn create_admin_in_pool(
     if !claim_values.is_empty() {
         let rendered_claims = claim_values
             .iter()
-            .map(|claim| format!("{}={}", claim.column_name, claim.value))
+            .map(AdminClaimValue::render)
             .collect::<Vec<_>>()
             .join(", ");
         println!(
@@ -242,6 +292,7 @@ fn is_missing_auth_management_schema(error: &sqlx::Error) -> bool {
 async fn discover_admin_claim_columns(
     pool: &DbPool,
     backend: DbBackend,
+    configured_claims: &BTreeMap<String, AuthClaimMapping>,
 ) -> Result<Vec<AdminClaimColumn>> {
     let rows = match backend {
         DbBackend::Sqlite => query("PRAGMA table_info('user')").fetch_all(pool).await?,
@@ -267,21 +318,22 @@ async fn discover_admin_claim_columns(
         }
     };
 
-    let mut columns = Vec::new();
+    let mut user_columns = Vec::new();
     for row in rows {
-        let Some(metadata) = admin_claim_column_from_row(&row, backend)? else {
-            continue;
-        };
-        columns.push(metadata);
+        user_columns.push(user_column_from_row(&row, backend)?);
     }
 
-    Ok(columns)
+    if configured_claims.is_empty() {
+        return Ok(user_columns
+            .into_iter()
+            .filter_map(legacy_admin_claim_column_from_metadata)
+            .collect());
+    }
+
+    configured_admin_claim_columns(&user_columns, configured_claims)
 }
 
-fn admin_claim_column_from_row(
-    row: &sqlx::any::AnyRow,
-    backend: DbBackend,
-) -> Result<Option<AdminClaimColumn>> {
+fn user_column_from_row(row: &sqlx::any::AnyRow, backend: DbBackend) -> Result<UserColumnMetadata> {
     let (column_name, data_type, required) = match backend {
         DbBackend::Sqlite => {
             let column_name: String = row.try_get("name")?;
@@ -306,15 +358,71 @@ fn admin_claim_column_from_row(
         }
     };
 
-    if !is_claim_column_name(&column_name) || !is_integer_claim_type(&data_type) {
-        return Ok(None);
+    Ok(UserColumnMetadata {
+        column_name,
+        data_type,
+        required,
+    })
+}
+
+fn legacy_admin_claim_column_from_metadata(
+    metadata: UserColumnMetadata,
+) -> Option<AdminClaimColumn> {
+    if !is_claim_column_name(&metadata.column_name) || !is_integer_claim_type(&metadata.data_type) {
+        return None;
     }
 
-    Ok(Some(AdminClaimColumn {
-        env_var: admin_claim_env_var(&column_name),
-        column_name,
-        required,
-    }))
+    Some(AdminClaimColumn {
+        claim_name: None,
+        env_var: admin_claim_env_var(&metadata.column_name),
+        column_name: metadata.column_name,
+        required: metadata.required,
+        ty: AuthClaimType::I64,
+    })
+}
+
+fn configured_admin_claim_columns(
+    user_columns: &[UserColumnMetadata],
+    configured_claims: &BTreeMap<String, AuthClaimMapping>,
+) -> Result<Vec<AdminClaimColumn>> {
+    let columns_by_name = user_columns
+        .iter()
+        .map(|column| (column.column_name.as_str(), column))
+        .collect::<HashMap<_, _>>();
+    let mut columns = Vec::new();
+    let mut seen_columns = HashSet::new();
+
+    for (claim_name, mapping) in configured_claims {
+        let Some(metadata) = columns_by_name.get(mapping.column.as_str()) else {
+            return Err(Error::Config(format!(
+                "Configured auth claim `security.auth.claims.{claim_name}` maps to missing `user.{}` column",
+                mapping.column
+            )));
+        };
+
+        if !claim_type_matches_column(mapping.ty, &metadata.data_type) {
+            return Err(Error::Config(format!(
+                "Configured auth claim `security.auth.claims.{claim_name}` expects `{}` values, but `user.{}` is declared as `{}`",
+                admin_claim_type_label(mapping.ty),
+                mapping.column,
+                metadata.data_type
+            )));
+        }
+
+        if !seen_columns.insert(mapping.column.clone()) {
+            continue;
+        }
+
+        columns.push(AdminClaimColumn {
+            claim_name: Some(claim_name.clone()),
+            column_name: mapping.column.clone(),
+            env_var: admin_claim_env_var(&mapping.column),
+            required: metadata.required,
+            ty: mapping.ty,
+        });
+    }
+
+    Ok(columns)
 }
 
 fn resolve_admin_claim_values(
@@ -325,19 +433,13 @@ fn resolve_admin_claim_values(
 
     for column in claim_columns {
         if let Some(value) = claim_value_from_env(column)? {
-            values.push(AdminClaimValue {
-                column_name: column.column_name.clone(),
-                value,
-            });
+            values.push(value);
             continue;
         }
 
         if interactive_claims {
             if let Some(value) = prompt_admin_claim_value(column)? {
-                values.push(AdminClaimValue {
-                    column_name: column.column_name.clone(),
-                    value,
-                });
+                values.push(value);
             }
             continue;
         }
@@ -353,27 +455,27 @@ fn resolve_admin_claim_values(
     Ok(values)
 }
 
-fn claim_value_from_env(column: &AdminClaimColumn) -> Result<Option<i64>> {
+fn claim_value_from_env(column: &AdminClaimColumn) -> Result<Option<AdminClaimValue>> {
     match std::env::var(&column.env_var) {
         Ok(raw) if raw.trim().is_empty() => Ok(None),
-        Ok(raw) => raw.trim().parse::<i64>().map(Some).map_err(|_| {
-            Error::Validation(format!(
-                "Environment variable {} must be a valid integer",
-                column.env_var
-            ))
-        }),
+        Ok(raw) => parse_admin_claim_value(column, raw.trim()),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<i64>> {
+fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<AdminClaimValue>> {
     let prompt = if column.required {
-        format!("{} (required admin claim column)", column.column_name)
+        format!(
+            "{} (required {} admin claim column)",
+            admin_claim_display_name(column),
+            admin_claim_type_label(column.ty).to_ascii_lowercase()
+        )
     } else {
         format!(
-            "{} (optional admin claim column, press Enter to skip)",
-            column.column_name
+            "{} (optional {} admin claim column, press Enter to skip)",
+            admin_claim_display_name(column),
+            admin_claim_type_label(column.ty).to_ascii_lowercase()
         )
     };
 
@@ -388,10 +490,8 @@ fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<i64>> {
                 } else {
                     Ok(())
                 }
-            } else if trimmed.parse::<i64>().is_ok() {
-                Ok(())
             } else {
-                Err("Please enter a valid integer")
+                validate_admin_claim_input(column.ty, trimmed)
             }
         })
         .interact_text()
@@ -401,10 +501,7 @@ fn prompt_admin_claim_value(column: &AdminClaimColumn) -> Result<Option<i64>> {
     if trimmed.is_empty() {
         Ok(None)
     } else {
-        trimmed
-            .parse::<i64>()
-            .map(Some)
-            .map_err(|_| Error::Validation(format!("{} must be an integer", column.column_name)))
+        parse_admin_claim_value(column, trimmed)
     }
 }
 
@@ -434,6 +531,129 @@ fn is_claim_column_name(column_name: &str) -> bool {
 fn is_integer_claim_type(data_type: &str) -> bool {
     let data_type = data_type.trim().to_ascii_lowercase();
     data_type.contains("int")
+}
+
+fn is_string_claim_type(data_type: &str) -> bool {
+    let data_type = data_type.trim().to_ascii_lowercase();
+    data_type.is_empty()
+        || data_type.contains("char")
+        || data_type.contains("text")
+        || data_type.contains("clob")
+        || data_type.contains("string")
+}
+
+fn is_bool_claim_type(data_type: &str) -> bool {
+    let data_type = data_type.trim().to_ascii_lowercase();
+    data_type.is_empty()
+        || data_type.contains("bool")
+        || data_type.contains("tinyint")
+        || data_type.contains("int")
+}
+
+fn claim_type_matches_column(ty: AuthClaimType, data_type: &str) -> bool {
+    match ty {
+        AuthClaimType::I64 => is_integer_claim_type(data_type),
+        AuthClaimType::String => is_string_claim_type(data_type),
+        AuthClaimType::Bool => is_bool_claim_type(data_type),
+    }
+}
+
+fn admin_claim_display_name(column: &AdminClaimColumn) -> String {
+    match column.claim_name.as_deref() {
+        Some(claim_name) if claim_name != column.column_name => {
+            format!("{claim_name} (column {})", column.column_name)
+        }
+        Some(claim_name) => claim_name.to_owned(),
+        None => column.column_name.clone(),
+    }
+}
+
+fn admin_claim_type_label(ty: AuthClaimType) -> &'static str {
+    match ty {
+        AuthClaimType::I64 => "I64",
+        AuthClaimType::String => "String",
+        AuthClaimType::Bool => "Bool",
+    }
+}
+
+fn validate_admin_claim_input(
+    ty: AuthClaimType,
+    raw: &str,
+) -> std::result::Result<(), &'static str> {
+    match ty {
+        AuthClaimType::I64 => {
+            if raw.parse::<i64>().is_ok() {
+                Ok(())
+            } else {
+                Err("Please enter a valid integer")
+            }
+        }
+        AuthClaimType::String => Ok(()),
+        AuthClaimType::Bool => {
+            if parse_bool_claim(raw).is_some() {
+                Ok(())
+            } else {
+                Err("Please enter true/false, yes/no, on/off, or 1/0")
+            }
+        }
+    }
+}
+
+fn parse_admin_claim_value(
+    column: &AdminClaimColumn,
+    raw: &str,
+) -> Result<Option<AdminClaimValue>> {
+    let value = match column.ty {
+        AuthClaimType::I64 => {
+            let value = raw.parse::<i64>().map_err(|_| {
+                Error::Validation(format!(
+                    "Environment variable {} must be a valid integer",
+                    column.env_var
+                ))
+            })?;
+            AdminClaimValue::I64 {
+                column_name: column.column_name.clone(),
+                value,
+            }
+        }
+        AuthClaimType::String => AdminClaimValue::String {
+            column_name: column.column_name.clone(),
+            value: raw.to_owned(),
+        },
+        AuthClaimType::Bool => {
+            let value = parse_bool_claim(raw).ok_or_else(|| {
+                Error::Validation(format!(
+                    "Environment variable {} must be true/false, yes/no, on/off, or 1/0",
+                    column.env_var
+                ))
+            })?;
+            AdminClaimValue::Bool {
+                column_name: column.column_name.clone(),
+                value,
+            }
+        }
+    };
+    Ok(Some(value))
+}
+
+fn parse_bool_claim(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn configured_auth_claims(
+    config_path: Option<&Path>,
+) -> Result<BTreeMap<String, AuthClaimMapping>> {
+    let Some(path) = config_path else {
+        return Ok(BTreeMap::new());
+    };
+
+    let service =
+        compiler::load_service_from_path(path).map_err(|error| Error::Config(error.to_string()))?;
+    Ok(service.security.auth.claims)
 }
 
 #[derive(Clone, Copy)]
@@ -483,9 +703,10 @@ fn quote_ident(backend: DbBackend, ident: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::create_admin_with_options;
+    use super::{configured_auth_claims, create_admin_in_pool, create_admin_with_options};
     use rest_macro_core::db::{DbPool, query};
     use sqlx::Row;
+    use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -501,6 +722,12 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
     }
 
     #[tokio::test]
@@ -647,5 +874,80 @@ mod tests {
         assert!(email_verified_at.is_some());
         assert!(created_at.is_some());
         assert!(updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn create_admin_uses_explicit_auth_claim_mappings_from_config() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let database_url = unique_sqlite_url("mapped_claims");
+        let pool = DbPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+
+        query(
+            "CREATE TABLE user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tenant_scope INTEGER NOT NULL,
+                claim_workspace_id INTEGER,
+                is_staff BOOLEAN NOT NULL,
+                plan TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("user table should exist");
+
+        let configured_claims = configured_auth_claims(Some(&fixture_path("auth_claims_api.eon")))
+            .expect("auth claims fixture should load");
+
+        unsafe {
+            std::env::set_var("ADMIN_TENANT_SCOPE", "7");
+            std::env::set_var("ADMIN_CLAIM_WORKSPACE_ID", "42");
+            std::env::set_var("ADMIN_IS_STAFF", "true");
+            std::env::set_var("ADMIN_PLAN", "pro");
+        }
+
+        create_admin_in_pool(
+            &pool,
+            "admin@example.com".to_owned(),
+            "password123".to_owned(),
+            false,
+            &configured_claims,
+        )
+        .await
+        .expect("admin should be created");
+
+        let row = query(
+            "SELECT tenant_scope, claim_workspace_id, CAST(is_staff AS INTEGER) AS is_staff_value, plan \
+             FROM user WHERE email = ?",
+        )
+        .bind("admin@example.com")
+        .fetch_one(&pool)
+        .await
+        .expect("admin row should exist");
+        let tenant_scope: i64 = row
+            .try_get("tenant_scope")
+            .expect("tenant scope should decode");
+        let workspace_id: Option<i64> = row
+            .try_get("claim_workspace_id")
+            .expect("workspace claim should decode");
+        let is_staff: i64 = row
+            .try_get("is_staff_value")
+            .expect("is_staff should decode");
+        let plan: String = row.try_get("plan").expect("plan should decode");
+        assert_eq!(tenant_scope, 7);
+        assert_eq!(workspace_id, Some(42));
+        assert_eq!(is_staff, 1);
+        assert_eq!(plan, "pro");
+
+        unsafe {
+            std::env::remove_var("ADMIN_TENANT_SCOPE");
+            std::env::remove_var("ADMIN_CLAIM_WORKSPACE_ID");
+            std::env::remove_var("ADMIN_IS_STAFF");
+            std::env::remove_var("ADMIN_PLAN");
+        }
     }
 }

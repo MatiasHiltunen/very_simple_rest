@@ -1,0 +1,378 @@
+use heck::ToSnakeCase;
+
+use crate::{
+    auth::AuthClaimType,
+    authorization::{
+        ActionAuthorization, AuthorizationAction, AuthorizationAssignment, AuthorizationCondition,
+        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationValueSource,
+        ResourceAuthorization,
+    },
+    security::SecurityConfig,
+};
+
+use super::model::{PolicyAssignment, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec};
+
+pub fn compile_service_authorization(service: &ServiceSpec) -> AuthorizationModel {
+    AuthorizationModel {
+        contract: service.authorization.clone(),
+        resources: service
+            .resources
+            .iter()
+            .map(|resource| compile_resource_authorization(resource, &service.security))
+            .collect(),
+    }
+}
+
+pub fn compile_resource_authorization(
+    resource: &ResourceSpec,
+    security: &SecurityConfig,
+) -> ResourceAuthorization {
+    let resource_id = resource_rule_id(&resource.struct_ident.to_string());
+    ResourceAuthorization {
+        id: resource_id.clone(),
+        resource: resource.struct_ident.to_string(),
+        table: resource.table_name.clone(),
+        admin_bypass: resource.policies.admin_bypass,
+        actions: vec![
+            compile_filter_action(
+                &resource_id,
+                AuthorizationAction::Read,
+                resource.roles.read.as_deref(),
+                &resource.policies.read,
+                security,
+            ),
+            compile_assignment_action(
+                &resource_id,
+                AuthorizationAction::Create,
+                resource.roles.create.as_deref(),
+                &resource.policies.create,
+                security,
+            ),
+            compile_filter_action(
+                &resource_id,
+                AuthorizationAction::Update,
+                resource.roles.update.as_deref(),
+                &resource.policies.update,
+                security,
+            ),
+            compile_filter_action(
+                &resource_id,
+                AuthorizationAction::Delete,
+                resource.roles.delete.as_deref(),
+                &resource.policies.delete,
+                security,
+            ),
+        ],
+    }
+}
+
+fn compile_filter_action(
+    resource_id: &str,
+    action: AuthorizationAction,
+    required_role: Option<&str>,
+    filters: &[PolicyFilter],
+    security: &SecurityConfig,
+) -> ActionAuthorization {
+    let action_id = action_rule_id(resource_id, action);
+    ActionAuthorization {
+        id: action_id.clone(),
+        action,
+        role_rule_id: required_role.map(|_| format!("{action_id}.role")),
+        required_role: required_role.map(ToOwned::to_owned),
+        filter: compile_filter_group(&action_id, filters, security),
+        assignments: Vec::new(),
+    }
+}
+
+fn compile_assignment_action(
+    resource_id: &str,
+    action: AuthorizationAction,
+    required_role: Option<&str>,
+    assignments: &[PolicyAssignment],
+    security: &SecurityConfig,
+) -> ActionAuthorization {
+    let action_id = action_rule_id(resource_id, action);
+    ActionAuthorization {
+        id: action_id.clone(),
+        action,
+        role_rule_id: required_role.map(|_| format!("{action_id}.role")),
+        required_role: required_role.map(ToOwned::to_owned),
+        filter: None,
+        assignments: assignments
+            .iter()
+            .map(|assignment| compile_assignment(&action_id, assignment, security))
+            .collect(),
+    }
+}
+
+fn compile_filter_group(
+    action_id: &str,
+    filters: &[PolicyFilter],
+    security: &SecurityConfig,
+) -> Option<AuthorizationCondition> {
+    match filters {
+        [] => None,
+        [filter] => Some(compile_filter(
+            &format!("{action_id}.filter"),
+            filter,
+            security,
+        )),
+        _ => Some(AuthorizationCondition::All {
+            id: format!("{action_id}.filter"),
+            conditions: filters
+                .iter()
+                .enumerate()
+                .map(|(index, filter)| {
+                    compile_filter(
+                        &format!("{action_id}.filter.{}", index + 1),
+                        filter,
+                        security,
+                    )
+                })
+                .collect(),
+        }),
+    }
+}
+
+fn compile_filter(
+    rule_id: &str,
+    filter: &PolicyFilter,
+    security: &SecurityConfig,
+) -> AuthorizationCondition {
+    AuthorizationCondition::Match(AuthorizationMatch {
+        id: rule_id.to_owned(),
+        field: filter.field.clone(),
+        operator: AuthorizationOperator::Equals,
+        source: compile_source(&filter.source, security),
+    })
+}
+
+fn compile_assignment(
+    action_id: &str,
+    assignment: &PolicyAssignment,
+    security: &SecurityConfig,
+) -> AuthorizationAssignment {
+    AuthorizationAssignment {
+        id: format!(
+            "{action_id}.assignment.{}",
+            stable_rule_segment(&assignment.field)
+        ),
+        field: assignment.field.clone(),
+        source: compile_source(&assignment.source, security),
+    }
+}
+
+fn compile_source(
+    source: &PolicyValueSource,
+    security: &SecurityConfig,
+) -> AuthorizationValueSource {
+    match source {
+        PolicyValueSource::UserId => AuthorizationValueSource::UserId,
+        PolicyValueSource::Claim(name) => AuthorizationValueSource::Claim {
+            name: name.clone(),
+            ty: configured_claim_type(name, security),
+        },
+    }
+}
+
+fn configured_claim_type(claim_name: &str, security: &SecurityConfig) -> AuthClaimType {
+    security
+        .auth
+        .claims
+        .get(claim_name)
+        .map(|mapping| mapping.ty)
+        .unwrap_or(AuthClaimType::I64)
+}
+
+fn resource_rule_id(resource_name: &str) -> String {
+    format!("resource.{}", stable_rule_segment(resource_name))
+}
+
+fn action_rule_id(resource_id: &str, action: AuthorizationAction) -> String {
+    format!("{resource_id}.action.{}", action_label(action))
+}
+
+fn action_label(action: AuthorizationAction) -> &'static str {
+    match action {
+        AuthorizationAction::Read => "read",
+        AuthorizationAction::Create => "create",
+        AuthorizationAction::Update => "update",
+        AuthorizationAction::Delete => "delete",
+    }
+}
+
+fn stable_rule_segment(value: &str) -> String {
+    let snake = value.to_snake_case();
+    let mut segment = String::with_capacity(snake.len());
+    let mut last_was_separator = false;
+    for ch in snake.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() { ch } else { '_' };
+        if normalized == '_' {
+            if !segment.is_empty() && !last_was_separator {
+                segment.push('_');
+            }
+            last_was_separator = true;
+        } else {
+            segment.push(normalized);
+            last_was_separator = false;
+        }
+    }
+    while segment.ends_with('_') {
+        segment.pop();
+    }
+    if segment.is_empty() {
+        "rule".to_owned()
+    } else {
+        segment
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn fixture(path: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(path)
+    }
+
+    #[test]
+    fn compiles_existing_tenant_policies_into_authorization_model() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/tenant_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        let resource = model.resources.first().expect("resource should exist");
+        assert_eq!(resource.id, "resource.tenant_post");
+        assert_eq!(resource.resource, "TenantPost");
+        assert!(!resource.admin_bypass);
+
+        let read = resource
+            .action(AuthorizationAction::Read)
+            .expect("read action should exist");
+        assert_eq!(read.id, "resource.tenant_post.action.read");
+        assert_eq!(read.role_rule_id, None);
+        assert_eq!(read.required_role, None);
+        assert_eq!(
+            read.filter,
+            Some(AuthorizationCondition::All {
+                id: "resource.tenant_post.action.read.filter".to_owned(),
+                conditions: vec![
+                    AuthorizationCondition::Match(AuthorizationMatch {
+                        id: "resource.tenant_post.action.read.filter.1".to_owned(),
+                        field: "user_id".to_owned(),
+                        operator: AuthorizationOperator::Equals,
+                        source: AuthorizationValueSource::UserId,
+                    }),
+                    AuthorizationCondition::Match(AuthorizationMatch {
+                        id: "resource.tenant_post.action.read.filter.2".to_owned(),
+                        field: "tenant_id".to_owned(),
+                        operator: AuthorizationOperator::Equals,
+                        source: AuthorizationValueSource::Claim {
+                            name: "tenant_id".to_owned(),
+                            ty: AuthClaimType::I64,
+                        },
+                    }),
+                ],
+            })
+        );
+
+        let create = resource
+            .action(AuthorizationAction::Create)
+            .expect("create action should exist");
+        assert_eq!(create.id, "resource.tenant_post.action.create");
+        assert_eq!(create.filter, None);
+        assert_eq!(
+            create.assignments,
+            vec![
+                AuthorizationAssignment {
+                    id: "resource.tenant_post.action.create.assignment.user_id".to_owned(),
+                    field: "user_id".to_owned(),
+                    source: AuthorizationValueSource::UserId,
+                },
+                AuthorizationAssignment {
+                    id: "resource.tenant_post.action.create.assignment.tenant_id".to_owned(),
+                    field: "tenant_id".to_owned(),
+                    source: AuthorizationValueSource::Claim {
+                        name: "tenant_id".to_owned(),
+                        ty: AuthClaimType::I64,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn compiles_explicit_claim_types_into_authorization_sources() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/auth_claims_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        let resource = model.resources.first().expect("resource should exist");
+        let read = resource
+            .action(AuthorizationAction::Read)
+            .expect("read action should exist");
+        assert_eq!(
+            read.filter,
+            Some(AuthorizationCondition::Match(AuthorizationMatch {
+                id: "resource.scoped_doc.action.read.filter".to_owned(),
+                field: "tenant_id".to_owned(),
+                operator: AuthorizationOperator::Equals,
+                source: AuthorizationValueSource::Claim {
+                    name: "tenant_id".to_owned(),
+                    ty: AuthClaimType::I64,
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn carries_static_authorization_contract_into_compiled_model() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/authorization_contract_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        assert_eq!(model.contract.scopes.len(), 2);
+        assert_eq!(model.contract.scopes[1].name, "Household");
+        assert_eq!(model.contract.permissions.len(), 2);
+        assert_eq!(model.contract.permissions[0].name, "FamilyManage");
+        assert_eq!(
+            model.contract.permissions[0].actions,
+            vec![AuthorizationAction::Update, AuthorizationAction::Delete]
+        );
+        assert_eq!(model.contract.templates.len(), 2);
+        assert_eq!(model.contract.templates[0].name, "FamilyManager");
+    }
+
+    #[test]
+    fn generates_stable_role_and_assignment_rule_ids() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/tenant_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        let resource = model.resources.first().expect("resource should exist");
+        let create = resource
+            .action(AuthorizationAction::Create)
+            .expect("create action should exist");
+
+        assert_eq!(resource.id, "resource.tenant_post");
+        assert_eq!(create.id, "resource.tenant_post.action.create");
+        assert_eq!(create.role_rule_id, None);
+        assert_eq!(
+            create.assignments[0].id,
+            "resource.tenant_post.action.create.assignment.user_id"
+        );
+    }
+}

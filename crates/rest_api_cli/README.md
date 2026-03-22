@@ -212,6 +212,39 @@ vsr docs --output docs/eon-reference.md
 
 The checked-in reference document lives at `docs/eon-reference.md`.
 
+### Authorization Explain
+
+Inspect how a `.eon` service compiles into the current internal authorization model:
+
+```bash
+vsr authz explain --input api.eon
+vsr authz explain --input api.eon --format json --output docs/authz.json
+```
+
+When `--input` is omitted, `vsr` falls back to the same autodiscovered or explicit `--config`
+path used by the other `.eon`-aware commands.
+
+You can also simulate a single authorization decision:
+
+```bash
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --user-id 7 --claim tenant_id=3 --row tenant_id=3
+vsr authz simulate --input api.eon --resource ScopedDoc --action create --role admin --proposed tenant_id=42 --format json
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --scope Family=42 --scoped-assignment template:FamilyMember@Family=42
+vsr --database-url sqlite:app.db?mode=rwc authz simulate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42 --load-runtime-assignments
+```
+
+Repeated `--claim`, `--row`, and `--proposed` arguments use `key=value` syntax. Values are
+inferred as `null`, `bool`, `i64`, or `String`. `--scope` uses `ScopeName=value`, and repeated
+`--scoped-assignment` arguments use `permission:Name@Scope=value` or
+`template:Name@Scope=value`. `--load-runtime-assignments` loads stored assignments for
+`--user-id` from the configured database, using the table created by `vsr migrate authz`.
+These runtime scoped assignments are validated and resolved by the simulator, but they are not
+yet enforced by generated handlers.
+
+The `.eon` format also supports an optional static `authorization` block for declaring scopes,
+permissions, and templates. In this slice it is contract-only: validated and surfaced by the
+diagnostic commands, but not yet enforced by generated handlers.
+
 ### Static Files In `.eon`
 
 Bare `.eon` services can define service-level static mounts:
@@ -358,6 +391,21 @@ Generated modules expose this through `module::runtime()`. The parsed runtime op
 `vsr build` now generates those companion files into `<binary>.bundle/` when this flag is enabled.
 `vsr server emit` still copies the source static directories as-is.
 
+Generated `.eon` modules also expose the compiled authorization model through
+`module::authorization()`. That includes the optional static `authorization` contract and the
+resource/action policy view used by `vsr authz explain`, which makes it suitable for custom
+policy-management and diagnostics endpoints in emitted or manual servers. They also expose
+`module::authorization_runtime(db)`, and `module::configure(...)` now registers that runtime
+service as Actix app data for the configured scope. For a basic opt-in runtime assignment API,
+generated modules also expose `module::configure_authorization_management(cfg, db)`, which mounts
+`POST /authz/runtime/evaluate` plus admin-oriented
+`GET/POST/DELETE /authz/runtime/assignments...` endpoints backed by the shared authorization
+runtime. The evaluate endpoint resolves persisted scoped permissions for an explicit
+resource/action/scope request, but it does not apply static CRUD policy checks.
+Custom handlers can also enforce persisted runtime grants directly through
+`AuthorizationRuntime::enforce_runtime_access(...)` after injecting the shared runtime as Actix
+app data.
+
 ### Create Admin
 
 Create a new admin user:
@@ -370,10 +418,11 @@ vsr create-admin
 vsr create-admin --email admin@example.com --password secure_password
 ```
 
-If the built-in auth `user` table has extra numeric claim columns such as `tenant_id`,
-`org_id`, or `claim_workspace_id`, the CLI detects them automatically. Interactive admin creation
-prompts for those values, and non-interactive flows accept environment variables named
-`ADMIN_<COLUMN_NAME>`, for example `ADMIN_TENANT_ID=1`.
+If the built-in auth `user` table has auth claim columns, the CLI detects them automatically.
+That includes legacy implicit numeric claim columns such as `tenant_id`, `org_id`, or
+`claim_workspace_id`, plus explicit `security.auth.claims` mappings from your `.eon` service. 
+Interactive admin creation prompts for those values, and non-interactive flows accept environment
+variables named `ADMIN_<COLUMN_NAME>`, for example `ADMIN_TENANT_ID=1` or `ADMIN_IS_STAFF=true`.
 
 ### Check Database
 
@@ -406,7 +455,7 @@ The CLI tool respects the following environment variables:
 | `DATABASE_URL` | Database connection string | Derived from `--config` or a single local `.eon`; otherwise `sqlite:var/data/app.db?mode=rwc` |
 | `ADMIN_EMAIL` | Default admin email address | None |
 | `ADMIN_PASSWORD` | Default admin password | None |
-| `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` | None |
+| `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` or `ADMIN_IS_STAFF` | None |
 | `JWT_SECRET` | Secret key for JWT tokens | Required for built-in auth at runtime |
 
 ## Examples
@@ -430,6 +479,7 @@ vsr check-db
 ```bash
 # Use the compiled database settings from a bare .eon service explicitly
 vsr --config tests/fixtures/turso_local_api.eon check-db
+vsr --config tests/fixtures/turso_local_api.eon migrate authz --output migrations/0001_authz.sql
 vsr --config tests/fixtures/turso_local_api.eon migrate apply --dir migrations
 ```
 

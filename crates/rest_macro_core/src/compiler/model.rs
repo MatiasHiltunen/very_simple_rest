@@ -6,7 +6,8 @@ use proc_macro2::Span;
 use quote::ToTokens;
 use syn::{Ident, Type};
 
-use crate::auth::{AuthEmailProvider, SessionCookieSameSite};
+use crate::auth::{AuthClaimType, AuthEmailProvider, SessionCookieSameSite};
+use crate::authorization::AuthorizationContract;
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
 use crate::runtime::RuntimeConfig;
@@ -401,6 +402,7 @@ pub struct StaticMountSpec {
 pub struct ServiceSpec {
     pub module_ident: Ident,
     pub resources: Vec<ResourceSpec>,
+    pub authorization: AuthorizationContract,
     pub static_mounts: Vec<StaticMountSpec>,
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
@@ -452,6 +454,7 @@ impl std::fmt::Debug for ServiceSpec {
         f.debug_struct("ServiceSpec")
             .field("module_ident", &self.module_ident)
             .field("resources", &self.resources)
+            .field("authorization", &self.authorization)
             .field("static_mounts", &self.static_mounts)
             .field("database", &self.database)
             .field("logging", &self.logging)
@@ -674,6 +677,41 @@ pub fn validate_row_policies(
     validate_policy_filters(fields, "delete", &policies.delete, span)
 }
 
+pub fn validate_policy_claim_sources(
+    resources: &[ResourceSpec],
+    security: &SecurityConfig,
+    span: Span,
+) -> syn::Result<()> {
+    if security.auth.claims.is_empty() {
+        return Ok(());
+    }
+
+    for resource in resources {
+        for (scope, filter) in resource.policies.iter_filters() {
+            validate_policy_claim_source(
+                resource,
+                scope,
+                &filter.field,
+                &filter.source,
+                security,
+                span,
+            )?;
+        }
+        for (scope, assignment) in resource.policies.iter_assignments() {
+            validate_policy_claim_source(
+                resource,
+                scope,
+                &assignment.field,
+                &assignment.source,
+                security,
+                span,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn validate_relations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
     for field in fields {
         let Some(relation) = &field.relation else {
@@ -840,6 +878,201 @@ pub fn validate_list_config(list: &ListConfig, span: Span) -> syn::Result<()> {
     Ok(())
 }
 
+pub fn validate_authorization_contract(
+    contract: &AuthorizationContract,
+    resources: &[ResourceSpec],
+    span: Span,
+) -> syn::Result<()> {
+    let mut scope_names = HashSet::new();
+    for scope in &contract.scopes {
+        validate_authorization_identifier(&scope.name, span, "authorization scope name")?;
+        if !scope_names.insert(scope.name.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!("duplicate authorization scope `{}`", scope.name),
+            ));
+        }
+        if matches!(scope.description.as_deref(), Some(description) if description.trim().is_empty())
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.scopes.{}` description cannot be empty",
+                    scope.name
+                ),
+            ));
+        }
+    }
+
+    for scope in &contract.scopes {
+        if let Some(parent) = &scope.parent {
+            if !scope_names.contains(parent.as_str()) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.scopes.{}` references unknown parent scope `{parent}`",
+                        scope.name
+                    ),
+                ));
+            }
+        }
+    }
+    for scope in &contract.scopes {
+        let mut seen = HashSet::new();
+        let mut current = scope.parent.as_deref();
+        while let Some(parent) = current {
+            if !seen.insert(parent) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.scopes.{}` contains a parent cycle involving `{parent}`",
+                        scope.name
+                    ),
+                ));
+            }
+            current = contract
+                .scopes
+                .iter()
+                .find(|candidate| candidate.name == parent)
+                .and_then(|candidate| candidate.parent.as_deref());
+        }
+    }
+
+    let resource_names = resources
+        .iter()
+        .map(|resource| resource.struct_ident.to_string())
+        .collect::<HashSet<_>>();
+
+    let mut permission_names = HashSet::new();
+    for permission in &contract.permissions {
+        validate_authorization_identifier(&permission.name, span, "authorization permission name")?;
+        if !permission_names.insert(permission.name.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!("duplicate authorization permission `{}`", permission.name),
+            ));
+        }
+        if matches!(permission.description.as_deref(), Some(description) if description.trim().is_empty())
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.permissions.{}` description cannot be empty",
+                    permission.name
+                ),
+            ));
+        }
+        if permission.actions.is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.permissions.{}` must declare at least one action",
+                    permission.name
+                ),
+            ));
+        }
+        if permission.resources.is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.permissions.{}` must declare at least one resource",
+                    permission.name
+                ),
+            ));
+        }
+        for resource_name in &permission.resources {
+            if !resource_names.contains(resource_name) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.permissions.{}` references unknown resource `{resource_name}`",
+                        permission.name
+                    ),
+                ));
+            }
+        }
+        for scope_name in &permission.scopes {
+            if !scope_names.contains(scope_name.as_str()) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.permissions.{}` references unknown scope `{scope_name}`",
+                        permission.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    let permission_names = permission_names;
+    let mut template_names = HashSet::new();
+    for template in &contract.templates {
+        validate_authorization_identifier(&template.name, span, "authorization template name")?;
+        if !template_names.insert(template.name.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!("duplicate authorization template `{}`", template.name),
+            ));
+        }
+        if matches!(template.description.as_deref(), Some(description) if description.trim().is_empty())
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.templates.{}` description cannot be empty",
+                    template.name
+                ),
+            ));
+        }
+        if template.permissions.is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.templates.{}` must declare at least one permission",
+                    template.name
+                ),
+            ));
+        }
+        for permission_name in &template.permissions {
+            if !permission_names.contains(permission_name.as_str()) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.templates.{}` references unknown permission `{permission_name}`",
+                        template.name
+                    ),
+                ));
+            }
+        }
+        for scope_name in &template.scopes {
+            if !scope_names.contains(scope_name.as_str()) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.templates.{}` references unknown scope `{scope_name}`",
+                        template.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_authorization_identifier(value: &str, span: Span, label: &str) -> syn::Result<()> {
+    if is_valid_sql_identifier(value) {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            span,
+            format!(
+                "{label} `{value}` is not valid; use only letters, digits, and underscores, and start with a letter or underscore"
+            ),
+        ))
+    }
+}
+
 pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::Result<()> {
     if matches!(security.requests.json_max_bytes, Some(0)) {
         return Err(syn::Error::new(
@@ -876,6 +1109,30 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
             span,
             "`security.auth.password_reset_token_ttl_seconds` must be greater than 0",
         ));
+    }
+
+    for (claim_name, mapping) in &security.auth.claims {
+        if !is_valid_sql_identifier(claim_name) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`security.auth.claims.{claim_name}` is not a valid claim identifier; use only letters, digits, and underscores, and start with a letter or underscore"
+                ),
+            ));
+        }
+
+        if is_reserved_auth_claim_name(claim_name) {
+            return Err(syn::Error::new(
+                span,
+                format!("`security.auth.claims.{claim_name}` uses a reserved JWT/auth field name"),
+            ));
+        }
+
+        validate_sql_identifier(
+            &mapping.column,
+            span,
+            &format!("`security.auth.claims.{claim_name}.column`"),
+        )?;
     }
 
     if security.auth.require_email_verification && security.auth.email.is_none() {
@@ -1150,6 +1407,61 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
     }
 
     Ok(())
+}
+
+fn validate_policy_claim_source(
+    resource: &ResourceSpec,
+    scope: &str,
+    field_name: &str,
+    source: &PolicyValueSource,
+    security: &SecurityConfig,
+    span: Span,
+) -> syn::Result<()> {
+    let PolicyValueSource::Claim(claim_name) = source else {
+        return Ok(());
+    };
+
+    if let Some(mapping) = security.auth.claims.get(claim_name) {
+        if mapping.ty != AuthClaimType::I64 {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "resource `{}` {scope} row policy for field `{field_name}` uses `claim.{claim_name}`, but `security.auth.claims.{claim_name}` is `{}`; row policies currently require `I64` claims",
+                    resource.struct_ident,
+                    auth_claim_type_label(mapping.ty),
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    if legacy_auth_claim_name_supported(claim_name) {
+        return Ok(());
+    }
+
+    Err(syn::Error::new(
+        span,
+        format!(
+            "resource `{}` {scope} row policy for field `{field_name}` references undeclared `claim.{claim_name}`; declare `security.auth.claims.{claim_name}` or keep using a legacy numeric `*_id` claim",
+            resource.struct_ident,
+        ),
+    ))
+}
+
+fn legacy_auth_claim_name_supported(claim_name: &str) -> bool {
+    claim_name.ends_with("_id") && claim_name != "id"
+}
+
+fn is_reserved_auth_claim_name(claim_name: &str) -> bool {
+    matches!(claim_name, "sub" | "roles" | "iss" | "aud" | "exp" | "id")
+}
+
+fn auth_claim_type_label(ty: AuthClaimType) -> &'static str {
+    match ty {
+        AuthClaimType::I64 => "I64",
+        AuthClaimType::String => "String",
+        AuthClaimType::Bool => "Bool",
+    }
 }
 
 pub fn validate_runtime_config(_runtime: &RuntimeConfig, _span: Span) -> syn::Result<()> {

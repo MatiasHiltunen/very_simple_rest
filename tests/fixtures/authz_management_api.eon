@@ -1,0 +1,41 @@
+module: "authz_management_api"
+security: {
+    auth: {
+        issuer: "authz_management_tests"
+        audience: "authz_management_clients"
+        require_email_verification: false
+        session_cookie: {
+            secure: false
+        }
+    }
+}
+authorization: {
+    scopes: {
+        Family: {
+            description: "Family tenancy scope"
+        }
+    }
+    permissions: {
+        FamilyRead: {
+            actions: ["Read"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+    templates: {
+        FamilyMember: {
+            permissions: ["FamilyRead"]
+            scopes: ["Family"]
+        }
+    }
+}
+resources: [
+    {
+        name: "ScopedDoc"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "tenant_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     path::{Component, Path, PathBuf},
 };
@@ -16,14 +16,19 @@ use super::model::{
     ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile,
     StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
-    validate_field_validations, validate_list_config, validate_logging_config, validate_relations,
+    validate_authorization_contract, validate_field_validations, validate_list_config,
+    validate_logging_config, validate_policy_claim_sources, validate_relations,
     validate_row_policies, validate_runtime_config, validate_security_config,
     validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
-        AuthEmailProvider, AuthEmailSettings, AuthSettings, AuthUiPageSettings,
-        SessionCookieSameSite, SessionCookieSettings,
+        AuthClaimMapping, AuthClaimType, AuthEmailProvider, AuthEmailSettings, AuthSettings,
+        AuthUiPageSettings, SessionCookieSameSite, SessionCookieSettings,
+    },
+    authorization::{
+        AuthorizationAction, AuthorizationContract, AuthorizationPermission, AuthorizationScope,
+        AuthorizationTemplate,
     },
     database::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
@@ -57,6 +62,8 @@ struct ServiceDocument {
     logging: Option<LoggingDocument>,
     #[serde(default)]
     runtime: Option<RuntimeDocument>,
+    #[serde(default)]
+    authorization: Option<AuthorizationDocument>,
     #[serde(default)]
     tls: Option<TlsDocument>,
     #[serde(default, rename = "static")]
@@ -178,6 +185,8 @@ struct AuthSecurityDocument {
     #[serde(default)]
     password_reset_token_ttl_seconds: Option<i64>,
     #[serde(default)]
+    claims: BTreeMap<String, AuthClaimMapValueDocument>,
+    #[serde(default)]
     session_cookie: Option<SessionCookieDocument>,
     #[serde(default)]
     email: Option<AuthEmailDocument>,
@@ -233,6 +242,29 @@ struct AuthUiPageDocument {
     title: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AuthClaimMapValueDocument {
+    Type(AuthClaimTypeDocument),
+    Column(String),
+    Config(AuthClaimConfigDocument),
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthClaimConfigDocument {
+    #[serde(default)]
+    column: Option<String>,
+    #[serde(default, rename = "type")]
+    ty: Option<AuthClaimTypeDocument>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+enum AuthClaimTypeDocument {
+    String,
+    I64,
+    Bool,
+}
+
 #[derive(Default, serde::Deserialize)]
 struct LoggingDocument {
     #[serde(default)]
@@ -247,6 +279,54 @@ struct LoggingDocument {
 struct RuntimeDocument {
     #[serde(default)]
     compression: Option<CompressionDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationDocument {
+    #[serde(default)]
+    scopes: BTreeMap<String, AuthorizationScopeDocument>,
+    #[serde(default)]
+    permissions: BTreeMap<String, AuthorizationPermissionDocument>,
+    #[serde(default)]
+    templates: BTreeMap<String, AuthorizationTemplateDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationScopeDocument {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    parent: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationPermissionDocument {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    actions: Vec<AuthorizationActionDocument>,
+    #[serde(default)]
+    resources: Vec<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationTemplateDocument {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    permissions: Vec<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+enum AuthorizationActionDocument {
+    Read,
+    Create,
+    Update,
+    Delete,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -684,6 +764,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     )?;
     let logging = parse_logging_document(document.logging)?;
     let runtime = parse_runtime_document(document.runtime);
+    let authorization = parse_authorization_document(document.authorization);
     let tls = parse_tls_document(document.tls)?;
     let security = parse_security_document(document.security, span)?;
     validate_logging_config(&logging, span)?;
@@ -698,11 +779,14 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             "service config must contain at least one resource",
         ));
     }
+    validate_policy_claim_sources(&resources, &security, span)?;
+    validate_authorization_contract(&authorization, &resources, span)?;
 
     Ok(LoadedService {
         service: ServiceSpec {
             module_ident,
             resources,
+            authorization,
             static_mounts,
             database,
             logging,
@@ -907,6 +991,7 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
                 password_reset_token_ttl_seconds: auth
                     .password_reset_token_ttl_seconds
                     .unwrap_or(defaults.password_reset_token_ttl_seconds),
+                claims: parse_auth_claims_document(auth.claims),
                 session_cookie: auth
                     .session_cookie
                     .map(parse_session_cookie_document)
@@ -972,6 +1057,58 @@ fn parse_runtime_document(document: Option<RuntimeDocument>) -> RuntimeConfig {
         .unwrap_or_default();
 
     RuntimeConfig { compression }
+}
+
+fn parse_authorization_document(document: Option<AuthorizationDocument>) -> AuthorizationContract {
+    let Some(document) = document else {
+        return AuthorizationContract::default();
+    };
+
+    AuthorizationContract {
+        scopes: document
+            .scopes
+            .into_iter()
+            .map(|(name, scope)| AuthorizationScope {
+                name,
+                description: scope.description,
+                parent: scope.parent,
+            })
+            .collect(),
+        permissions: document
+            .permissions
+            .into_iter()
+            .map(|(name, permission)| AuthorizationPermission {
+                name,
+                description: permission.description,
+                actions: permission
+                    .actions
+                    .into_iter()
+                    .map(parse_authorization_action_document)
+                    .collect(),
+                resources: permission.resources,
+                scopes: permission.scopes,
+            })
+            .collect(),
+        templates: document
+            .templates
+            .into_iter()
+            .map(|(name, template)| AuthorizationTemplate {
+                name,
+                description: template.description,
+                permissions: template.permissions,
+                scopes: template.scopes,
+            })
+            .collect(),
+    }
+}
+
+fn parse_authorization_action_document(value: AuthorizationActionDocument) -> AuthorizationAction {
+    match value {
+        AuthorizationActionDocument::Read => AuthorizationAction::Read,
+        AuthorizationActionDocument::Create => AuthorizationAction::Create,
+        AuthorizationActionDocument::Update => AuthorizationAction::Update,
+        AuthorizationActionDocument::Delete => AuthorizationAction::Delete,
+    }
 }
 
 fn parse_tls_document(document: Option<TlsDocument>) -> syn::Result<TlsConfig> {
@@ -1108,6 +1245,38 @@ fn parse_auth_ui_page_document(
         path: document.path,
         title: document.title.unwrap_or_else(|| default_title.to_owned()),
     })
+}
+
+fn parse_auth_claims_document(
+    document: BTreeMap<String, AuthClaimMapValueDocument>,
+) -> BTreeMap<String, AuthClaimMapping> {
+    document
+        .into_iter()
+        .map(|(claim_name, value)| {
+            let (column, ty) = match value {
+                AuthClaimMapValueDocument::Type(ty) => {
+                    (claim_name.clone(), parse_auth_claim_type_document(ty))
+                }
+                AuthClaimMapValueDocument::Column(column) => (column, AuthClaimType::I64),
+                AuthClaimMapValueDocument::Config(config) => (
+                    config.column.unwrap_or_else(|| claim_name.clone()),
+                    config
+                        .ty
+                        .map(parse_auth_claim_type_document)
+                        .unwrap_or(AuthClaimType::I64),
+                ),
+            };
+            (claim_name, AuthClaimMapping { column, ty })
+        })
+        .collect()
+}
+
+fn parse_auth_claim_type_document(document: AuthClaimTypeDocument) -> AuthClaimType {
+    match document {
+        AuthClaimTypeDocument::String => AuthClaimType::String,
+        AuthClaimTypeDocument::I64 => AuthClaimType::I64,
+        AuthClaimTypeDocument::Bool => AuthClaimType::Bool,
+    }
 }
 
 fn parse_session_cookie_same_site(value: &str) -> Option<SessionCookieSameSite> {
@@ -2039,6 +2208,7 @@ mod tests {
                 module_ident: sanitize_module_ident("test", Span::call_site()),
                 resources: build_resources(document.db, document.resources)
                     .expect("resources should build"),
+                authorization: AuthorizationContract::default(),
                 static_mounts: Vec::new(),
                 database: parse_database_document(
                     document.db,
@@ -2146,6 +2316,12 @@ mod tests {
                     issuer: "issuer"
                     audience: "audience"
                     access_token_ttl_seconds: 600
+                    claims: {
+                        tenant_id: I64
+                        workspace_id: "claim_workspace_id"
+                        staff: { column: "is_staff", type: Bool }
+                        plan: String
+                    }
                     session_cookie: {
                         secure: false
                         same_site: Lax
@@ -2218,6 +2394,34 @@ mod tests {
         assert_eq!(security.auth.issuer.as_deref(), Some("issuer"));
         assert_eq!(security.auth.audience.as_deref(), Some("audience"));
         assert_eq!(security.auth.access_token_ttl_seconds, 600);
+        assert_eq!(
+            security.auth.claims.get("tenant_id"),
+            Some(&AuthClaimMapping {
+                column: "tenant_id".to_owned(),
+                ty: AuthClaimType::I64,
+            })
+        );
+        assert_eq!(
+            security.auth.claims.get("workspace_id"),
+            Some(&AuthClaimMapping {
+                column: "claim_workspace_id".to_owned(),
+                ty: AuthClaimType::I64,
+            })
+        );
+        assert_eq!(
+            security.auth.claims.get("staff"),
+            Some(&AuthClaimMapping {
+                column: "is_staff".to_owned(),
+                ty: AuthClaimType::Bool,
+            })
+        );
+        assert_eq!(
+            security.auth.claims.get("plan"),
+            Some(&AuthClaimMapping {
+                column: "plan".to_owned(),
+                ty: AuthClaimType::String,
+            })
+        );
         let session_cookie = security
             .auth
             .session_cookie
@@ -2262,6 +2466,167 @@ mod tests {
         let runtime = parse_runtime_document(document.runtime);
         assert!(runtime.compression.enabled);
         assert!(runtime.compression.static_precompressed);
+    }
+
+    #[test]
+    fn parses_authorization_contract_from_eon() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                scopes: {
+                    Family: {
+                        description: "Family scope"
+                    }
+                    Household: {
+                        parent: "Family"
+                    }
+                }
+                permissions: {
+                    FamilyRead: {
+                        actions: ["Read"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                }
+                templates: {
+                    FamilyMember: {
+                        permissions: ["FamilyRead"]
+                        scopes: ["Family"]
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization);
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        validate_authorization_contract(&authorization, &resources, Span::call_site())
+            .expect("authorization contract should validate");
+
+        assert_eq!(authorization.scopes.len(), 2);
+        assert_eq!(authorization.scopes[1].name, "Household");
+        assert_eq!(authorization.scopes[1].parent.as_deref(), Some("Family"));
+        assert_eq!(
+            authorization.permissions[0].actions,
+            vec![AuthorizationAction::Read]
+        );
+        assert_eq!(
+            authorization.templates[0].permissions,
+            vec!["FamilyRead".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rejects_authorization_permission_for_unknown_resource() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                permissions: {
+                    FamilyRead: {
+                        actions: ["Read"]
+                        resources: ["MissingResource"]
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization);
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let error = validate_authorization_contract(&authorization, &resources, Span::call_site())
+            .expect_err("unknown authorization resource should fail");
+        assert!(error.to_string().contains("MissingResource"));
+        assert!(
+            error
+                .to_string()
+                .contains("authorization.permissions.FamilyRead")
+        );
+    }
+
+    #[test]
+    fn rejects_undeclared_non_legacy_policy_claim_when_explicit_auth_claims_are_present() {
+        let document = parse_document(
+            r#"
+            security: {
+                auth: {
+                    claims: {
+                        tenant_id: I64
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    policies: {
+                        read: { field: "tenant_id", equals: "claim.tenant" }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "tenant_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let error = validate_policy_claim_sources(&resources, &security, Span::call_site())
+            .expect_err("undeclared claim should fail");
+        assert!(error.to_string().contains("undeclared `claim.tenant`"));
+        assert!(error.to_string().contains("security.auth.claims.tenant"));
+    }
+
+    #[test]
+    fn rejects_non_integer_explicit_claims_in_row_policies() {
+        let document = parse_document(
+            r#"
+            security: {
+                auth: {
+                    claims: {
+                        tenant_slug: String
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    policies: {
+                        read: { field: "tenant_id", equals: "claim.tenant_slug" }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "tenant_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let error = validate_policy_claim_sources(&resources, &security, Span::call_site())
+            .expect_err("non-integer mapped claim should fail");
+        assert!(error.to_string().contains("tenant_slug"));
+        assert!(error.to_string().contains("currently require `I64` claims"));
     }
 
     #[test]
