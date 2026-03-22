@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use vsra::commands;
 use std::path::PathBuf;
+use vsra::commands;
 
 #[derive(Parser)]
 #[command(name = "vsr")]

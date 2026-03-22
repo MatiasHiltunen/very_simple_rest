@@ -12,6 +12,7 @@ rest_api_from_eon!("tests/fixtures/turso_local_api.eon");
 rest_api_from_eon!("tests/fixtures/turso_local_encrypted_api.eon");
 rest_api_from_eon!("tests/fixtures/tls_api.eon");
 rest_api_from_eon!("tests/fixtures/mapped_api.eon");
+rest_api_from_eon!("tests/fixtures/runtime_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -65,6 +66,13 @@ fn eon_macro_defaults_sqlite_services_to_turso_local_database_engine() {
         blog_api::default_database_url(),
         "sqlite:var/data/blog_api.db?mode=rwc"
     );
+}
+
+#[test]
+fn eon_macro_exposes_runtime_defaults() {
+    let runtime = runtime_api::runtime();
+    assert!(runtime.compression.enabled);
+    assert!(runtime.compression.static_precompressed);
 }
 
 #[test]

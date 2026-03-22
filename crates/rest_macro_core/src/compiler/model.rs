@@ -9,6 +9,7 @@ use syn::{Ident, Type};
 use crate::auth::{AuthEmailProvider, SessionCookieSameSite};
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
+use crate::runtime::RuntimeConfig;
 use crate::security::SecurityConfig;
 use crate::tls::TlsConfig;
 use url::Url;
@@ -403,6 +404,7 @@ pub struct ServiceSpec {
     pub static_mounts: Vec<StaticMountSpec>,
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
+    pub runtime: RuntimeConfig,
     pub security: SecurityConfig,
     pub tls: TlsConfig,
 }
@@ -453,6 +455,7 @@ impl std::fmt::Debug for ServiceSpec {
             .field("static_mounts", &self.static_mounts)
             .field("database", &self.database)
             .field("logging", &self.logging)
+            .field("runtime", &self.runtime)
             .field("security", &self.security)
             .field("tls", &self.tls)
             .finish()
@@ -1146,6 +1149,10 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         }
     }
 
+    Ok(())
+}
+
+pub fn validate_runtime_config(_runtime: &RuntimeConfig, _span: Span) -> syn::Result<()> {
     Ok(())
 }
 

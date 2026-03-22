@@ -1,0 +1,13 @@
+module: "runtime_api"
+runtime: {
+    compression: {
+        enabled: true
+        static_precompressed: true
+    }
+}
+resources: [
+    {
+        name: "RuntimePost"
+        fields: [{ name: "id", type: I64 }]
+    }
+]

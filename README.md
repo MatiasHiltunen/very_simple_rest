@@ -268,6 +268,8 @@ same default name.
 The build command also exports the generated runtime assets next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file,
 `README.md`, `migrations/`, and relative TLS certificate files when they exist at build time.
+When `runtime.compression.static_precompressed = true`, `vsr build` also generates `.br` and
+`.gz` companion files for copied static assets inside that bundle.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and a Swagger UI page at
 `/docs`.
@@ -494,6 +496,31 @@ Generated `.eon` modules expose the compiled settings through `module::security(
 `module::configure_security(...)`. Secrets such as `JWT_SECRET` still belong in the environment,
 not in `.eon`. The current rate-limit implementation is in-memory and process-local, so it is a
 good default for a single binary but not a shared distributed limiter.
+
+## Runtime In `.eon`
+
+`.eon` services can also define service-level runtime defaults:
+
+```eon
+runtime: {
+    compression: {
+        enabled: true
+        static_precompressed: true
+    }
+}
+```
+
+Generated `.eon` modules expose this through `module::runtime()`. The currently parsed runtime
+options are:
+
+- `compression.enabled`: enables dynamic HTTP response compression on emitted servers and can be
+  applied manually with `very_simple_rest::core::runtime::compression_middleware(&module::runtime())`
+- `compression.static_precompressed`: enables `.br` and `.gz` companion-file lookup for generated
+  static mounts, adds `Vary: Accept-Encoding`, and preserves the existing cache policy when an
+  encoded asset is served
+
+`vsr build` now generates those companion files into `<binary>.bundle/` when this flag is enabled.
+`vsr server emit` still copies the source static directories as-is.
 
 ## Migrations
 

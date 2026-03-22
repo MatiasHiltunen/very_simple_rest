@@ -142,7 +142,9 @@ with `--without-auth` because the built-in auth migration owns that table name.
 
 `vsr build` also exports the generated runtime artifacts next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file, `README.md`,
-`migrations/`, and relative TLS certificate files when they exist at build time.
+`migrations/`, and relative TLS certificate files when they exist at build time. When
+`runtime.compression.static_precompressed = true`, `vsr build` also generates `.br` and `.gz`
+companion files for copied static assets inside that bundle.
 
 The generated server fails fast if built-in auth is enabled and `JWT_SECRET` is missing. `vsr
 gen-env` and emitted `.env.example` files still help by generating or surfacing the required env
@@ -323,6 +325,28 @@ This config currently controls:
 
 Secrets such as `JWT_SECRET` remain environment-driven. The current auth rate limiter is
 process-local rather than distributed.
+
+### Runtime In `.eon`
+
+Bare `.eon` services can also define runtime defaults:
+
+```eon
+runtime: {
+    compression: {
+        enabled: true
+        static_precompressed: true
+    }
+}
+```
+
+Generated modules expose this through `module::runtime()`. The parsed runtime options are:
+
+- `compression.enabled`: emitted servers now apply dynamic HTTP response compression from this flag
+- `compression.static_precompressed`: generated static mounts now serve `.br` and `.gz` companion
+  files when present and add `Vary: Accept-Encoding`
+
+`vsr build` now generates those companion files into `<binary>.bundle/` when this flag is enabled.
+`vsr server emit` still copies the source static directories as-is.
 
 ### Create Admin
 

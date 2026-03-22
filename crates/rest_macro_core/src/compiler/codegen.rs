@@ -139,12 +139,18 @@ pub fn expand_service_module(
             let mounts = [
                 #(#static_mounts),*
             ];
-            #runtime_crate::core::static_files::configure_static_mounts(cfg, &mounts);
+            let runtime = runtime();
+            #runtime_crate::core::static_files::configure_static_mounts_with_runtime(
+                cfg,
+                &mounts,
+                &runtime,
+            );
         }
     };
     let database = database_tokens(service, runtime_crate);
     let default_database_url = Literal::string(&default_service_database_url(service));
     let logging = logging_tokens(service, runtime_crate);
+    let runtime = runtime_tokens(service, runtime_crate);
     let security = security_tokens(service, runtime_crate);
     let tls = tls_tokens(service, runtime_crate);
 
@@ -179,6 +185,10 @@ pub fn expand_service_module(
 
             pub fn logging() -> #runtime_crate::core::logging::LoggingConfig {
                 #logging
+            }
+
+            pub fn runtime() -> #runtime_crate::core::runtime::RuntimeConfig {
+                #runtime
             }
 
             pub fn security() -> #runtime_crate::core::security::SecurityConfig {
@@ -267,6 +277,20 @@ fn tls_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
             key_path: #key_path,
             cert_path_env: #cert_path_env,
             key_path_env: #key_path_env,
+        }
+    }
+}
+
+fn runtime_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    let compression_enabled = service.runtime.compression.enabled;
+    let static_precompressed = service.runtime.compression.static_precompressed;
+
+    quote! {
+        #runtime_crate::core::runtime::RuntimeConfig {
+            compression: #runtime_crate::core::runtime::CompressionConfig {
+                enabled: #compression_enabled,
+                static_precompressed: #static_precompressed,
+            },
         }
     }
 }

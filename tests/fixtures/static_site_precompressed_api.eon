@@ -1,0 +1,32 @@
+module: "static_site_precompressed_api"
+runtime: {
+    compression: {
+        enabled: false
+        static_precompressed: true
+    }
+}
+static: {
+    mounts: [
+        {
+            mount: "/assets"
+            dir: "static_site/assets"
+            mode: Directory
+            cache: Immutable
+        }
+        {
+            mount: "/"
+            dir: "static_site"
+            mode: Spa
+            cache: NoStore
+        }
+    ]
+}
+resources: [
+    {
+        name: "Page"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

@@ -17,7 +17,8 @@ use super::model::{
     StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
     validate_field_validations, validate_list_config, validate_logging_config, validate_relations,
-    validate_row_policies, validate_security_config, validate_sql_identifier, validate_tls_config,
+    validate_row_policies, validate_runtime_config, validate_security_config,
+    validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
@@ -28,6 +29,7 @@ use crate::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
     },
     logging::{LogTimestampPrecision, LoggingConfig},
+    runtime::{CompressionConfig, RuntimeConfig},
     security::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
@@ -53,6 +55,8 @@ struct ServiceDocument {
     database: Option<DatabaseDocument>,
     #[serde(default)]
     logging: Option<LoggingDocument>,
+    #[serde(default)]
+    runtime: Option<RuntimeDocument>,
     #[serde(default)]
     tls: Option<TlsDocument>,
     #[serde(default, rename = "static")]
@@ -237,6 +241,20 @@ struct LoggingDocument {
     default_filter: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct RuntimeDocument {
+    #[serde(default)]
+    compression: Option<CompressionDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct CompressionDocument {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    static_precompressed: Option<bool>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -450,7 +468,9 @@ struct FieldMapConfigDocument {
     validate: Option<FieldValidationDocument>,
 }
 
-fn deserialize_resource_documents<'de, D>(deserializer: D) -> Result<Vec<ResourceDocument>, D::Error>
+fn deserialize_resource_documents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ResourceDocument>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -663,9 +683,11 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         span,
     )?;
     let logging = parse_logging_document(document.logging)?;
+    let runtime = parse_runtime_document(document.runtime);
     let tls = parse_tls_document(document.tls)?;
     let security = parse_security_document(document.security, span)?;
     validate_logging_config(&logging, span)?;
+    validate_runtime_config(&runtime, span)?;
     validate_tls_config(&tls, span)?;
     validate_security_config(&security, span)?;
 
@@ -684,6 +706,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             static_mounts,
             database,
             logging,
+            runtime,
             security,
             tls,
         },
@@ -933,6 +956,22 @@ fn parse_logging_document(document: Option<LoggingDocument>) -> syn::Result<Logg
         default_filter: document.default_filter.unwrap_or(defaults.default_filter),
         timestamp,
     })
+}
+
+fn parse_runtime_document(document: Option<RuntimeDocument>) -> RuntimeConfig {
+    let Some(document) = document else {
+        return RuntimeConfig::default();
+    };
+
+    let compression = document
+        .compression
+        .map(|compression| CompressionConfig {
+            enabled: compression.enabled.unwrap_or(false),
+            static_precompressed: compression.static_precompressed.unwrap_or(false),
+        })
+        .unwrap_or_default();
+
+    RuntimeConfig { compression }
 }
 
 fn parse_tls_document(document: Option<TlsDocument>) -> syn::Result<TlsConfig> {
@@ -2009,6 +2048,7 @@ mod tests {
                 )
                 .expect("database config should parse"),
                 logging: LoggingConfig::default(),
+                runtime: RuntimeConfig::default(),
                 security: SecurityConfig::default(),
                 tls: TlsConfig::default(),
             },
@@ -2198,6 +2238,48 @@ mod tests {
                 include_subdomains: true,
             })
         );
+    }
+
+    #[test]
+    fn parses_runtime_config_from_eon() {
+        let document = parse_document(
+            r#"
+            runtime: {
+                compression: {
+                    enabled: true
+                    static_precompressed: true
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let runtime = parse_runtime_document(document.runtime);
+        assert!(runtime.compression.enabled);
+        assert!(runtime.compression.static_precompressed);
+    }
+
+    #[test]
+    fn runtime_config_defaults_to_disabled_compression() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let runtime = parse_runtime_document(document.runtime);
+        assert!(!runtime.compression.enabled);
+        assert!(!runtime.compression.static_precompressed);
     }
 
     #[test]

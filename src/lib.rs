@@ -114,11 +114,16 @@ while keeping the SQL dialect as SQLite. `TursoLocal` can also carry `encryption
 is read from the environment as a hex key for local Turso bootstrap and encrypted local database
 access.
 
-`.eon` services can also define service-level `logging` and `security` defaults. Logging controls
-the emitted server's filter env var, default filter, and timestamp precision through
-`module::logging()`, while `security` covers JSON body limits, CORS, trusted-proxy handling, auth
-rate limits, security headers, and built-in auth token settings through `module::security()` and
-`module::configure_security(...)`. Secrets such as `JWT_SECRET` still belong in the environment.
+`.eon` services can also define service-level `logging`, `runtime`, and `security` defaults.
+Logging controls the emitted server's filter env var, default filter, and timestamp precision
+through `module::logging()`. `runtime` exposes compression defaults through `module::runtime()`;
+emitted servers now apply dynamic HTTP response compression from `runtime.compression.enabled`,
+manual apps can use `core::runtime::compression_middleware(&module::runtime())`, and generated
+static mounts can serve `.br` and `.gz` companion assets when
+`runtime.compression.static_precompressed` is enabled. `security`
+covers JSON body limits, CORS, trusted-proxy handling, auth rate limits, security headers, and
+built-in auth token settings through `module::security()` and `module::configure_security(...)`.
+Secrets such as `JWT_SECRET` still belong in the environment.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
 the `/auth/register` and `/auth/login` routes in a fresh database.
@@ -185,6 +190,10 @@ pub mod logging {
     pub use rest_macro_core::logging::{LogTimestampPrecision, LoggingConfig};
 }
 
+pub mod runtime {
+    pub use rest_macro_core::runtime::{CompressionConfig, RuntimeConfig};
+}
+
 pub mod tls {
     pub use rest_macro_core::tls::{
         DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
@@ -213,6 +222,7 @@ pub mod prelude {
     pub use crate::database;
     pub use crate::db;
     pub use crate::logging;
+    pub use crate::runtime;
     pub use crate::tls;
     pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 

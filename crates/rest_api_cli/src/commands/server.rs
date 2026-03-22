@@ -1,10 +1,13 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use brotli::CompressorWriter;
 use colored::Colorize;
+use flate2::{Compression, write::GzEncoder};
 use rest_macro_core::auth::{
     AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
 };
@@ -22,6 +25,11 @@ const LOCAL_DEP_PATH_ENV: &str = "VSR_LOCAL_DEP_PATH";
 const REPO_GIT_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest.git";
 const CARGO_BUILD_RETRY_DELAYS_MS: &[u64] = &[200, 500, 1_000];
 const BUILD_ARTIFACT_DIR_SUFFIX: &str = ".bundle";
+const PRECOMPRESSED_BROTLI_SUFFIX: &str = ".br";
+const PRECOMPRESSED_GZIP_SUFFIX: &str = ".gz";
+const BROTLI_BUFFER_SIZE: usize = 4096;
+const BROTLI_QUALITY: u32 = 5;
+const BROTLI_LGWIN: u32 = 22;
 
 pub fn emit_server_project(
     input: &Path,
@@ -271,39 +279,30 @@ fn export_generated_runtime_artifacts(
         }
     }
 
+    let service = load_emitted_service_spec(project_dir)?;
+
     let migrations = project_dir.join("migrations");
     if migrations.exists() {
         copy_dir_recursive(&migrations, &artifact_dir.join("migrations"))?;
     }
 
-    copy_generated_static_artifacts(project_dir, &artifact_dir)?;
-    copy_generated_tls_artifacts(project_dir, &artifact_dir)?;
+    copy_generated_static_artifacts(project_dir, &artifact_dir, service.as_ref())?;
+    generate_precompressed_static_artifacts(&artifact_dir, service.as_ref())?;
+    copy_generated_tls_artifacts(project_dir, &artifact_dir, service.as_ref())?;
 
     Ok(artifact_dir)
 }
 
-fn copy_generated_static_artifacts(project_dir: &Path, artifact_dir: &Path) -> Result<()> {
-    let Some(service) = load_emitted_service_spec(project_dir)? else {
+fn copy_generated_static_artifacts(
+    project_dir: &Path,
+    artifact_dir: &Path,
+    service: Option<&ServiceSpec>,
+) -> Result<()> {
+    let Some(service) = service else {
         return Ok(());
     };
 
-    if service.static_mounts.is_empty() {
-        return Ok(());
-    }
-
-    let mut copied = Vec::<PathBuf>::new();
-    let mut mounts = service.static_mounts.iter().collect::<Vec<_>>();
-    mounts.sort_by_key(|mount| Path::new(&mount.source_dir).components().count());
-
-    for mount in mounts {
-        let relative_dir = PathBuf::from(&mount.source_dir);
-        if copied
-            .iter()
-            .any(|existing| relative_dir.starts_with(existing))
-        {
-            continue;
-        }
-
+    for relative_dir in configured_static_relative_dirs(service) {
         let source = project_dir.join(&relative_dir);
         if !source.exists() {
             return Err(Error::Config(format!(
@@ -313,14 +312,42 @@ fn copy_generated_static_artifacts(project_dir: &Path, artifact_dir: &Path) -> R
         }
 
         copy_dir_recursive(&source, &artifact_dir.join(&relative_dir))?;
-        copied.push(relative_dir);
     }
 
     Ok(())
 }
 
-fn copy_generated_tls_artifacts(project_dir: &Path, artifact_dir: &Path) -> Result<()> {
-    let Some(service) = load_emitted_service_spec(project_dir)? else {
+fn generate_precompressed_static_artifacts(
+    artifact_dir: &Path,
+    service: Option<&ServiceSpec>,
+) -> Result<()> {
+    let Some(service) = service else {
+        return Ok(());
+    };
+    if !service.runtime.compression.static_precompressed {
+        return Ok(());
+    }
+
+    for relative_dir in configured_static_relative_dirs(service) {
+        let static_dir = artifact_dir.join(&relative_dir);
+        if !static_dir.exists() {
+            return Err(Error::Config(format!(
+                "runtime bundle is missing copied static dir for compression: {}",
+                static_dir.display()
+            )));
+        }
+        generate_precompressed_static_dir(&static_dir)?;
+    }
+
+    Ok(())
+}
+
+fn copy_generated_tls_artifacts(
+    project_dir: &Path,
+    artifact_dir: &Path,
+    service: Option<&ServiceSpec>,
+) -> Result<()> {
+    let Some(service) = service else {
         return Ok(());
     };
 
@@ -428,11 +455,17 @@ fn copy_configured_static_dirs(
     output_dir: &Path,
     service: &ServiceSpec,
 ) -> Result<()> {
-    if service.static_mounts.is_empty() {
-        return Ok(());
+    let service_root = input.parent().unwrap_or_else(|| Path::new("."));
+    for relative_dir in configured_static_relative_dirs(service) {
+        let source = service_root.join(&relative_dir);
+        let destination = output_dir.join(&relative_dir);
+        copy_dir_recursive(&source, &destination)?;
     }
 
-    let service_root = input.parent().unwrap_or_else(|| Path::new("."));
+    Ok(())
+}
+
+fn configured_static_relative_dirs(service: &ServiceSpec) -> Vec<PathBuf> {
     let mut copied = Vec::<PathBuf>::new();
     let mut mounts = service.static_mounts.iter().collect::<Vec<_>>();
     mounts.sort_by_key(|mount| Path::new(&mount.source_dir).components().count());
@@ -445,14 +478,10 @@ fn copy_configured_static_dirs(
         {
             continue;
         }
-
-        let source = service_root.join(&relative_dir);
-        let destination = output_dir.join(&relative_dir);
-        copy_dir_recursive(&source, &destination)?;
         copied.push(relative_dir);
     }
 
-    Ok(())
+    copied
 }
 
 fn copy_configured_tls_files(input: &Path, output_dir: &Path, service: &ServiceSpec) -> Result<()> {
@@ -539,6 +568,110 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn generate_precompressed_static_dir(source: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        let file_type = entry.file_type().map_err(Error::Io)?;
+        let path = entry.path();
+
+        if file_type.is_symlink() {
+            return Err(Error::Config(format!(
+                "static asset path contains a symlink and cannot be emitted safely: {}",
+                path.display()
+            )));
+        }
+
+        if file_type.is_dir() {
+            generate_precompressed_static_dir(&path)?;
+        } else if file_type.is_file() {
+            generate_precompressed_companions(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn generate_precompressed_companions(path: &Path) -> Result<()> {
+    if !is_precompressible_static_asset(path) {
+        return Ok(());
+    }
+
+    let contents = fs::read(path).map_err(Error::Io)?;
+    write_precompressed_companion_if_missing(
+        path,
+        PRECOMPRESSED_GZIP_SUFFIX,
+        gzip_bytes(&contents)?,
+    )?;
+    write_precompressed_companion_if_missing(
+        path,
+        PRECOMPRESSED_BROTLI_SUFFIX,
+        brotli_bytes(&contents)?,
+    )?;
+    Ok(())
+}
+
+fn write_precompressed_companion_if_missing(
+    path: &Path,
+    suffix: &str,
+    compressed: Vec<u8>,
+) -> Result<()> {
+    let companion = precompressed_path(path, suffix);
+    if companion.exists() {
+        return Ok(());
+    }
+    fs::write(companion, compressed).map_err(Error::Io)
+}
+
+fn precompressed_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut companion = path.as_os_str().to_os_string();
+    companion.push(suffix);
+    PathBuf::from(companion)
+}
+
+fn is_precompressible_static_asset(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "html"
+            | "htm"
+            | "css"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "json"
+            | "svg"
+            | "txt"
+            | "xml"
+            | "map"
+            | "webmanifest"
+            | "wasm"
+    )
+}
+
+fn gzip_bytes(contents: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(contents).map_err(Error::Io)?;
+    encoder.finish().map_err(Error::Io)
+}
+
+fn brotli_bytes(contents: &[u8]) -> Result<Vec<u8>> {
+    let mut compressed = Vec::new();
+    {
+        let mut writer = CompressorWriter::new(
+            &mut compressed,
+            BROTLI_BUFFER_SIZE,
+            BROTLI_QUALITY,
+            BROTLI_LGWIN,
+        );
+        writer.write_all(contents).map_err(Error::Io)?;
+        writer.flush().map_err(Error::Io)?;
+    }
+    Ok(compressed)
 }
 
 fn prepare_output_dir(path: &Path, force: bool) -> Result<()> {
@@ -806,12 +939,15 @@ async fn main() -> std::io::Result<()> {{
         .await
         .map_err(|error| std::io::Error::other(format!("database connection failed: {{error}}")))?;
 
-{tls_setup}    let api_security = {module_name}::security();
+{tls_setup}    let api_runtime = {module_name}::runtime();
+    let api_security = {module_name}::security();
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {{
+        let api_runtime = api_runtime.clone();
         let api_security = api_security.clone();
         App::new()
             .wrap(Logger::default())
+            .wrap(very_simple_rest::core::runtime::compression_middleware(&api_runtime))
             .wrap(very_simple_rest::core::security::cors_middleware(&api_security))
             .wrap(very_simple_rest::core::security::security_headers_middleware(&api_security))
             .route("/openapi.json", web::get().to(openapi_spec))
@@ -1247,9 +1383,12 @@ mod tests {
     use crate::commands::db::database_url_from_service_config;
     use crate::commands::setup::run_setup;
     use crate::commands::tls::generate_self_signed_certificate;
+    use brotli::Decompressor;
+    use flate2::read::GzDecoder;
     use reqwest::blocking::Client;
     use serde_json::{Value, json};
     use std::fs;
+    use std::io::Read;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
@@ -1277,6 +1416,26 @@ mod tests {
 
     fn read_to_string(path: &Path) -> String {
         fs::read_to_string(path).expect("generated file should be readable")
+    }
+
+    fn read_gzip_to_string(path: &Path) -> String {
+        let bytes = fs::read(path).expect("gzip file should be readable");
+        let mut decoder = GzDecoder::new(&bytes[..]);
+        let mut decoded = String::new();
+        decoder
+            .read_to_string(&mut decoded)
+            .expect("gzip file should decode");
+        decoded
+    }
+
+    fn read_brotli_to_string(path: &Path) -> String {
+        let bytes = fs::read(path).expect("brotli file should be readable");
+        let mut decoder = Decompressor::new(&bytes[..], 4096);
+        let mut decoded = String::new();
+        decoder
+            .read_to_string(&mut decoded)
+            .expect("brotli file should decode");
+        decoded
     }
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1499,11 +1658,13 @@ mod tests {
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("rest_api_from_eon!(\"blog_api.eon\")"));
         assert!(main_rs.contains("blog_api::security()"));
+        assert!(main_rs.contains("blog_api::runtime()"));
         assert!(main_rs.contains("resolve_database_config("));
         assert!(main_rs.contains("&blog_api::database()"));
         assert!(main_rs.contains("resolve_database_url("));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
         assert!(main_rs.contains("blog_api::configure"));
+        assert!(main_rs.contains("compression_middleware"));
         assert!(main_rs.contains("cors_middleware"));
         assert!(main_rs.contains("security_headers_middleware"));
         assert!(main_rs.contains(".route(\"/openapi.json\""));
@@ -1824,6 +1985,48 @@ mod tests {
 
         assert!(artifact_dir.join("static_site/index.html").exists());
         assert!(artifact_dir.join("static_site/assets/app.js").exists());
+        assert!(!artifact_dir.join("static_site/index.html.gz").exists());
+        assert!(!artifact_dir.join("static_site/index.html.br").exists());
+        assert!(!artifact_dir.join("static_site/assets/app.js.gz").exists());
+        assert!(!artifact_dir.join("static_site/assets/app.js.br").exists());
+    }
+
+    #[test]
+    fn export_generated_runtime_artifacts_generates_precompressed_static_dirs_into_bundle() {
+        let root = test_root();
+        let project_dir = root.join("project");
+        emit_server_project(
+            &fixture_path("static_site_precompressed_api.eon"),
+            &project_dir,
+            Some("static-site-precompressed-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("server project should emit");
+
+        let output = root.join("dist/static-site-precompressed-server");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+            .expect("runtime artifacts should export");
+
+        let index_html = artifact_dir.join("static_site/index.html");
+        let app_js = artifact_dir.join("static_site/assets/app.js");
+
+        assert_eq!(
+            read_gzip_to_string(&artifact_dir.join("static_site/index.html.gz")),
+            read_to_string(&index_html)
+        );
+        assert_eq!(
+            read_brotli_to_string(&artifact_dir.join("static_site/index.html.br")),
+            read_to_string(&index_html)
+        );
+        assert_eq!(
+            read_gzip_to_string(&artifact_dir.join("static_site/assets/app.js.gz")),
+            read_to_string(&app_js)
+        );
+        assert_eq!(
+            read_brotli_to_string(&artifact_dir.join("static_site/assets/app.js.br")),
+            read_to_string(&app_js)
+        );
     }
 
     #[test]

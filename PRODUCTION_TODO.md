@@ -3,6 +3,8 @@
 This checklist tracks the remaining work needed before `very_simple_rest` should be treated as
 production-grade for public multi-tenant deployments.
 
+For a phased roadmap and a concrete compression MVP design, see `IMPROVEMENT_PLAN.md`.
+
 ## Security
 
 - [ ] Add distributed rate limiting support.
@@ -72,7 +74,7 @@ production-grade for public multi-tenant deployments.
 
 - [ ] Add embedded asset mode for `vsr server build`.
   Current static serving is filesystem-based only.
-- [ ] Add precompressed asset support and cache-safe SPA deployment guidance.
+- [ ] Add cache-safe SPA deployment guidance for generated static bundles.
 - [ ] Add stronger CSP integration for emitted static/SPA servers.
 
 ## Testing And Release Quality
