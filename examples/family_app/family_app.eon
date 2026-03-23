@@ -131,21 +131,27 @@ authorization: {
 resources: {
     Family: {
         roles: {
-            create: "admin"
-            read: "member"
-            update: "member"
-            delete: "admin"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
-                exists: {
-                    resource: "FamilyMember"
-                    where: [
-                        { field: "family_id", equals_field: "id" }
-                        "user_id=user.id"
-                    ]
-                }
+                any_of: [
+                    "owner_user_id=user.id"
+                    {
+                        exists: {
+                            resource: "FamilyMember"
+                            where: [
+                                { field: "family_id", equals_field: "id" }
+                                "user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
             }
+            create: "owner_user_id=user.id"
             update: {
                 any_of: [
                     "owner_user_id=user.id"
@@ -173,10 +179,10 @@ resources: {
     }
     Household: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: { field: "family_id", equals: "claim.active_family_id" }
@@ -204,10 +210,10 @@ resources: {
     }
     FamilyMember: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
@@ -241,10 +247,10 @@ resources: {
     }
     FamilyDelegate: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
@@ -276,10 +282,10 @@ resources: {
     }
     ChildProfile: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
@@ -340,10 +346,10 @@ resources: {
     }
     CarePlan: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
@@ -388,10 +394,10 @@ resources: {
     }
     GuardianNote: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
@@ -439,10 +445,10 @@ resources: {
     }
     HouseholdAnnouncement: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             read: {
@@ -470,10 +476,10 @@ resources: {
     }
     ShoppingItem: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             create: [
@@ -507,10 +513,10 @@ resources: {
     }
     CalendarEvent: {
         roles: {
-            create: "member"
-            read: "member"
-            update: "member"
-            delete: "member"
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
         }
         policies: {
             create: [

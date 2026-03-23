@@ -161,6 +161,11 @@ columns instead, including `String` and `Bool` claim types. Interactive flows pr
 values, and non-interactive flows accept environment variables named `ADMIN_<COLUMN_NAME>`, such
 as `ADMIN_TENANT_ID=1` or `ADMIN_IS_STAFF=true`.
 
+For services that expose the built-in auth admin routes, `PATCH /api/auth/admin/users/{id}` can
+also update configured `security.auth.claims` values on existing users. That makes it possible to
+bootstrap claim-scoped examples and policy-heavy services through HTTP instead of direct SQL
+updates.
+
 ### JWT Secret Configuration
 
 Built-in auth now requires `JWT_SECRET` to be set before the server starts.

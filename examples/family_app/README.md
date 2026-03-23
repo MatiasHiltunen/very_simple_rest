@@ -1,64 +1,62 @@
 # Family App Example
 
-This example is a single `.eon` family-management service that demonstrates the newer
-authorization surface in one place.
+This example is a policy-heavy `.eon` service that exercises the current authorization surface in
+one place.
 
-It is intentionally opinionated:
+It demonstrates:
 
-- family membership drives baseline reads through relation-aware `exists` policies
-- owner and delegate relationships drive sensitive updates through nested `any_of` / `exists`
-- explicit built-in auth claims show typed `I64`, `String`, and `Bool` policy inputs
-- runtime authorization scopes and templates are declared up front in `authorization`
-- hybrid enforcement widens a few shared resources through runtime grants without weakening the
-  static owner-scoped defaults
+- explicit built-in auth claims with `I64`, `String`, and `Bool`
+- relation-aware `exists` policies with nested `any_of` / `all_of`
+- static authorization contracts with scopes, permissions, and templates
+- runtime authorization management at `/authz/runtime`
+- hybrid enforcement on shared resources
 
-## What It Demonstrates
+## Important Shape
 
-- keyed-map `.eon` syntax for both `resources` and `fields`
-- explicit auth claim mapping via `security.auth.claims`
-- relation-aware policy filters with `exists`
-- nested boolean policy groups with `any_of` and `all_of`
-- typed claim filters:
-  - `claim.active_family_id` on family-scoped rows
-  - `claim.preferred_household` on string-matched announcements
-  - `claim.support_agent` on bool-matched care-plan visibility
-- static authorization contracts with `scopes`, `permissions`, and `templates`
-- runtime authorization management API at `/authz/runtime`
-- hybrid enforcement on:
-  - `ShoppingItem` at `Family` scope
-  - `CalendarEvent` at `Household` scope
+This example uses the built-in auth system's normal coarse role, `user`, for resource access.
+Family-specific roles such as guardian, caregiver, and child viewer are modeled through:
 
-## Example Domain
+- `FamilyMember` rows
+- `FamilyDelegate` rows
+- runtime authorization templates
 
-- `Family`, `Household`, and `FamilyMember` model the baseline household graph
-- `FamilyDelegate` models a parent delegating access to another adult
-- `ChildProfile`, `CarePlan`, and `GuardianNote` show more sensitive child-care records
-- `HouseholdAnnouncement` shows string-claim-based audience selection
-- `ShoppingItem` and `CalendarEvent` start owner-scoped, then can widen through runtime grants
+That keeps the example aligned with built-in registration, which creates `user` accounts by
+default.
 
-## Auth Claim Setup
+## Setup
 
-The example assumes the built-in auth `user` table has three extra columns:
+This example now ships checked-in migrations for:
+
+- the auth claim extension
+- runtime authorization assignment tables
+- the service schema
+
+That means `vsr setup` works from this directory without manual SQLite bootstrapping.
+
+```bash
+cd examples/family_app
+
+export JWT_SECRET=replace-me
+export ADMIN_EMAIL=admin@example.com
+export ADMIN_PASSWORD=change-me
+
+vsr setup --non-interactive
+```
+
+The `migrations/` directory intentionally does not bundle `0000_auth.sql` or
+`0001_auth_management.sql`, so `vsr setup` still applies the built-in auth/auth-management
+migrations first and then applies the example-specific migrations afterward.
+
+The auth extension adds these `user` columns:
 
 - `active_family_id INTEGER`
 - `preferred_household TEXT`
 - `is_support_agent INTEGER NOT NULL DEFAULT 0`
 
-Apply the built-in auth schema first, then extend it:
-
-```bash
-mkdir -p examples/family_app/migrations
-mkdir -p examples/family_app/var/data
-
-vsr migrate auth --output examples/family_app/migrations/0000_auth.sql
-sqlite3 examples/family_app/var/data/family_app.db < examples/family_app/migrations/0000_auth.sql
-sqlite3 examples/family_app/var/data/family_app.db < examples/family_app/auth_extension.sql
-```
-
-Those columns are then mapped by `security.auth.claims` in
+Those are mapped by `security.auth.claims` in
 [family_app.eon](/Users/mh/Projects/very_simple_rest/examples/family_app/family_app.eon).
 
-## Generate And Inspect
+## Verify The Policy Model
 
 ```bash
 vsr authz explain --input examples/family_app/family_app.eon
@@ -68,7 +66,7 @@ vsr authz simulate \
   --resource ChildProfile \
   --action update \
   --user-id 7 \
-  --role member \
+  --role user \
   --row family_id=42 \
   --row primary_guardian_user_id=11 \
   --row created_by_user_id=11 \
@@ -78,29 +76,48 @@ vsr authz simulate \
   --input examples/family_app/family_app.eon \
   --resource ShoppingItem \
   --action read \
-  --role member \
+  --role user \
   --row created_by_user_id=11 \
   --row family_id=42 \
   --hybrid-source item \
   --scoped-assignment template:Guardian@Family=42
-
-vsr authz simulate \
-  --input examples/family_app/family_app.eon \
-  --resource CalendarEvent \
-  --action read \
-  --role member \
-  --scope Household=12 \
-  --hybrid-source collection_filter \
-  --scoped-assignment template:HouseholdModerator@Household=12
 ```
+
+## API Bootstrap Flow
+
+The example now supports this real HTTP flow:
+
+1. A normal registered `user` can create a `Family`.
+2. The created row is immediately readable by its owner because `Family.read` now includes
+   `owner_user_id=user.id`.
+3. An admin can then set that user's `active_family_id` through the built-in auth admin API.
+4. After logging in again, that guardian can create `FamilyMember` rows for self and other
+   registered users.
+
+The key admin bootstrap call is:
+
+```bash
+curl -X PATCH http://127.0.0.1:8080/api/auth/admin/users/<guardian_user_id> \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "claims": {
+          "active_family_id": 42,
+          "preferred_household": "helsinki-household"
+        }
+      }'
+```
+
+`PATCH /api/auth/admin/users/{id}` now accepts configured claim updates from
+`security.auth.claims`, so this example can be exercised through HTTP instead of direct SQLite
+edits.
 
 ## Runtime Assignment Flow
 
-The example also includes a static authorization contract suitable for the runtime assignment API:
+The example also includes a static authorization contract suitable for runtime assignment
+management:
 
 ```bash
-vsr migrate authz --output examples/family_app/migrations/0001_authz.sql
-
 vsr --config examples/family_app/family_app.eon \
   --database-url sqlite:examples/family_app/var/data/family_app.db?mode=rwc \
   authz runtime create \
@@ -109,17 +126,26 @@ vsr --config examples/family_app/family_app.eon \
   --created-by-user-id 1
 ```
 
-That flow is what lets `ShoppingItem` and `CalendarEvent` widen through hybrid enforcement while
-their static `.eon` policies stay owner-scoped by default.
+That is what widens `ShoppingItem` and `CalendarEvent` through hybrid enforcement while their
+static `.eon` policies stay owner-scoped by default.
 
-## Current Limits
+## Current Limit
 
-This example is realistic within the current engine, but it also reflects the current limits:
+The example still does not support a pure self-service first-family bootstrap for additional
+members in `.eon` alone.
 
-- family-local role names such as `guardian` or `caregiver` are modeled through runtime templates,
-  not directly inside static row-policy predicates
-- relation-aware policies are still equality-based
-- hybrid collection reads still require one explicit scope per request
+The reason is current engine scope, not a broken example:
 
-That makes the example useful as both a showcase and a map of where the current policy system
-still stops.
+- create policies still do not support relation-aware validation such as
+  “allow `FamilyMember.create` when the posted `family_id` belongs to a `Family` owned by
+  `user.id`”
+- built-in auth claims are now admin-manageable through API, but not self-managed by end users
+
+So today the safe flow is:
+
+1. user creates family
+2. admin sets `active_family_id`
+3. user logs in again
+4. user adds family members
+
+That limitation is now documented explicitly instead of being hidden behind a half-working setup.

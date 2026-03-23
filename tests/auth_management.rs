@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -297,6 +298,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
         .set_json(&auth::UpdateManagedUserInput {
             role: Some("moderator".to_owned()),
             email_verified: Some(true),
+            claims: BTreeMap::new(),
         })
         .to_request();
     let patch_bob_response = test::call_service(&app, patch_bob_request).await;

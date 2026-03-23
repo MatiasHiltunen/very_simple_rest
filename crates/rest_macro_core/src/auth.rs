@@ -587,6 +587,8 @@ pub struct UpdateManagedUserInput {
     pub role: Option<String>,
     #[serde(default)]
     pub email_verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claims: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1526,8 +1528,19 @@ async fn update_managed_user_row(
     db: &DbPool,
     user_id: i64,
     input: &UpdateManagedUserInput,
+    claim_updates: &[ManagedClaimUpdateValue],
     updated_at: &str,
 ) -> Result<bool, sqlx::Error> {
+    let tx = db.begin().await?;
+    let exists = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM user WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(&tx)
+        .await?;
+    if exists == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
     let role = input
         .role
         .as_ref()
@@ -1535,27 +1548,73 @@ async fn update_managed_user_row(
         .filter(|value| !value.is_empty());
     let set_verified = input.email_verified == Some(true);
     let clear_verified = input.email_verified == Some(false);
-    let should_update = role.is_some() || input.email_verified.is_some();
+    let should_update =
+        role.is_some() || input.email_verified.is_some() || !claim_updates.is_empty();
 
-    let result = query(
-        "UPDATE user \
-         SET role = CASE WHEN ? THEN ? ELSE role END, \
-             email_verified_at = CASE WHEN ? THEN ? WHEN ? THEN NULL ELSE email_verified_at END, \
-             updated_at = CASE WHEN ? THEN ? ELSE updated_at END \
-         WHERE id = ?",
-    )
-    .bind(role.is_some())
-    .bind(role.unwrap_or_default())
-    .bind(set_verified)
-    .bind(updated_at)
-    .bind(clear_verified)
-    .bind(should_update)
-    .bind(updated_at)
-    .bind(user_id)
-    .execute(db)
-    .await?;
+    if role.is_some() || input.email_verified.is_some() {
+        query(
+            "UPDATE user \
+             SET role = CASE WHEN ? THEN ? ELSE role END, \
+                 email_verified_at = CASE WHEN ? THEN ? WHEN ? THEN NULL ELSE email_verified_at END, \
+                 updated_at = CASE WHEN ? THEN ? ELSE updated_at END \
+             WHERE id = ?",
+        )
+        .bind(role.is_some())
+        .bind(role.unwrap_or_default())
+        .bind(set_verified)
+        .bind(updated_at)
+        .bind(clear_verified)
+        .bind(should_update)
+        .bind(updated_at)
+        .bind(user_id)
+        .execute(&tx)
+        .await?;
+    }
 
-    Ok(result.rows_affected() != 0)
+    if !claim_updates.is_empty() {
+        let backend = detect_auth_backend(db).await?;
+        let user_columns = user_table_columns(db, backend).await?;
+        let has_updated_at = user_columns
+            .iter()
+            .any(|column| column.column_name == "updated_at");
+
+        for update in claim_updates {
+            let sql = if has_updated_at {
+                format!(
+                    "UPDATE {} SET {} = {}, {} = {} WHERE {} = {}",
+                    backend.quote_ident("user"),
+                    backend.quote_ident(update.column_name()),
+                    placeholder_for_backend(backend, 1),
+                    backend.quote_ident("updated_at"),
+                    placeholder_for_backend(backend, 2),
+                    backend.quote_ident("id"),
+                    placeholder_for_backend(backend, 3),
+                )
+            } else {
+                format!(
+                    "UPDATE {} SET {} = {} WHERE {} = {}",
+                    backend.quote_ident("user"),
+                    backend.quote_ident(update.column_name()),
+                    placeholder_for_backend(backend, 1),
+                    backend.quote_ident("id"),
+                    placeholder_for_backend(backend, 2),
+                )
+            };
+            let mut update_query = query(&sql);
+            update_query = match update {
+                ManagedClaimUpdateValue::I64 { value, .. } => update_query.bind(*value),
+                ManagedClaimUpdateValue::String { value, .. } => update_query.bind(value),
+                ManagedClaimUpdateValue::Bool { value, .. } => update_query.bind(*value),
+            };
+            if has_updated_at {
+                update_query = update_query.bind(updated_at);
+            }
+            update_query.bind(user_id).execute(&tx).await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(should_update)
 }
 
 fn configured_auth_email(settings: &AuthSettings) -> Result<&AuthEmailSettings, HttpResponse> {
@@ -1780,6 +1839,35 @@ impl AdminClaimValue {
             Self::I64 { column_name, value } => format!("{column_name}={value}"),
             Self::String { column_name, value } => format!("{column_name}={value}"),
             Self::Bool { column_name, value } => format!("{column_name}={value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ManagedClaimUpdateValue {
+    I64 {
+        claim_name: String,
+        column_name: String,
+        value: Option<i64>,
+    },
+    String {
+        claim_name: String,
+        column_name: String,
+        value: Option<String>,
+    },
+    Bool {
+        claim_name: String,
+        column_name: String,
+        value: Option<bool>,
+    },
+}
+
+impl ManagedClaimUpdateValue {
+    fn column_name(&self) -> &str {
+        match self {
+            Self::I64 { column_name, .. }
+            | Self::String { column_name, .. }
+            | Self::Bool { column_name, .. } => column_name,
         }
     }
 }
@@ -2138,6 +2226,128 @@ fn parse_bool_claim(raw: &str) -> Option<bool> {
         "0" | "false" | "no" | "n" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn resolve_managed_claim_updates(
+    user_columns: &[UserColumnMetadata],
+    configured_claims: &BTreeMap<String, AuthClaimMapping>,
+    provided_claims: &BTreeMap<String, Value>,
+) -> Result<Vec<ManagedClaimUpdateValue>, HttpResponse> {
+    if provided_claims.is_empty() {
+        return Ok(Vec::new());
+    }
+    if configured_claims.is_empty() {
+        return Err(errors::bad_request(
+            "claims_not_configured",
+            "This service does not declare `security.auth.claims`, so managed claim updates are unavailable",
+        ));
+    }
+
+    let configured_columns = configured_admin_claim_columns(user_columns, configured_claims)
+        .map_err(|error| errors::validation_error("claims", error))?;
+    let columns_by_claim = configured_columns
+        .into_iter()
+        .filter_map(|column| column.claim_name.clone().map(|name| (name, column)))
+        .collect::<HashMap<_, _>>();
+
+    let mut updates = Vec::new();
+    for (claim_name, raw_value) in provided_claims {
+        let field = format!("claims.{claim_name}");
+        let Some(column) = columns_by_claim.get(claim_name.as_str()) else {
+            return Err(errors::validation_error(
+                field,
+                format!(
+                    "Unknown managed auth claim `{claim_name}`. Declare it under `security.auth.claims` first"
+                ),
+            ));
+        };
+
+        let update = match (column.ty, raw_value) {
+            (AuthClaimType::I64, Value::Null) => {
+                if column.required {
+                    return Err(errors::validation_error(
+                        field,
+                        format!("Managed auth claim `{claim_name}` cannot be null"),
+                    ));
+                }
+                ManagedClaimUpdateValue::I64 {
+                    claim_name: claim_name.clone(),
+                    column_name: column.column_name.clone(),
+                    value: None,
+                }
+            }
+            (AuthClaimType::I64, Value::Number(number)) => {
+                let Some(value) = number.as_i64() else {
+                    return Err(errors::validation_error(
+                        field,
+                        format!("Managed auth claim `{claim_name}` must be an integer"),
+                    ));
+                };
+                ManagedClaimUpdateValue::I64 {
+                    claim_name: claim_name.clone(),
+                    column_name: column.column_name.clone(),
+                    value: Some(value),
+                }
+            }
+            (AuthClaimType::String, Value::Null) => {
+                if column.required {
+                    return Err(errors::validation_error(
+                        field,
+                        format!("Managed auth claim `{claim_name}` cannot be null"),
+                    ));
+                }
+                ManagedClaimUpdateValue::String {
+                    claim_name: claim_name.clone(),
+                    column_name: column.column_name.clone(),
+                    value: None,
+                }
+            }
+            (AuthClaimType::String, Value::String(value)) => ManagedClaimUpdateValue::String {
+                claim_name: claim_name.clone(),
+                column_name: column.column_name.clone(),
+                value: Some(value.clone()),
+            },
+            (AuthClaimType::Bool, Value::Null) => {
+                if column.required {
+                    return Err(errors::validation_error(
+                        field,
+                        format!("Managed auth claim `{claim_name}` cannot be null"),
+                    ));
+                }
+                ManagedClaimUpdateValue::Bool {
+                    claim_name: claim_name.clone(),
+                    column_name: column.column_name.clone(),
+                    value: None,
+                }
+            }
+            (AuthClaimType::Bool, Value::Bool(value)) => ManagedClaimUpdateValue::Bool {
+                claim_name: claim_name.clone(),
+                column_name: column.column_name.clone(),
+                value: Some(*value),
+            },
+            (AuthClaimType::I64, _) => {
+                return Err(errors::validation_error(
+                    field,
+                    format!("Managed auth claim `{claim_name}` must be an integer"),
+                ));
+            }
+            (AuthClaimType::String, _) => {
+                return Err(errors::validation_error(
+                    field,
+                    format!("Managed auth claim `{claim_name}` must be a string"),
+                ));
+            }
+            (AuthClaimType::Bool, _) => {
+                return Err(errors::validation_error(
+                    field,
+                    format!("Managed auth claim `{claim_name}` must be a boolean"),
+                ));
+            }
+        };
+        updates.push(update);
+    }
+
+    Ok(updates)
 }
 
 fn placeholder_for_backend(backend: AuthDbBackend, index: usize) -> String {
@@ -2755,12 +2965,6 @@ pub async fn update_managed_user(
     if !user_is_admin(&user) {
         return errors::forbidden("forbidden", "Admin role is required");
     }
-    if input.role.is_none() && input.email_verified.is_none() {
-        return errors::bad_request(
-            "missing_changes",
-            "Provide `role` and/or `email_verified` to update the user",
-        );
-    }
     if input
         .role
         .as_deref()
@@ -2772,7 +2976,29 @@ pub async fn update_managed_user(
     let user_id = path.into_inner();
     let now = now_timestamp_string();
     let settings = auth_settings_from_request(&req);
-    match update_managed_user_row(db.get_ref(), user_id, &input, &now).await {
+    let claim_updates = if input.claims.is_empty() {
+        Vec::new()
+    } else {
+        let backend = match detect_auth_backend(db.get_ref()).await {
+            Ok(backend) => backend,
+            Err(_) => return errors::internal_error("Database error"),
+        };
+        let user_columns = match user_table_columns(db.get_ref(), backend).await {
+            Ok(columns) => columns,
+            Err(_) => return errors::internal_error("Database error"),
+        };
+        match resolve_managed_claim_updates(&user_columns, &settings.claims, &input.claims) {
+            Ok(updates) => updates,
+            Err(response) => return response,
+        }
+    };
+    if input.role.is_none() && input.email_verified.is_none() && claim_updates.is_empty() {
+        return errors::bad_request(
+            "missing_changes",
+            "Provide `role`, `email_verified`, and/or `claims` to update the user",
+        );
+    }
+    match update_managed_user_row(db.get_ref(), user_id, &input, &claim_updates, &now).await {
         Ok(true) => {
             match load_authenticated_user_by_id_with_settings(db.get_ref(), user_id, &settings)
                 .await
