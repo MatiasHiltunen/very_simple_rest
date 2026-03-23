@@ -1,0 +1,545 @@
+module: "family_app_api"
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/family_app.db"
+    }
+}
+security: {
+    auth: {
+        issuer: "family_app_api"
+        audience: "family_app_clients"
+        require_email_verification: false
+        claims: {
+            active_family_id: { column: "active_family_id", type: I64 }
+            preferred_household: String
+            support_agent: { column: "is_support_agent", type: Bool }
+        }
+        session_cookie: {
+            secure: false
+        }
+    }
+}
+authorization: {
+    management_api: {
+        mount: "/authz/runtime"
+    }
+    scopes: {
+        Family: {
+            description: "Family-wide scope for shared household access"
+        }
+        Household: {
+            parent: "Family"
+            description: "Sub-scope for one household inside a blended family"
+        }
+    }
+    permissions: {
+        FamilyRead: {
+            actions: ["Read"]
+            resources: [
+                "Family"
+                "Household"
+                "FamilyMember"
+                "FamilyDelegate"
+                "ChildProfile"
+                "CarePlan"
+                "GuardianNote"
+                "HouseholdAnnouncement"
+                "ShoppingItem"
+                "CalendarEvent"
+            ]
+            scopes: ["Family"]
+        }
+        FamilyContribute: {
+            actions: ["Create", "Read", "Update", "Delete"]
+            resources: ["ShoppingItem"]
+            scopes: ["Family"]
+        }
+        ChildCareRead: {
+            actions: ["Read"]
+            resources: ["CarePlan", "GuardianNote"]
+            scopes: ["Family"]
+        }
+        ChildCareManage: {
+            actions: ["Create", "Read", "Update", "Delete"]
+            resources: ["CarePlan", "GuardianNote"]
+            scopes: ["Family"]
+        }
+        HouseholdModerate: {
+            actions: ["Read", "Update", "Delete"]
+            resources: ["CalendarEvent"]
+            scopes: ["Household"]
+        }
+    }
+    templates: {
+        Guardian: {
+            permissions: [
+                "FamilyRead"
+                "FamilyContribute"
+                "ChildCareRead"
+                "ChildCareManage"
+            ]
+            scopes: ["Family"]
+        }
+        Caregiver: {
+            permissions: [
+                "FamilyRead"
+                "FamilyContribute"
+                "ChildCareRead"
+            ]
+            scopes: ["Family"]
+        }
+        ChildViewer: {
+            permissions: ["FamilyRead"]
+            scopes: ["Family"]
+        }
+        HouseholdModerator: {
+            permissions: [
+                "FamilyRead"
+                "HouseholdModerate"
+            ]
+            scopes: ["Household"]
+        }
+    }
+    hybrid_enforcement: {
+        resources: {
+            ShoppingItem: {
+                scope: "Family"
+                scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
+                    create_payload: true
+                }
+                actions: ["Create", "Read", "Update", "Delete"]
+            }
+            CalendarEvent: {
+                scope: "Household"
+                scope_field: "household_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
+                    create_payload: false
+                }
+                actions: ["Read", "Update", "Delete"]
+            }
+        }
+    }
+}
+resources: {
+    Family: {
+        roles: {
+            create: "admin"
+            read: "member"
+            update: "member"
+            delete: "admin"
+        }
+        policies: {
+            read: {
+                exists: {
+                    resource: "FamilyMember"
+                    where: [
+                        { field: "family_id", equals_field: "id" }
+                        "user_id=user.id"
+                    ]
+                }
+            }
+            update: {
+                any_of: [
+                    "owner_user_id=user.id"
+                    {
+                        exists: {
+                            resource: "FamilyDelegate"
+                            where: [
+                                { field: "family_id", equals_field: "id" }
+                                { field: "primary_user_id", equals_field: "owner_user_id" }
+                                "delegate_user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
+            delete: "owner_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            owner_user_id: I64
+            slug: String
+            name: String
+            timezone: String
+        }
+    }
+    Household: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: { field: "family_id", equals: "claim.active_family_id" }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "created_by_user_id=user.id"
+            ]
+            update: "created_by_user_id=user.id"
+            delete: "created_by_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            created_by_user_id: I64
+            slug: String
+            label: String
+            timezone: String
+        }
+    }
+    FamilyMember: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: {
+                any_of: [
+                    "user_id=user.id"
+                    { field: "family_id", equals: "claim.active_family_id" }
+                ]
+            }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "created_by_user_id=user.id"
+            ]
+            update: "created_by_user_id=user.id"
+            delete: "created_by_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            user_id: I64
+            created_by_user_id: I64
+            role_label: String
+            display_name: String
+            is_child: Bool
+        }
+    }
+    FamilyDelegate: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: {
+                any_of: [
+                    "primary_user_id=user.id"
+                    "delegate_user_id=user.id"
+                ]
+            }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "primary_user_id=user.id"
+            ]
+            update: "primary_user_id=user.id"
+            delete: "primary_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            primary_user_id: I64
+            delegate_user_id: I64
+            label: String
+        }
+    }
+    ChildProfile: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: {
+                exists: {
+                    resource: "FamilyMember"
+                    where: [
+                        { field: "family_id", equals_field: "family_id" }
+                        "user_id=user.id"
+                    ]
+                }
+            }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "created_by_user_id=user.id"
+            ]
+            update: {
+                any_of: [
+                    "created_by_user_id=user.id"
+                    {
+                        exists: {
+                            resource: "FamilyDelegate"
+                            where: [
+                                { field: "family_id", equals_field: "family_id" }
+                                { field: "primary_user_id", equals_field: "primary_guardian_user_id" }
+                                "delegate_user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
+            delete: "created_by_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            household_id: {
+                type: I64
+                relation: {
+                    references: "household.id"
+                    nested_route: true
+                }
+            }
+            created_by_user_id: I64
+            primary_guardian_user_id: I64
+            display_name: String
+            school: String
+            pickup_code: {
+                type: String
+                nullable: true
+            }
+        }
+    }
+    CarePlan: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: {
+                any_of: [
+                    "author_user_id=user.id"
+                    {
+                        all_of: [
+                            { field: "family_id", equals: "claim.active_family_id" }
+                            { field: "support_visible", equals: "claim.support_agent" }
+                        ]
+                    }
+                ]
+            }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "author_user_id=user.id"
+            ]
+            update: "author_user_id=user.id"
+            delete: "author_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            child_profile_id: {
+                type: I64
+                relation: {
+                    references: "child_profile.id"
+                    nested_route: true
+                }
+            }
+            author_user_id: I64
+            title: String
+            support_visible: Bool
+            notes: String
+        }
+    }
+    GuardianNote: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: {
+                any_of: [
+                    "author_user_id=user.id"
+                    {
+                        exists: {
+                            resource: "FamilyDelegate"
+                            where: [
+                                { field: "family_id", equals_field: "family_id" }
+                                { field: "primary_user_id", equals_field: "author_user_id" }
+                                "delegate_user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "author_user_id=user.id"
+            ]
+            update: "author_user_id=user.id"
+            delete: "author_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            child_profile_id: {
+                type: I64
+                relation: {
+                    references: "child_profile.id"
+                    nested_route: true
+                }
+            }
+            author_user_id: I64
+            category: String
+            body: String
+        }
+    }
+    HouseholdAnnouncement: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            read: {
+                all_of: [
+                    { field: "family_id", equals: "claim.active_family_id" }
+                    { field: "household_slug", equals: "claim.preferred_household" }
+                ]
+            }
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                { field: "household_slug", value: "claim.preferred_household" }
+                "author_user_id=user.id"
+            ]
+            update: "author_user_id=user.id"
+            delete: "author_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: I64
+            author_user_id: I64
+            household_slug: String
+            title: String
+            body: String
+        }
+    }
+    ShoppingItem: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "created_by_user_id=user.id"
+            ]
+            read: "created_by_user_id=user.id"
+            update: "created_by_user_id=user.id"
+            delete: "created_by_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            household_id: {
+                type: I64
+                relation: {
+                    references: "household.id"
+                    nested_route: true
+                }
+            }
+            created_by_user_id: I64
+            title: String
+            completed: Bool
+        }
+    }
+    CalendarEvent: {
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            create: [
+                { field: "family_id", value: "claim.active_family_id" }
+                "created_by_user_id=user.id"
+            ]
+            read: "created_by_user_id=user.id"
+            update: "created_by_user_id=user.id"
+            delete: "created_by_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                }
+            }
+            household_id: {
+                type: I64
+                relation: {
+                    references: "household.id"
+                    nested_route: true
+                }
+            }
+            created_by_user_id: I64
+            title: String
+            starts_at: DateTime
+            ends_at: DateTime
+        }
+    }
+}
