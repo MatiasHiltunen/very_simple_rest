@@ -374,27 +374,115 @@ predicates against explicit related rows. `--scope` accepts `ScopeName=value`, a
 Stored runtime assignments now include `created_at`, `created_by_user_id`, and optional
 `expires_at`; expired assignments are ignored by runtime simulation and runtime access checks.
 
+The same persisted runtime-assignment layer is also manageable directly from the CLI:
+
+```bash
+vsr --database-url sqlite:app.db?mode=rwc authz runtime list --user-id 7
+vsr --database-url sqlite:app.db?mode=rwc authz runtime create --config api.eon --user-id 7 --assignment template:FamilyMember@Family=42 --created-by-user-id 1
+vsr --database-url sqlite:app.db?mode=rwc authz runtime evaluate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42
+vsr --database-url sqlite:app.db?mode=rwc authz runtime revoke --id runtime.assignment.123 --actor-user-id 1 --reason suspended
+vsr --database-url sqlite:app.db?mode=rwc authz runtime renew --id runtime.assignment.123 --expires-at 2026-03-31T00:00:00Z --actor-user-id 1 --reason restored
+vsr --database-url sqlite:app.db?mode=rwc authz runtime history --user-id 7
+vsr --database-url sqlite:app.db?mode=rwc authz runtime delete --id runtime.assignment.123 --actor-user-id 1 --reason cleanup
+```
+
+`authz runtime create` validates the target permission/template and scope against the static
+`.eon` authorization contract before persisting the assignment. `authz runtime evaluate` loads
+stored assignments for the user and evaluates only the runtime grant layer; it does not run the
+static CRUD role and row-policy checks. `authz runtime revoke` deactivates an assignment by
+setting its expiration to the current time without deleting its record, and `authz runtime renew`
+sets a new future expiration. `authz runtime history` reads the append-only assignment event log,
+which now records `created`, `revoked`, `renewed`, and `deleted` events with actor and optional
+reason data.
+
 `.eon` also now accepts an optional static `authorization` block for declaring scopes,
-permissions, and templates. That block is contract-only in this slice: it is validated, included
-in the compiled authorization model, and shown by `vsr authz explain`, but it does not change
-request enforcement yet.
+permissions, templates, and an opt-in runtime authorization management API. The scope /
+permission / template part is still contract-only by itself: it is validated, included in the
+compiled authorization model, and shown by `vsr authz explain`. Request-time behavior changes
+only when you explicitly opt into either the management API or hybrid enforcement. The management
+API can be enabled explicitly:
+
+```eon
+authorization: {
+    management_api: {
+        mount: "/authz/runtime"
+    }
+    scopes: {
+        Family: {}
+    }
+    permissions: {
+        FamilyRead: {
+            actions: ["Read"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+}
+```
+
+For generated item routes, `.eon` can also opt into the first hybrid-enforcement slice:
+
+```eon
+authorization: {
+    scopes: {
+        Family: {}
+    }
+    permissions: {
+        FamilyManage: {
+            actions: ["Create", "Read", "Update", "Delete"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+    hybrid_enforcement: {
+        resources: {
+            ScopedDoc: {
+                scope: "Family"
+                scope_field: "family_id"
+                actions: ["Create", "Read", "Update", "Delete"]
+            }
+        }
+    }
+}
+```
+
+In this mode, generated `GET /resource/{id}`, `PUT /resource/{id}`, and `DELETE /resource/{id}`
+still apply the normal static role checks first. If the static row-policy path denies the row,
+the handler can then derive a runtime scope from the stored row, such as `Family=42` from
+`family_id`, and consult persisted runtime scoped grants through `AuthorizationRuntime`.
+
+Generated `POST /resource` can also opt into the first hybrid create slice, but only when the
+configured `scope_field` is already claim-controlled in `policies.create`. In that case, the
+generated create DTO exposes that one field as an optional fallback, and the handler uses it only
+when the claim is missing and a matching runtime scoped `Create` grant exists for the supplied
+scope.
+
+This is additive only: it does not bypass static role requirements, it does not affect
+collection/list routes, and it does not let runtime grants override unrelated create assignments.
 
 Generated `.eon` modules expose the compiled authorization view through `module::authorization()`
 so manual apps or emitted servers can build custom policy-management and diagnostics surfaces on
-top of the same typed model. They also expose `module::authorization_runtime(db)`, and
-`module::configure(...)` now registers that runtime service as Actix app data so custom handlers
-can load, persist, and simulate runtime scoped assignments without duplicating storage logic.
-When you want a basic admin-only runtime assignment API, call
-`module::configure_authorization_management(cfg, db)` to mount:
+top of the same typed model. They also expose `module::authorization_runtime(db)` and
+`module::authorization_management()`. `module::configure(...)` now registers the runtime service
+as Actix app data so custom handlers can load, persist, and simulate runtime scoped assignments
+without duplicating storage logic. When `authorization.management_api` is enabled in `.eon`,
+generated `configure(...)` also mounts the runtime management routes automatically at the
+configured mount. You can still call `module::configure_authorization_management(cfg, db)` for an
+explicit mount using the same configured path:
 
-- `POST /authz/runtime/evaluate`
-- `GET /authz/runtime/assignments?user_id=...`
-- `POST /authz/runtime/assignments`
-- `DELETE /authz/runtime/assignments/{id}`
+- `POST <mount>/evaluate`
+- `GET <mount>/assignments?user_id=...`
+- `GET <mount>/assignment-events?user_id=...`
+- `POST <mount>/assignments`
+- `POST <mount>/assignments/{id}/revoke`
+- `POST <mount>/assignments/{id}/renew`
+- `DELETE <mount>/assignments/{id}`
 
 Those endpoints manage persisted scoped permission/template assignments through the shared
 authorization runtime. Assignment records include `created_at`, `created_by_user_id`, and an
-optional `expires_at`, and expired assignments are ignored by runtime evaluation. `POST
+optional `expires_at`, and expired assignments are ignored by runtime evaluation. The append-only
+assignment event stream records `created`, `revoked`, `renewed`, and `deleted` events with actor
+metadata, and is available from `GET <mount>/assignment-events?user_id=...`. `POST
 /authz/runtime/evaluate` checks which persisted scoped permissions apply to an explicit
 `resource + action + scope` for the current user or an admin-selected user. It still does not
 run static role checks, row policies, or create-time assignments, so CRUD enforcement remains
@@ -752,7 +840,8 @@ This makes the generated handlers:
 
 In `.eon`, `read`, `update`, and `delete` filters can also use boolean composition. A single
 policy entry stays as-is, arrays imply `all_of`, and you can nest `all_of`, `any_of`, `not`, and
-`exists` explicitly. `create` policies remain flat assignments and do not support boolean groups.
+`exists` explicitly. Leaf filters support equality plus `is_null` / `is_not_null` checks on
+nullable fields. `create` policies remain flat assignments and do not support boolean groups.
 
 ```eon
 policies: {
@@ -760,6 +849,7 @@ policies: {
     read: {
         any_of: [
             "owner_id=user.id"
+            { field: "archived_at", is_null: true }
             {
                 all_of: [
                     "tenant_id=claim.tenant_id"
@@ -775,7 +865,7 @@ policies: {
     update: {
         any_of: [
             "owner_id=user.id"
-            "tenant_id=claim.tenant_id"
+            { field: "archived_at", is_not_null: true }
         ]
     }
     delete: "Owner:owner_id"
@@ -807,8 +897,8 @@ That shape is intentionally narrow for now:
 - `exists` targets another declared resource
 - `where` accepts leaf comparisons plus nested `all_of`, `any_of`, and `not` groups
 - list entries inside `where` still imply `AND`
-- each condition is either `related_field = user.id` / `claim.<name>` or
-  `related_field = row.<current_field>`
+- each condition is either `related_field = user.id` / `claim.<name>`,
+  `related_field = row.<current_field>`, or a nullable `IS NULL` / `IS NOT NULL` check
 
 When you use the built-in auth routes, `/auth/login` now emits numeric claims automatically from
 the `user` row. You can also make those claim names explicit in `.eon`:

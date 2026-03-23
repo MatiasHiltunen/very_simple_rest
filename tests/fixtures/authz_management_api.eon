@@ -10,6 +10,9 @@ security: {
     }
 }
 authorization: {
+    management_api: {
+        mount: "/authz/runtime"
+    }
     scopes: {
         Family: {
             description: "Family tenancy scope"

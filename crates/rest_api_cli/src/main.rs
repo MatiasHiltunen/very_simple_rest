@@ -505,6 +505,208 @@ enum AuthzCommand {
         #[arg(long)]
         force: bool,
     },
+
+    /// Manage persisted runtime authorization assignments and evaluate runtime grants
+    Runtime {
+        #[command(subcommand)]
+        command: AuthzRuntimeCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthzRuntimeCommand {
+    /// List persisted runtime authorization assignments for a user
+    List {
+        /// User id to inspect
+        #[arg(long, value_name = "ID")]
+        user_id: i64,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Create one persisted runtime authorization assignment
+    Create {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// User id that will receive the assignment
+        #[arg(long, value_name = "ID")]
+        user_id: i64,
+
+        /// Assignment in `permission:Name@Scope=value` or `template:Name@Scope=value` form
+        #[arg(long = "assignment", value_name = "ASSIGNMENT")]
+        assignment: String,
+
+        /// Optional actor user id recorded as the creator
+        #[arg(long, value_name = "ID")]
+        created_by_user_id: Option<i64>,
+
+        /// Optional RFC3339 expiration timestamp
+        #[arg(long, value_name = "RFC3339")]
+        expires_at: Option<String>,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Delete one persisted runtime authorization assignment by id
+    Delete {
+        /// Assignment id to delete
+        #[arg(long, value_name = "ID")]
+        id: String,
+
+        /// Optional actor user id recorded in the delete event
+        #[arg(long, value_name = "ID")]
+        actor_user_id: Option<i64>,
+
+        /// Optional delete reason stored in assignment history
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Revoke one persisted runtime authorization assignment without deleting its history
+    Revoke {
+        /// Assignment id to revoke
+        #[arg(long, value_name = "ID")]
+        id: String,
+
+        /// Optional actor user id recorded in the revoke event
+        #[arg(long, value_name = "ID")]
+        actor_user_id: Option<i64>,
+
+        /// Optional revoke reason stored in assignment history
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Renew one persisted runtime authorization assignment by setting a new future expiration
+    Renew {
+        /// Assignment id to renew
+        #[arg(long, value_name = "ID")]
+        id: String,
+
+        /// New RFC3339 expiration timestamp
+        #[arg(long, value_name = "RFC3339")]
+        expires_at: String,
+
+        /// Optional actor user id recorded in the renew event
+        #[arg(long, value_name = "ID")]
+        actor_user_id: Option<i64>,
+
+        /// Optional renewal reason stored in assignment history
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// List persisted runtime authorization assignment history for a user
+    History {
+        /// User id to inspect
+        #[arg(long, value_name = "ID")]
+        user_id: i64,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Evaluate persisted runtime grants for one user/resource/action/scope tuple
+    Evaluate {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Resource name
+        #[arg(long, value_name = "NAME")]
+        resource: String,
+
+        /// Action to evaluate
+        #[arg(long, value_enum)]
+        action: AuthzActionArg,
+
+        /// User id to evaluate
+        #[arg(long, value_name = "ID")]
+        user_id: i64,
+
+        /// Scope in ScopeName=value form
+        #[arg(long, value_name = "SCOPE=VALUE")]
+        scope: String,
+
+        /// Optional output file; defaults to stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: AuthzExplainFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -867,20 +1069,7 @@ async fn main() -> Result<()> {
                 commands::authz::simulate_authorization(
                     &input,
                     resource.as_deref(),
-                    match action {
-                        AuthzActionArg::Read => {
-                            rest_macro_core::authorization::AuthorizationAction::Read
-                        }
-                        AuthzActionArg::Create => {
-                            rest_macro_core::authorization::AuthorizationAction::Create
-                        }
-                        AuthzActionArg::Update => {
-                            rest_macro_core::authorization::AuthorizationAction::Update
-                        }
-                        AuthzActionArg::Delete => {
-                            rest_macro_core::authorization::AuthorizationAction::Delete
-                        }
-                    },
+                    authz_action(*action),
                     *user_id,
                     roles,
                     claims,
@@ -901,6 +1090,223 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
+            AuthzCommand::Runtime { command } => match command {
+                AuthzRuntimeCommand::List {
+                    user_id,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Listing runtime authorization assignments..."
+                            .green()
+                            .bold()
+                    );
+                    commands::authz::list_runtime_assignments(
+                        *user_id,
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+                AuthzRuntimeCommand::Create {
+                    input,
+                    user_id,
+                    assignment,
+                    created_by_user_id,
+                    expires_at,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Creating runtime authorization assignment..."
+                            .green()
+                            .bold()
+                    );
+                    let input = input
+                        .clone()
+                        .or_else(|| config_path.clone())
+                        .ok_or_else(|| {
+                            anyhow!("authz runtime create requires --input or --config")
+                        })?;
+                    commands::authz::create_runtime_assignment(
+                        &input,
+                        *user_id,
+                        assignment,
+                        expires_at.as_deref(),
+                        *created_by_user_id,
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+                AuthzRuntimeCommand::Delete {
+                    id,
+                    actor_user_id,
+                    reason,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Deleting runtime authorization assignment..."
+                            .green()
+                            .bold()
+                    );
+                    commands::authz::delete_runtime_assignment(
+                        id,
+                        *actor_user_id,
+                        reason.as_deref(),
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+                AuthzRuntimeCommand::Revoke {
+                    id,
+                    actor_user_id,
+                    reason,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Revoking runtime authorization assignment..."
+                            .green()
+                            .bold()
+                    );
+                    commands::authz::revoke_runtime_assignment(
+                        id,
+                        *actor_user_id,
+                        reason.as_deref(),
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+                AuthzRuntimeCommand::Renew {
+                    id,
+                    expires_at,
+                    actor_user_id,
+                    reason,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Renewing runtime authorization assignment..."
+                            .green()
+                            .bold()
+                    );
+                    commands::authz::renew_runtime_assignment(
+                        id,
+                        expires_at,
+                        *actor_user_id,
+                        reason.as_deref(),
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+                AuthzRuntimeCommand::History {
+                    user_id,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Listing runtime authorization assignment history..."
+                            .green()
+                            .bold()
+                    );
+                    commands::authz::list_runtime_assignment_history(
+                        *user_id,
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+                AuthzRuntimeCommand::Evaluate {
+                    input,
+                    resource,
+                    action,
+                    user_id,
+                    scope,
+                    output,
+                    format,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Evaluating runtime authorization access...".green().bold()
+                    );
+                    let input = input
+                        .clone()
+                        .or_else(|| config_path.clone())
+                        .ok_or_else(|| {
+                            anyhow!("authz runtime evaluate requires --input or --config")
+                        })?;
+                    commands::authz::evaluate_runtime_access(
+                        &input,
+                        resource,
+                        authz_action(*action),
+                        *user_id,
+                        scope,
+                        &database_url,
+                        config_path.as_deref(),
+                        output.as_deref(),
+                        match format {
+                            AuthzExplainFormatArg::Text => commands::authz::OutputFormat::Text,
+                            AuthzExplainFormatArg::Json => commands::authz::OutputFormat::Json,
+                        },
+                        *force,
+                    )
+                    .await?;
+                }
+            },
         },
 
         Commands::Tls { command } => match command {
@@ -926,6 +1332,15 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn authz_action(action: AuthzActionArg) -> rest_macro_core::authorization::AuthorizationAction {
+    match action {
+        AuthzActionArg::Read => rest_macro_core::authorization::AuthorizationAction::Read,
+        AuthzActionArg::Create => rest_macro_core::authorization::AuthorizationAction::Create,
+        AuthzActionArg::Update => rest_macro_core::authorization::AuthorizationAction::Update,
+        AuthzActionArg::Delete => rest_macro_core::authorization::AuthorizationAction::Delete,
+    }
 }
 
 fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {

@@ -65,7 +65,6 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
     let app = test::init_service(App::new().service(scope("/api").configure(|cfg| {
         auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
         authz_management_api::configure(cfg, pool.clone());
-        authz_management_api::configure_authorization_management(cfg, pool.clone());
         cfg.route(
                     "/runtime-docs/{family_id}",
                     web::get().to(
@@ -225,6 +224,26 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0], created);
 
+    let event_list_request = test::TestRequest::get()
+        .uri(&format!(
+            "/api/authz/runtime/assignment-events?user_id={member_user_id}"
+        ))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .to_request();
+    let events_after_create: Vec<
+        very_simple_rest::authorization::AuthorizationScopedAssignmentEventRecord,
+    > = test::call_and_read_body_json(&app, event_list_request).await;
+    assert_eq!(events_after_create.len(), 1);
+    assert_eq!(events_after_create[0].assignment_id, created.id);
+    assert_eq!(
+        events_after_create[0].event,
+        very_simple_rest::authorization::AuthorizationScopedAssignmentEventKind::Created
+    );
+    assert_eq!(events_after_create[0].actor_user_id, Some(admin_user_id));
+
     let evaluate_request = test::TestRequest::post()
         .uri("/api/authz/runtime/evaluate")
         .insert_header((
@@ -269,6 +288,100 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
         member_runtime_denied_response.status(),
         StatusCode::FORBIDDEN
     );
+
+    let revoke_request = test::TestRequest::post()
+        .uri(&format!(
+            "/api/authz/runtime/assignments/{}/revoke",
+            created.id
+        ))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(json!({
+            "reason": "suspend"
+        }))
+        .to_request();
+    let revoke_response = test::call_service(&app, revoke_request).await;
+    assert_eq!(revoke_response.status(), StatusCode::OK);
+    let revoked: very_simple_rest::authorization::AuthorizationScopedAssignmentRecord =
+        test::read_body_json(revoke_response).await;
+    assert_eq!(revoked.id, created.id);
+    assert!(revoked.expires_at.is_some());
+
+    let evaluate_after_revoke_request = test::TestRequest::post()
+        .uri("/api/authz/runtime/evaluate")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(json!({
+            "resource": "ScopedDoc",
+            "action": "read",
+            "scope": { "scope": "Family", "value": "42" },
+            "user_id": member_user_id
+        }))
+        .to_request();
+    let evaluated_after_revoke: very_simple_rest::authorization::AuthorizationRuntimeAccessResult =
+        test::call_and_read_body_json(&app, evaluate_after_revoke_request).await;
+    assert!(!evaluated_after_revoke.allowed);
+
+    let member_runtime_after_revoke_request = test::TestRequest::get()
+        .uri("/api/runtime-docs/42")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", member_token_response.token.as_str()),
+        ))
+        .to_request();
+    let member_runtime_after_revoke_response =
+        test::call_service(&app, member_runtime_after_revoke_request).await;
+    assert_eq!(
+        member_runtime_after_revoke_response.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let renewed_expires_at =
+        (Utc::now() + Duration::days(2)).to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+    let renew_request = test::TestRequest::post()
+        .uri(&format!(
+            "/api/authz/runtime/assignments/{}/renew",
+            created.id
+        ))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(json!({
+            "expires_at": renewed_expires_at,
+            "reason": "restore"
+        }))
+        .to_request();
+    let renew_response = test::call_service(&app, renew_request).await;
+    assert_eq!(renew_response.status(), StatusCode::OK);
+    let renewed: very_simple_rest::authorization::AuthorizationScopedAssignmentRecord =
+        test::read_body_json(renew_response).await;
+    assert_eq!(renewed.id, created.id);
+    assert_eq!(
+        renewed.expires_at.as_deref(),
+        Some(renewed_expires_at.as_str())
+    );
+
+    let evaluate_after_renew_request = test::TestRequest::post()
+        .uri("/api/authz/runtime/evaluate")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(json!({
+            "resource": "ScopedDoc",
+            "action": "read",
+            "scope": { "scope": "Family", "value": "42" },
+            "user_id": member_user_id
+        }))
+        .to_request();
+    let evaluated_after_renew: very_simple_rest::authorization::AuthorizationRuntimeAccessResult =
+        test::call_and_read_body_json(&app, evaluate_after_renew_request).await;
+    assert!(evaluated_after_renew.allowed);
 
     let self_assignment_request = test::TestRequest::post()
         .uri("/api/authz/runtime/assignments")
@@ -360,6 +473,41 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
         very_simple_rest::authorization::AuthorizationScopedAssignmentRecord,
     > = test::call_and_read_body_json(&app, list_after_delete_request).await;
     assert!(listed_after_delete.is_empty());
+
+    let event_list_after_delete_request = test::TestRequest::get()
+        .uri(&format!(
+            "/api/authz/runtime/assignment-events?user_id={member_user_id}"
+        ))
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .to_request();
+    let events_after_delete: Vec<
+        very_simple_rest::authorization::AuthorizationScopedAssignmentEventRecord,
+    > = test::call_and_read_body_json(&app, event_list_after_delete_request).await;
+    assert_eq!(events_after_delete.len(), 4);
+    assert_eq!(events_after_delete[1].assignment_id, created.id);
+    assert_eq!(
+        events_after_delete[1].event,
+        very_simple_rest::authorization::AuthorizationScopedAssignmentEventKind::Revoked
+    );
+    assert_eq!(events_after_delete[1].actor_user_id, Some(admin_user_id));
+    assert_eq!(events_after_delete[1].reason.as_deref(), Some("suspend"));
+    assert_eq!(events_after_delete[2].assignment_id, created.id);
+    assert_eq!(
+        events_after_delete[2].event,
+        very_simple_rest::authorization::AuthorizationScopedAssignmentEventKind::Renewed
+    );
+    assert_eq!(events_after_delete[2].actor_user_id, Some(admin_user_id));
+    assert_eq!(events_after_delete[2].reason.as_deref(), Some("restore"));
+    assert_eq!(events_after_delete[3].assignment_id, created.id);
+    assert_eq!(
+        events_after_delete[3].event,
+        very_simple_rest::authorization::AuthorizationScopedAssignmentEventKind::Deleted
+    );
+    assert_eq!(events_after_delete[3].actor_user_id, Some(admin_user_id));
+    assert_eq!(events_after_delete[3].reason, None);
 
     unsafe {
         std::env::remove_var("JWT_SECRET");

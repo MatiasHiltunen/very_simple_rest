@@ -113,6 +113,7 @@ expired assignments are ignored by runtime evaluation.
 
 - Implemented for static `.eon` row filters: `all_of`, `any_of`, and `not`
 - Implemented for static `.eon` row filters: typed equality against `I64`, `String`, and `Bool` claims
+- Implemented for static `.eon` row filters: nullable `is_null` / `is_not_null` checks on optional fields
 - Current shorthand syntax still compiles as sugar
 - Remaining: enums, nullable values, richer operators beyond equality, and parity outside static row filters
 
@@ -121,6 +122,11 @@ expired assignments are ignored by runtime evaluation.
 - Add scope types and scoped role/permission assignments
 - Support runtime-managed memberships and assignments
 - Preserve `.eon` as the static contract
+- Implemented: opt-in `authorization.management_api` config now lets generated modules and emitted servers auto-mount the runtime authorization management endpoints from `.eon`
+- Implemented: persisted runtime assignments now also write append-only create/delete history, exposed through both the generated management API and `vsr authz runtime history`
+- Implemented: persisted runtime assignments now support non-destructive revoke/renew lifecycle updates with append-only history, generated management endpoints, and matching `vsr authz runtime revoke|renew` commands
+- Implemented: the first hybrid enforcement mode now lets generated item-scoped `Read`/`Update`/`Delete` handlers fall back to persisted runtime grants after static row-policy denial, using explicit `.eon` scope derivation from a configured row field
+- Implemented: hybrid `Create` can now use the same runtime grant layer as an additive fallback, but only when the configured `scope_field` is already claim-controlled in `policies.create`
 
 ### Phase 5: Relation-Aware Authorization
 

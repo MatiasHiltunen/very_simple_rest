@@ -14,6 +14,8 @@ use crate::{
 };
 
 pub const AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE: &str = "authz_scoped_assignment";
+pub const AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE: &str = "authz_scoped_assignment_event";
+pub const DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT: &str = "/authz/runtime";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +30,8 @@ pub enum AuthorizationAction {
 #[serde(rename_all = "snake_case")]
 pub enum AuthorizationOperator {
     Equals,
+    IsNull,
+    IsNotNull,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -38,6 +42,70 @@ pub struct AuthorizationContract {
     pub permissions: Vec<AuthorizationPermission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub templates: Vec<AuthorizationTemplate>,
+    #[serde(
+        default,
+        skip_serializing_if = "AuthorizationHybridEnforcementConfig::is_empty"
+    )]
+    pub hybrid_enforcement: AuthorizationHybridEnforcementConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "AuthorizationManagementApiConfig::is_default"
+    )]
+    pub management_api: AuthorizationManagementApiConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationManagementApiConfig {
+    pub enabled: bool,
+    pub mount: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationHybridEnforcementConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<AuthorizationHybridResource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationHybridResource {
+    pub resource: String,
+    pub scope: String,
+    pub scope_field: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<AuthorizationAction>,
+}
+
+impl Default for AuthorizationManagementApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mount: DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT.to_owned(),
+        }
+    }
+}
+
+impl AuthorizationManagementApiConfig {
+    pub fn is_default(config: &Self) -> bool {
+        !config.enabled && config.mount == DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT
+    }
+}
+
+impl AuthorizationHybridEnforcementConfig {
+    pub fn is_empty(config: &Self) -> bool {
+        config.resources.is_empty()
+    }
+
+    pub fn resource(&self, name: &str) -> Option<&AuthorizationHybridResource> {
+        self.resources
+            .iter()
+            .find(|resource| resource.resource == name)
+    }
+}
+
+impl AuthorizationHybridResource {
+    pub fn supports_action(&self, action: AuthorizationAction) -> bool {
+        self.actions.iter().any(|candidate| *candidate == action)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -106,6 +174,32 @@ pub struct AuthorizationScopedAssignmentRecord {
     pub expires_at: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationScopedAssignmentEventKind {
+    Created,
+    Revoked,
+    Renewed,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationScopedAssignmentEventRecord {
+    pub id: String,
+    pub assignment_id: String,
+    pub user_id: i64,
+    pub event: AuthorizationScopedAssignmentEventKind,
+    pub occurred_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_user_id: Option<i64>,
+    pub target: AuthorizationScopedAssignmentTarget,
+    pub scope: AuthorizationScopeBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthorizationScopedAssignmentCreateInput {
     pub user_id: i64,
@@ -113,6 +207,19 @@ pub struct AuthorizationScopedAssignmentCreateInput {
     pub scope: AuthorizationScopeBinding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationScopedAssignmentRevokeInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationScopedAssignmentRenewInput {
+    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -210,7 +317,8 @@ pub struct AuthorizationMatch {
     pub id: String,
     pub field: String,
     pub operator: AuthorizationOperator,
-    pub source: AuthorizationValueSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AuthorizationValueSource>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -319,7 +427,8 @@ pub enum AuthorizationConditionTrace {
         id: String,
         field: String,
         operator: AuthorizationOperator,
-        source: AuthorizationValueSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<AuthorizationValueSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         row_value: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -387,7 +496,9 @@ pub enum AuthorizationExistsConditionTrace {
     Match {
         id: String,
         field: String,
-        source: AuthorizationValueSource,
+        operator: AuthorizationOperator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<AuthorizationValueSource>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_value: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -474,7 +585,11 @@ impl AuthorizationCondition {
 
 impl AuthorizationContract {
     pub fn is_empty(&self) -> bool {
-        self.scopes.is_empty() && self.permissions.is_empty() && self.templates.is_empty()
+        self.scopes.is_empty()
+            && self.permissions.is_empty()
+            && self.templates.is_empty()
+            && self.hybrid_enforcement.resources.is_empty()
+            && !self.management_api.enabled
     }
 
     pub fn scope(&self, name: &str) -> Option<&AuthorizationScope> {
@@ -489,6 +604,10 @@ impl AuthorizationContract {
 
     pub fn template(&self, name: &str) -> Option<&AuthorizationTemplate> {
         self.templates.iter().find(|template| template.name == name)
+    }
+
+    pub fn hybrid_resource(&self, name: &str) -> Option<&AuthorizationHybridResource> {
+        self.hybrid_enforcement.resource(name)
     }
 }
 
@@ -546,6 +665,26 @@ impl AuthorizationScopedAssignmentRecord {
             id: self.id.clone(),
             target: self.target.clone(),
             scope: self.scope.clone(),
+        }
+    }
+
+    pub fn event(
+        &self,
+        event: AuthorizationScopedAssignmentEventKind,
+        actor_user_id: Option<i64>,
+        reason: Option<String>,
+    ) -> AuthorizationScopedAssignmentEventRecord {
+        AuthorizationScopedAssignmentEventRecord {
+            id: new_runtime_assignment_event_id(),
+            assignment_id: self.id.clone(),
+            user_id: self.user_id,
+            event,
+            occurred_at: runtime_assignment_timestamp_now(),
+            actor_user_id,
+            target: self.target.clone(),
+            scope: self.scope.clone(),
+            expires_at: self.expires_at.clone(),
+            reason,
         }
     }
 }
@@ -998,6 +1137,13 @@ impl AuthorizationRuntime {
         list_runtime_assignments_for_user(&self.pool, user_id).await
     }
 
+    pub async fn list_assignment_events_for_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<AuthorizationScopedAssignmentEventRecord>, String> {
+        list_runtime_assignment_events_for_user(&self.pool, user_id).await
+    }
+
     pub async fn create_assignment(
         &self,
         assignment: AuthorizationScopedAssignmentRecord,
@@ -1005,12 +1151,48 @@ impl AuthorizationRuntime {
         assignment.validate()?;
         self.model
             .validate_scoped_assignments(std::slice::from_ref(&assignment.scoped_assignment()))?;
-        insert_runtime_assignment(&self.pool, &assignment).await?;
+        create_runtime_assignment_with_audit(&self.pool, assignment.clone()).await?;
         Ok(assignment)
     }
 
     pub async fn delete_assignment(&self, assignment_id: &str) -> Result<bool, String> {
-        delete_runtime_assignment(&self.pool, assignment_id).await
+        self.delete_assignment_with_audit(assignment_id, None, None)
+            .await
+    }
+
+    pub async fn delete_assignment_with_audit(
+        &self,
+        assignment_id: &str,
+        actor_user_id: Option<i64>,
+        reason: Option<String>,
+    ) -> Result<bool, String> {
+        delete_runtime_assignment_with_audit(&self.pool, assignment_id, actor_user_id, reason).await
+    }
+
+    pub async fn revoke_assignment_with_audit(
+        &self,
+        assignment_id: &str,
+        actor_user_id: Option<i64>,
+        reason: Option<String>,
+    ) -> Result<Option<AuthorizationScopedAssignmentRecord>, String> {
+        revoke_runtime_assignment_with_audit(&self.pool, assignment_id, actor_user_id, reason).await
+    }
+
+    pub async fn renew_assignment_with_audit(
+        &self,
+        assignment_id: &str,
+        expires_at: &str,
+        actor_user_id: Option<i64>,
+        reason: Option<String>,
+    ) -> Result<Option<AuthorizationScopedAssignmentRecord>, String> {
+        renew_runtime_assignment_with_audit(
+            &self.pool,
+            assignment_id,
+            expires_at,
+            actor_user_id,
+            reason,
+        )
+        .await
     }
 
     pub async fn simulate_resource_action_with_user_assignments(
@@ -1060,11 +1242,15 @@ impl AuthorizationRuntime {
 }
 
 impl AuthorizationPermission {
-    fn supports_scope(&self, scope_name: &str) -> bool {
+    pub(crate) fn supports_scope(&self, scope_name: &str) -> bool {
         self.scopes.is_empty() || self.scopes.iter().any(|scope| scope == scope_name)
     }
 
-    fn matches_resource_action(&self, resource: &str, action: AuthorizationAction) -> bool {
+    pub(crate) fn matches_resource_action(
+        &self,
+        resource: &str,
+        action: AuthorizationAction,
+    ) -> bool {
         self.resources.iter().any(|candidate| candidate == resource)
             && self.actions.iter().any(|candidate| *candidate == action)
     }
@@ -1113,6 +1299,14 @@ pub fn authorization_runtime_migration_sql(backend: AuthDbBackend) -> String {
         AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "expires_at TEXT",
         AuthDbBackend::Mysql => "expires_at VARCHAR(64)",
     };
+    let event_kind_column = match backend {
+        AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "event_kind TEXT NOT NULL",
+        AuthDbBackend::Mysql => "event_kind VARCHAR(32) NOT NULL",
+    };
+    let reason_column = match backend {
+        AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "reason TEXT",
+        AuthDbBackend::Mysql => "reason TEXT",
+    };
 
     format!(
         "-- Generated by very_simple_rest for runtime authorization assignments.\n\n\
@@ -1128,43 +1322,96 @@ pub fn authorization_runtime_migration_sql(backend: AuthDbBackend) -> String {
              {scope_value_column}\n\
          );\n\n\
          CREATE INDEX idx_{table}_user ON {table} (user_id);\n\
-         CREATE INDEX idx_{table}_scope ON {table} (scope_name, scope_value);\n",
+         CREATE INDEX idx_{table}_scope ON {table} (scope_name, scope_value);\n\n\
+         CREATE TABLE {event_table} (\n\
+             {id_column},\n\
+             assignment_id TEXT NOT NULL,\n\
+             {user_id_column},\n\
+             {created_by_user_id_column},\n\
+             {created_at_column},\n\
+             {event_kind_column},\n\
+             {target_kind_column},\n\
+             {target_name_column},\n\
+             {scope_name_column},\n\
+             {scope_value_column},\n\
+             {expires_at_column},\n\
+             {reason_column}\n\
+         );\n\n\
+         CREATE INDEX idx_{event_table}_user ON {event_table} (user_id, created_at);\n\
+         CREATE INDEX idx_{event_table}_assignment ON {event_table} (assignment_id, created_at);\n",
         table = AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
+        event_table = AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE,
     )
 }
 
 pub fn authorization_management_routes(cfg: &mut web::ServiceConfig) {
+    authorization_management_routes_at(cfg, DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT);
+}
+
+pub fn authorization_management_routes_at(cfg: &mut web::ServiceConfig, mount: &str) {
     errors::configure_extractor_errors(cfg);
+    let mount = normalize_management_mount(mount);
     cfg.route(
-        "/authz/runtime/evaluate",
+        &format!("{mount}/evaluate"),
         web::post().to(evaluate_runtime_access_endpoint),
     );
     cfg.route(
-        "/authz/runtime/assignments",
+        &format!("{mount}/assignments"),
         web::get().to(list_runtime_assignments_endpoint),
     );
     cfg.route(
-        "/authz/runtime/assignments",
+        &format!("{mount}/assignments"),
         web::post().to(create_runtime_assignment_endpoint),
     );
     cfg.route(
-        "/authz/runtime/assignments/{id}",
+        &format!("{mount}/assignment-events"),
+        web::get().to(list_runtime_assignment_events_endpoint),
+    );
+    cfg.route(
+        &format!("{mount}/assignments/{{id}}"),
         web::delete().to(delete_runtime_assignment_endpoint),
     );
+    cfg.route(
+        &format!("{mount}/assignments/{{id}}/revoke"),
+        web::post().to(revoke_runtime_assignment_endpoint),
+    );
+    cfg.route(
+        &format!("{mount}/assignments/{{id}}/renew"),
+        web::post().to(renew_runtime_assignment_endpoint),
+    );
+}
+
+fn normalize_management_mount(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT.to_owned();
+    }
+    if trimmed.ends_with('/') {
+        trimmed.trim_end_matches('/').to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 pub fn new_runtime_assignment_id() -> String {
     format!("runtime.assignment.{}", Uuid::new_v4())
 }
 
+pub fn new_runtime_assignment_event_id() -> String {
+    format!("runtime.assignment_event.{}", Uuid::new_v4())
+}
+
 pub fn runtime_assignment_timestamp_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Micros, false)
 }
 
-pub async fn insert_runtime_assignment(
-    pool: &DbPool,
+pub async fn insert_runtime_assignment<E>(
+    executor: &E,
     assignment: &AuthorizationScopedAssignmentRecord,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
     let (target_kind, target_name) = runtime_assignment_target_parts(&assignment.target);
     query(&format!(
         "INSERT INTO {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} \
@@ -1180,9 +1427,89 @@ pub async fn insert_runtime_assignment(
     .bind(target_name)
     .bind(&assignment.scope.scope)
     .bind(&assignment.scope.value)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(runtime_assignment_storage_error)?;
+    Ok(())
+}
+
+async fn update_runtime_assignment<E>(
+    executor: &E,
+    assignment: &AuthorizationScopedAssignmentRecord,
+) -> Result<(), String>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
+    query(&format!(
+        "UPDATE {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} SET expires_at = ? WHERE id = ?"
+    ))
+    .bind(&assignment.expires_at)
+    .bind(&assignment.id)
+    .execute(executor)
+    .await
+    .map_err(runtime_assignment_storage_error)?;
+    Ok(())
+}
+
+pub async fn insert_runtime_assignment_event<E>(
+    executor: &E,
+    event: &AuthorizationScopedAssignmentEventRecord,
+) -> Result<(), String>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
+    let (target_kind, target_name) = runtime_assignment_target_parts(&event.target);
+    query(&format!(
+        "INSERT INTO {AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE} \
+         (id, assignment_id, user_id, created_by_user_id, created_at, event_kind, target_kind, target_name, scope_name, scope_value, expires_at, reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ))
+    .bind(&event.id)
+    .bind(&event.assignment_id)
+    .bind(event.user_id)
+    .bind(event.actor_user_id)
+    .bind(&event.occurred_at)
+    .bind(runtime_assignment_event_kind_label(event.event))
+    .bind(target_kind)
+    .bind(target_name)
+    .bind(&event.scope.scope)
+    .bind(&event.scope.value)
+    .bind(&event.expires_at)
+    .bind(&event.reason)
+    .execute(executor)
+    .await
+    .map_err(runtime_assignment_storage_error)?;
+    Ok(())
+}
+
+pub async fn create_runtime_assignment_with_audit(
+    pool: &DbPool,
+    assignment: AuthorizationScopedAssignmentRecord,
+) -> Result<(), String> {
+    let tx = pool
+        .begin()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    if let Err(error) = insert_runtime_assignment(&tx, &assignment).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = insert_runtime_assignment_event(
+        &tx,
+        &assignment.event(
+            AuthorizationScopedAssignmentEventKind::Created,
+            assignment.created_by_user_id,
+            None,
+        ),
+    )
+    .await
+    {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    tx.commit()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
     Ok(())
 }
 
@@ -1204,15 +1531,174 @@ pub async fn list_runtime_assignments_for_user(
         .collect()
 }
 
-pub async fn delete_runtime_assignment(pool: &DbPool, assignment_id: &str) -> Result<bool, String> {
-    let result = query(&format!(
+pub async fn list_runtime_assignment_events_for_user(
+    pool: &DbPool,
+    user_id: i64,
+) -> Result<Vec<AuthorizationScopedAssignmentEventRecord>, String> {
+    let rows = query(&format!(
+        "SELECT id, assignment_id, user_id, created_by_user_id, created_at, event_kind, target_kind, target_name, scope_name, scope_value, expires_at, reason \
+         FROM {AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE} WHERE user_id = ? ORDER BY created_at, id"
+    ))
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(runtime_assignment_storage_error)?;
+
+    rows.into_iter()
+        .map(runtime_assignment_event_record_from_row)
+        .collect()
+}
+
+pub async fn delete_runtime_assignment_with_audit(
+    pool: &DbPool,
+    assignment_id: &str,
+    actor_user_id: Option<i64>,
+    reason: Option<String>,
+) -> Result<bool, String> {
+    let tx = pool
+        .begin()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    let Some(assignment) = fetch_runtime_assignment_by_id(&tx, assignment_id).await? else {
+        let _ = tx.rollback().await;
+        return Ok(false);
+    };
+    if let Err(error) = query(&format!(
         "DELETE FROM {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} WHERE id = ?"
     ))
     .bind(assignment_id)
-    .execute(pool)
+    .execute(&tx)
     .await
-    .map_err(runtime_assignment_storage_error)?;
-    Ok(result.rows_affected() != 0)
+    .map_err(runtime_assignment_storage_error)
+    {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = insert_runtime_assignment_event(
+        &tx,
+        &assignment.event(
+            AuthorizationScopedAssignmentEventKind::Deleted,
+            actor_user_id,
+            reason,
+        ),
+    )
+    .await
+    {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    tx.commit()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    Ok(true)
+}
+
+pub async fn revoke_runtime_assignment_with_audit(
+    pool: &DbPool,
+    assignment_id: &str,
+    actor_user_id: Option<i64>,
+    reason: Option<String>,
+) -> Result<Option<AuthorizationScopedAssignmentRecord>, String> {
+    let tx = pool
+        .begin()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    let Some(mut assignment) = fetch_runtime_assignment_by_id(&tx, assignment_id).await? else {
+        let _ = tx.rollback().await;
+        return Ok(None);
+    };
+    let revoked_at = runtime_assignment_timestamp_now();
+    let revoked_at_timestamp = parse_runtime_assignment_timestamp("revoked_at", &revoked_at)?;
+    if !assignment.is_active_at(&revoked_at_timestamp)? {
+        let _ = tx.rollback().await;
+        return Err(format!(
+            "runtime assignment `{assignment_id}` is already inactive"
+        ));
+    }
+    assignment.expires_at = Some(revoked_at);
+    assignment.validate()?;
+    if let Err(error) = update_runtime_assignment(&tx, &assignment).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = insert_runtime_assignment_event(
+        &tx,
+        &assignment.event(
+            AuthorizationScopedAssignmentEventKind::Revoked,
+            actor_user_id,
+            reason,
+        ),
+    )
+    .await
+    {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    tx.commit()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    Ok(Some(assignment))
+}
+
+pub async fn renew_runtime_assignment_with_audit(
+    pool: &DbPool,
+    assignment_id: &str,
+    expires_at: &str,
+    actor_user_id: Option<i64>,
+    reason: Option<String>,
+) -> Result<Option<AuthorizationScopedAssignmentRecord>, String> {
+    let renewed_at = Utc::now();
+    let next_expires_at = parse_runtime_assignment_timestamp("expires_at", expires_at)?
+        .to_rfc3339_opts(SecondsFormat::Micros, false);
+    let next_expires_at_timestamp =
+        parse_runtime_assignment_timestamp("expires_at", &next_expires_at)?;
+    if next_expires_at_timestamp <= renewed_at {
+        return Err(
+            "runtime assignment `expires_at` must be later than the current time".to_owned(),
+        );
+    }
+
+    let tx = pool
+        .begin()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    let Some(mut assignment) = fetch_runtime_assignment_by_id(&tx, assignment_id).await? else {
+        let _ = tx.rollback().await;
+        return Ok(None);
+    };
+    if let Some(current_expires_at) = assignment.expires_at.as_deref() {
+        let current_expires_at =
+            parse_runtime_assignment_timestamp("expires_at", current_expires_at)?;
+        if current_expires_at >= next_expires_at_timestamp {
+            let _ = tx.rollback().await;
+            return Err(format!(
+                "runtime assignment `{assignment_id}` already expires at or after `{next_expires_at}`"
+            ));
+        }
+    }
+    assignment.expires_at = Some(next_expires_at);
+    assignment.validate()?;
+    if let Err(error) = update_runtime_assignment(&tx, &assignment).await {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = insert_runtime_assignment_event(
+        &tx,
+        &assignment.event(
+            AuthorizationScopedAssignmentEventKind::Renewed,
+            actor_user_id,
+            reason,
+        ),
+    )
+    .await
+    {
+        let _ = tx.rollback().await;
+        return Err(error);
+    }
+    tx.commit()
+        .await
+        .map_err(runtime_assignment_storage_error)?;
+    Ok(Some(assignment))
 }
 
 pub async fn load_runtime_assignments_for_user(
@@ -1379,14 +1865,20 @@ fn evaluate_condition_trace(
     match condition {
         AuthorizationCondition::Match(rule) => {
             let row_value = input.row.get(&rule.field).cloned();
-            let source_value = resolve_source_value(&rule.source, input);
+            let source_value = rule
+                .source
+                .as_ref()
+                .and_then(|source| resolve_source_value(source, input));
             let missing_field = row_value.is_none();
-            let missing_source = source_value.is_none();
+            let missing_source =
+                matches!(rule.operator, AuthorizationOperator::Equals) && source_value.is_none();
             let indeterminate = missing_field || missing_source;
             let matched = match (&row_value, &source_value, rule.operator) {
                 (Some(row_value), Some(source_value), AuthorizationOperator::Equals) => {
                     row_value == source_value
                 }
+                (Some(Value::Null), _, AuthorizationOperator::IsNull) => true,
+                (Some(value), _, AuthorizationOperator::IsNotNull) => !value.is_null(),
                 _ => false,
             };
             AuthorizationConditionTrace::Match {
@@ -1645,15 +2137,29 @@ fn evaluate_exists_condition_trace(
 ) -> AuthorizationExistsConditionTrace {
     match condition {
         AuthorizationExistsCondition::Match(rule) => {
-            let source_value = resolve_source_value(&rule.source, input);
+            let source_value = rule
+                .source
+                .as_ref()
+                .and_then(|source| resolve_source_value(source, input));
             let related_value = related_row.and_then(|row| row.get(&rule.field).cloned());
-            let missing_source = source_value.is_none();
+            let missing_source =
+                matches!(rule.operator, AuthorizationOperator::Equals) && source_value.is_none();
             let missing_related_field = related_row.is_some() && related_value.is_none();
             let indeterminate = missing_source || missing_related_field;
-            let matched = !indeterminate && related_value.as_ref() == source_value.as_ref();
+            let matched = match (&related_value, &source_value, rule.operator) {
+                (Some(related_value), Some(source_value), AuthorizationOperator::Equals) => {
+                    !indeterminate && related_value == source_value
+                }
+                (Some(Value::Null), _, AuthorizationOperator::IsNull) => !indeterminate,
+                (Some(value), _, AuthorizationOperator::IsNotNull) => {
+                    !indeterminate && !value.is_null()
+                }
+                _ => false,
+            };
             AuthorizationExistsConditionTrace::Match {
                 id: rule.id.clone(),
                 field: rule.field.clone(),
+                operator: rule.operator,
                 source: rule.source.clone(),
                 source_value,
                 related_value,
@@ -1795,12 +2301,38 @@ fn parse_stored_scoped_assignment_target(
     }
 }
 
+fn parse_runtime_assignment_event_kind(
+    assignment_id: &str,
+    value: &str,
+) -> Result<AuthorizationScopedAssignmentEventKind, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "created" => Ok(AuthorizationScopedAssignmentEventKind::Created),
+        "revoked" => Ok(AuthorizationScopedAssignmentEventKind::Revoked),
+        "renewed" => Ok(AuthorizationScopedAssignmentEventKind::Renewed),
+        "deleted" => Ok(AuthorizationScopedAssignmentEventKind::Deleted),
+        _ => Err(format!(
+            "runtime assignment event `{assignment_id}` has unsupported event kind `{value}`"
+        )),
+    }
+}
+
 fn runtime_assignment_target_parts(
     target: &AuthorizationScopedAssignmentTarget,
 ) -> (&'static str, &str) {
     match target {
         AuthorizationScopedAssignmentTarget::Permission { name } => ("permission", name.as_str()),
         AuthorizationScopedAssignmentTarget::Template { name } => ("template", name.as_str()),
+    }
+}
+
+fn runtime_assignment_event_kind_label(
+    kind: AuthorizationScopedAssignmentEventKind,
+) -> &'static str {
+    match kind {
+        AuthorizationScopedAssignmentEventKind::Created => "created",
+        AuthorizationScopedAssignmentEventKind::Revoked => "revoked",
+        AuthorizationScopedAssignmentEventKind::Renewed => "renewed",
+        AuthorizationScopedAssignmentEventKind::Deleted => "deleted",
     }
 }
 
@@ -1856,14 +2388,82 @@ fn runtime_assignment_record_from_row(
     Ok(record)
 }
 
+fn runtime_assignment_event_record_from_row(
+    row: sqlx::any::AnyRow,
+) -> Result<AuthorizationScopedAssignmentEventRecord, String> {
+    let id: String = row.try_get("id").map_err(|error| error.to_string())?;
+    let assignment_id: String = row
+        .try_get("assignment_id")
+        .map_err(|error| error.to_string())?;
+    let user_id: i64 = row.try_get("user_id").map_err(|error| error.to_string())?;
+    let actor_user_id: Option<i64> = row
+        .try_get("created_by_user_id")
+        .map_err(|error| error.to_string())?;
+    let occurred_at: String = row
+        .try_get("created_at")
+        .map_err(|error| error.to_string())?;
+    let event_kind: String = row
+        .try_get("event_kind")
+        .map_err(|error| error.to_string())?;
+    let target_kind: String = row
+        .try_get("target_kind")
+        .map_err(|error| error.to_string())?;
+    let target_name: String = row
+        .try_get("target_name")
+        .map_err(|error| error.to_string())?;
+    let scope_name: String = row
+        .try_get("scope_name")
+        .map_err(|error| error.to_string())?;
+    let scope_value: String = row
+        .try_get("scope_value")
+        .map_err(|error| error.to_string())?;
+    let expires_at: Option<String> = row
+        .try_get("expires_at")
+        .map_err(|error| error.to_string())?;
+    let reason: Option<String> = row.try_get("reason").map_err(|error| error.to_string())?;
+    Ok(AuthorizationScopedAssignmentEventRecord {
+        id: id.clone(),
+        assignment_id,
+        user_id,
+        event: parse_runtime_assignment_event_kind(&id, &event_kind)?,
+        occurred_at,
+        actor_user_id,
+        target: parse_stored_scoped_assignment_target(&id, &target_kind, &target_name)?,
+        scope: AuthorizationScopeBinding {
+            scope: scope_name,
+            value: scope_value,
+        },
+        expires_at,
+        reason,
+    })
+}
+
+async fn fetch_runtime_assignment_by_id<E>(
+    executor: &E,
+    assignment_id: &str,
+) -> Result<Option<AuthorizationScopedAssignmentRecord>, String>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
+    let row = query(&format!(
+        "SELECT id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value \
+         FROM {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} WHERE id = ?"
+    ))
+    .bind(assignment_id)
+    .fetch_optional(executor)
+    .await
+    .map_err(runtime_assignment_storage_error)?;
+    row.map(runtime_assignment_record_from_row).transpose()
+}
+
 fn runtime_assignment_storage_error(error: sqlx::Error) -> String {
     if is_missing_runtime_assignment_table(&error) {
         format!(
-            "runtime authorization assignment table `{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}` does not exist; generate and apply the authz runtime migration first"
+            "runtime authorization assignment tables `{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}` / `{AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE}` do not exist; generate and apply the authz runtime migration first"
         )
     } else if is_outdated_runtime_assignment_table(&error) {
         format!(
-            "runtime authorization assignment table `{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}` is missing required lifecycle columns; regenerate and apply the authz runtime migration"
+            "runtime authorization assignment tables are missing required lifecycle or audit columns; regenerate and apply the authz runtime migration"
         )
     } else {
         error.to_string()
@@ -1921,6 +2521,21 @@ async fn list_runtime_assignments_endpoint(
     }
 }
 
+async fn list_runtime_assignment_events_endpoint(
+    user: UserContext,
+    query: web::Query<AuthorizationScopedAssignmentListQuery>,
+    runtime: web::Data<AuthorizationRuntime>,
+) -> impl Responder {
+    if !authorization_user_is_admin(&user) {
+        return errors::forbidden("forbidden", "Admin role is required");
+    }
+
+    match runtime.list_assignment_events_for_user(query.user_id).await {
+        Ok(events) => HttpResponse::Ok().json(events),
+        Err(message) => errors::internal_error(message),
+    }
+}
+
 async fn create_runtime_assignment_endpoint(
     user: UserContext,
     input: web::Json<AuthorizationScopedAssignmentCreateInput>,
@@ -1953,9 +2568,67 @@ async fn delete_runtime_assignment_endpoint(
         return errors::forbidden("forbidden", "Admin role is required");
     }
 
-    match runtime.delete_assignment(&path.into_inner()).await {
+    match runtime
+        .delete_assignment_with_audit(&path.into_inner(), Some(user.id), None)
+        .await
+    {
         Ok(true) => HttpResponse::NoContent().finish(),
         Ok(false) => errors::not_found("Runtime authorization assignment not found"),
+        Err(message) => errors::internal_error(message),
+    }
+}
+
+async fn revoke_runtime_assignment_endpoint(
+    user: UserContext,
+    path: web::Path<String>,
+    input: web::Json<AuthorizationScopedAssignmentRevokeInput>,
+    runtime: web::Data<AuthorizationRuntime>,
+) -> impl Responder {
+    if !authorization_user_is_admin(&user) {
+        return errors::forbidden("forbidden", "Admin role is required");
+    }
+
+    match runtime
+        .revoke_assignment_with_audit(&path.into_inner(), Some(user.id), input.into_inner().reason)
+        .await
+    {
+        Ok(Some(assignment)) => HttpResponse::Ok().json(assignment),
+        Ok(None) => errors::not_found("Runtime authorization assignment not found"),
+        Err(message) if message.contains("already inactive") => {
+            errors::bad_request("invalid_runtime_assignment", message)
+        }
+        Err(message) => errors::internal_error(message),
+    }
+}
+
+async fn renew_runtime_assignment_endpoint(
+    user: UserContext,
+    path: web::Path<String>,
+    input: web::Json<AuthorizationScopedAssignmentRenewInput>,
+    runtime: web::Data<AuthorizationRuntime>,
+) -> impl Responder {
+    if !authorization_user_is_admin(&user) {
+        return errors::forbidden("forbidden", "Admin role is required");
+    }
+
+    let input = input.into_inner();
+    match runtime
+        .renew_assignment_with_audit(
+            &path.into_inner(),
+            &input.expires_at,
+            Some(user.id),
+            input.reason,
+        )
+        .await
+    {
+        Ok(Some(assignment)) => HttpResponse::Ok().json(assignment),
+        Ok(None) => errors::not_found("Runtime authorization assignment not found"),
+        Err(message)
+            if message.contains("expires_at")
+                || message.contains("already expires at or after") =>
+        {
+            errors::bad_request("invalid_runtime_assignment", message)
+        }
         Err(message) => errors::internal_error(message),
     }
 }
@@ -1983,6 +2656,14 @@ fn is_outdated_runtime_assignment_table(error: &sqlx::Error) -> bool {
                 || message.contains("no such column: expires_at")
                 || message.contains("column \"expires_at\" does not exist")
                 || message.contains("unknown column 'expires_at'")
+                || message.contains("no such table: authz_scoped_assignment_event")
+                || message.contains("table \"authz_scoped_assignment_event\" does not exist")
+                || message.contains("no such column: event_kind")
+                || message.contains("column \"event_kind\" does not exist")
+                || message.contains("unknown column 'event_kind'")
+                || message.contains("no such column: reason")
+                || message.contains("column \"reason\" does not exist")
+                || message.contains("unknown column 'reason'")
         }
         _ => false,
     }
@@ -2008,7 +2689,7 @@ mod tests {
             id: format!("condition.{field}"),
             field: field.to_owned(),
             operator: AuthorizationOperator::Equals,
-            source: AuthorizationValueSource::UserId,
+            source: Some(AuthorizationValueSource::UserId),
         })
     }
 
@@ -2027,7 +2708,7 @@ mod tests {
                     id: "condition.exists.family_member.2".to_owned(),
                     field: "user_id".to_owned(),
                     operator: AuthorizationOperator::Equals,
-                    source: AuthorizationValueSource::UserId,
+                    source: Some(AuthorizationValueSource::UserId),
                 }),
             ],
         }
@@ -2053,13 +2734,13 @@ mod tests {
                                 id: "condition.exists.family_access.1.2.1".to_owned(),
                                 field: "primary_user_id".to_owned(),
                                 operator: AuthorizationOperator::Equals,
-                                source: AuthorizationValueSource::UserId,
+                                source: Some(AuthorizationValueSource::UserId),
                             }),
                             AuthorizationExistsCondition::Match(AuthorizationMatch {
                                 id: "condition.exists.family_access.1.2.2".to_owned(),
                                 field: "delegate_user_id".to_owned(),
                                 operator: AuthorizationOperator::Equals,
-                                source: AuthorizationValueSource::UserId,
+                                source: Some(AuthorizationValueSource::UserId),
                             }),
                         ],
                     },
@@ -2280,6 +2961,62 @@ mod tests {
     }
 
     #[test]
+    fn simulate_action_supports_is_null_filters() {
+        let resource = ResourceAuthorization {
+            id: "resource.note".to_owned(),
+            resource: "Note".to_owned(),
+            table: "note".to_owned(),
+            admin_bypass: false,
+            actions: vec![ActionAuthorization {
+                id: "resource.note.action.read".to_owned(),
+                action: AuthorizationAction::Read,
+                role_rule_id: None,
+                required_role: None,
+                filter: Some(AuthorizationCondition::Match(AuthorizationMatch {
+                    id: "resource.note.action.read.filter".to_owned(),
+                    field: "archived_at".to_owned(),
+                    operator: AuthorizationOperator::IsNull,
+                    source: None,
+                })),
+                assignments: Vec::new(),
+            }],
+        };
+
+        let allowed = resource
+            .simulate_action(&AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([("archived_at".to_owned(), Value::Null)]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
+                scope: None,
+                scoped_assignments: Vec::new(),
+            })
+            .expect("action should exist");
+        assert_eq!(allowed.outcome, AuthorizationOutcome::Allowed);
+
+        let denied = resource
+            .simulate_action(&AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([(
+                    "archived_at".to_owned(),
+                    Value::String("2026-03-23T00:00:00Z".to_owned()),
+                )]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
+                scope: None,
+                scoped_assignments: Vec::new(),
+            })
+            .expect("action should exist");
+        assert_eq!(denied.outcome, AuthorizationOutcome::Denied);
+    }
+
+    #[test]
     fn simulate_action_allows_exists_predicate_when_related_row_matches() {
         let resource = ResourceAuthorization {
             id: "resource.shared_doc".to_owned(),
@@ -2441,6 +3178,8 @@ mod tests {
                     permissions: vec!["FamilyRead".to_owned()],
                     scopes: vec!["Family".to_owned()],
                 }],
+                hybrid_enforcement: AuthorizationHybridEnforcementConfig::default(),
+                management_api: AuthorizationManagementApiConfig::default(),
             },
             resources: vec![ResourceAuthorization {
                 id: "resource.scoped_doc".to_owned(),
@@ -2518,6 +3257,8 @@ mod tests {
                     scopes: vec!["Family".to_owned()],
                 }],
                 templates: Vec::new(),
+                hybrid_enforcement: AuthorizationHybridEnforcementConfig::default(),
+                management_api: AuthorizationManagementApiConfig::default(),
             },
             resources: vec![ResourceAuthorization {
                 id: "resource.scoped_doc".to_owned(),
@@ -2568,14 +3309,19 @@ mod tests {
     }
 
     #[test]
-    fn authorization_runtime_migration_sql_mentions_runtime_assignment_table() {
+    fn authorization_runtime_migration_sql_mentions_runtime_assignment_tables() {
         let sql = authorization_runtime_migration_sql(AuthDbBackend::Sqlite);
         assert!(sql.contains(&format!(
             "CREATE TABLE {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}"
         )));
+        assert!(sql.contains(&format!(
+            "CREATE TABLE {AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE}"
+        )));
         assert!(sql.contains("created_at"));
         assert!(sql.contains("expires_at"));
         assert!(sql.contains("target_kind"));
+        assert!(sql.contains("event_kind"));
+        assert!(sql.contains("reason"));
         assert!(sql.contains("scope_name"));
     }
 
@@ -2600,6 +3346,8 @@ mod tests {
                     permissions: vec!["FamilyRead".to_owned()],
                     scopes: vec!["Family".to_owned()],
                 }],
+                hybrid_enforcement: AuthorizationHybridEnforcementConfig::default(),
+                management_api: AuthorizationManagementApiConfig::default(),
             },
             resources: vec![ResourceAuthorization {
                 id: "resource.scoped_doc".to_owned(),
@@ -2664,6 +3412,17 @@ mod tests {
             .await
             .expect("assignments should load");
         assert_eq!(stored, vec![assignment.clone()]);
+        let events = runtime
+            .list_assignment_events_for_user(7)
+            .await
+            .expect("assignment events should load");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].assignment_id, assignment.id);
+        assert_eq!(
+            events[0].event,
+            AuthorizationScopedAssignmentEventKind::Created
+        );
+        assert_eq!(events[0].actor_user_id, Some(3));
 
         let result = runtime
             .simulate_resource_action_with_user_assignments(
@@ -2710,8 +3469,80 @@ mod tests {
             vec!["FamilyMember".to_owned()]
         );
 
+        let revoked = runtime
+            .revoke_assignment_with_audit(&assignment.id, Some(9), Some("suspend".to_owned()))
+            .await
+            .expect("assignment should revoke")
+            .expect("assignment should exist");
+        assert_eq!(revoked.id, assignment.id);
+        assert!(revoked.expires_at.is_some());
+        let revoked_access = runtime
+            .evaluate_runtime_access_for_user(
+                7,
+                "ScopedDoc",
+                AuthorizationAction::Read,
+                AuthorizationScopeBinding {
+                    scope: "Family".to_owned(),
+                    value: "42".to_owned(),
+                },
+            )
+            .await
+            .expect("runtime access should evaluate after revoke");
+        assert!(!revoked_access.allowed);
+
+        let renewed_expires_at =
+            (Utc::now() + chrono::Duration::days(2)).to_rfc3339_opts(SecondsFormat::Micros, false);
+        let renewed = runtime
+            .renew_assignment_with_audit(
+                &assignment.id,
+                &renewed_expires_at,
+                Some(10),
+                Some("restore".to_owned()),
+            )
+            .await
+            .expect("assignment should renew")
+            .expect("assignment should still exist");
+        assert_eq!(renewed.id, assignment.id);
+        assert_eq!(
+            renewed.expires_at.as_deref(),
+            Some(renewed_expires_at.as_str())
+        );
+        let renewed_access = runtime
+            .evaluate_runtime_access_for_user(
+                7,
+                "ScopedDoc",
+                AuthorizationAction::Read,
+                AuthorizationScopeBinding {
+                    scope: "Family".to_owned(),
+                    value: "42".to_owned(),
+                },
+            )
+            .await
+            .expect("runtime access should evaluate after renew");
+        assert!(renewed_access.allowed);
+
+        let events = runtime
+            .list_assignment_events_for_user(7)
+            .await
+            .expect("assignment events should reload");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].assignment_id, assignment.id);
+        assert_eq!(
+            events[1].event,
+            AuthorizationScopedAssignmentEventKind::Revoked
+        );
+        assert_eq!(events[1].actor_user_id, Some(9));
+        assert_eq!(events[1].reason.as_deref(), Some("suspend"));
+        assert_eq!(events[2].assignment_id, assignment.id);
+        assert_eq!(
+            events[2].event,
+            AuthorizationScopedAssignmentEventKind::Renewed
+        );
+        assert_eq!(events[2].actor_user_id, Some(10));
+        assert_eq!(events[2].reason.as_deref(), Some("restore"));
+
         let deleted = runtime
-            .delete_assignment(&assignment.id)
+            .delete_assignment_with_audit(&assignment.id, Some(11), Some("cleanup".to_owned()))
             .await
             .expect("assignment should delete");
         assert!(deleted);
@@ -2722,6 +3553,18 @@ mod tests {
                 .expect("assignment list should reload")
                 .is_empty()
         );
+        let events = runtime
+            .list_assignment_events_for_user(7)
+            .await
+            .expect("assignment events should reload after delete");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3].assignment_id, assignment.id);
+        assert_eq!(
+            events[3].event,
+            AuthorizationScopedAssignmentEventKind::Deleted
+        );
+        assert_eq!(events[3].actor_user_id, Some(11));
+        assert_eq!(events[3].reason.as_deref(), Some("cleanup"));
     }
 
     #[actix_web::test]

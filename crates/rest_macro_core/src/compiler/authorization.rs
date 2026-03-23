@@ -12,7 +12,7 @@ use crate::{
 
 use super::model::{
     PolicyAssignment, PolicyExistsCondition, PolicyFilter, PolicyFilterExpression,
-    PolicyValueSource, ResourceSpec, ServiceSpec,
+    PolicyFilterOperator, PolicyValueSource, ResourceSpec, ServiceSpec,
 };
 
 pub fn compile_service_authorization(service: &ServiceSpec) -> AuthorizationModel {
@@ -201,8 +201,15 @@ fn compile_filter(
     AuthorizationCondition::Match(AuthorizationMatch {
         id: rule_id.to_owned(),
         field: filter.field.clone(),
-        operator: AuthorizationOperator::Equals,
-        source: compile_source(&filter.source, security),
+        operator: match &filter.operator {
+            PolicyFilterOperator::Equals(_) => AuthorizationOperator::Equals,
+            PolicyFilterOperator::IsNull => AuthorizationOperator::IsNull,
+            PolicyFilterOperator::IsNotNull => AuthorizationOperator::IsNotNull,
+        },
+        source: match &filter.operator {
+            PolicyFilterOperator::Equals(source) => Some(compile_source(source, security)),
+            PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => None,
+        },
     })
 }
 
@@ -383,16 +390,16 @@ mod tests {
                         id: "resource.tenant_post.action.read.filter.1".to_owned(),
                         field: "user_id".to_owned(),
                         operator: AuthorizationOperator::Equals,
-                        source: AuthorizationValueSource::UserId,
+                        source: Some(AuthorizationValueSource::UserId),
                     }),
                     AuthorizationCondition::Match(AuthorizationMatch {
                         id: "resource.tenant_post.action.read.filter.2".to_owned(),
                         field: "tenant_id".to_owned(),
                         operator: AuthorizationOperator::Equals,
-                        source: AuthorizationValueSource::Claim {
+                        source: Some(AuthorizationValueSource::Claim {
                             name: "tenant_id".to_owned(),
                             ty: AuthClaimType::I64,
-                        },
+                        }),
                     }),
                 ],
             })
@@ -443,10 +450,10 @@ mod tests {
                 id: "resource.scoped_doc.action.read.filter".to_owned(),
                 field: "tenant_id".to_owned(),
                 operator: AuthorizationOperator::Equals,
-                source: AuthorizationValueSource::Claim {
+                source: Some(AuthorizationValueSource::Claim {
                     name: "tenant_id".to_owned(),
                     ty: AuthClaimType::I64,
-                },
+                }),
             }))
         );
 
@@ -462,10 +469,10 @@ mod tests {
                 id: "resource.plan_doc.action.read.filter".to_owned(),
                 field: "plan".to_owned(),
                 operator: AuthorizationOperator::Equals,
-                source: AuthorizationValueSource::Claim {
+                source: Some(AuthorizationValueSource::Claim {
                     name: "plan".to_owned(),
                     ty: AuthClaimType::String,
-                },
+                }),
             }))
         );
 
@@ -481,10 +488,10 @@ mod tests {
                 id: "resource.staff_doc.action.read.filter".to_owned(),
                 field: "staff".to_owned(),
                 operator: AuthorizationOperator::Equals,
-                source: AuthorizationValueSource::Claim {
+                source: Some(AuthorizationValueSource::Claim {
                     name: "staff".to_owned(),
                     ty: AuthClaimType::Bool,
-                },
+                }),
             }))
         );
     }
@@ -512,7 +519,7 @@ mod tests {
                         id: "resource.shared_doc.action.read.filter.1".to_owned(),
                         field: "owner_id".to_owned(),
                         operator: AuthorizationOperator::Equals,
-                        source: AuthorizationValueSource::UserId,
+                        source: Some(AuthorizationValueSource::UserId),
                     }),
                     AuthorizationCondition::All {
                         id: "resource.shared_doc.action.read.filter.2".to_owned(),
@@ -521,10 +528,10 @@ mod tests {
                                 id: "resource.shared_doc.action.read.filter.2.1".to_owned(),
                                 field: "tenant_id".to_owned(),
                                 operator: AuthorizationOperator::Equals,
-                                source: AuthorizationValueSource::Claim {
+                                source: Some(AuthorizationValueSource::Claim {
                                     name: "tenant_id".to_owned(),
                                     ty: AuthClaimType::I64,
-                                },
+                                }),
                             }),
                             AuthorizationCondition::Not {
                                 id: "resource.shared_doc.action.read.filter.2.2".to_owned(),
@@ -534,7 +541,7 @@ mod tests {
                                             .to_owned(),
                                         field: "blocked_user_id".to_owned(),
                                         operator: AuthorizationOperator::Equals,
-                                        source: AuthorizationValueSource::UserId,
+                                        source: Some(AuthorizationValueSource::UserId),
                                     },
                                 )),
                             },
@@ -577,7 +584,7 @@ mod tests {
                             id: "resource.shared_doc.action.read.filter.1.2".to_owned(),
                             field: "user_id".to_owned(),
                             operator: AuthorizationOperator::Equals,
-                            source: AuthorizationValueSource::UserId,
+                            source: Some(AuthorizationValueSource::UserId),
                         }),
                     ],
                 }],
@@ -620,13 +627,13 @@ mod tests {
                                     id: "resource.shared_doc.action.read.filter.1.2.1".to_owned(),
                                     field: "primary_user_id".to_owned(),
                                     operator: AuthorizationOperator::Equals,
-                                    source: AuthorizationValueSource::UserId,
+                                    source: Some(AuthorizationValueSource::UserId),
                                 }),
                                 AuthorizationExistsCondition::Match(AuthorizationMatch {
                                     id: "resource.shared_doc.action.read.filter.1.2.2".to_owned(),
                                     field: "delegate_user_id".to_owned(),
                                     operator: AuthorizationOperator::Equals,
-                                    source: AuthorizationValueSource::UserId,
+                                    source: Some(AuthorizationValueSource::UserId),
                                 }),
                             ],
                         },
@@ -637,23 +644,69 @@ mod tests {
     }
 
     #[test]
-    fn carries_static_authorization_contract_into_compiled_model() {
+    fn compiles_null_check_filters_into_authorization_conditions() {
         let loaded = super::super::eon_parser::load_service_from_path(&fixture(
-            "tests/fixtures/authorization_contract_api.eon",
+            "tests/fixtures/null_policy_api.eon",
         ))
         .expect("fixture should parse");
         let model = compile_service_authorization(&loaded.service);
 
-        assert_eq!(model.contract.scopes.len(), 2);
-        assert_eq!(model.contract.scopes[1].name, "Household");
+        let note = model.resource("Note").expect("note resource should exist");
+        let read = note
+            .action(AuthorizationAction::Read)
+            .expect("read action should exist");
+        assert_eq!(
+            read.filter,
+            Some(AuthorizationCondition::Match(AuthorizationMatch {
+                id: "resource.note.action.read.filter".to_owned(),
+                field: "archived_at".to_owned(),
+                operator: AuthorizationOperator::IsNull,
+                source: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn carries_static_authorization_contract_into_compiled_model() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/hybrid_runtime_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        assert_eq!(model.contract.scopes.len(), 1);
+        assert_eq!(model.contract.scopes[0].name, "Family");
         assert_eq!(model.contract.permissions.len(), 2);
         assert_eq!(model.contract.permissions[0].name, "FamilyManage");
         assert_eq!(
             model.contract.permissions[0].actions,
-            vec![AuthorizationAction::Update, AuthorizationAction::Delete]
+            vec![
+                AuthorizationAction::Create,
+                AuthorizationAction::Read,
+                AuthorizationAction::Update,
+                AuthorizationAction::Delete
+            ]
         );
-        assert_eq!(model.contract.templates.len(), 2);
-        assert_eq!(model.contract.templates[0].name, "FamilyManager");
+        assert_eq!(model.contract.templates.len(), 1);
+        assert_eq!(model.contract.templates[0].name, "FamilyMember");
+        assert_eq!(model.contract.hybrid_enforcement.resources.len(), 1);
+        assert_eq!(
+            model.contract.hybrid_enforcement.resources[0].resource,
+            "ScopedDoc"
+        );
+        assert_eq!(
+            model.contract.hybrid_enforcement.resources[0].scope_field,
+            "family_id"
+        );
+        assert_eq!(
+            model.contract.hybrid_enforcement.resources[0].actions,
+            vec![
+                AuthorizationAction::Create,
+                AuthorizationAction::Read,
+                AuthorizationAction::Update,
+                AuthorizationAction::Delete
+            ]
+        );
     }
 
     #[test]

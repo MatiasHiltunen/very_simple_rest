@@ -219,7 +219,14 @@ impl PolicyValueSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyFilter {
     pub field: String,
-    pub source: PolicyValueSource,
+    pub operator: PolicyFilterOperator,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PolicyFilterOperator {
+    Equals(PolicyValueSource),
+    IsNull,
+    IsNotNull,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -973,14 +980,9 @@ fn validate_policy_claim_sources_in_expression(
         return Ok(());
     };
     match expression {
-        PolicyFilterExpression::Match(filter) => validate_policy_claim_source(
-            resource,
-            scope,
-            &filter.field,
-            &filter.source,
-            security,
-            span,
-        ),
+        PolicyFilterExpression::Match(filter) => {
+            validate_policy_filter_claim_source(resource, scope, filter, security, span)
+        }
         PolicyFilterExpression::All(expressions) | PolicyFilterExpression::Any(expressions) => {
             for expression in expressions {
                 validate_policy_claim_sources_in_expression(
@@ -1198,6 +1200,8 @@ pub fn validate_authorization_contract(
     resources: &[ResourceSpec],
     span: Span,
 ) -> syn::Result<()> {
+    validate_authorization_management_api(&contract.management_api, span)?;
+
     let mut scope_names = HashSet::new();
     for scope in &contract.scopes {
         validate_authorization_identifier(&scope.name, span, "authorization scope name")?;
@@ -1370,6 +1374,208 @@ pub fn validate_authorization_contract(
                 ));
             }
         }
+    }
+
+    validate_authorization_hybrid_enforcement(contract, resources, &scope_names, span)?;
+
+    Ok(())
+}
+
+fn validate_authorization_hybrid_enforcement(
+    contract: &AuthorizationContract,
+    resources: &[ResourceSpec],
+    scope_names: &HashSet<&str>,
+    span: Span,
+) -> syn::Result<()> {
+    let mut seen_resources = HashSet::new();
+    for config in &contract.hybrid_enforcement.resources {
+        if !seen_resources.insert(config.resource.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "duplicate authorization hybrid enforcement resource `{}`",
+                    config.resource
+                ),
+            ));
+        }
+
+        let resource = resources
+            .iter()
+            .find(|resource| resource.struct_ident.to_string() == config.resource)
+            .ok_or_else(|| {
+                syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.hybrid_enforcement.resources.{}` references unknown resource `{}`",
+                        config.resource, config.resource
+                    ),
+                )
+            })?;
+
+        if !scope_names.contains(config.scope.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}` references unknown scope `{}`",
+                    config.resource, config.scope
+                ),
+            ));
+        }
+
+        let field = resource.find_field(&config.scope_field).ok_or_else(|| {
+            syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}.scope_field` references missing field `{}`",
+                    config.resource, config.scope_field
+                ),
+            )
+        })?;
+
+        if policy_field_claim_type(&field.ty).is_none() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}.scope_field` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types",
+                    config.resource
+                ),
+            ));
+        }
+
+        if config.actions.is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}` must declare at least one action",
+                    config.resource
+                ),
+            ));
+        }
+
+        let mut seen_actions = HashSet::new();
+        for action in &config.actions {
+            if !seen_actions.insert(*action) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.hybrid_enforcement.resources.{}` contains duplicate action `{:?}`",
+                        config.resource, action
+                    ),
+                ));
+            }
+
+            match action {
+                crate::authorization::AuthorizationAction::Read => {
+                    if !read_requires_auth(resource) {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` cannot enable `Read` for a public resource; add read auth first",
+                                config.resource
+                            ),
+                        ));
+                    }
+                    if !resource.policies.has_read_filters() {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Read` requires a static read row policy to supplement",
+                                config.resource
+                            ),
+                        ));
+                    }
+                }
+                crate::authorization::AuthorizationAction::Update => {
+                    if !resource.policies.has_update_filters() {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Update` requires a static update row policy to supplement",
+                                config.resource
+                            ),
+                        ));
+                    }
+                }
+                crate::authorization::AuthorizationAction::Delete => {
+                    if !resource.policies.has_delete_filters() {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Delete` requires a static delete row policy to supplement",
+                                config.resource
+                            ),
+                        ));
+                    }
+                }
+                crate::authorization::AuthorizationAction::Create => {
+                    let Some(assignment) = resource
+                        .policies
+                        .create
+                        .iter()
+                        .find(|assignment| assignment.field == config.scope_field)
+                    else {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Create` requires `{}` to be assigned by a static create policy",
+                                config.resource, config.scope_field
+                            ),
+                        ));
+                    };
+                    if !matches!(assignment.source, PolicyValueSource::Claim(_)) {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Create` requires `{}` to be claim-controlled in `policies.create`",
+                                config.resource, config.scope_field
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            let has_permission = contract.permissions.iter().any(|permission| {
+                permission.supports_scope(&config.scope)
+                    && permission.matches_resource_action(&config.resource, *action)
+            });
+            if !has_permission {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`authorization.hybrid_enforcement.resources.{}` action `{:?}` has no matching declared permission for resource `{}` and scope `{}`",
+                        config.resource, action, config.resource, config.scope
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_authorization_management_api(
+    config: &crate::authorization::AuthorizationManagementApiConfig,
+    span: Span,
+) -> syn::Result<()> {
+    if config.mount.trim().is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "`authorization.management_api.mount` cannot be empty",
+        ));
+    }
+
+    if !config.mount.starts_with('/') {
+        return Err(syn::Error::new(
+            span,
+            "`authorization.management_api.mount` must start with `/`",
+        ));
+    }
+
+    if config.mount.contains("//") {
+        return Err(syn::Error::new(
+            span,
+            "`authorization.management_api.mount` cannot contain `//`",
+        ));
     }
 
     Ok(())
@@ -1792,6 +1998,21 @@ fn validate_policy_claim_source(
     ))
 }
 
+fn validate_policy_filter_claim_source(
+    resource: &ResourceSpec,
+    scope: &str,
+    filter: &PolicyFilter,
+    security: &SecurityConfig,
+    span: Span,
+) -> syn::Result<()> {
+    match &filter.operator {
+        PolicyFilterOperator::Equals(source) => {
+            validate_policy_claim_source(resource, scope, &filter.field, source, security, span)
+        }
+        PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => Ok(()),
+    }
+}
+
 fn legacy_auth_claim_name_supported(claim_name: &str) -> bool {
     claim_name.ends_with("_id") && claim_name != "id"
 }
@@ -1932,7 +2153,8 @@ fn validate_policy_filter_expression(
 ) -> syn::Result<()> {
     match expression {
         PolicyFilterExpression::Match(policy) => {
-            validate_policy_field(&resource.fields, scope, &policy.field, span).map(|_| ())
+            let field = validate_policy_field(&resource.fields, scope, &policy.field, span)?;
+            validate_policy_filter_operator(scope, &policy.field, field, &policy.operator, span)
         }
         PolicyFilterExpression::All(expressions) | PolicyFilterExpression::Any(expressions) => {
             for expression in expressions {
@@ -1982,8 +2204,8 @@ fn validate_exists_policy_condition(
 ) -> syn::Result<()> {
     match condition {
         PolicyExistsCondition::Match(policy) => {
-            validate_policy_field(&target_resource.fields, scope, &policy.field, span)?;
-            Ok(())
+            let field = validate_policy_field(&target_resource.fields, scope, &policy.field, span)?;
+            validate_policy_filter_operator(scope, &policy.field, field, &policy.operator, span)
         }
         PolicyExistsCondition::CurrentRowField { field, row_field } => {
             let target_field = validate_policy_field(&target_resource.fields, scope, field, span)?;
@@ -2042,14 +2264,9 @@ fn validate_exists_policy_claim_sources(
     span: Span,
 ) -> syn::Result<()> {
     match condition {
-        PolicyExistsCondition::Match(condition) => validate_policy_claim_source(
-            target_resource,
-            scope,
-            &condition.field,
-            &condition.source,
-            security,
-            span,
-        ),
+        PolicyExistsCondition::Match(condition) => {
+            validate_policy_filter_claim_source(target_resource, scope, condition, security, span)
+        }
         PolicyExistsCondition::CurrentRowField { .. } => Ok(()),
         PolicyExistsCondition::All(expressions) | PolicyExistsCondition::Any(expressions) => {
             for expression in expressions {
@@ -2065,6 +2282,30 @@ fn validate_exists_policy_claim_sources(
         }
         PolicyExistsCondition::Not(expression) => {
             validate_exists_policy_claim_sources(target_resource, scope, expression, security, span)
+        }
+    }
+}
+
+fn validate_policy_filter_operator(
+    scope: &str,
+    field_name: &str,
+    field: &FieldSpec,
+    operator: &PolicyFilterOperator,
+    span: Span,
+) -> syn::Result<()> {
+    match operator {
+        PolicyFilterOperator::Equals(_) => Ok(()),
+        PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => {
+            if is_optional_type(&field.ty) {
+                Ok(())
+            } else {
+                Err(syn::Error::new(
+                    span,
+                    format!(
+                        "{scope} row policy null checks require nullable/optional field `{field_name}`"
+                    ),
+                ))
+            }
         }
     }
 }

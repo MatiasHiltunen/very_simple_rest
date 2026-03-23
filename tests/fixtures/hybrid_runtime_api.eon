@@ -1,0 +1,74 @@
+module: "hybrid_runtime_api"
+security: {
+    auth: {
+        issuer: "hybrid_runtime_tests"
+        audience: "hybrid_runtime_clients"
+        require_email_verification: false
+        session_cookie: {
+            secure: false
+        }
+    }
+}
+authorization: {
+    management_api: {
+        mount: "/authz/runtime"
+    }
+    scopes: {
+        Family: {
+            description: "Family tenancy scope"
+        }
+    }
+    permissions: {
+        FamilyManage: {
+            actions: ["Create", "Read", "Update", "Delete"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+        FamilyRead: {
+            actions: ["Read"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+    templates: {
+        FamilyMember: {
+            permissions: ["FamilyRead", "FamilyManage"]
+            scopes: ["Family"]
+        }
+    }
+    hybrid_enforcement: {
+        resources: {
+            ScopedDoc: {
+                scope: "Family"
+                scope_field: "family_id"
+                actions: ["Create", "Read", "Update", "Delete"]
+            }
+        }
+    }
+}
+resources: [
+    {
+        name: "ScopedDoc"
+        roles: {
+            create: "member"
+            read: "member"
+            update: "member"
+            delete: "member"
+        }
+        policies: {
+            create: [
+                "user_id=user.id"
+                { field: "family_id", value: "claim.family_id" }
+            ]
+            read: "user_id=user.id"
+            update: "user_id=user.id"
+            delete: "user_id=user.id"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "user_id", type: I64 }
+            { name: "family_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

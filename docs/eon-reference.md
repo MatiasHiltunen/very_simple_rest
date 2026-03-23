@@ -53,13 +53,35 @@ These keys are read from the service root.
 
 ## Authorization Contract
 
-The optional `authorization` block declares static scope, permission, and template vocabulary. It does not change runtime enforcement by itself yet, but it is compiled into the authorization model and available through `vsr authz explain`.
+The optional `authorization` block declares static scope, permission, template, hybrid-enforcement, and management-surface vocabulary. The scope/permission/template declarations are compiled into the authorization model and available through `vsr authz explain`; request-time behavior changes only when you explicitly enable the generated runtime management API or hybrid enforcement.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
+| authorization.management_api | Map | Disabled | No | See Authorization Management API | Opt-in generated runtime authorization management routes for modules and emitted servers. |
 | authorization.scopes | Map<ScopeName, Scope> | None | No | Keyed scope map | Scope names must be unique valid identifiers. Use this to declare hierarchical authorization scope vocabulary. |
 | authorization.permissions | Map<PermissionName, Permission> | None | No | Keyed permission map | Permission names must be unique valid identifiers. Each permission must declare at least one action and one resource. |
 | authorization.templates | Map<TemplateName, Template> | None | No | Keyed template map | Template names must be unique valid identifiers. Templates currently reference permissions and scopes only. |
+| authorization.hybrid_enforcement | Map | None | No | See Authorization Hybrid Enforcement | Opt-in additive runtime grant checks for generated item-scoped CRUD handlers. |
+
+## Authorization Hybrid Enforcement
+
+Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. Item-scoped `Read`/`Update`/`Delete` derive scope from stored rows, while `Create` is supported only as an additive fallback for a claim-controlled `policies.create` scope field.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| authorization.hybrid_enforcement.resources | Map<ResourceName, HybridResource> | None | No | Keyed resource map | Each entry must reference a declared resource, declared scope, and at least one matching permission action. |
+| authorization.hybrid_enforcement.resources.<resource>.scope | String | Required | Yes | Declared scope name such as `Family` | Runtime grants are evaluated against this scope for the configured resource. |
+| authorization.hybrid_enforcement.resources.<resource>.scope_field | String | Required | Yes | Declared resource field name such as `family_id` | The generated handler derives the runtime scope value from this row field. |
+| authorization.hybrid_enforcement.resources.<resource>.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
+
+## Authorization Management API
+
+When enabled, generated modules and emitted servers automatically mount the runtime authorization management endpoints under the configured path.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| authorization.management_api.enabled | Bool | true when the block exists; otherwise disabled | No | true, false | Controls whether generated `configure(...)` mounts the runtime authorization management routes automatically. |
+| authorization.management_api.mount | String | `/authz/runtime` | No | Absolute route path such as `/authz/runtime` or `/ops/authz` | Must start with `/`. Trailing `/` is normalized away. The mounted endpoints are `<mount>/evaluate`, `<mount>/assignment-events`, `<mount>/assignments`, `<mount>/assignments/{id}`, `<mount>/assignments/{id}/revoke`, and `<mount>/assignments/{id}/renew`. |
 
 ## Authorization Scopes
 
@@ -93,6 +115,9 @@ Templates group permissions and optional scopes into reusable named bundles.
 
 ```eon
 authorization: {
+    management_api: {
+        mount: "/ops/authz"
+    }
     scopes: {
         Family: {
             description: "Family tenancy scope"
@@ -158,10 +183,10 @@ Row policies support both the newer explicit form and older owner/set-owner shor
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].policies.admin_bypass | Bool | true | No | true, false | When true, admin-role users bypass the configured row-level policies. |
-| resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `SetOwner` syntax is rejected here. |
+| resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `is_null` and `is_not_null` require a nullable field. `SetOwner` syntax is rejected here. |
 | resources[].policies.create | PolicyAssignment, [PolicyAssignment] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field` | Assigns values during create operations. Boolean groups are not supported here. `Owner` syntax is rejected here. |
-| resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. |
-| resources[].policies.delete | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters delete queries. Arrays imply `all_of`. |
+| resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
+| resources[].policies.delete | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters delete queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
 
 ```eon
 policies: {
@@ -169,6 +194,7 @@ policies: {
     read: {
         any_of: [
             "owner_id=user.id"
+            { field: "archived_at", is_null: true }
             {
                 all_of: [
                     "tenant_id=claim.tenant_id"
@@ -181,12 +207,17 @@ policies: {
         "owner_id=user.id"
         { field: "tenant_id", value: "claim.tenant_id" }
     ]
-    update: [{ field: "tenant_id", equals: "claim.tenant_id" }]
+    update: {
+        any_of: [
+            "owner_id=user.id"
+            { field: "archived_at", is_not_null: true }
+        ]
+    }
     delete: "Owner:owner_id"
 }
 ```
 
-The first relation-aware filter form is `exists`, which targets another declared resource and correlates it with the current row:
+The first relation-aware filter form is `exists`, which targets another declared resource and correlates it with the current row. Leaf `where` entries can be equality checks, current-row field correlations, or nullable `is_null` / `is_not_null` checks:
 
 ```eon
 read: {

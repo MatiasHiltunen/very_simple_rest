@@ -13,14 +13,14 @@ use super::model::{
     DbBackend, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
     GENERATED_DECIMAL_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
     ListConfig, NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter,
-    PolicyFilter, PolicyFilterExpression, PolicyValueSource, ReferentialAction, ResourceSpec,
-    RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
-    StaticMountSpec, WriteModelStyle, default_resource_module_ident, infer_generated_value,
-    infer_sql_type, sanitize_module_ident, sanitize_struct_ident, validate_authorization_contract,
-    validate_field_validations, validate_list_config, validate_logging_config,
-    validate_policy_claim_sources, validate_relations, validate_row_policies,
-    validate_runtime_config, validate_security_config, validate_sql_identifier,
-    validate_tls_config,
+    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
+    ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
+    default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
+    sanitize_struct_ident, validate_authorization_contract, validate_field_validations,
+    validate_list_config, validate_logging_config, validate_policy_claim_sources,
+    validate_relations, validate_row_policies, validate_runtime_config, validate_security_config,
+    validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
@@ -28,8 +28,9 @@ use crate::{
         AuthUiPageSettings, SessionCookieSameSite, SessionCookieSettings,
     },
     authorization::{
-        AuthorizationAction, AuthorizationContract, AuthorizationPermission, AuthorizationScope,
-        AuthorizationTemplate,
+        AuthorizationAction, AuthorizationContract, AuthorizationHybridEnforcementConfig,
+        AuthorizationHybridResource, AuthorizationManagementApiConfig, AuthorizationPermission,
+        AuthorizationScope, AuthorizationTemplate, DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT,
     },
     database::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
@@ -290,6 +291,34 @@ struct AuthorizationDocument {
     permissions: BTreeMap<String, AuthorizationPermissionDocument>,
     #[serde(default)]
     templates: BTreeMap<String, AuthorizationTemplateDocument>,
+    #[serde(default)]
+    hybrid_enforcement: Option<AuthorizationHybridEnforcementDocument>,
+    #[serde(default)]
+    management_api: Option<AuthorizationManagementApiDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationHybridEnforcementDocument {
+    #[serde(default)]
+    resources: BTreeMap<String, AuthorizationHybridResourceDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationHybridResourceDocument {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    scope_field: Option<String>,
+    #[serde(default)]
+    actions: Vec<AuthorizationActionDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationManagementApiDocument {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    mount: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -494,6 +523,10 @@ struct PolicyRuleDocument {
     #[serde(default)]
     equals: Option<String>,
     #[serde(default)]
+    is_null: bool,
+    #[serde(default)]
+    is_not_null: bool,
+    #[serde(default)]
     value: Option<String>,
 }
 
@@ -503,6 +536,10 @@ struct ExistsPolicyRuleDocument {
     field: String,
     #[serde(default)]
     equals: Option<String>,
+    #[serde(default)]
+    is_null: bool,
+    #[serde(default)]
+    is_not_null: bool,
     #[serde(default)]
     equals_field: Option<String>,
 }
@@ -833,7 +870,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     )?;
     let logging = parse_logging_document(document.logging)?;
     let runtime = parse_runtime_document(document.runtime);
-    let authorization = parse_authorization_document(document.authorization);
+    let authorization = parse_authorization_document(document.authorization)?;
     let tls = parse_tls_document(document.tls)?;
     let security = parse_security_document(document.security, span)?;
     validate_logging_config(&logging, span)?;
@@ -1129,12 +1166,14 @@ fn parse_runtime_document(document: Option<RuntimeDocument>) -> RuntimeConfig {
     RuntimeConfig { compression }
 }
 
-fn parse_authorization_document(document: Option<AuthorizationDocument>) -> AuthorizationContract {
+fn parse_authorization_document(
+    document: Option<AuthorizationDocument>,
+) -> syn::Result<AuthorizationContract> {
     let Some(document) = document else {
-        return AuthorizationContract::default();
+        return Ok(AuthorizationContract::default());
     };
 
-    AuthorizationContract {
+    Ok(AuthorizationContract {
         scopes: document
             .scopes
             .into_iter()
@@ -1169,7 +1208,72 @@ fn parse_authorization_document(document: Option<AuthorizationDocument>) -> Auth
                 scopes: template.scopes,
             })
             .collect(),
-    }
+        hybrid_enforcement: parse_authorization_hybrid_enforcement_document(
+            document.hybrid_enforcement,
+        )?,
+        management_api: parse_authorization_management_api_document(document.management_api)?,
+    })
+}
+
+fn parse_authorization_hybrid_enforcement_document(
+    document: Option<AuthorizationHybridEnforcementDocument>,
+) -> syn::Result<AuthorizationHybridEnforcementConfig> {
+    let Some(document) = document else {
+        return Ok(AuthorizationHybridEnforcementConfig::default());
+    };
+
+    Ok(AuthorizationHybridEnforcementConfig {
+        resources: document
+            .resources
+            .into_iter()
+            .map(|(resource, config)| {
+                let scope = config.scope.ok_or_else(|| {
+                    syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "`authorization.hybrid_enforcement.resources.{resource}.scope` is required"
+                        ),
+                    )
+                })?;
+                let scope_field = config.scope_field.ok_or_else(|| {
+                    syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "`authorization.hybrid_enforcement.resources.{resource}.scope_field` is required"
+                        ),
+                    )
+                })?;
+                Ok(AuthorizationHybridResource {
+                    resource,
+                    scope,
+                    scope_field,
+                    actions: config
+                        .actions
+                        .into_iter()
+                        .map(parse_authorization_action_document)
+                        .collect(),
+                })
+            })
+            .collect::<syn::Result<Vec<_>>>()?,
+    })
+}
+
+fn parse_authorization_management_api_document(
+    document: Option<AuthorizationManagementApiDocument>,
+) -> syn::Result<AuthorizationManagementApiConfig> {
+    let Some(document) = document else {
+        return Ok(AuthorizationManagementApiConfig::default());
+    };
+
+    let enabled = document.enabled.unwrap_or(true);
+    let mount = normalize_authorization_management_mount(
+        document
+            .mount
+            .as_deref()
+            .unwrap_or(DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT),
+    )?;
+
+    Ok(AuthorizationManagementApiConfig { enabled, mount })
 }
 
 fn parse_authorization_action_document(value: AuthorizationActionDocument) -> AuthorizationAction {
@@ -1179,6 +1283,38 @@ fn parse_authorization_action_document(value: AuthorizationActionDocument) -> Au
         AuthorizationActionDocument::Update => AuthorizationAction::Update,
         AuthorizationActionDocument::Delete => AuthorizationAction::Delete,
     }
+}
+
+fn normalize_authorization_management_mount(value: &str) -> syn::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "authorization management API mount cannot be empty",
+        ));
+    }
+
+    if !trimmed.starts_with('/') {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "authorization management API mount must start with `/`",
+        ));
+    }
+
+    let normalized = if trimmed != "/" && trimmed.ends_with('/') {
+        trimmed.trim_end_matches('/').to_owned()
+    } else {
+        trimmed.to_owned()
+    };
+
+    if normalized.contains("//") {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "authorization management API mount cannot contain `//`",
+        ));
+    }
+
+    Ok(normalized)
 }
 
 fn parse_tls_document(document: Option<TlsDocument>) -> syn::Result<TlsConfig> {
@@ -2068,20 +2204,34 @@ fn parse_exists_policy_entry(
             Ok(PolicyExistsCondition::Match(filter))
         }
         ExistsPolicyEntryDocument::Rule(policy) => {
-            let present =
-                usize::from(policy.equals.is_some()) + usize::from(policy.equals_field.is_some());
+            let present = usize::from(policy.equals.is_some())
+                + usize::from(policy.equals_field.is_some())
+                + usize::from(policy.is_null)
+                + usize::from(policy.is_not_null);
             if present != 1 {
                 return Err(syn::Error::new(
                     Span::call_site(),
                     format!(
-                        "{scope} row policy exists entries must set exactly one of `equals` or `equals_field`"
+                        "{scope} row policy exists entries must set exactly one of `equals`, `equals_field`, `is_null`, or `is_not_null`"
                     ),
                 ));
             }
             if let Some(source) = policy.equals {
                 return Ok(PolicyExistsCondition::Match(PolicyFilter {
                     field: policy.field,
-                    source: parse_policy_source(&source)?,
+                    operator: PolicyFilterOperator::Equals(parse_policy_source(&source)?),
+                }));
+            }
+            if policy.is_null {
+                return Ok(PolicyExistsCondition::Match(PolicyFilter {
+                    field: policy.field,
+                    operator: PolicyFilterOperator::IsNull,
+                }));
+            }
+            if policy.is_not_null {
+                return Ok(PolicyExistsCondition::Match(PolicyFilter {
+                    field: policy.field,
+                    operator: PolicyFilterOperator::IsNotNull,
                 }));
             }
             Ok(PolicyExistsCondition::CurrentRowField {
@@ -2110,7 +2260,7 @@ fn parse_filter_policy(
             match kind {
                 RowPolicyKind::Owner => Ok(PolicyFilter {
                     field: policy.field,
-                    source: PolicyValueSource::UserId,
+                    operator: PolicyFilterOperator::Equals(PolicyValueSource::UserId),
                 }),
                 RowPolicyKind::SetOwner => Err(syn::Error::new(
                     Span::call_site(),
@@ -2119,15 +2269,32 @@ fn parse_filter_policy(
             }
         }
         PolicyEntryDocument::Rule(policy) => {
-            let source = policy.equals.ok_or_else(|| {
-                syn::Error::new(
+            let present = usize::from(policy.equals.is_some())
+                + usize::from(policy.is_null)
+                + usize::from(policy.is_not_null);
+            if present != 1 {
+                return Err(syn::Error::new(
                     Span::call_site(),
-                    format!("{scope} row policy entries must use `equals`"),
-                )
-            })?;
+                    format!(
+                        "{scope} row policy entries must set exactly one of `equals`, `is_null`, or `is_not_null`"
+                    ),
+                ));
+            }
+            if let Some(source) = policy.equals {
+                return Ok(PolicyFilter {
+                    field: policy.field,
+                    operator: PolicyFilterOperator::Equals(parse_policy_source(&source)?),
+                });
+            }
+            if policy.is_null {
+                return Ok(PolicyFilter {
+                    field: policy.field,
+                    operator: PolicyFilterOperator::IsNull,
+                });
+            }
             Ok(PolicyFilter {
                 field: policy.field,
-                source: parse_policy_source(&source)?,
+                operator: PolicyFilterOperator::IsNotNull,
             })
         }
         PolicyEntryDocument::Shorthand(policy) => parse_filter_shorthand(scope, &policy),
@@ -2180,7 +2347,7 @@ fn parse_filter_shorthand(scope: &'static str, value: &str) -> syn::Result<Polic
     if let Some(field) = parse_legacy_policy_field(value, RowPolicyKind::Owner) {
         return Ok(PolicyFilter {
             field,
-            source: PolicyValueSource::UserId,
+            operator: PolicyFilterOperator::Equals(PolicyValueSource::UserId),
         });
     }
 
@@ -2192,7 +2359,10 @@ fn parse_filter_shorthand(scope: &'static str, value: &str) -> syn::Result<Polic
     }
 
     let (field, source) = parse_policy_expression(value)?;
-    Ok(PolicyFilter { field, source })
+    Ok(PolicyFilter {
+        field,
+        operator: PolicyFilterOperator::Equals(source),
+    })
 }
 
 fn parse_assignment_shorthand(value: &str) -> syn::Result<PolicyAssignment> {
@@ -2618,10 +2788,91 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(read_filters.len(), 2);
         assert_eq!(
-            read_filters[1].source,
-            super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+            read_filters[1].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+            )
         );
         assert_eq!(resource.policies.create.len(), 2);
+    }
+
+    #[test]
+    fn parses_null_check_row_policies_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Note"
+                    policies: {
+                        read: { field: "archived_at", is_null: true }
+                        delete: { field: "archived_at", is_not_null: true }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "title", type: String }
+                        { name: "archived_at", type: String, nullable: true }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let resource = &resources[0];
+        let read = resource
+            .policies
+            .read
+            .as_ref()
+            .expect("read policy should exist");
+        let delete = resource
+            .policies
+            .delete
+            .as_ref()
+            .expect("delete policy should exist");
+
+        match read {
+            PolicyFilterExpression::Match(filter) => assert_eq!(
+                filter.operator,
+                super::super::model::PolicyFilterOperator::IsNull
+            ),
+            other => panic!("expected read null-check filter, got {other:?}"),
+        }
+        match delete {
+            PolicyFilterExpression::Match(filter) => assert_eq!(
+                filter.operator,
+                super::super::model::PolicyFilterOperator::IsNotNull
+            ),
+            other => panic!("expected delete null-check filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_null_check_row_policies_for_non_nullable_fields() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Note"
+                    policies: {
+                        read: { field: "title", is_null: true }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = build_resources(document.db, document.resources)
+            .expect_err("null checks on non-nullable fields should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("null checks require nullable/optional field")
+        );
     }
 
     #[test]
@@ -3093,12 +3344,18 @@ mod tests {
             "#,
         );
 
-        let authorization = parse_authorization_document(document.authorization);
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
         let resources =
             build_resources(document.db, document.resources).expect("resources should build");
         validate_authorization_contract(&authorization, &resources, Span::call_site())
             .expect("authorization contract should validate");
 
+        assert!(!authorization.management_api.enabled);
+        assert_eq!(
+            authorization.management_api.mount,
+            DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT
+        );
         assert_eq!(authorization.scopes.len(), 2);
         assert_eq!(authorization.scopes[1].name, "Household");
         assert_eq!(authorization.scopes[1].parent.as_deref(), Some("Family"));
@@ -3133,7 +3390,8 @@ mod tests {
             "#,
         );
 
-        let authorization = parse_authorization_document(document.authorization);
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
         let resources =
             build_resources(document.db, document.resources).expect("resources should build");
         let error = validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -3144,6 +3402,239 @@ mod tests {
                 .to_string()
                 .contains("authorization.permissions.FamilyRead")
         );
+    }
+
+    #[test]
+    fn parses_authorization_management_api_from_eon() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                management_api: {
+                    mount: "/ops/authz/"
+                }
+                scopes: {
+                    Family: {}
+                }
+                permissions: {
+                    FamilyRead: {
+                        actions: ["Read"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
+        assert!(authorization.management_api.enabled);
+        assert_eq!(authorization.management_api.mount, "/ops/authz");
+    }
+
+    #[test]
+    fn parses_authorization_hybrid_enforcement_from_eon() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                scopes: {
+                    Family: {}
+                }
+                permissions: {
+                    FamilyRead: {
+                        actions: ["Read"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                }
+                hybrid_enforcement: {
+                    resources: {
+                        ScopedDoc: {
+                            scope: "Family"
+                            scope_field: "family_id"
+                            actions: ["Read"]
+                        }
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    roles: {
+                        read: "member"
+                    }
+                    policies: {
+                        read: "user_id=user.id"
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "user_id", type: I64 }
+                        { name: "family_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        validate_authorization_contract(&authorization, &resources, Span::call_site())
+            .expect("authorization contract should validate");
+
+        assert_eq!(authorization.hybrid_enforcement.resources.len(), 1);
+        assert_eq!(
+            authorization.hybrid_enforcement.resources[0].resource,
+            "ScopedDoc"
+        );
+        assert_eq!(
+            authorization.hybrid_enforcement.resources[0].scope,
+            "Family"
+        );
+        assert_eq!(
+            authorization.hybrid_enforcement.resources[0].scope_field,
+            "family_id"
+        );
+        assert_eq!(
+            authorization.hybrid_enforcement.resources[0].actions,
+            vec![AuthorizationAction::Read]
+        );
+    }
+
+    #[test]
+    fn rejects_authorization_hybrid_enforcement_create_without_claim_controlled_scope_field() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                scopes: {
+                    Family: {}
+                }
+                permissions: {
+                    FamilyCreate: {
+                        actions: ["Create"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                }
+                hybrid_enforcement: {
+                    resources: {
+                        ScopedDoc: {
+                            scope: "Family"
+                            scope_field: "family_id"
+                            actions: ["Create"]
+                        }
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    policies: {
+                        create: "user_id=user.id"
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "user_id", type: I64 }
+                        { name: "family_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let error = validate_authorization_contract(&authorization, &resources, Span::call_site())
+            .expect_err("hybrid create without claim-controlled scope field should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires `family_id` to be assigned by a static create policy")
+        );
+    }
+
+    #[test]
+    fn accepts_authorization_hybrid_enforcement_create_for_claim_controlled_scope_field() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                scopes: {
+                    Family: {}
+                }
+                permissions: {
+                    FamilyCreate: {
+                        actions: ["Create"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                }
+                hybrid_enforcement: {
+                    resources: {
+                        ScopedDoc: {
+                            scope: "Family"
+                            scope_field: "family_id"
+                            actions: ["Create"]
+                        }
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    policies: {
+                        create: [
+                            "user_id=user.id"
+                            { field: "family_id", value: "claim.family_id" }
+                        ]
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "user_id", type: I64 }
+                        { name: "family_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        validate_authorization_contract(&authorization, &resources, Span::call_site())
+            .expect("hybrid create with claim-controlled scope field should validate");
+    }
+
+    #[test]
+    fn rejects_authorization_management_api_mount_without_leading_slash() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                management_api: {
+                    mount: "authz/runtime"
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let error = parse_authorization_document(document.authorization)
+            .expect_err("invalid management api mount should fail");
+        assert!(error.to_string().contains("must start with `/`"));
     }
 
     #[test]

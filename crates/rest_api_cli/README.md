@@ -246,14 +246,72 @@ yet enforced by generated handlers. Stored assignments include `created_at`,
 `created_by_user_id`, and optional `expires_at`; expired assignments are ignored by runtime
 simulation and runtime access checks.
 
+You can also manage those persisted runtime assignments directly from the CLI:
+
+```bash
+vsr --database-url sqlite:app.db?mode=rwc authz runtime list --user-id 7
+vsr --database-url sqlite:app.db?mode=rwc authz runtime create --config api.eon --user-id 7 --assignment template:FamilyMember@Family=42 --created-by-user-id 1
+vsr --database-url sqlite:app.db?mode=rwc authz runtime evaluate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42
+vsr --database-url sqlite:app.db?mode=rwc authz runtime revoke --id runtime.assignment.123 --actor-user-id 1 --reason suspended
+vsr --database-url sqlite:app.db?mode=rwc authz runtime renew --id runtime.assignment.123 --expires-at 2026-03-31T00:00:00Z --actor-user-id 1 --reason restored
+vsr --database-url sqlite:app.db?mode=rwc authz runtime history --user-id 7
+vsr --database-url sqlite:app.db?mode=rwc authz runtime delete --id runtime.assignment.123 --actor-user-id 1 --reason cleanup
+```
+
+`authz runtime create` validates the requested permission/template and scope against the static
+`.eon` authorization contract before inserting the row. `authz runtime evaluate` loads stored
+assignments for the user and evaluates only the runtime grant layer; it does not apply the
+static CRUD role and row-policy checks. `authz runtime revoke` deactivates an assignment by
+setting its expiration to the current time without deleting its record, and `authz runtime renew`
+sets a new future expiration. `authz runtime history` reads the append-only assignment event log,
+which now records `created`, `revoked`, `renewed`, and `deleted` events with actor and optional
+reason data.
+
 Static `.eon` row policies also support `all_of`, `any_of`, `not`, and a first bounded
 relation-aware `exists` form. `vsr authz simulate` can fully evaluate `exists` predicates when
 you supply matching related rows with repeated `--related-row` arguments; otherwise the trace
 stays incomplete and reports the missing related resource data.
 
 The `.eon` format also supports an optional static `authorization` block for declaring scopes,
-permissions, and templates. In this slice it is contract-only: validated and surfaced by the
-diagnostic commands, but not yet enforced by generated handlers.
+permissions, templates, and an opt-in runtime management mount. The scope/permission/template
+portion is still contract-only by itself for generated CRUD enforcement: validated and surfaced by
+the diagnostic commands. Request-time behavior changes only when you opt into runtime management
+or hybrid enforcement.
+
+Generated item-scoped CRUD handlers can now also opt into the first hybrid-enforcement slice:
+
+```eon
+authorization: {
+    scopes: {
+        Family: {}
+    }
+    permissions: {
+        FamilyManage: {
+            actions: ["Create", "Read", "Update", "Delete"]
+            resources: ["ScopedDoc"]
+            scopes: ["Family"]
+        }
+    }
+    hybrid_enforcement: {
+        resources: {
+            ScopedDoc: {
+                scope: "Family"
+                scope_field: "family_id"
+                actions: ["Create", "Read", "Update", "Delete"]
+            }
+        }
+    }
+}
+```
+
+This is additive and item-scoped only. Generated `GET /resource/{id}`, `PUT /resource/{id}`, and
+`DELETE /resource/{id}` still require the static role check to pass first. When the static row
+policy denies the row, the handler can derive a runtime scope from the stored row and consult the
+persisted runtime assignment layer. Generated `POST /resource` can also opt into a narrow hybrid
+create fallback when the configured `scope_field` is already assigned from a claim in
+`policies.create`; in that case the create DTO exposes that one field as an optional fallback and
+the handler uses it only when the claim is missing and a matching runtime `Create` grant exists
+for the supplied scope. Collection/list routes are unchanged in this slice.
 
 ### Static Files In `.eon`
 
@@ -409,7 +467,8 @@ policy-management and diagnostics endpoints in emitted or manual servers. They a
 service as Actix app data for the configured scope. For a basic opt-in runtime assignment API,
 generated modules also expose `module::configure_authorization_management(cfg, db)`, which mounts
 `POST /authz/runtime/evaluate` plus admin-oriented
-`GET/POST/DELETE /authz/runtime/assignments...` endpoints backed by the shared authorization
+`GET /authz/runtime/assignment-events`, `GET/POST/DELETE /authz/runtime/assignments...`, and
+`POST /authz/runtime/assignments/{id}/revoke|renew` endpoints backed by the shared authorization
 runtime. The evaluate endpoint resolves persisted scoped permissions for an explicit
 resource/action/scope request, but it does not apply static CRUD policy checks.
 Custom handlers can also enforce persisted runtime grants directly through

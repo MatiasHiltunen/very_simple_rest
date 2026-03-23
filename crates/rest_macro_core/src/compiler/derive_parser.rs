@@ -4,10 +4,11 @@ use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
     DbBackend, FieldSpec, FieldValidation, ListConfig, NumericBound, PolicyAssignment,
-    PolicyFilter, PolicyFilterExpression, PolicyValueSource, ReferentialAction, ResourceSpec,
-    RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
-    infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
-    validate_relations, validate_row_policies, validate_sql_identifier,
+    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
+    ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle,
+    default_resource_module_ident, infer_generated_value, infer_sql_type,
+    validate_field_validations, validate_list_config, validate_relations, validate_row_policies,
+    validate_sql_identifier,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -514,7 +515,7 @@ fn parse_filter_policy(value: &str, span: proc_macro2::Span) -> syn::Result<Poli
     if let Some(field) = parse_legacy_policy_field(value, RowPolicyKind::Owner) {
         return Ok(PolicyFilter {
             field,
-            source: PolicyValueSource::UserId,
+            operator: PolicyFilterOperator::Equals(PolicyValueSource::UserId),
         });
     }
 
@@ -526,7 +527,10 @@ fn parse_filter_policy(value: &str, span: proc_macro2::Span) -> syn::Result<Poli
     }
 
     let (field, source) = parse_policy_expression(value, span)?;
-    Ok(PolicyFilter { field, source })
+    Ok(PolicyFilter {
+        field,
+        operator: PolicyFilterOperator::Equals(source),
+    })
 }
 
 fn parse_assignment_policy(value: &str, span: proc_macro2::Span) -> syn::Result<PolicyAssignment> {
@@ -670,8 +674,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(read_filters.len(), 2);
         assert_eq!(
-            read_filters[1].source,
-            super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+            read_filters[1].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+            )
         );
         assert_eq!(resource.policies.create.len(), 2);
     }

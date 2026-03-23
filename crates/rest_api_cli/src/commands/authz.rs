@@ -7,11 +7,18 @@ use rest_macro_core::{
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment,
         AuthorizationAssignmentTrace, AuthorizationCondition, AuthorizationConditionTrace,
         AuthorizationContract, AuthorizationExistsCondition, AuthorizationExistsConditionTrace,
-        AuthorizationMatch, AuthorizationModel, AuthorizationOutcome, AuthorizationScopeBinding,
-        AuthorizationScopedAssignment, AuthorizationScopedAssignmentTarget,
+        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationOutcome,
+        AuthorizationRuntime, AuthorizationRuntimeAccessResult, AuthorizationScopeBinding,
+        AuthorizationScopedAssignment, AuthorizationScopedAssignmentCreateInput,
+        AuthorizationScopedAssignmentEventKind, AuthorizationScopedAssignmentEventRecord,
+        AuthorizationScopedAssignmentRecord, AuthorizationScopedAssignmentTarget,
         AuthorizationScopedAssignmentTrace, AuthorizationSimulationInput,
         AuthorizationSimulationResult, AuthorizationValueSource, ResourceAuthorization,
+        delete_runtime_assignment_with_audit as delete_stored_runtime_assignment_with_audit,
+        list_runtime_assignment_events_for_user, list_runtime_assignments_for_user,
         load_runtime_assignments_for_user,
+        renew_runtime_assignment_with_audit as renew_stored_runtime_assignment_with_audit,
+        revoke_runtime_assignment_with_audit as revoke_stored_runtime_assignment_with_audit,
     },
     compiler,
 };
@@ -23,6 +30,12 @@ use super::db::connect_database;
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeAssignmentDeleteResult {
+    id: String,
+    deleted: bool,
 }
 
 pub fn explain_authorization(
@@ -167,6 +180,244 @@ pub async fn simulate_authorization(
     Ok(())
 }
 
+pub async fn list_runtime_assignments(
+    user_id: i64,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let pool = connect_database(database_url, config_path)
+        .await
+        .context("failed to connect database for runtime authorization assignments")?;
+    let assignments = list_runtime_assignments_for_user(&pool, user_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let rendered = render_runtime_assignments(&assignments, format)?;
+    write_output(rendered, output, force, "runtime authorization assignments")
+}
+
+pub async fn list_runtime_assignment_history(
+    user_id: i64,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let pool = connect_database(database_url, config_path)
+        .await
+        .context("failed to connect database for runtime authorization assignment history")?;
+    let events = list_runtime_assignment_events_for_user(&pool, user_id)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let rendered = render_runtime_assignment_history(&events, format)?;
+    write_output(
+        rendered,
+        output,
+        force,
+        "runtime authorization assignment history",
+    )
+}
+
+pub async fn create_runtime_assignment(
+    input: &Path,
+    user_id: i64,
+    assignment: &str,
+    expires_at: Option<&str>,
+    created_by_user_id: Option<i64>,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let runtime = load_authorization_runtime(input, database_url, config_path).await?;
+    let scoped_assignment = parse_scoped_assignment(assignment, "runtime.assignment.cli")?;
+    let created = runtime
+        .create_assignment(
+            AuthorizationScopedAssignmentCreateInput {
+                user_id,
+                target: scoped_assignment.target,
+                scope: scoped_assignment.scope,
+                expires_at: expires_at.map(str::to_owned),
+            }
+            .into_record(created_by_user_id)
+            .map_err(anyhow::Error::msg)?,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let rendered = render_runtime_assignment_record(&created, format)?;
+    write_output(rendered, output, force, "runtime authorization assignment")
+}
+
+pub async fn delete_runtime_assignment(
+    assignment_id: &str,
+    actor_user_id: Option<i64>,
+    reason: Option<&str>,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let pool = connect_database(database_url, config_path)
+        .await
+        .context("failed to connect database for runtime authorization assignments")?;
+    let deleted = delete_stored_runtime_assignment_with_audit(
+        &pool,
+        assignment_id,
+        actor_user_id,
+        reason.map(str::to_owned),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    let rendered = render_runtime_assignment_delete_result(
+        &RuntimeAssignmentDeleteResult {
+            id: assignment_id.to_owned(),
+            deleted,
+        },
+        format,
+    )?;
+    write_output(
+        rendered,
+        output,
+        force,
+        "runtime authorization delete result",
+    )
+}
+
+pub async fn revoke_runtime_assignment(
+    assignment_id: &str,
+    actor_user_id: Option<i64>,
+    reason: Option<&str>,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let pool = connect_database(database_url, config_path)
+        .await
+        .context("failed to connect database for runtime authorization assignments")?;
+    let revoked = revoke_stored_runtime_assignment_with_audit(
+        &pool,
+        assignment_id,
+        actor_user_id,
+        reason.map(str::to_owned),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?
+    .ok_or_else(|| {
+        anyhow::anyhow!("runtime authorization assignment `{assignment_id}` not found")
+    })?;
+    let rendered = render_runtime_assignment_record(&revoked, format)?;
+    write_output(
+        rendered,
+        output,
+        force,
+        "runtime authorization assignment revocation",
+    )
+}
+
+pub async fn renew_runtime_assignment(
+    assignment_id: &str,
+    expires_at: &str,
+    actor_user_id: Option<i64>,
+    reason: Option<&str>,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let pool = connect_database(database_url, config_path)
+        .await
+        .context("failed to connect database for runtime authorization assignments")?;
+    let renewed = renew_stored_runtime_assignment_with_audit(
+        &pool,
+        assignment_id,
+        expires_at,
+        actor_user_id,
+        reason.map(str::to_owned),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?
+    .ok_or_else(|| {
+        anyhow::anyhow!("runtime authorization assignment `{assignment_id}` not found")
+    })?;
+    let rendered = render_runtime_assignment_record(&renewed, format)?;
+    write_output(
+        rendered,
+        output,
+        force,
+        "runtime authorization assignment renewal",
+    )
+}
+
+pub async fn evaluate_runtime_access(
+    input: &Path,
+    resource: &str,
+    action: AuthorizationAction,
+    user_id: i64,
+    scope: &str,
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: Option<&Path>,
+    format: OutputFormat,
+    force: bool,
+) -> Result<()> {
+    let runtime = load_authorization_runtime(input, database_url, config_path).await?;
+    let result = runtime
+        .evaluate_runtime_access_for_user(user_id, resource, action, parse_scope_binding(scope)?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let rendered = render_runtime_access_result(&result, format)?;
+    write_output(rendered, output, force, "runtime authorization evaluation")
+}
+
+async fn load_authorization_runtime(
+    input: &Path,
+    database_url: &str,
+    config_path: Option<&Path>,
+) -> Result<AuthorizationRuntime> {
+    let service = compiler::load_service_from_path(input)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .with_context(|| format!("failed to load service definition from {}", input.display()))?;
+    let pool = connect_database(database_url, config_path)
+        .await
+        .context("failed to connect database for runtime authorization assignments")?;
+    Ok(AuthorizationRuntime::new(
+        compiler::compile_service_authorization(&service),
+        pool,
+    ))
+}
+
+fn write_output(rendered: String, output: Option<&Path>, force: bool, label: &str) -> Result<()> {
+    if let Some(output) = output {
+        if output.exists() && !force {
+            bail!(
+                "{label} output already exists at {} (use --force to overwrite)",
+                output.display()
+            );
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(output, rendered)
+            .with_context(|| format!("failed to write {label} to {}", output.display()))?;
+        println!("{} {}", "Generated".green().bold(), output.display());
+    } else {
+        print!("{rendered}");
+        if !rendered.ends_with('\n') {
+            println!();
+        }
+    }
+    Ok(())
+}
+
 pub fn render_authorization_simulation(
     service: &compiler::ServiceSpec,
     resource_name: Option<&str>,
@@ -182,6 +433,61 @@ pub fn render_authorization_simulation(
         OutputFormat::Text => Ok(render_text_simulation(service, &result)),
         OutputFormat::Json => serde_json::to_string_pretty(&result)
             .context("failed to serialize authorization simulation to JSON"),
+    }
+}
+
+pub fn render_runtime_assignments(
+    assignments: &[AuthorizationScopedAssignmentRecord],
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Text => Ok(render_text_runtime_assignments(assignments)),
+        OutputFormat::Json => serde_json::to_string_pretty(assignments)
+            .context("failed to serialize runtime authorization assignments to JSON"),
+    }
+}
+
+pub fn render_runtime_assignment_history(
+    events: &[AuthorizationScopedAssignmentEventRecord],
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Text => Ok(render_text_runtime_assignment_history(events)),
+        OutputFormat::Json => serde_json::to_string_pretty(events)
+            .context("failed to serialize runtime authorization assignment history to JSON"),
+    }
+}
+
+pub fn render_runtime_assignment_record(
+    assignment: &AuthorizationScopedAssignmentRecord,
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Text => Ok(render_text_runtime_assignment_record(assignment)),
+        OutputFormat::Json => serde_json::to_string_pretty(assignment)
+            .context("failed to serialize runtime authorization assignment to JSON"),
+    }
+}
+
+fn render_runtime_assignment_delete_result(
+    result: &RuntimeAssignmentDeleteResult,
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Text => Ok(render_text_runtime_assignment_delete_result(result)),
+        OutputFormat::Json => serde_json::to_string_pretty(result)
+            .context("failed to serialize runtime authorization delete result to JSON"),
+    }
+}
+
+pub fn render_runtime_access_result(
+    result: &AuthorizationRuntimeAccessResult,
+    format: OutputFormat,
+) -> Result<String> {
+    match format {
+        OutputFormat::Text => Ok(render_text_runtime_access_result(result)),
+        OutputFormat::Json => serde_json::to_string_pretty(result)
+            .context("failed to serialize runtime authorization access result to JSON"),
     }
 }
 
@@ -202,7 +508,196 @@ fn render_text_explanation(service: &compiler::ServiceSpec, model: &Authorizatio
     output
 }
 
+fn render_text_runtime_assignments(assignments: &[AuthorizationScopedAssignmentRecord]) -> String {
+    let mut output = String::new();
+    output.push_str("Runtime authorization assignments\n");
+    output.push_str(&format!("count: {}\n", assignments.len()));
+    if assignments.is_empty() {
+        output.push_str("assignments: none\n");
+        return output;
+    }
+
+    output.push_str("assignments:\n");
+    for assignment in assignments {
+        output.push_str(&format!(
+            "  - {}\n",
+            render_runtime_assignment_record_line(assignment)
+        ));
+    }
+    output
+}
+
+fn render_text_runtime_assignment_history(
+    events: &[AuthorizationScopedAssignmentEventRecord],
+) -> String {
+    let mut output = String::new();
+    output.push_str("Runtime authorization assignment history\n");
+    output.push_str(&format!("count: {}\n", events.len()));
+    if events.is_empty() {
+        output.push_str("events: none\n");
+        return output;
+    }
+
+    output.push_str("events:\n");
+    for event in events {
+        output.push_str(&format!(
+            "  - {}\n",
+            render_runtime_assignment_event_line(event)
+        ));
+    }
+    output
+}
+
+fn render_text_runtime_assignment_record(
+    assignment: &AuthorizationScopedAssignmentRecord,
+) -> String {
+    let mut output = String::new();
+    output.push_str("Runtime authorization assignment\n");
+    output.push_str(&format!("id: {}\n", assignment.id));
+    output.push_str(&format!("user_id: {}\n", assignment.user_id));
+    output.push_str(&format!(
+        "target: {}\n",
+        render_scoped_assignment_target(&assignment.target)
+    ));
+    output.push_str(&format!(
+        "scope: {}={}\n",
+        assignment.scope.scope, assignment.scope.value
+    ));
+    output.push_str(&format!("created_at: {}\n", assignment.created_at));
+    output.push_str(&format!(
+        "created_by_user_id: {}\n",
+        assignment
+            .created_by_user_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_owned())
+    ));
+    output.push_str(&format!(
+        "expires_at: {}\n",
+        assignment.expires_at.as_deref().unwrap_or("none")
+    ));
+    output
+}
+
+fn render_text_runtime_assignment_delete_result(result: &RuntimeAssignmentDeleteResult) -> String {
+    let mut output = String::new();
+    output.push_str("Runtime authorization delete result\n");
+    output.push_str(&format!("id: {}\n", result.id));
+    output.push_str(&format!("deleted: {}\n", result.deleted));
+    output
+}
+
+fn render_text_runtime_access_result(result: &AuthorizationRuntimeAccessResult) -> String {
+    let mut output = String::new();
+    output.push_str("Runtime authorization access\n");
+    output.push_str(&format!("user_id: {}\n", result.user_id));
+    output.push_str(&format!("resource_id: {}\n", result.resource_id));
+    output.push_str(&format!("resource: {}\n", result.resource));
+    output.push_str(&format!("action_id: {}\n", result.action_id));
+    output.push_str(&format!("action: {}\n", action_label(result.action)));
+    output.push_str(&format!(
+        "scope: {}={}\n",
+        result.scope.scope, result.scope.value
+    ));
+    output.push_str(&format!("allowed: {}\n", result.allowed));
+
+    if result.runtime_assignments.is_empty() {
+        output.push_str("runtime_assignments: none\n");
+    } else {
+        output.push_str("runtime_assignments:\n");
+        for assignment in &result.runtime_assignments {
+            output.push_str(&format!(
+                "  - {}\n",
+                render_scoped_assignment_trace(assignment)
+            ));
+        }
+    }
+
+    if result.resolved_permissions.is_empty() {
+        output.push_str("resolved_permissions: none\n");
+    } else {
+        output.push_str(&format!(
+            "resolved_permissions: {}\n",
+            result.resolved_permissions.join(", ")
+        ));
+    }
+
+    if result.resolved_templates.is_empty() {
+        output.push_str("resolved_templates: none\n");
+    } else {
+        output.push_str(&format!(
+            "resolved_templates: {}\n",
+            result.resolved_templates.join(", ")
+        ));
+    }
+
+    if result.notes.is_empty() {
+        output.push_str("notes: none\n");
+    } else {
+        output.push_str("notes:\n");
+        for note in &result.notes {
+            output.push_str(&format!("  - {note}\n"));
+        }
+    }
+
+    output
+}
+
+fn render_runtime_assignment_record_line(
+    assignment: &AuthorizationScopedAssignmentRecord,
+) -> String {
+    let mut details = Vec::new();
+    details.push(format!("user_id={}", assignment.user_id));
+    details.push(format!(
+        "target={}",
+        render_scoped_assignment_target(&assignment.target)
+    ));
+    details.push(format!(
+        "scope={}={}",
+        assignment.scope.scope, assignment.scope.value
+    ));
+    details.push(format!("created_at={}", assignment.created_at));
+    if let Some(created_by_user_id) = assignment.created_by_user_id {
+        details.push(format!("created_by_user_id={created_by_user_id}"));
+    }
+    if let Some(expires_at) = &assignment.expires_at {
+        details.push(format!("expires_at={expires_at}"));
+    }
+    format!("{} [{}]", assignment.id, details.join(", "))
+}
+
+fn render_runtime_assignment_event_line(
+    event: &AuthorizationScopedAssignmentEventRecord,
+) -> String {
+    let mut details = Vec::new();
+    details.push(format!("assignment_id={}", event.assignment_id));
+    details.push(format!("user_id={}", event.user_id));
+    details.push(format!(
+        "event={}",
+        runtime_assignment_event_kind_label(event.event)
+    ));
+    details.push(format!(
+        "target={}",
+        render_scoped_assignment_target(&event.target)
+    ));
+    details.push(format!("scope={}={}", event.scope.scope, event.scope.value));
+    details.push(format!("occurred_at={}", event.occurred_at));
+    if let Some(actor_user_id) = event.actor_user_id {
+        details.push(format!("actor_user_id={actor_user_id}"));
+    }
+    if let Some(expires_at) = &event.expires_at {
+        details.push(format!("expires_at={expires_at}"));
+    }
+    if let Some(reason) = &event.reason {
+        details.push(format!("reason={reason}"));
+    }
+    format!("{} [{}]", event.id, details.join(", "))
+}
+
 fn render_contract_text(output: &mut String, contract: &AuthorizationContract) {
+    output.push_str(&format!(
+        "\ncontract.management_api: enabled={}, mount={}\n",
+        contract.management_api.enabled, contract.management_api.mount
+    ));
     output.push_str(&format!("\ncontract.scopes: {}\n", contract.scopes.len()));
     for scope in &contract.scopes {
         output.push_str(&format!("  - {}", scope.name));
@@ -252,6 +747,25 @@ fn render_contract_text(output: &mut String, contract: &AuthorizationContract) {
             } else {
                 template.scopes.join(", ")
             }
+        ));
+    }
+
+    output.push_str(&format!(
+        "contract.hybrid_enforcement.resources: {}\n",
+        contract.hybrid_enforcement.resources.len()
+    ));
+    for resource in &contract.hybrid_enforcement.resources {
+        output.push_str(&format!(
+            "  - {} [scope={}, scope_field={}, actions={}]\n",
+            resource.resource,
+            resource.scope,
+            resource.scope_field,
+            resource
+                .actions
+                .iter()
+                .map(|action| action_label(*action))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 }
@@ -453,12 +967,18 @@ fn join_conditions(operator: &str, conditions: &[AuthorizationCondition]) -> Str
 }
 
 fn render_match(rule: &AuthorizationMatch) -> String {
-    format!(
-        "{} {} == {}",
-        rule.id,
-        rule.field,
-        render_source(&rule.source)
-    )
+    match (rule.operator, rule.source.as_ref()) {
+        (AuthorizationOperator::Equals, Some(source)) => {
+            format!("{} {} == {}", rule.id, rule.field, render_source(source))
+        }
+        (AuthorizationOperator::IsNull, _) => format!("{} {} IS NULL", rule.id, rule.field),
+        (AuthorizationOperator::IsNotNull, _) => {
+            format!("{} {} IS NOT NULL", rule.id, rule.field)
+        }
+        (AuthorizationOperator::Equals, None) => {
+            format!("{} {} == <missing-source>", rule.id, rule.field)
+        }
+    }
 }
 
 fn render_exists_condition(condition: &AuthorizationExistsCondition) -> String {
@@ -537,12 +1057,21 @@ fn render_condition_trace(trace: &AuthorizationConditionTrace) -> String {
             if let Some(source_value) = source_value {
                 details.push(format!("source={}", render_json_value(source_value)));
             }
+            let rendered_source =
+                source
+                    .as_ref()
+                    .map(render_source)
+                    .unwrap_or_else(|| match operator {
+                        AuthorizationOperator::Equals => "<missing-source>".to_owned(),
+                        AuthorizationOperator::IsNull => "null".to_owned(),
+                        AuthorizationOperator::IsNotNull => "not-null".to_owned(),
+                    });
             format!(
                 "{} {} {} {} [{}]",
                 id,
                 field,
                 operator_label(*operator),
-                render_source(source),
+                rendered_source,
                 details.join(", ")
             )
         }
@@ -635,6 +1164,7 @@ fn render_exists_condition_trace(trace: &AuthorizationExistsConditionTrace) -> S
         AuthorizationExistsConditionTrace::Match {
             id,
             field,
+            operator,
             source,
             source_value,
             missing_source,
@@ -657,11 +1187,21 @@ fn render_exists_condition_trace(trace: &AuthorizationExistsConditionTrace) -> S
             if let Some(related_value) = related_value {
                 details.push(format!("related={}", render_json_value(related_value)));
             }
+            let rendered_source =
+                source
+                    .as_ref()
+                    .map(render_source)
+                    .unwrap_or_else(|| match operator {
+                        AuthorizationOperator::Equals => "<missing-source>".to_owned(),
+                        AuthorizationOperator::IsNull => "null".to_owned(),
+                        AuthorizationOperator::IsNotNull => "not-null".to_owned(),
+                    });
             format!(
-                "{} {} == {} [{}]",
+                "{} {} {} {} [{}]",
                 id,
                 field,
-                render_source(source),
+                operator_label(*operator),
+                rendered_source,
                 if details.is_empty() {
                     "ready".to_owned()
                 } else {
@@ -826,6 +1366,17 @@ fn render_scoped_assignment_target(target: &AuthorizationScopedAssignmentTarget)
     }
 }
 
+fn runtime_assignment_event_kind_label(
+    kind: AuthorizationScopedAssignmentEventKind,
+) -> &'static str {
+    match kind {
+        AuthorizationScopedAssignmentEventKind::Created => "created",
+        AuthorizationScopedAssignmentEventKind::Revoked => "revoked",
+        AuthorizationScopedAssignmentEventKind::Renewed => "renewed",
+        AuthorizationScopedAssignmentEventKind::Deleted => "deleted",
+    }
+}
+
 fn action_label(action: AuthorizationAction) -> &'static str {
     match action {
         AuthorizationAction::Read => "read",
@@ -846,6 +1397,8 @@ fn outcome_label(outcome: AuthorizationOutcome) -> &'static str {
 fn operator_label(operator: rest_macro_core::authorization::AuthorizationOperator) -> &'static str {
     match operator {
         rest_macro_core::authorization::AuthorizationOperator::Equals => "==",
+        rest_macro_core::authorization::AuthorizationOperator::IsNull => "IS NULL",
+        rest_macro_core::authorization::AuthorizationOperator::IsNotNull => "IS NOT NULL",
     }
 }
 
@@ -963,20 +1516,24 @@ fn parse_scoped_assignments(values: &[String]) -> Result<Vec<AuthorizationScoped
         .iter()
         .enumerate()
         .map(|(index, raw)| {
-            let (target, scope) = raw.split_once('@').ok_or_else(|| {
-                anyhow::anyhow!(
-                    "runtime assignments must use `permission:Name@Scope=value` or `template:Name@Scope=value`"
-                )
-            })?;
-            let target = parse_scoped_assignment_target(target.trim())?;
-            let scope = parse_scope_binding(scope.trim())?;
-            Ok(AuthorizationScopedAssignment {
-                id: format!("runtime.assignment.{}", index + 1),
-                target,
-                scope,
-            })
+            parse_scoped_assignment(raw, &format!("runtime.assignment.{}", index + 1))
         })
         .collect()
+}
+
+fn parse_scoped_assignment(raw: &str, id: &str) -> Result<AuthorizationScopedAssignment> {
+    let (target, scope) = raw.split_once('@').ok_or_else(|| {
+        anyhow::anyhow!(
+            "runtime assignments must use `permission:Name@Scope=value` or `template:Name@Scope=value`"
+        )
+    })?;
+    let target = parse_scoped_assignment_target(target.trim())?;
+    let scope = parse_scope_binding(scope.trim())?;
+    Ok(AuthorizationScopedAssignment {
+        id: id.to_owned(),
+        target,
+        scope,
+    })
 }
 
 fn parse_scoped_assignment_target(raw: &str) -> Result<AuthorizationScopedAssignmentTarget> {
@@ -1008,9 +1565,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        OutputFormat, explain_authorization, parse_cli_value, parse_related_rows,
-        parse_scope_binding, parse_scoped_assignments, render_authorization_explanation,
-        render_authorization_simulation, simulate_authorization,
+        OutputFormat, create_runtime_assignment, delete_runtime_assignment,
+        evaluate_runtime_access, explain_authorization, list_runtime_assignment_history,
+        list_runtime_assignments, parse_cli_value, parse_related_rows, parse_scope_binding,
+        parse_scoped_assignments, render_authorization_explanation,
+        render_authorization_simulation, renew_runtime_assignment, revoke_runtime_assignment,
+        simulate_authorization,
     };
     use rest_macro_core::{
         authorization::{AuthorizationAction, AuthorizationSimulationInput},
@@ -1352,5 +1912,264 @@ mod tests {
         assert!(rendered.contains("runtime.assignment.db.1"));
         assert!(rendered.contains("resolved_permissions: FamilyRead"));
         assert!(rendered.contains("resolved_templates: FamilyMember"));
+    }
+
+    #[tokio::test]
+    async fn runtime_assignment_commands_manage_persisted_assignments() {
+        use rest_macro_core::auth::AuthDbBackend;
+        use rest_macro_core::authorization::authorization_runtime_migration_sql;
+        use sqlx::Executor;
+
+        sqlx::any::install_default_drivers();
+
+        let root = test_root();
+        fs::create_dir_all(&root).expect("test root should exist");
+        let database_path = root.join("authz-runtime-cli.db");
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+        let pool = sqlx::AnyPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+        pool.execute(authorization_runtime_migration_sql(AuthDbBackend::Sqlite).as_str())
+            .await
+            .expect("runtime assignment migration should apply");
+        drop(pool);
+
+        let create_output = root.join("create.json");
+        create_runtime_assignment(
+            &fixture_path("authz_management_api.eon"),
+            7,
+            "template:FamilyMember@Family=42",
+            Some("2026-03-25T00:00:00Z"),
+            Some(1),
+            &database_url,
+            None,
+            Some(&create_output),
+            OutputFormat::Json,
+            false,
+        )
+        .await
+        .expect("runtime assignment should create");
+
+        let created: Value = serde_json::from_str(
+            &fs::read_to_string(&create_output).expect("created assignment output should exist"),
+        )
+        .expect("created assignment output should parse");
+        let assignment_id = created["id"]
+            .as_str()
+            .expect("created assignment should include id")
+            .to_owned();
+        assert_eq!(created["user_id"], 7);
+        assert_eq!(created["target"]["kind"], "template");
+        assert_eq!(created["target"]["name"], "FamilyMember");
+        assert_eq!(created["scope"]["scope"], "Family");
+        assert_eq!(created["scope"]["value"], "42");
+        assert_eq!(created["created_by_user_id"], 1);
+
+        let list_output = root.join("list.txt");
+        list_runtime_assignments(
+            7,
+            &database_url,
+            None,
+            Some(&list_output),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime assignments should list");
+        let listed = fs::read_to_string(&list_output).expect("list output should exist");
+        assert!(listed.contains("Runtime authorization assignments"));
+        assert!(listed.contains(&assignment_id));
+        assert!(listed.contains("target=template:FamilyMember"));
+        assert!(listed.contains("scope=Family=42"));
+
+        let evaluate_output = root.join("evaluate.txt");
+        evaluate_runtime_access(
+            &fixture_path("authz_management_api.eon"),
+            "ScopedDoc",
+            AuthorizationAction::Read,
+            7,
+            "Family=42",
+            &database_url,
+            None,
+            Some(&evaluate_output),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime access should evaluate");
+        let evaluated =
+            fs::read_to_string(&evaluate_output).expect("evaluation output should exist");
+        assert!(evaluated.contains("Runtime authorization access"));
+        assert!(evaluated.contains("allowed: true"));
+        assert!(evaluated.contains("resolved_permissions: FamilyRead"));
+        assert!(evaluated.contains("resolved_templates: FamilyMember"));
+
+        let revoke_output = root.join("revoke.txt");
+        revoke_runtime_assignment(
+            &assignment_id,
+            Some(11),
+            Some("suspend"),
+            &database_url,
+            None,
+            Some(&revoke_output),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime assignment should revoke");
+        let revoked = fs::read_to_string(&revoke_output).expect("revoke output should exist");
+        assert!(revoked.contains("Runtime authorization assignment"));
+        assert!(revoked.contains(&assignment_id));
+        assert!(revoked.contains("expires_at: "));
+
+        let evaluate_after_revoke = root.join("evaluate-after-revoke.txt");
+        evaluate_runtime_access(
+            &fixture_path("authz_management_api.eon"),
+            "ScopedDoc",
+            AuthorizationAction::Read,
+            7,
+            "Family=42",
+            &database_url,
+            None,
+            Some(&evaluate_after_revoke),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime access should evaluate after revoke");
+        let evaluated_after_revoke = fs::read_to_string(&evaluate_after_revoke)
+            .expect("post-revoke evaluation output should exist");
+        assert!(evaluated_after_revoke.contains("allowed: false"));
+
+        let renewed_expires_at = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::days(3))
+            .expect("renewed expiry should compute")
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
+        let renew_output = root.join("renew.json");
+        renew_runtime_assignment(
+            &assignment_id,
+            &renewed_expires_at,
+            Some(12),
+            Some("restore"),
+            &database_url,
+            None,
+            Some(&renew_output),
+            OutputFormat::Json,
+            false,
+        )
+        .await
+        .expect("runtime assignment should renew");
+        let renewed: Value = serde_json::from_str(
+            &fs::read_to_string(&renew_output).expect("renew output should exist"),
+        )
+        .expect("renew output should parse");
+        assert_eq!(renewed["id"], assignment_id);
+        assert_eq!(renewed["expires_at"], renewed_expires_at);
+
+        let history_output = root.join("history.txt");
+        list_runtime_assignment_history(
+            7,
+            &database_url,
+            None,
+            Some(&history_output),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime assignment history should list");
+        let history = fs::read_to_string(&history_output).expect("history output should exist");
+        assert!(history.contains("Runtime authorization assignment history"));
+        assert!(history.contains("event=created"));
+        assert!(history.contains("event=revoked"));
+        assert!(history.contains("actor_user_id=11"));
+        assert!(history.contains("reason=suspend"));
+        let history_after_renew_output = root.join("history-after-renew.txt");
+        list_runtime_assignment_history(
+            7,
+            &database_url,
+            None,
+            Some(&history_after_renew_output),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime assignment history should list after renew");
+        let history_after_renew = fs::read_to_string(&history_after_renew_output)
+            .expect("renewed history output should exist");
+        assert!(history_after_renew.contains("event=renewed"));
+        assert!(history_after_renew.contains("actor_user_id=12"));
+        assert!(history_after_renew.contains("reason=restore"));
+
+        let evaluate_after_renew = root.join("evaluate-after-renew.txt");
+        evaluate_runtime_access(
+            &fixture_path("authz_management_api.eon"),
+            "ScopedDoc",
+            AuthorizationAction::Read,
+            7,
+            "Family=42",
+            &database_url,
+            None,
+            Some(&evaluate_after_renew),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime access should evaluate after renew");
+        let evaluated_after_renew = fs::read_to_string(&evaluate_after_renew)
+            .expect("post-renew evaluation output should exist");
+        assert!(evaluated_after_renew.contains("allowed: true"));
+
+        let delete_output = root.join("delete.json");
+        delete_runtime_assignment(
+            &assignment_id,
+            Some(13),
+            Some("cleanup"),
+            &database_url,
+            None,
+            Some(&delete_output),
+            OutputFormat::Json,
+            false,
+        )
+        .await
+        .expect("runtime assignment should delete");
+        let deleted: Value = serde_json::from_str(
+            &fs::read_to_string(&delete_output).expect("delete output should exist"),
+        )
+        .expect("delete output should parse");
+        assert_eq!(deleted["id"], assignment_id);
+        assert_eq!(deleted["deleted"], true);
+
+        let list_after_delete = root.join("list-after-delete.txt");
+        list_runtime_assignments(
+            7,
+            &database_url,
+            None,
+            Some(&list_after_delete),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime assignments should list after delete");
+        let listed_after_delete =
+            fs::read_to_string(&list_after_delete).expect("list-after-delete output should exist");
+        assert!(listed_after_delete.contains("count: 0"));
+        assert!(listed_after_delete.contains("assignments: none"));
+
+        let history_after_delete_output = root.join("history-after-delete.txt");
+        list_runtime_assignment_history(
+            7,
+            &database_url,
+            None,
+            Some(&history_after_delete_output),
+            OutputFormat::Text,
+            false,
+        )
+        .await
+        .expect("runtime assignment history should list after delete");
+        let history_after_delete = fs::read_to_string(&history_after_delete_output)
+            .expect("delete history output should exist");
+        assert!(history_after_delete.contains("event=deleted"));
+        assert!(history_after_delete.contains("actor_user_id=13"));
+        assert!(history_after_delete.contains("reason=cleanup"));
     }
 }

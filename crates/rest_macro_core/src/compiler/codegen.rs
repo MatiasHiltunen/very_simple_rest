@@ -11,8 +11,8 @@ use super::model::{
 use crate::{
     authorization::{
         ActionAuthorization, AuthorizationAssignment, AuthorizationCondition,
-        AuthorizationExistsCondition, AuthorizationMatch, AuthorizationModel,
-        AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
+        AuthorizationContract, AuthorizationExistsCondition, AuthorizationMatch,
+        AuthorizationModel, AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
     },
     database::DatabaseEngine,
     logging::LogTimestampPrecision,
@@ -22,10 +22,11 @@ use crate::{
 pub fn expand_resource_impl(
     resource: &ResourceSpec,
     resources: &[ResourceSpec],
+    authorization: Option<&AuthorizationContract>,
     runtime_crate: &Path,
 ) -> syn::Result<TokenStream> {
     let impl_module_ident = &resource.impl_module_ident;
-    let impl_body = resource_impl_tokens(resource, resources, runtime_crate);
+    let impl_body = resource_impl_tokens(resource, resources, authorization, runtime_crate);
 
     Ok(quote! {
         mod #impl_module_ident {
@@ -39,13 +40,45 @@ pub fn expand_derive_resource(
     resource: &ResourceSpec,
     runtime_crate: &Path,
 ) -> syn::Result<TokenStream> {
-    let struct_tokens = resource_struct_tokens(resource, runtime_crate);
-    let impl_tokens =
-        expand_resource_impl(resource, std::slice::from_ref(resource), runtime_crate)?;
+    let struct_tokens = resource_struct_tokens(resource, None, runtime_crate);
+    let impl_tokens = expand_resource_impl(
+        resource,
+        std::slice::from_ref(resource),
+        None,
+        runtime_crate,
+    )?;
 
     Ok(quote! {
         #struct_tokens
         #impl_tokens
+    })
+}
+
+#[derive(Clone, Copy)]
+struct HybridResourceEnforcement<'a> {
+    scope: &'a str,
+    scope_field: &'a super::model::FieldSpec,
+    create: bool,
+    read: bool,
+    update: bool,
+    delete: bool,
+}
+
+fn hybrid_resource_enforcement<'a>(
+    resource: &'a ResourceSpec,
+    authorization: Option<&'a AuthorizationContract>,
+) -> Option<HybridResourceEnforcement<'a>> {
+    let config = authorization?.hybrid_resource(&resource.struct_ident.to_string())?;
+    let scope_field = resource
+        .find_field(&config.scope_field)
+        .unwrap_or_else(|| panic!("validated hybrid scope field is missing"));
+    Some(HybridResourceEnforcement {
+        scope: &config.scope,
+        scope_field,
+        create: config.supports_action(crate::authorization::AuthorizationAction::Create),
+        read: config.supports_action(crate::authorization::AuthorizationAction::Read),
+        update: config.supports_action(crate::authorization::AuthorizationAction::Update),
+        delete: config.supports_action(crate::authorization::AuthorizationAction::Delete),
     })
 }
 
@@ -77,8 +110,14 @@ pub fn expand_service_module(
         .resources
         .iter()
         .map(|resource| {
-            let struct_tokens = resource_struct_tokens(resource, runtime_crate);
-            let impl_tokens = expand_resource_impl(resource, &service.resources, runtime_crate)?;
+            let struct_tokens =
+                resource_struct_tokens(resource, Some(&service.authorization), runtime_crate);
+            let impl_tokens = expand_resource_impl(
+                resource,
+                &service.resources,
+                Some(&service.authorization),
+                runtime_crate,
+            )?;
             Ok(quote! {
                 #struct_tokens
                 #impl_tokens
@@ -160,7 +199,11 @@ pub fn expand_service_module(
     let runtime = runtime_tokens(service, runtime_crate);
     let security = security_tokens(service, runtime_crate);
     let authorization = authorization_tokens(service, runtime_crate);
+    let authorization_management = authorization_management_tokens(service, runtime_crate);
     let tls = tls_tokens(service, runtime_crate);
+    let authorization_management_mount =
+        Literal::string(&service.authorization.management_api.mount);
+    let authorization_management_enabled = service.authorization.management_api.enabled;
 
     Ok(quote! {
         pub mod #module_ident {
@@ -178,6 +221,12 @@ pub fn expand_service_module(
                 cfg.app_data(web::Data::new(authorization_runtime(db.clone())));
                 #(#configure_calls)*
                 configure_security(cfg);
+                if #authorization_management_enabled {
+                    #runtime_crate::core::authorization::authorization_management_routes_at(
+                        cfg,
+                        #authorization_management_mount,
+                    );
+                }
             }
 
             pub fn configure_static(cfg: &mut web::ServiceConfig) {
@@ -208,6 +257,11 @@ pub fn expand_service_module(
                 #authorization
             }
 
+            pub fn authorization_management(
+            ) -> #runtime_crate::core::authorization::AuthorizationManagementApiConfig {
+                #authorization_management
+            }
+
             pub fn authorization_runtime(
                 db: impl Into<DbPool>,
             ) -> #runtime_crate::core::authorization::AuthorizationRuntime {
@@ -232,7 +286,11 @@ pub fn expand_service_module(
             ) {
                 let db = db.into();
                 cfg.app_data(web::Data::new(authorization_runtime(db)));
-                #runtime_crate::core::authorization::authorization_management_routes(cfg);
+                let management = authorization_management();
+                #runtime_crate::core::authorization::authorization_management_routes_at(
+                    cfg,
+                    management.mount.as_str(),
+                );
             }
         }
     })
@@ -243,7 +301,18 @@ fn authorization_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStr
     authorization_model_tokens(&model, runtime_crate)
 }
 
+fn authorization_management_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    let enabled = service.authorization.management_api.enabled;
+    let mount = Literal::string(&service.authorization.management_api.mount);
+    quote!(#runtime_crate::core::authorization::AuthorizationManagementApiConfig {
+        enabled: #enabled,
+        mount: #mount.to_owned(),
+    })
+}
+
 fn authorization_model_tokens(model: &AuthorizationModel, runtime_crate: &Path) -> TokenStream {
+    let management_enabled = model.contract.management_api.enabled;
+    let management_mount = Literal::string(&model.contract.management_api.mount);
     let scopes = model.contract.scopes.iter().map(|scope| {
         let name = Literal::string(&scope.name);
         let description = option_string_tokens(scope.description.as_deref());
@@ -295,6 +364,26 @@ fn authorization_model_tokens(model: &AuthorizationModel, runtime_crate: &Path) 
             scopes: vec![#(#scopes),*],
         })
     });
+    let hybrid_resources = model
+        .contract
+        .hybrid_enforcement
+        .resources
+        .iter()
+        .map(|resource| {
+            let resource_name = Literal::string(&resource.resource);
+            let scope = Literal::string(&resource.scope);
+            let scope_field = Literal::string(&resource.scope_field);
+            let actions = resource
+                .actions
+                .iter()
+                .map(|action| authorization_action_tokens(*action, runtime_crate));
+            quote!(#runtime_crate::core::authorization::AuthorizationHybridResource {
+                resource: #resource_name.to_owned(),
+                scope: #scope.to_owned(),
+                scope_field: #scope_field.to_owned(),
+                actions: vec![#(#actions),*],
+            })
+        });
     let resources = model
         .resources
         .iter()
@@ -306,6 +395,13 @@ fn authorization_model_tokens(model: &AuthorizationModel, runtime_crate: &Path) 
                 scopes: vec![#(#scopes),*],
                 permissions: vec![#(#permissions),*],
                 templates: vec![#(#templates),*],
+                hybrid_enforcement: #runtime_crate::core::authorization::AuthorizationHybridEnforcementConfig {
+                    resources: vec![#(#hybrid_resources),*],
+                },
+                management_api: #runtime_crate::core::authorization::AuthorizationManagementApiConfig {
+                    enabled: #management_enabled,
+                    mount: #management_mount.to_owned(),
+                },
             },
             resources: vec![#(#resources),*],
         }
@@ -486,7 +582,7 @@ fn match_tokens(rule: &AuthorizationMatch, runtime_crate: &Path) -> TokenStream 
     let id = Literal::string(&rule.id);
     let field = Literal::string(&rule.field);
     let operator = authorization_operator_tokens(rule.operator, runtime_crate);
-    let source = value_source_tokens(&rule.source, runtime_crate);
+    let source = optional_value_source_tokens(rule.source.as_ref(), runtime_crate);
 
     quote! {
         #runtime_crate::core::authorization::AuthorizationMatch {
@@ -540,6 +636,12 @@ fn authorization_operator_tokens(
         AuthorizationOperator::Equals => {
             quote!(#runtime_crate::core::authorization::AuthorizationOperator::Equals)
         }
+        AuthorizationOperator::IsNull => {
+            quote!(#runtime_crate::core::authorization::AuthorizationOperator::IsNull)
+        }
+        AuthorizationOperator::IsNotNull => {
+            quote!(#runtime_crate::core::authorization::AuthorizationOperator::IsNotNull)
+        }
     }
 }
 
@@ -556,6 +658,19 @@ fn value_source_tokens(source: &AuthorizationValueSource, runtime_crate: &Path) 
                 ty: #ty,
             })
         }
+    }
+}
+
+fn optional_value_source_tokens(
+    source: Option<&AuthorizationValueSource>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match source {
+        Some(source) => {
+            let source = value_source_tokens(source, runtime_crate);
+            quote!(Some(#source))
+        }
+        None => quote!(None),
     }
 }
 
@@ -972,7 +1087,11 @@ fn option_auth_ui_page_tokens(
     }
 }
 
-fn resource_struct_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {
+fn resource_struct_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    runtime_crate: &Path,
+) -> TokenStream {
     let struct_ident = &resource.struct_ident;
     let create_ident = format_ident!("{struct_ident}Create");
     let update_ident = format_ident!("{struct_ident}Update");
@@ -986,13 +1105,15 @@ fn resource_struct_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Toke
         }
     });
 
-    let create_fields = create_payload_fields(resource).into_iter().map(|field| {
-        let ident = &field.field.ident;
-        let ty = create_payload_field_ty(&field);
-        quote! {
-            pub #ident: #ty,
-        }
-    });
+    let create_fields = create_payload_fields(resource, authorization)
+        .into_iter()
+        .map(|field| {
+            let ident = &field.field.ident;
+            let ty = create_payload_field_ty(&field);
+            quote! {
+                pub #ident: #ty,
+            }
+        });
     let update_fields = update_payload_fields(resource).into_iter().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
@@ -1372,6 +1493,7 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
 fn resource_impl_tokens(
     resource: &ResourceSpec,
     resources: &[ResourceSpec],
+    authorization: Option<&AuthorizationContract>,
     runtime_crate: &Path,
 ) -> TokenStream {
     let struct_ident = &resource.struct_ident;
@@ -1390,10 +1512,14 @@ fn resource_impl_tokens(
     let read_check = role_guard(runtime_crate, resource.roles.read.as_deref());
     let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
     let delete_check = role_guard(runtime_crate, resource.roles.delete.as_deref());
-    let create_validation = create_validation_tokens(resource, runtime_crate);
+    let create_validation = create_validation_tokens(resource, authorization, runtime_crate);
     let update_validation = update_validation_tokens(resource, runtime_crate);
     let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
     let admin_bypass = resource.policies.admin_bypass;
+    let hybrid = hybrid_resource_enforcement(resource, authorization);
+    let hybrid_create_scope_field = hybrid
+        .filter(|config| config.create)
+        .map(|config| config.scope_field.name());
 
     let insert_fields = insert_fields(resource);
     let insert_fields_csv = insert_fields
@@ -1413,9 +1539,55 @@ fn resource_impl_tokens(
             let ident = &field.ident;
             let field_name = field.name();
             if let Some(source) = create_assignment_source(resource, &field_name) {
-                let value = policy_source_value(source, field, runtime_crate);
-                quote! {
-                    q = q.bind(#value);
+                if hybrid_create_scope_field.as_deref() == Some(field_name.as_str())
+                    && matches!(source, PolicyValueSource::Claim(_))
+                {
+                    let value = optional_policy_source_value(source, field);
+                    let field_name_lit = Literal::string(&field_name);
+                    quote! {
+                        match #value {
+                            Some(value) => {
+                                q = q.bind(value);
+                            }
+                            None => match &item.#ident {
+                                Some(value) => match Self::hybrid_create_allows_item_scope(
+                                    &item,
+                                    &user,
+                                    runtime.get_ref(),
+                                )
+                                .await
+                                {
+                                    Ok(true) => {
+                                        q = q.bind(value);
+                                    }
+                                    Ok(false) => {
+                                        return #runtime_crate::core::errors::forbidden(
+                                            "forbidden",
+                                            format!(
+                                                "Insufficient privileges for create scope field `{}`",
+                                                #field_name_lit
+                                            ),
+                                        );
+                                    }
+                                    Err(response) => return response,
+                                },
+                                None => {
+                                    return #runtime_crate::core::errors::validation_error(
+                                        #field_name_lit,
+                                        format!(
+                                            "Missing required create field `{}`",
+                                            #field_name_lit
+                                        ),
+                                    );
+                                }
+                            },
+                        }
+                    }
+                } else {
+                    let value = policy_source_value(source, field, runtime_crate);
+                    quote! {
+                        q = q.bind(#value);
+                    }
                 }
             } else {
                 quote! {
@@ -1774,6 +1946,166 @@ fn resource_impl_tokens(
         },
         None => quote!(true),
     };
+    let hybrid_configure_app_data = if hybrid.is_some() {
+        quote! {
+            cfg.app_data(web::Data::new(authorization_runtime(db.get_ref().clone())));
+        }
+    } else {
+        quote!()
+    };
+    let hybrid_helper_tokens = if let Some(hybrid) = hybrid {
+        let scope_name = Literal::string(hybrid.scope);
+        let resource_name = Literal::string(&resource.struct_ident.to_string());
+        let scope_field_ident = &hybrid.scope_field.ident;
+        let scope_value = match super::model::policy_field_claim_type(&hybrid.scope_field.ty)
+            .unwrap_or_else(|| panic!("validated hybrid scope field type is unsupported"))
+        {
+            crate::auth::AuthClaimType::I64 => {
+                if super::model::is_optional_type(&hybrid.scope_field.ty) {
+                    quote!(item.#scope_field_ident.map(|value| value.to_string()))
+                } else {
+                    quote!(Some(item.#scope_field_ident.to_string()))
+                }
+            }
+            crate::auth::AuthClaimType::Bool => {
+                if super::model::is_optional_type(&hybrid.scope_field.ty) {
+                    quote!(item.#scope_field_ident.map(|value| value.to_string()))
+                } else {
+                    quote!(Some(item.#scope_field_ident.to_string()))
+                }
+            }
+            crate::auth::AuthClaimType::String => {
+                if super::model::is_optional_type(&hybrid.scope_field.ty) {
+                    quote!(item.#scope_field_ident.clone())
+                } else {
+                    quote!(Some(item.#scope_field_ident.clone()))
+                }
+            }
+        };
+        let hybrid_read = hybrid.read;
+        let hybrid_create = hybrid.create;
+        let hybrid_update = hybrid.update;
+        let hybrid_delete = hybrid.delete;
+        let hybrid_create_scope_tokens = if hybrid_create {
+            let create_scope_value =
+                match super::model::policy_field_claim_type(&hybrid.scope_field.ty)
+                    .unwrap_or_else(|| panic!("validated hybrid scope field type is unsupported"))
+                {
+                    crate::auth::AuthClaimType::I64 | crate::auth::AuthClaimType::Bool => {
+                        quote!(item.#scope_field_ident.map(|value| value.to_string()))
+                    }
+                    crate::auth::AuthClaimType::String => {
+                        quote!(item.#scope_field_ident.clone())
+                    }
+                };
+            quote! {
+                fn hybrid_scope_binding_for_create_item(
+                    item: &#create_payload_ty,
+                ) -> Option<#runtime_crate::core::authorization::AuthorizationScopeBinding> {
+                    let value = #create_scope_value;
+                    value.map(|value| #runtime_crate::core::authorization::AuthorizationScopeBinding {
+                        scope: #scope_name.to_owned(),
+                        value,
+                    })
+                }
+
+                async fn hybrid_create_allows_item_scope(
+                    item: &#create_payload_ty,
+                    user: &#runtime_crate::core::auth::UserContext,
+                    runtime: &#runtime_crate::core::authorization::AuthorizationRuntime,
+                ) -> Result<bool, HttpResponse> {
+                    if !Self::hybrid_runtime_supports_action(
+                        #runtime_crate::core::authorization::AuthorizationAction::Create,
+                    ) {
+                        return Ok(false);
+                    }
+                    let Some(scope) = Self::hybrid_scope_binding_for_create_item(item) else {
+                        return Ok(false);
+                    };
+                    match runtime
+                        .evaluate_runtime_access_for_user(
+                            user.id,
+                            #resource_name,
+                            #runtime_crate::core::authorization::AuthorizationAction::Create,
+                            scope,
+                        )
+                        .await
+                    {
+                        Ok(result) => Ok(result.allowed),
+                        Err(message) => Err(#runtime_crate::core::errors::internal_error(message)),
+                    }
+                }
+            }
+        } else {
+            quote!()
+        };
+        quote! {
+            fn hybrid_runtime_supports_action(
+                action: #runtime_crate::core::authorization::AuthorizationAction,
+            ) -> bool {
+                match action {
+                    #runtime_crate::core::authorization::AuthorizationAction::Read => #hybrid_read,
+                    #runtime_crate::core::authorization::AuthorizationAction::Create => #hybrid_create,
+                    #runtime_crate::core::authorization::AuthorizationAction::Update => #hybrid_update,
+                    #runtime_crate::core::authorization::AuthorizationAction::Delete => #hybrid_delete,
+                }
+            }
+
+            async fn fetch_by_id_unfiltered(
+                id: i64,
+                db: &DbPool,
+            ) -> Result<Option<Self>, #runtime_crate::sqlx::Error> {
+                let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, Self::list_placeholder(1));
+                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
+                    .bind(id)
+                    .fetch_optional(db)
+                    .await
+            }
+
+            fn hybrid_scope_binding_for_item(
+                item: &Self,
+            ) -> Option<#runtime_crate::core::authorization::AuthorizationScopeBinding> {
+                let value = #scope_value;
+                value.map(|value| #runtime_crate::core::authorization::AuthorizationScopeBinding {
+                    scope: #scope_name.to_owned(),
+                    value,
+                })
+            }
+
+            #hybrid_create_scope_tokens
+
+            async fn fetch_runtime_authorized_by_id(
+                id: i64,
+                user: &#runtime_crate::core::auth::UserContext,
+                runtime: &#runtime_crate::core::authorization::AuthorizationRuntime,
+                db: &DbPool,
+                action: #runtime_crate::core::authorization::AuthorizationAction,
+            ) -> Result<Option<Self>, HttpResponse> {
+                if !Self::hybrid_runtime_supports_action(action) {
+                    return Ok(None);
+                }
+                let item = Self::fetch_by_id_unfiltered(id, db)
+                    .await
+                    .map_err(|error| #runtime_crate::core::errors::internal_error(error.to_string()))?;
+                let Some(item) = item else {
+                    return Ok(None);
+                };
+                let Some(scope) = Self::hybrid_scope_binding_for_item(&item) else {
+                    return Ok(None);
+                };
+                match runtime
+                    .evaluate_runtime_access_for_user(user.id, #resource_name, action, scope)
+                    .await
+                {
+                    Ok(result) if result.allowed => Ok(Some(item)),
+                    Ok(_) => Ok(None),
+                    Err(message) => Err(#runtime_crate::core::errors::internal_error(message)),
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
     let fetch_readable_by_id_body = if !resource.policies.has_read_filters() {
         let id_placeholder = resource.db.placeholder(1);
         quote! {
@@ -1934,13 +2266,43 @@ fn resource_impl_tokens(
                 resource.id_field,
                 resource.db.placeholder(update_plan.where_index)
             );
+            let hybrid_update_fallback = if hybrid.map(|config| config.update).unwrap_or(false) {
+                quote! {
+                    match Self::fetch_runtime_authorized_by_id(
+                        id,
+                        &user,
+                        runtime.get_ref(),
+                        db.get_ref(),
+                        #runtime_crate::core::authorization::AuthorizationAction::Update,
+                    )
+                    .await
+                    {
+                        Ok(Some(_)) => {
+                            let sql = #admin_sql;
+                            let mut q = #runtime_crate::db::query(sql);
+                            #(#bind_fields_update)*
+                            q = q.bind(id);
+                            match q.execute(db.get_ref()).await {
+                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        }
+                        Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                        Err(response) => response,
+                    }
+                }
+            } else {
+                quote!(#runtime_crate::core::errors::not_found("Not found"))
+            };
 
             quote! {
+                let id = path.into_inner();
                 if #admin_bypass && #is_admin {
                     let sql = #admin_sql;
                     let mut q = #runtime_crate::db::query(sql);
                     #(#bind_fields_update)*
-                    q = q.bind(path.into_inner());
+                    q = q.bind(id);
                     match q.execute(db.get_ref()).await {
                         Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
                         Ok(_) => HttpResponse::Ok().finish(),
@@ -1959,22 +2321,19 @@ fn resource_impl_tokens(
                             );
                             let mut q = #runtime_crate::db::query(&sql);
                             #(#bind_fields_update)*
-                            q = q.bind(path.into_inner());
+                            q = q.bind(id);
                             for bind in binds {
                                 q = match bind {
                                     #(#query_bind_matches)*
                                 };
                             }
                             match q.execute(db.get_ref()).await {
-                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
                                 Ok(_) => HttpResponse::Ok().finish(),
                                 Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                             }
                         }
-                        #plan_ident::Indeterminate => #runtime_crate::core::errors::forbidden(
-                            "missing_claim",
-                            "Missing required principal values for row policy",
-                        ),
+                        #plan_ident::Indeterminate => #hybrid_update_fallback,
                     }
                 }
             }
@@ -2003,11 +2362,42 @@ fn resource_impl_tokens(
             resource.id_field,
             resource.db.placeholder(1)
         );
+        let hybrid_delete_fallback = if hybrid.map(|config| config.delete).unwrap_or(false) {
+            quote! {
+                match Self::fetch_runtime_authorized_by_id(
+                    id,
+                    &user,
+                    runtime.get_ref(),
+                    db.get_ref(),
+                    #runtime_crate::core::authorization::AuthorizationAction::Delete,
+                )
+                .await
+                {
+                    Ok(Some(_)) => {
+                        let sql = #admin_sql;
+                        match #runtime_crate::db::query(sql)
+                            .bind(id)
+                            .execute(db.get_ref())
+                            .await
+                        {
+                            Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                            Ok(_) => HttpResponse::Ok().finish(),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                    Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                    Err(response) => response,
+                }
+            }
+        } else {
+            quote!(#runtime_crate::core::errors::not_found("Not found"))
+        };
         quote! {
+            let id = path.into_inner();
             if #admin_bypass && #is_admin {
                 let sql = #admin_sql;
                 match #runtime_crate::db::query(sql)
-                    .bind(path.into_inner())
+                    .bind(id)
                     .execute(db.get_ref())
                     .await
                 {
@@ -2026,22 +2416,19 @@ fn resource_impl_tokens(
                             condition
                         );
                         let mut q = #runtime_crate::db::query(&sql);
-                        q = q.bind(path.into_inner());
+                        q = q.bind(id);
                         for bind in binds {
                             q = match bind {
                                 #(#query_bind_matches)*
                             };
                         }
                         match q.execute(db.get_ref()).await {
-                            Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                            Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
                             Ok(_) => HttpResponse::Ok().finish(),
                             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                         }
                     }
-                    #plan_ident::Indeterminate => #runtime_crate::core::errors::forbidden(
-                        "missing_claim",
-                        "Missing required principal values for row policy",
-                    ),
+                    #plan_ident::Indeterminate => #hybrid_delete_fallback,
                 }
             }
         }
@@ -2236,14 +2623,45 @@ fn resource_impl_tokens(
         }
     };
     let get_one_handler = if read_requires_auth {
-        quote! {
-            async fn get_one(
-                path: web::Path<i64>,
-                user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
-            ) -> impl Responder {
-                #read_check
-                #get_one_body
+        if hybrid.map(|config| config.read).unwrap_or(false) {
+            quote! {
+                async fn get_one(
+                    path: web::Path<i64>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                    runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
+                ) -> impl Responder {
+                    #read_check
+                    let id = path.into_inner();
+                    match Self::fetch_readable_by_id(id, &user, db.get_ref()).await {
+                        Ok(Some(item)) => HttpResponse::Ok().json(item),
+                        Ok(None) => match Self::fetch_runtime_authorized_by_id(
+                            id,
+                            &user,
+                            runtime.get_ref(),
+                            db.get_ref(),
+                            #runtime_crate::core::authorization::AuthorizationAction::Read,
+                        )
+                        .await
+                        {
+                            Ok(Some(item)) => HttpResponse::Ok().json(item),
+                            Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                            Err(response) => response,
+                        },
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                }
+            }
+        } else {
+            quote! {
+                async fn get_one(
+                    path: web::Path<i64>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                ) -> impl Responder {
+                    #read_check
+                    #get_one_body
+                }
             }
         }
     } else {
@@ -2257,6 +2675,21 @@ fn resource_impl_tokens(
             }
         }
     };
+    let update_runtime_arg = if hybrid.map(|config| config.update).unwrap_or(false) {
+        quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
+    } else {
+        quote!()
+    };
+    let create_runtime_arg = if hybrid.map(|config| config.create).unwrap_or(false) {
+        quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
+    } else {
+        quote!()
+    };
+    let delete_runtime_arg = if hybrid.map(|config| config.delete).unwrap_or(false) {
+        quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
+    } else {
+        quote!()
+    };
 
     quote! {
         use #runtime_crate::actix_web::{web, HttpRequest, HttpResponse, Responder};
@@ -2269,6 +2702,7 @@ fn resource_impl_tokens(
                 let db = web::Data::new(db.into());
                 #runtime_crate::core::errors::configure_extractor_errors(cfg);
                 cfg.app_data(db.clone());
+                #hybrid_configure_app_data
 
                 cfg.service(
                     web::resource(format!("/{}", #table_name))
@@ -2292,6 +2726,8 @@ fn resource_impl_tokens(
             fn can_read(user: &#runtime_crate::core::auth::UserContext) -> bool {
                 #can_read_body
             }
+
+            #hybrid_helper_tokens
 
             async fn fetch_readable_by_id(
                 id: i64,
@@ -2639,7 +3075,8 @@ fn resource_impl_tokens(
                 req: HttpRequest,
                 item: web::Json<#create_payload_ty>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
+                db: web::Data<DbPool>
+                #create_runtime_arg
             ) -> impl Responder {
                 #create_check
                 #(#create_validation)*
@@ -2650,7 +3087,8 @@ fn resource_impl_tokens(
                 path: web::Path<i64>,
                 item: web::Json<#update_payload_ty>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
+                db: web::Data<DbPool>
+                #update_runtime_arg
             ) -> impl Responder {
                 #update_check
                 #(#update_validation)*
@@ -2660,7 +3098,8 @@ fn resource_impl_tokens(
             async fn delete(
                 path: web::Path<i64>,
                 user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
+                db: web::Data<DbPool>
+                #delete_runtime_arg
             ) -> impl Responder {
                 #delete_check
                 #delete_body
@@ -2692,9 +3131,16 @@ fn update_payload_type(resource: &ResourceSpec) -> TokenStream {
 struct CreatePayloadField<'a> {
     field: &'a super::model::FieldSpec,
     allow_admin_override: bool,
+    allow_hybrid_runtime: bool,
 }
 
-fn create_payload_fields(resource: &ResourceSpec) -> Vec<CreatePayloadField<'_>> {
+fn create_payload_fields<'a>(
+    resource: &'a ResourceSpec,
+    authorization: Option<&'a AuthorizationContract>,
+) -> Vec<CreatePayloadField<'a>> {
+    let hybrid_create_scope_field = hybrid_resource_enforcement(resource, authorization)
+        .filter(|config| config.create)
+        .map(|config| config.scope_field.name());
     resource
         .fields
         .iter()
@@ -2710,20 +3156,25 @@ fn create_payload_fields(resource: &ResourceSpec) -> Vec<CreatePayloadField<'_>>
                     create_assignment_source(resource, &field.name()),
                     Some(PolicyValueSource::Claim(_))
                 );
-            if controlled && !allow_admin_override {
+            let allow_hybrid_runtime =
+                controlled && hybrid_create_scope_field.as_deref() == Some(field.name().as_str());
+            if controlled && !allow_admin_override && !allow_hybrid_runtime {
                 return None;
             }
 
             Some(CreatePayloadField {
                 field,
                 allow_admin_override,
+                allow_hybrid_runtime,
             })
         })
         .collect()
 }
 
 fn create_payload_field_ty(field: &CreatePayloadField<'_>) -> syn::Type {
-    if field.allow_admin_override && !super::model::is_optional_type(&field.field.ty) {
+    if (field.allow_admin_override || field.allow_hybrid_runtime)
+        && !super::model::is_optional_type(&field.field.ty)
+    {
         let ty = &field.field.ty;
         syn::parse_quote!(Option<#ty>)
     } else {
@@ -2732,7 +3183,9 @@ fn create_payload_field_ty(field: &CreatePayloadField<'_>) -> syn::Type {
 }
 
 fn create_payload_field_is_optional(field: &CreatePayloadField<'_>) -> bool {
-    field.allow_admin_override || super::model::is_optional_type(&field.field.ty)
+    field.allow_admin_override
+        || field.allow_hybrid_runtime
+        || super::model::is_optional_type(&field.field.ty)
 }
 
 fn update_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
@@ -2977,8 +3430,12 @@ fn list_bind_match_tokens(resource: &ResourceSpec, query_ident: &str) -> Vec<Tok
     ]
 }
 
-fn create_validation_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
-    create_payload_fields(resource)
+fn create_validation_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    runtime_crate: &Path,
+) -> Vec<TokenStream> {
+    create_payload_fields(resource, authorization)
         .into_iter()
         .filter_map(|field| {
             validation_tokens(
@@ -3425,22 +3882,38 @@ fn policy_expression_plan_tokens(
         PolicyFilterExpression::Match(filter) => {
             let field = resource_field(resource, &filter.field);
             let field_name = Literal::string(&filter.field);
-            let value = maybe_policy_source_value(&filter.source, field);
-            let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
-            quote! {
-                {
-                    match #value {
-                        Some(value) => {
-                            let placeholder = Self::list_placeholder(#next_index_ident);
-                            #next_index_ident += 1;
-                            #plan_ident::Resolved {
-                                condition: format!("{} = {}", #field_name, placeholder),
-                                binds: vec![#bind_value],
+            match &filter.operator {
+                super::model::PolicyFilterOperator::Equals(source) => {
+                    let value = maybe_policy_source_value(source, field);
+                    let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
+                    quote! {
+                        {
+                            match #value {
+                                Some(value) => {
+                                    let placeholder = Self::list_placeholder(#next_index_ident);
+                                    #next_index_ident += 1;
+                                    #plan_ident::Resolved {
+                                        condition: format!("{} = {}", #field_name, placeholder),
+                                        binds: vec![#bind_value],
+                                    }
+                                }
+                                None => #plan_ident::Indeterminate,
                             }
                         }
-                        None => #plan_ident::Indeterminate,
                     }
                 }
+                super::model::PolicyFilterOperator::IsNull => quote! {
+                    #plan_ident::Resolved {
+                        condition: format!("{} IS NULL", #field_name),
+                        binds: Vec::<#bind_ident>::new(),
+                    }
+                },
+                super::model::PolicyFilterOperator::IsNotNull => quote! {
+                    #plan_ident::Resolved {
+                        condition: format!("{} IS NOT NULL", #field_name),
+                        binds: Vec::<#bind_ident>::new(),
+                    }
+                },
             }
         }
         PolicyFilterExpression::All(expressions) => {
@@ -3553,20 +4026,36 @@ fn exists_condition_plan_tokens(
         super::model::PolicyExistsCondition::Match(filter) => {
             let field = resource_field(target_resource, &filter.field);
             let field_name = Literal::string(&filter.field);
-            let value = maybe_policy_source_value(&filter.source, field);
-            let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
-            quote! {
-                match #value {
-                    Some(value) => {
-                        let placeholder = Self::list_placeholder(#next_index_ident);
-                        #next_index_ident += 1;
-                        #plan_ident::Resolved {
-                            condition: format!("{}.{} = {}", #alias, #field_name, placeholder),
-                            binds: vec![#bind_value],
+            match &filter.operator {
+                super::model::PolicyFilterOperator::Equals(source) => {
+                    let value = maybe_policy_source_value(source, field);
+                    let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
+                    quote! {
+                        match #value {
+                            Some(value) => {
+                                let placeholder = Self::list_placeholder(#next_index_ident);
+                                #next_index_ident += 1;
+                                #plan_ident::Resolved {
+                                    condition: format!("{}.{} = {}", #alias, #field_name, placeholder),
+                                    binds: vec![#bind_value],
+                                }
+                            }
+                            None => #plan_ident::Indeterminate,
                         }
                     }
-                    None => #plan_ident::Indeterminate,
                 }
+                super::model::PolicyFilterOperator::IsNull => quote! {
+                    #plan_ident::Resolved {
+                        condition: format!("{}.{} IS NULL", #alias, #field_name),
+                        binds: Vec::<#bind_ident>::new(),
+                    }
+                },
+                super::model::PolicyFilterOperator::IsNotNull => quote! {
+                    #plan_ident::Resolved {
+                        condition: format!("{}.{} IS NOT NULL", #alias, #field_name),
+                        binds: Vec::<#bind_ident>::new(),
+                    }
+                },
             }
         }
         super::model::PolicyExistsCondition::CurrentRowField { field, row_field } => {

@@ -132,7 +132,13 @@ runtime assignment API, generated modules also expose
 `module::configure_authorization_management(cfg, db)`, including a request-time runtime access
 evaluation endpoint for explicit `resource + action + scope` checks. Custom handlers can also call
 `AuthorizationRuntime::enforce_runtime_access(...)` for real request-time runtime permission
-enforcement.
+enforcement. Generated item routes can also opt into hybrid enforcement through
+`authorization.hybrid_enforcement`, which lets `GET /resource/{id}`, `PUT /resource/{id}`, and
+`DELETE /resource/{id}` fall back to persisted runtime scoped grants after the static row-policy
+path denies a row. `POST /resource` can also opt into a narrow hybrid create fallback when the
+configured `scope_field` is already claim-controlled in `policies.create`, so the generated create
+DTO can accept that one field as an optional runtime-authorized fallback. This slice is additive
+only and still requires the static role check to pass first.
 Secrets such as `JWT_SECRET` still belong in the environment.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
@@ -186,20 +192,26 @@ pub mod auth {
 
 pub mod authorization {
     pub use rest_macro_core::authorization::{
-        AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE, ActionAuthorization, AuthorizationAction,
-        AuthorizationAssignment, AuthorizationAssignmentTrace, AuthorizationCondition,
-        AuthorizationConditionTrace, AuthorizationContract, AuthorizationMatch, AuthorizationModel,
-        AuthorizationOperator, AuthorizationOutcome, AuthorizationPermission, AuthorizationRuntime,
-        AuthorizationRuntimeAccessInput, AuthorizationRuntimeAccessResult, AuthorizationScope,
-        AuthorizationScopeBinding, AuthorizationScopedAssignment,
-        AuthorizationScopedAssignmentCreateInput, AuthorizationScopedAssignmentListQuery,
-        AuthorizationScopedAssignmentRecord, AuthorizationScopedAssignmentTarget,
-        AuthorizationScopedAssignmentTrace, AuthorizationSimulationInput,
-        AuthorizationSimulationResult, AuthorizationTemplate, AuthorizationValueSource,
-        ResourceAuthorization, authorization_management_routes,
-        authorization_runtime_migration_sql, delete_runtime_assignment, insert_runtime_assignment,
+        AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE, AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
+        ActionAuthorization, AuthorizationAction, AuthorizationAssignment,
+        AuthorizationAssignmentTrace, AuthorizationCondition, AuthorizationConditionTrace,
+        AuthorizationContract, AuthorizationHybridEnforcementConfig, AuthorizationHybridResource,
+        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationOutcome,
+        AuthorizationPermission, AuthorizationRuntime, AuthorizationRuntimeAccessInput,
+        AuthorizationRuntimeAccessResult, AuthorizationScope, AuthorizationScopeBinding,
+        AuthorizationScopedAssignment, AuthorizationScopedAssignmentCreateInput,
+        AuthorizationScopedAssignmentEventKind, AuthorizationScopedAssignmentEventRecord,
+        AuthorizationScopedAssignmentListQuery, AuthorizationScopedAssignmentRecord,
+        AuthorizationScopedAssignmentRenewInput, AuthorizationScopedAssignmentRevokeInput,
+        AuthorizationScopedAssignmentTarget, AuthorizationScopedAssignmentTrace,
+        AuthorizationSimulationInput, AuthorizationSimulationResult, AuthorizationTemplate,
+        AuthorizationValueSource, ResourceAuthorization, authorization_management_routes,
+        authorization_runtime_migration_sql, create_runtime_assignment_with_audit,
+        delete_runtime_assignment_with_audit, insert_runtime_assignment,
+        insert_runtime_assignment_event, list_runtime_assignment_events_for_user,
         list_runtime_assignments_for_user, load_runtime_assignments_for_user,
-        new_runtime_assignment_id,
+        new_runtime_assignment_event_id, new_runtime_assignment_id,
+        renew_runtime_assignment_with_audit, revoke_runtime_assignment_with_audit,
     };
 }
 

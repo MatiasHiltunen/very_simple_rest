@@ -15,6 +15,7 @@ rest_api_from_eon!("tests/fixtures/mapped_api.eon");
 rest_api_from_eon!("tests/fixtures/runtime_api.eon");
 rest_api_from_eon!("tests/fixtures/auth_claims_api.eon");
 rest_api_from_eon!("tests/fixtures/authorization_contract_api.eon");
+rest_api_from_eon!("tests/fixtures/hybrid_runtime_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -116,11 +117,33 @@ fn eon_macro_exposes_authorization_model() {
 
     let _authorization_runtime_with_db_pool =
         |db: very_simple_rest::db::DbPool| authorization_contract_api::authorization_runtime(db);
+    let _authorization_management_config = authorization_contract_api::authorization_management();
     let _configure_authorization_management_with_db_pool =
         |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
          db: very_simple_rest::db::DbPool| {
             authorization_contract_api::configure_authorization_management(cfg, db)
         };
+}
+
+#[test]
+fn eon_macro_exposes_hybrid_create_scope_field_in_generated_dto() {
+    let create = hybrid_runtime_api::ScopedDocCreate {
+        family_id: Some(42),
+        title: "Runtime-created household note".to_owned(),
+    };
+
+    let authorization = hybrid_runtime_api::authorization();
+    assert_eq!(
+        authorization.contract.hybrid_enforcement.resources[0].actions,
+        vec![
+            very_simple_rest::authorization::AuthorizationAction::Create,
+            very_simple_rest::authorization::AuthorizationAction::Read,
+            very_simple_rest::authorization::AuthorizationAction::Update,
+            very_simple_rest::authorization::AuthorizationAction::Delete,
+        ]
+    );
+
+    let _ = create;
 }
 
 #[test]
