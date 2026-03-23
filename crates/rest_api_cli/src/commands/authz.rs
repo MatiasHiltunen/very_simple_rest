@@ -6,11 +6,12 @@ use rest_macro_core::{
     authorization::{
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment,
         AuthorizationAssignmentTrace, AuthorizationCondition, AuthorizationConditionTrace,
-        AuthorizationContract, AuthorizationMatch, AuthorizationModel, AuthorizationOutcome,
-        AuthorizationScopeBinding, AuthorizationScopedAssignment,
-        AuthorizationScopedAssignmentTarget, AuthorizationScopedAssignmentTrace,
-        AuthorizationSimulationInput, AuthorizationSimulationResult, AuthorizationValueSource,
-        ResourceAuthorization, load_runtime_assignments_for_user,
+        AuthorizationContract, AuthorizationExistsCondition, AuthorizationExistsConditionTrace,
+        AuthorizationMatch, AuthorizationModel, AuthorizationOutcome, AuthorizationScopeBinding,
+        AuthorizationScopedAssignment, AuthorizationScopedAssignmentTarget,
+        AuthorizationScopedAssignmentTrace, AuthorizationSimulationInput,
+        AuthorizationSimulationResult, AuthorizationValueSource, ResourceAuthorization,
+        load_runtime_assignments_for_user,
     },
     compiler,
 };
@@ -87,6 +88,7 @@ pub async fn simulate_authorization(
     roles: &[String],
     claims: &[String],
     row: &[String],
+    related_rows: &[String],
     proposed: &[String],
     scope: Option<&str>,
     scoped_assignments: &[String],
@@ -124,6 +126,7 @@ pub async fn simulate_authorization(
             roles: roles.to_vec(),
             claims: parse_key_value_values(claims, "claim")?,
             row: parse_key_value_values(row, "row")?,
+            related_rows: parse_related_rows(related_rows)?,
             proposed: parse_key_value_values(proposed, "proposed")?,
             scope: scope.map(parse_scope_binding).transpose()?,
             scoped_assignments: runtime_assignments,
@@ -419,6 +422,22 @@ fn render_condition(condition: &AuthorizationCondition) -> String {
         AuthorizationCondition::Not { id, condition } => {
             format!("{id} NOT ({})", render_condition(condition))
         }
+        AuthorizationCondition::Exists {
+            id,
+            resource,
+            table,
+            conditions,
+        } => format!(
+            "{} EXISTS {}:{} [{}]",
+            id,
+            resource,
+            table,
+            conditions
+                .iter()
+                .map(render_exists_condition)
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        ),
     }
 }
 
@@ -440,6 +459,38 @@ fn render_match(rule: &AuthorizationMatch) -> String {
         rule.field,
         render_source(&rule.source)
     )
+}
+
+fn render_exists_condition(condition: &AuthorizationExistsCondition) -> String {
+    match condition {
+        AuthorizationExistsCondition::Match(rule) => render_match(rule),
+        AuthorizationExistsCondition::CurrentRowField {
+            id,
+            field,
+            row_field,
+        } => format!("{id} {field} == row.{row_field}"),
+        AuthorizationExistsCondition::All { id, conditions } => format!(
+            "{} ({})",
+            id,
+            conditions
+                .iter()
+                .map(render_exists_condition)
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        ),
+        AuthorizationExistsCondition::Any { id, conditions } => format!(
+            "{} ({})",
+            id,
+            conditions
+                .iter()
+                .map(render_exists_condition)
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        ),
+        AuthorizationExistsCondition::Not { id, condition } => {
+            format!("{id} NOT ({})", render_exists_condition(condition))
+        }
+    }
 }
 
 fn render_assignment(assignment: &AuthorizationAssignment) -> String {
@@ -534,6 +585,166 @@ fn render_condition_trace(trace: &AuthorizationConditionTrace) -> String {
             "{} NOT ({}) [{}]",
             id,
             render_condition_trace(condition),
+            render_trace_status(*matched, *indeterminate)
+        ),
+        AuthorizationConditionTrace::Exists {
+            id,
+            resource,
+            table,
+            matched,
+            indeterminate,
+            related_row_count,
+            matched_row_index,
+            missing_related_rows,
+            missing_related_fields,
+            conditions,
+            note,
+        } => {
+            let mut details = vec![render_trace_status(*matched, *indeterminate).to_owned()];
+            details.push(format!("related_rows={related_row_count}"));
+            if let Some(index) = matched_row_index {
+                details.push(format!("matched_row={}", index + 1));
+            }
+            if *missing_related_rows {
+                details.push("missing_related_rows".to_owned());
+            }
+            if *missing_related_fields {
+                details.push("missing_related_fields".to_owned());
+            }
+            if let Some(note) = note {
+                details.push(note.clone());
+            }
+            format!(
+                "{} EXISTS {}:{} [{}] [{}]",
+                id,
+                resource,
+                table,
+                conditions
+                    .iter()
+                    .map(render_exists_condition_trace)
+                    .collect::<Vec<_>>()
+                    .join(" AND "),
+                details.join(", ")
+            )
+        }
+    }
+}
+
+fn render_exists_condition_trace(trace: &AuthorizationExistsConditionTrace) -> String {
+    match trace {
+        AuthorizationExistsConditionTrace::Match {
+            id,
+            field,
+            source,
+            source_value,
+            missing_source,
+            related_value,
+            matched,
+            indeterminate,
+            missing_related_field,
+        } => {
+            let mut details = Vec::new();
+            details.push(render_trace_status(*matched, *indeterminate).to_owned());
+            if *missing_source {
+                details.push("missing_source".to_owned());
+            }
+            if *missing_related_field {
+                details.push("missing_related_field".to_owned());
+            }
+            if let Some(source_value) = source_value {
+                details.push(format!("source={}", render_json_value(source_value)));
+            }
+            if let Some(related_value) = related_value {
+                details.push(format!("related={}", render_json_value(related_value)));
+            }
+            format!(
+                "{} {} == {} [{}]",
+                id,
+                field,
+                render_source(source),
+                if details.is_empty() {
+                    "ready".to_owned()
+                } else {
+                    details.join(", ")
+                }
+            )
+        }
+        AuthorizationExistsConditionTrace::CurrentRowField {
+            id,
+            field,
+            row_field,
+            row_value,
+            missing_row_field,
+            related_value,
+            matched,
+            indeterminate,
+            missing_related_field,
+        } => {
+            let mut details = Vec::new();
+            details.push(render_trace_status(*matched, *indeterminate).to_owned());
+            if *missing_row_field {
+                details.push("missing_row_field".to_owned());
+            }
+            if *missing_related_field {
+                details.push("missing_related_field".to_owned());
+            }
+            if let Some(row_value) = row_value {
+                details.push(format!("row={}", render_json_value(row_value)));
+            }
+            if let Some(related_value) = related_value {
+                details.push(format!("related={}", render_json_value(related_value)));
+            }
+            format!(
+                "{} {} == row.{} [{}]",
+                id,
+                field,
+                row_field,
+                if details.is_empty() {
+                    "ready".to_owned()
+                } else {
+                    details.join(", ")
+                }
+            )
+        }
+        AuthorizationExistsConditionTrace::All {
+            id,
+            matched,
+            indeterminate,
+            conditions,
+        } => format!(
+            "{} ({}) [{}]",
+            id,
+            conditions
+                .iter()
+                .map(render_exists_condition_trace)
+                .collect::<Vec<_>>()
+                .join(" AND "),
+            render_trace_status(*matched, *indeterminate)
+        ),
+        AuthorizationExistsConditionTrace::Any {
+            id,
+            matched,
+            indeterminate,
+            conditions,
+        } => format!(
+            "{} ({}) [{}]",
+            id,
+            conditions
+                .iter()
+                .map(render_exists_condition_trace)
+                .collect::<Vec<_>>()
+                .join(" OR "),
+            render_trace_status(*matched, *indeterminate)
+        ),
+        AuthorizationExistsConditionTrace::Not {
+            id,
+            matched,
+            indeterminate,
+            condition,
+        } => format!(
+            "{} NOT ({}) [{}]",
+            id,
+            render_exists_condition_trace(condition),
             render_trace_status(*matched, *indeterminate)
         ),
     }
@@ -667,6 +878,43 @@ fn parse_key_value_values(values: &[String], label: &str) -> Result<BTreeMap<Str
     Ok(parsed)
 }
 
+fn parse_related_rows(values: &[String]) -> Result<BTreeMap<String, Vec<BTreeMap<String, Value>>>> {
+    let mut parsed = BTreeMap::new();
+    for raw in values {
+        let (resource, row_spec) = raw.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("related rows must use `Resource:key=value,other=value` syntax")
+        })?;
+        let resource = resource.trim();
+        if resource.is_empty() {
+            bail!("related row resource cannot be empty");
+        }
+        let row_spec = row_spec.trim();
+        if row_spec.is_empty() {
+            bail!("related row fields cannot be empty");
+        }
+        let fields = row_spec
+            .split(',')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| parse_key_value(segment, "related row"))
+            .collect::<Result<Vec<_>>>()?;
+        if fields.is_empty() {
+            bail!("related row fields cannot be empty");
+        }
+        let mut row = BTreeMap::new();
+        for (key, value) in fields {
+            if row.insert(key.clone(), value).is_some() {
+                bail!("duplicate related row key `{key}`");
+            }
+        }
+        parsed
+            .entry(resource.to_owned())
+            .or_insert_with(Vec::new)
+            .push(row);
+    }
+    Ok(parsed)
+}
+
 fn parse_key_value(raw: &str, label: &str) -> Result<(String, Value)> {
     let (key, value) = raw
         .split_once('=')
@@ -760,8 +1008,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        OutputFormat, explain_authorization, parse_cli_value, parse_scope_binding,
-        parse_scoped_assignments, render_authorization_explanation,
+        OutputFormat, explain_authorization, parse_cli_value, parse_related_rows,
+        parse_scope_binding, parse_scoped_assignments, render_authorization_explanation,
         render_authorization_simulation, simulate_authorization,
     };
     use rest_macro_core::{
@@ -856,6 +1104,7 @@ mod tests {
                     ("tenant_id".to_owned(), Value::from(3)),
                 ]),
                 proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
                 scope: None,
                 scoped_assignments: Vec::new(),
             },
@@ -890,6 +1139,7 @@ mod tests {
                 claims: BTreeMap::new(),
                 row: BTreeMap::new(),
                 proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
                 scope: Some(parse_scope_binding("Family=42").expect("scope should parse")),
                 scoped_assignments: parse_scoped_assignments(&[
                     "template:FamilyMember@Family=42".to_owned()
@@ -934,6 +1184,7 @@ mod tests {
             AuthorizationAction::Create,
             Some(1),
             &["admin".to_owned()],
+            &[],
             &[],
             &[],
             &["tenant_id=42".to_owned()],
@@ -992,6 +1243,51 @@ mod tests {
         assert_eq!(assignments[1].id, "runtime.assignment.2");
     }
 
+    #[test]
+    fn parse_related_rows_groups_rows_by_resource() {
+        let rows = parse_related_rows(&[
+            "FamilyMember:family_id=42,user_id=7".to_owned(),
+            "FamilyMember:family_id=42,user_id=9".to_owned(),
+        ])
+        .expect("related rows should parse");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows["FamilyMember"].len(), 2);
+        assert_eq!(rows["FamilyMember"][0]["family_id"], Value::from(42));
+        assert_eq!(rows["FamilyMember"][0]["user_id"], Value::from(7));
+    }
+
+    #[test]
+    fn render_authorization_simulation_evaluates_exists_with_related_rows() {
+        let rendered = render_authorization_simulation(
+            &load_service("exists_policy_api.eon"),
+            Some("SharedDoc"),
+            AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([("family_id".to_owned(), Value::from(42))]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::from([(
+                    "FamilyMember".to_owned(),
+                    vec![BTreeMap::from([
+                        ("family_id".to_owned(), Value::from(42)),
+                        ("user_id".to_owned(), Value::from(7)),
+                    ])],
+                )]),
+                scope: None,
+                scoped_assignments: Vec::new(),
+            },
+            OutputFormat::Text,
+        )
+        .expect("simulation should render");
+
+        assert!(rendered.contains("outcome: allowed"));
+        assert!(rendered.contains("matched_row=1"));
+        assert!(rendered.contains("related_rows=1"));
+    }
+
     #[tokio::test]
     async fn simulate_authorization_loads_runtime_assignments_from_database() {
         use rest_macro_core::auth::AuthDbBackend;
@@ -1012,11 +1308,14 @@ mod tests {
             .expect("runtime assignment migration should apply");
         sqlx::query(
             "INSERT INTO authz_scoped_assignment \
-             (id, user_id, target_kind, target_name, scope_name, scope_value) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+             (id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("runtime.assignment.db.1")
         .bind(7_i64)
+        .bind(1_i64)
+        .bind(rest_macro_core::authorization::runtime_assignment_timestamp_now())
+        .bind(Option::<String>::None)
         .bind("template")
         .bind("FamilyMember")
         .bind("Family")
@@ -1032,6 +1331,7 @@ mod tests {
             Some("ScopedDoc"),
             AuthorizationAction::Read,
             Some(7),
+            &[],
             &[],
             &[],
             &[],

@@ -8,11 +8,15 @@ use super::model::{
 
 pub fn render_service_migration_sql(service: &ServiceSpec) -> syn::Result<String> {
     let ordered_resources = topologically_sorted_resources(service)?;
+    let exists_target_indexes = exists_target_index_fields(service);
     let mut statements = Vec::new();
 
     for resource in ordered_resources {
         statements.push(render_create_table_sql(resource));
-        statements.extend(render_index_sql(resource));
+        statements.extend(render_index_sql(
+            resource,
+            exists_target_indexes.get(&resource.table_name),
+        ));
     }
 
     let body = statements.join("\n\n");
@@ -32,16 +36,26 @@ pub fn render_service_diff_migration_sql(
         .map(|resource| (resource.table_name.as_str(), resource))
         .collect::<HashMap<_, _>>();
     let next_order = topologically_sorted_resources(next)?;
+    let previous_exists_target_indexes = exists_target_index_fields(previous);
+    let next_exists_target_indexes = exists_target_index_fields(next);
     let mut statements = Vec::new();
 
     for resource in next_order {
         match previous_resources.get(resource.table_name.as_str()) {
             Some(previous_resource) => {
-                statements.extend(render_resource_diff_sql(previous_resource, resource)?);
+                statements.extend(render_resource_diff_sql(
+                    previous_resource,
+                    resource,
+                    previous_exists_target_indexes.get(previous_resource.table_name.as_str()),
+                    next_exists_target_indexes.get(resource.table_name.as_str()),
+                )?);
             }
             None => {
                 statements.push(render_create_table_sql(resource));
-                statements.extend(render_index_sql(resource));
+                statements.extend(render_index_sql(
+                    resource,
+                    next_exists_target_indexes.get(&resource.table_name),
+                ));
             }
         }
     }
@@ -171,14 +185,16 @@ fn render_create_table_sql(resource: &ResourceSpec) -> String {
 fn render_resource_diff_sql(
     previous: &ResourceSpec,
     next: &ResourceSpec,
+    previous_extra_index_fields: Option<&BTreeSet<String>>,
+    next_extra_index_fields: Option<&BTreeSet<String>>,
 ) -> syn::Result<Vec<String>> {
     let previous_fields = previous
         .fields
         .iter()
         .map(|field| (field.name(), field))
         .collect::<HashMap<_, _>>();
-    let next_indexed = indexed_fields(next);
-    let previous_indexed = indexed_fields(previous);
+    let next_indexed = indexed_fields(next, next_extra_index_fields);
+    let previous_indexed = indexed_fields(previous, previous_extra_index_fields);
     let mut statements = Vec::new();
 
     if previous.id_field != next.id_field || previous.db != next.db {
@@ -304,8 +320,11 @@ fn render_add_column_sql(
     ))
 }
 
-fn render_index_sql(resource: &ResourceSpec) -> Vec<String> {
-    indexed_fields(resource)
+fn render_index_sql(
+    resource: &ResourceSpec,
+    extra_index_fields: Option<&BTreeSet<String>>,
+) -> Vec<String> {
+    indexed_fields(resource, extra_index_fields)
         .into_iter()
         .map(|field_name| render_index_statement(resource, &field_name))
         .collect()
@@ -318,7 +337,10 @@ fn render_index_statement(resource: &ResourceSpec, field_name: &str) -> String {
     )
 }
 
-fn indexed_fields(resource: &ResourceSpec) -> BTreeSet<String> {
+fn indexed_fields(
+    resource: &ResourceSpec,
+    extra_index_fields: Option<&BTreeSet<String>>,
+) -> BTreeSet<String> {
     let mut indexed = BTreeSet::new();
 
     for field in &resource.fields {
@@ -328,6 +350,9 @@ fn indexed_fields(resource: &ResourceSpec) -> BTreeSet<String> {
     }
 
     indexed.extend(policy_index_fields(&resource.policies));
+    if let Some(extra_index_fields) = extra_index_fields {
+        indexed.extend(extra_index_fields.iter().cloned());
+    }
 
     indexed.remove(&resource.id_field);
     indexed
@@ -335,14 +360,47 @@ fn indexed_fields(resource: &ResourceSpec) -> BTreeSet<String> {
 
 fn policy_index_fields(policies: &RowPolicies) -> BTreeSet<String> {
     policies
-        .iter_filters()
-        .map(|(_, policy)| policy.field.clone())
+        .controlled_filter_fields()
+        .into_iter()
         .chain(
             policies
                 .iter_assignments()
                 .map(|(_, policy)| policy.field.clone()),
         )
         .collect()
+}
+
+fn exists_target_index_fields(service: &ServiceSpec) -> HashMap<String, BTreeSet<String>> {
+    let mut indexed = HashMap::<String, BTreeSet<String>>::new();
+
+    for resource in &service.resources {
+        for (target_resource, field_name) in resource.policies.exists_index_targets() {
+            let Some(target_table) =
+                resolve_exists_target_table(&service.resources, &target_resource)
+            else {
+                continue;
+            };
+            indexed
+                .entry(target_table.to_owned())
+                .or_default()
+                .insert(field_name);
+        }
+    }
+
+    indexed
+}
+
+fn resolve_exists_target_table<'a>(
+    resources: &'a [ResourceSpec],
+    target_resource: &str,
+) -> Option<&'a str> {
+    resources
+        .iter()
+        .find(|resource| {
+            resource.table_name == target_resource
+                || resource.struct_ident.to_string() == target_resource
+        })
+        .map(|resource| resource.table_name.as_str())
 }
 
 fn validate_compatible_field(
@@ -428,6 +486,20 @@ mod tests {
     }
 
     #[test]
+    fn migration_sql_indexes_exists_target_fields() {
+        let loaded = load_service_from_path(&fixture_path("exists_policy_api.eon"))
+            .expect("fixture should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("CREATE INDEX idx_shared_doc_family_id ON shared_doc (family_id);"));
+        assert!(
+            sql.contains("CREATE INDEX idx_family_member_family_id ON family_member (family_id);")
+        );
+        assert!(sql.contains("CREATE INDEX idx_family_member_user_id ON family_member (user_id);"));
+    }
+
+    #[test]
     fn migration_sql_renders_on_delete_action_for_relations() {
         let loaded =
             load_service_from_path(&fixture_path("cascade_api.eon")).expect("fixture should parse");
@@ -465,6 +537,22 @@ mod tests {
         assert!(sql.contains("ALTER TABLE owned_post ADD COLUMN subtitle TEXT;"));
         assert!(sql.contains("CREATE TABLE audit_log"));
         assert!(sql.contains("CREATE INDEX idx_audit_log_user_id ON audit_log (user_id);"));
+    }
+
+    #[test]
+    fn diff_sql_adds_exists_target_indexes_for_existing_resources() {
+        let previous = load_service_from_path(&fixture_path("exists_policy_api_previous.eon"))
+            .expect("fixture should parse");
+        let next = load_service_from_path(&fixture_path("exists_policy_api.eon"))
+            .expect("fixture should parse");
+        let sql = render_service_diff_migration_sql(&previous.service, &next.service)
+            .expect("diff sql should render");
+
+        assert!(sql.contains("CREATE INDEX idx_shared_doc_family_id ON shared_doc (family_id);"));
+        assert!(
+            sql.contains("CREATE INDEX idx_family_member_family_id ON family_member (family_id);")
+        );
+        assert!(sql.contains("CREATE INDEX idx_family_member_user_id ON family_member (user_id);"));
     }
 
     #[test]

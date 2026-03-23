@@ -1,0 +1,35 @@
+resources: [
+    {
+        name: "FamilyAccess"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "family_id", type: I64 }
+            { name: "primary_user_id", type: I64 }
+            { name: "delegate_user_id", type: I64 }
+        ]
+    }
+    {
+        name: "SharedDoc"
+        policies: {
+            read: {
+                exists: {
+                    resource: "FamilyAccess"
+                    where: [
+                        { field: "family_id", equals_field: "family_id" }
+                        {
+                            any_of: [
+                                "primary_user_id=user.id"
+                                "delegate_user_id=user.id"
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "family_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

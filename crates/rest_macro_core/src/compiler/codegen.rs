@@ -5,13 +5,14 @@ use quote::{format_ident, quote};
 use syn::Path;
 
 use super::model::{
-    GeneratedValue, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile,
-    StaticMode, WriteModelStyle, default_service_database_url,
+    GeneratedValue, PolicyFilterExpression, PolicyValueSource, ResourceSpec, ServiceSpec,
+    StaticCacheProfile, StaticMode, WriteModelStyle, default_service_database_url,
 };
 use crate::{
     authorization::{
-        ActionAuthorization, AuthorizationAssignment, AuthorizationCondition, AuthorizationMatch,
-        AuthorizationModel, AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
+        ActionAuthorization, AuthorizationAssignment, AuthorizationCondition,
+        AuthorizationExistsCondition, AuthorizationMatch, AuthorizationModel,
+        AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
     },
     database::DatabaseEngine,
     logging::LogTimestampPrecision,
@@ -20,10 +21,11 @@ use crate::{
 
 pub fn expand_resource_impl(
     resource: &ResourceSpec,
+    resources: &[ResourceSpec],
     runtime_crate: &Path,
 ) -> syn::Result<TokenStream> {
     let impl_module_ident = &resource.impl_module_ident;
-    let impl_body = resource_impl_tokens(resource, runtime_crate);
+    let impl_body = resource_impl_tokens(resource, resources, runtime_crate);
 
     Ok(quote! {
         mod #impl_module_ident {
@@ -38,7 +40,8 @@ pub fn expand_derive_resource(
     runtime_crate: &Path,
 ) -> syn::Result<TokenStream> {
     let struct_tokens = resource_struct_tokens(resource, runtime_crate);
-    let impl_tokens = expand_resource_impl(resource, runtime_crate)?;
+    let impl_tokens =
+        expand_resource_impl(resource, std::slice::from_ref(resource), runtime_crate)?;
 
     Ok(quote! {
         #struct_tokens
@@ -75,7 +78,7 @@ pub fn expand_service_module(
         .iter()
         .map(|resource| {
             let struct_tokens = resource_struct_tokens(resource, runtime_crate);
-            let impl_tokens = expand_resource_impl(resource, runtime_crate)?;
+            let impl_tokens = expand_resource_impl(resource, &service.resources, runtime_crate)?;
             Ok(quote! {
                 #struct_tokens
                 #impl_tokens
@@ -399,6 +402,79 @@ fn condition_tokens(condition: &AuthorizationCondition, runtime_crate: &Path) ->
             let id = Literal::string(id);
             let condition = condition_tokens(condition, runtime_crate);
             quote!(#runtime_crate::core::authorization::AuthorizationCondition::Not {
+                id: #id.to_owned(),
+                condition: Box::new(#condition),
+            })
+        }
+        AuthorizationCondition::Exists {
+            id,
+            resource,
+            table,
+            conditions,
+        } => {
+            let id = Literal::string(id);
+            let resource = Literal::string(resource);
+            let table = Literal::string(table);
+            let conditions = conditions
+                .iter()
+                .map(|condition| exists_condition_tokens(condition, runtime_crate));
+            quote!(#runtime_crate::core::authorization::AuthorizationCondition::Exists {
+                id: #id.to_owned(),
+                resource: #resource.to_owned(),
+                table: #table.to_owned(),
+                conditions: vec![#(#conditions),*],
+            })
+        }
+    }
+}
+
+fn exists_condition_tokens(
+    condition: &AuthorizationExistsCondition,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match condition {
+        AuthorizationExistsCondition::Match(rule) => {
+            let rule = match_tokens(rule, runtime_crate);
+            quote!(#runtime_crate::core::authorization::AuthorizationExistsCondition::Match(#rule))
+        }
+        AuthorizationExistsCondition::CurrentRowField {
+            id,
+            field,
+            row_field,
+        } => {
+            let id = Literal::string(id);
+            let field = Literal::string(field);
+            let row_field = Literal::string(row_field);
+            quote!(#runtime_crate::core::authorization::AuthorizationExistsCondition::CurrentRowField {
+                id: #id.to_owned(),
+                field: #field.to_owned(),
+                row_field: #row_field.to_owned(),
+            })
+        }
+        AuthorizationExistsCondition::All { id, conditions } => {
+            let id = Literal::string(id);
+            let conditions = conditions
+                .iter()
+                .map(|condition| exists_condition_tokens(condition, runtime_crate));
+            quote!(#runtime_crate::core::authorization::AuthorizationExistsCondition::All {
+                id: #id.to_owned(),
+                conditions: vec![#(#conditions),*],
+            })
+        }
+        AuthorizationExistsCondition::Any { id, conditions } => {
+            let id = Literal::string(id);
+            let conditions = conditions
+                .iter()
+                .map(|condition| exists_condition_tokens(condition, runtime_crate));
+            quote!(#runtime_crate::core::authorization::AuthorizationExistsCondition::Any {
+                id: #id.to_owned(),
+                conditions: vec![#(#conditions),*],
+            })
+        }
+        AuthorizationExistsCondition::Not { id, condition } => {
+            let id = Literal::string(id);
+            let condition = exists_condition_tokens(condition, runtime_crate);
+            quote!(#runtime_crate::core::authorization::AuthorizationExistsCondition::Not {
                 id: #id.to_owned(),
                 condition: Box::new(#condition),
             })
@@ -1059,6 +1135,29 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                         })?;
                 }
             }
+        } else if field.sql_type == "BOOLEAN" {
+            if super::model::is_optional_type(&field.ty) {
+                quote! {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<bool>, _>(row, #field_name_lit) {
+                        Ok(value) => value,
+                        Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
+                            #runtime_crate::sqlx::Row::try_get::<Option<i64>, _>(row, #field_name_lit)?
+                                .map(|value| value != 0)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                }
+            } else {
+                quote! {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<bool, _>(row, #field_name_lit) {
+                        Ok(value) => value,
+                        Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
+                            #runtime_crate::sqlx::Row::try_get::<i64, _>(row, #field_name_lit)? != 0
+                        }
+                        Err(error) => return Err(error),
+                    };
+                }
+            }
         } else {
             quote! {
                 let #ident: #ty = #runtime_crate::sqlx::Row::try_get(row, #field_name_lit)?;
@@ -1270,7 +1369,11 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     }
 }
 
-fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {
+fn resource_impl_tokens(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    runtime_crate: &Path,
+) -> TokenStream {
     let struct_ident = &resource.struct_ident;
     let table_name = &resource.table_name;
     let id_field = &resource.id_field;
@@ -1310,7 +1413,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             let ident = &field.ident;
             let field_name = field.name();
             if let Some(source) = create_assignment_source(resource, &field_name) {
-                let value = policy_source_value(source, runtime_crate);
+                let value = policy_source_value(source, field, runtime_crate);
                 quote! {
                     q = q.bind(#value);
                 }
@@ -1329,7 +1432,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             if let Some(source) = create_assignment_source(resource, &field_name) {
                 match source {
                     PolicyValueSource::Claim(_) => {
-                        let value = optional_policy_source_value(source);
+                        let value = optional_policy_source_value(source, field);
                         let field_name_lit = Literal::string(&field_name);
                         quote! {
                             match &item.#ident {
@@ -1351,7 +1454,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                         }
                     }
                     PolicyValueSource::UserId => {
-                        let value = policy_source_value(source, runtime_crate);
+                        let value = policy_source_value(source, field, runtime_crate);
                         quote! {
                             q = q.bind(#value);
                         }
@@ -1372,6 +1475,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
+    let update_where_index = Literal::usize_unsuffixed(update_plan.where_index);
+    let update_policy_start_index = Literal::usize_unsuffixed(update_plan.where_index + 1);
     let bind_fields_update = update_plan
         .bind_fields
         .iter()
@@ -1381,20 +1486,37 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             }
         })
         .collect::<Vec<_>>();
-    let read_filter_optional_binds =
-        bind_policy_optional_filters(&resource.policies.read, runtime_crate);
-    let update_filter_binds = bind_policy_filters(&resource.policies.update, runtime_crate);
-    let delete_filter_binds = bind_policy_filters(&resource.policies.delete, runtime_crate);
     let list_placeholder_body = match resource.db {
         super::model::DbBackend::Postgres => quote!(format!("${index}")),
         super::model::DbBackend::Sqlite | super::model::DbBackend::Mysql => {
             quote!("?".to_owned())
         }
     };
-    let read_policy_list_conditions = read_list_policy_condition_tokens(resource, runtime_crate);
     let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
     let list_bind_matches = list_bind_match_tokens(resource, "q");
     let count_bind_matches = list_bind_match_tokens(resource, "count_query");
+    let query_bind_matches = list_bind_match_tokens(resource, "q");
+    let policy_plan_enum = policy_plan_enum_tokens(resource);
+    let policy_plan_methods = policy_plan_method_tokens(resource, resources, runtime_crate);
+    let read_policy_list_conditions = if resource.policies.has_read_filters() {
+        let plan_ident = policy_plan_ident(resource);
+        quote! {
+            match Self::read_policy_plan(user, filter_binds.len() + 1) {
+                #plan_ident::Resolved { condition, binds } => {
+                    conditions.push(condition);
+                    filter_binds.extend(binds);
+                }
+                #plan_ident::Indeterminate => {
+                    return Err(#runtime_crate::core::errors::forbidden(
+                        "missing_claim",
+                        "Missing required principal values for row policy",
+                    ));
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
     let create_admin_override =
         resource.policies.admin_bypass && resource.policies.create.iter().next().is_some();
     let create_insert_binds = if create_admin_override {
@@ -1652,7 +1774,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         },
         None => quote!(true),
     };
-    let fetch_readable_by_id_body = if resource.policies.read.is_empty() {
+    let fetch_readable_by_id_body = if !resource.policies.has_read_filters() {
         let id_placeholder = resource.db.placeholder(1);
         quote! {
             if !Self::can_read(user) {
@@ -1667,25 +1789,41 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         }
     } else {
         let id_placeholder = resource.db.placeholder(1);
-        let filtered_sql = filtered_select_by_id_sql(resource, &resource.policies.read);
+        let plan_ident = policy_plan_ident(resource);
         quote! {
             if !Self::can_read(user) {
                 return Ok(None);
             }
 
             let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-            let filtered_sql = #filtered_sql;
 
-            let query = if #admin_bypass && #is_admin {
-                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql).bind(id)
+            if #admin_bypass && #is_admin {
+                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
+                    .bind(id)
+                    .fetch_optional(db)
+                    .await
             } else {
-                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(filtered_sql)
-                    .bind(id);
-                #(#read_filter_optional_binds)*
-                q
-            };
-
-            query.fetch_optional(db).await
+                match Self::read_policy_plan(user, 2) {
+                    #plan_ident::Resolved { condition, binds } => {
+                        let filtered_sql = format!(
+                            "SELECT * FROM {} WHERE {} = {} AND {}",
+                            #table_name,
+                            #id_field,
+                            #id_placeholder,
+                            condition
+                        );
+                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&filtered_sql)
+                            .bind(id);
+                        for bind in binds {
+                            q = match bind {
+                                #(#query_bind_matches)*
+                            };
+                        }
+                        q.fetch_optional(db).await
+                    }
+                    #plan_ident::Indeterminate => return Ok(None),
+                }
+            }
         }
     };
 
@@ -1767,7 +1905,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             )
         }
     } else {
-        if resource.policies.update.is_empty() {
+        if !resource.policies.has_update_filters() {
             let sql = format!(
                 "UPDATE {} SET {} WHERE {} = {}",
                 resource.table_name,
@@ -1788,12 +1926,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 }
             }
         } else {
-            let filtered_sql = filtered_update_sql(
-                resource,
-                &update_sql,
-                &resource.policies.update,
-                update_plan.where_index + 1,
-            );
+            let plan_ident = policy_plan_ident(resource);
             let admin_sql = format!(
                 "UPDATE {} SET {} WHERE {} = {}",
                 resource.table_name,
@@ -1814,22 +1947,41 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                     }
                 } else {
-                    let sql = #filtered_sql;
-                    let mut q = #runtime_crate::db::query(sql);
-                    #(#bind_fields_update)*
-                    q = q.bind(path.into_inner());
-                    #(#update_filter_binds)*
-                    match q.execute(db.get_ref()).await {
-                        Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                        Ok(_) => HttpResponse::Ok().finish(),
-                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    match Self::update_policy_plan(&user, #update_policy_start_index) {
+                        #plan_ident::Resolved { condition, binds } => {
+                            let sql = format!(
+                                "UPDATE {} SET {} WHERE {} = {} AND {}",
+                                #table_name,
+                                #update_sql,
+                                #id_field,
+                                Self::list_placeholder(#update_where_index),
+                                condition
+                            );
+                            let mut q = #runtime_crate::db::query(&sql);
+                            #(#bind_fields_update)*
+                            q = q.bind(path.into_inner());
+                            for bind in binds {
+                                q = match bind {
+                                    #(#query_bind_matches)*
+                                };
+                            }
+                            match q.execute(db.get_ref()).await {
+                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        }
+                        #plan_ident::Indeterminate => #runtime_crate::core::errors::forbidden(
+                            "missing_claim",
+                            "Missing required principal values for row policy",
+                        ),
                     }
                 }
             }
         }
     };
 
-    let delete_body = if resource.policies.delete.is_empty() {
+    let delete_body = if !resource.policies.has_delete_filters() {
         let id_placeholder = resource.db.placeholder(1);
         quote! {
             let sql = format!("DELETE FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
@@ -1844,7 +1996,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             }
         }
     } else {
-        let filtered_sql = filtered_delete_sql(resource, &resource.policies.delete, 2);
+        let plan_ident = policy_plan_ident(resource);
         let admin_sql = format!(
             "DELETE FROM {} WHERE {} = {}",
             resource.table_name,
@@ -1864,14 +2016,32 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             } else {
-                let sql = #filtered_sql;
-                let mut q = #runtime_crate::db::query(sql);
-                q = q.bind(path.into_inner());
-                #(#delete_filter_binds)*
-                match q.execute(db.get_ref()).await {
-                    Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                    Ok(_) => HttpResponse::Ok().finish(),
-                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                match Self::delete_policy_plan(&user, 2) {
+                    #plan_ident::Resolved { condition, binds } => {
+                        let sql = format!(
+                            "DELETE FROM {} WHERE {} = {} AND {}",
+                            #table_name,
+                            #id_field,
+                            Self::list_placeholder(1),
+                            condition
+                        );
+                        let mut q = #runtime_crate::db::query(&sql);
+                        q = q.bind(path.into_inner());
+                        for bind in binds {
+                            q = match bind {
+                                #(#query_bind_matches)*
+                            };
+                        }
+                        match q.execute(db.get_ref()).await {
+                            Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                            Ok(_) => HttpResponse::Ok().finish(),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                    #plan_ident::Indeterminate => #runtime_crate::core::errors::forbidden(
+                        "missing_claim",
+                        "Missing required principal values for row policy",
+                    ),
                 }
             }
         }
@@ -2092,6 +2262,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
         use #runtime_crate::actix_web::{web, HttpRequest, HttpResponse, Responder};
         use #runtime_crate::db::DbPool;
 
+        #policy_plan_enum
+
         impl #struct_ident {
             pub fn configure(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
                 let db = web::Data::new(db.into());
@@ -2151,6 +2323,8 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
             fn list_placeholder(index: usize) -> String {
                 #list_placeholder_body
             }
+
+            #policy_plan_methods
 
             fn sort_supports_cursor(sort: &#sort_field_ty) -> bool {
                 match sort {
@@ -2318,7 +2492,7 @@ fn resource_impl_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenS
                 }
 
                 if !(#admin_bypass && is_admin) {
-                    #(#read_policy_list_conditions)*
+                    #read_policy_list_conditions
                 }
 
                 #(#query_filter_conditions)*
@@ -2649,30 +2823,6 @@ fn list_filter_field_ty(field: &super::model::FieldSpec, runtime_crate: &Path) -
     }
 }
 
-fn read_list_policy_condition_tokens(
-    resource: &ResourceSpec,
-    runtime_crate: &Path,
-) -> Vec<TokenStream> {
-    let bind_ident = list_bind_ident(resource);
-    resource
-        .policies
-        .read
-        .iter()
-        .map(|filter| {
-            let field_name = Literal::string(&filter.field);
-            let value = policy_source_result_value(&filter.source, runtime_crate);
-            quote! {
-                conditions.push(format!(
-                    "{} = {}",
-                    #field_name,
-                    Self::list_placeholder(filter_binds.len() + 1)
-                ));
-                filter_binds.push(#bind_ident::Integer(#value));
-            }
-        })
-        .collect()
-}
-
 fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
     let bind_ident = list_bind_ident(resource);
     resource
@@ -2980,8 +3130,8 @@ fn insert_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
 fn policy_controlled_fields(resource: &ResourceSpec) -> BTreeSet<String> {
     resource
         .policies
-        .iter_filters()
-        .map(|(_, policy)| policy.field.clone())
+        .controlled_filter_fields()
+        .into_iter()
         .chain(
             resource
                 .policies
@@ -3003,41 +3153,39 @@ fn create_assignment_source<'a>(
         .map(|policy| &policy.source)
 }
 
-fn bind_policy_filters(filters: &[PolicyFilter], runtime_crate: &Path) -> Vec<TokenStream> {
-    filters
+fn resource_field<'a>(resource: &'a ResourceSpec, field_name: &str) -> &'a super::model::FieldSpec {
+    resource
+        .fields
         .iter()
-        .map(|filter| {
-            let value = policy_source_value(&filter.source, runtime_crate);
-            quote! {
-                q = q.bind(#value);
-            }
-        })
-        .collect()
+        .find(|field| field.name() == field_name)
+        .unwrap_or_else(|| panic!("validated resource is missing policy field `{field_name}`"))
 }
 
-fn bind_policy_optional_filters(
-    filters: &[PolicyFilter],
+fn claim_access_value_tokens(claim_name: &Literal, field: &super::model::FieldSpec) -> TokenStream {
+    match super::model::policy_field_claim_type(&field.ty)
+        .unwrap_or_else(|| panic!("unsupported row policy field type for `{}`", field.name()))
+    {
+        crate::auth::AuthClaimType::I64 => quote!(user.claim_i64(#claim_name)),
+        crate::auth::AuthClaimType::Bool => quote!(user.claim_bool(#claim_name)),
+        crate::auth::AuthClaimType::String => {
+            quote!(user.claim_str(#claim_name).map(|value| value.to_owned()))
+        }
+    }
+}
+
+fn policy_source_value(
+    source: &PolicyValueSource,
+    field: &super::model::FieldSpec,
     runtime_crate: &Path,
-) -> Vec<TokenStream> {
-    filters
-        .iter()
-        .map(|filter| {
-            let value = policy_source_optional_value(&filter.source, runtime_crate);
-            quote! {
-                q = q.bind(#value);
-            }
-        })
-        .collect()
-}
-
-fn policy_source_value(source: &PolicyValueSource, runtime_crate: &Path) -> TokenStream {
+) -> TokenStream {
     match source {
         PolicyValueSource::UserId => quote!(user.id),
         PolicyValueSource::Claim(name) => {
             let claim_name = Literal::string(name);
+            let claim_value = claim_access_value_tokens(&claim_name, field);
             quote! {
                 {
-                    match user.claim_i64(#claim_name) {
+                    match #claim_value {
                         Some(value) => value,
                         None => return #runtime_crate::core::errors::forbidden(
                             "missing_claim",
@@ -3050,121 +3198,445 @@ fn policy_source_value(source: &PolicyValueSource, runtime_crate: &Path) -> Toke
     }
 }
 
-fn policy_source_result_value(source: &PolicyValueSource, runtime_crate: &Path) -> TokenStream {
-    match source {
-        PolicyValueSource::UserId => quote!(user.id),
-        PolicyValueSource::Claim(name) => {
-            let claim_name = Literal::string(name);
-            quote! {
-                {
-                    match user.claim_i64(#claim_name) {
-                        Some(value) => value,
-                        None => return Err(#runtime_crate::core::errors::forbidden(
-                            "missing_claim",
-                            format!("Missing required claim `{}`", #claim_name),
-                        )),
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn policy_source_optional_value(source: &PolicyValueSource, _runtime_crate: &Path) -> TokenStream {
-    match source {
-        PolicyValueSource::UserId => quote!(user.id),
-        PolicyValueSource::Claim(name) => {
-            let claim_name = Literal::string(name);
-            quote! {
-                {
-                    match user.claim_i64(#claim_name) {
-                        Some(value) => value,
-                        None => return Ok(None),
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn optional_policy_source_value(source: &PolicyValueSource) -> TokenStream {
+fn optional_policy_source_value(
+    source: &PolicyValueSource,
+    field: &super::model::FieldSpec,
+) -> TokenStream {
     match source {
         PolicyValueSource::UserId => quote!(Some(user.id)),
         PolicyValueSource::Claim(name) => {
             let claim_name = Literal::string(name);
-            quote!(user.claim_i64(#claim_name))
+            claim_access_value_tokens(&claim_name, field)
         }
     }
 }
 
-fn filtered_select_by_id_sql(resource: &ResourceSpec, filters: &[PolicyFilter]) -> String {
-    let mut conditions = vec![format!(
-        "{} = {}",
-        resource.id_field,
-        resource.db.placeholder(1)
-    )];
-    conditions.extend(filter_conditions_sql(resource, filters, 2));
-    format!(
-        "SELECT * FROM {} WHERE {}",
-        resource.table_name,
-        conditions.join(" AND ")
-    )
+fn list_bind_value_tokens(
+    bind_ident: &syn::Ident,
+    field: &super::model::FieldSpec,
+    value: TokenStream,
+) -> TokenStream {
+    match super::model::policy_field_claim_type(&field.ty)
+        .unwrap_or_else(|| panic!("unsupported row policy field type for `{}`", field.name()))
+    {
+        crate::auth::AuthClaimType::I64 => quote!(#bind_ident::Integer(#value)),
+        crate::auth::AuthClaimType::Bool => quote!(#bind_ident::Boolean(#value)),
+        crate::auth::AuthClaimType::String => quote!(#bind_ident::Text(#value)),
+    }
 }
 
-fn filtered_update_sql(
-    resource: &ResourceSpec,
-    update_sql: &str,
-    filters: &[PolicyFilter],
-    start_index: usize,
-) -> String {
-    let mut conditions = vec![format!(
-        "{} = {}",
-        resource.id_field,
-        resource.db.placeholder(start_index - 1)
-    )];
-    conditions.extend(filter_conditions_sql(resource, filters, start_index));
-    format!(
-        "UPDATE {} SET {} WHERE {}",
-        resource.table_name,
-        update_sql,
-        conditions.join(" AND ")
-    )
+fn policy_plan_ident(resource: &ResourceSpec) -> syn::Ident {
+    format_ident!("{}PolicyFilterPlan", resource.struct_ident)
 }
 
-fn filtered_delete_sql(
-    resource: &ResourceSpec,
-    filters: &[PolicyFilter],
-    start_index: usize,
-) -> String {
-    let mut conditions = vec![format!(
-        "{} = {}",
-        resource.id_field,
-        resource.db.placeholder(1)
-    )];
-    conditions.extend(filter_conditions_sql(resource, filters, start_index));
-    format!(
-        "DELETE FROM {} WHERE {}",
-        resource.table_name,
-        conditions.join(" AND ")
-    )
+fn maybe_policy_source_value(
+    source: &PolicyValueSource,
+    field: &super::model::FieldSpec,
+) -> TokenStream {
+    match source {
+        PolicyValueSource::UserId => quote!(Some(user.id)),
+        PolicyValueSource::Claim(name) => {
+            let claim_name = Literal::string(name);
+            claim_access_value_tokens(&claim_name, field)
+        }
+    }
 }
 
-fn filter_conditions_sql(
+fn policy_plan_enum_tokens(resource: &ResourceSpec) -> TokenStream {
+    if !resource.policies.has_read_filters()
+        && !resource.policies.has_update_filters()
+        && !resource.policies.has_delete_filters()
+    {
+        return quote!();
+    }
+
+    let bind_ident = list_bind_ident(resource);
+    let plan_ident = policy_plan_ident(resource);
+
+    quote! {
+        #[derive(Debug, Clone)]
+        enum #plan_ident {
+            Resolved {
+                condition: String,
+                binds: Vec<#bind_ident>,
+            },
+            Indeterminate,
+        }
+    }
+}
+
+fn policy_plan_method_tokens(
     resource: &ResourceSpec,
-    filters: &[PolicyFilter],
-    start_index: usize,
-) -> Vec<String> {
-    filters
-        .iter()
-        .enumerate()
-        .map(|(index, filter)| {
-            format!(
-                "{} = {}",
-                filter.field,
-                resource.db.placeholder(start_index + index)
-            )
-        })
-        .collect()
+    resources: &[ResourceSpec],
+    runtime_crate: &Path,
+) -> TokenStream {
+    if !resource.policies.has_read_filters()
+        && !resource.policies.has_update_filters()
+        && !resource.policies.has_delete_filters()
+    {
+        return quote!();
+    }
+
+    let bind_ident = list_bind_ident(resource);
+    let plan_ident = policy_plan_ident(resource);
+    let read_method = resource.policies.read.as_ref().map(|expression| {
+        single_policy_plan_method_tokens(
+            "read",
+            resource,
+            resources,
+            expression,
+            &bind_ident,
+            &plan_ident,
+            runtime_crate,
+        )
+    });
+    let update_method = resource.policies.update.as_ref().map(|expression| {
+        single_policy_plan_method_tokens(
+            "update",
+            resource,
+            resources,
+            expression,
+            &bind_ident,
+            &plan_ident,
+            runtime_crate,
+        )
+    });
+    let delete_method = resource.policies.delete.as_ref().map(|expression| {
+        single_policy_plan_method_tokens(
+            "delete",
+            resource,
+            resources,
+            expression,
+            &bind_ident,
+            &plan_ident,
+            runtime_crate,
+        )
+    });
+    quote! {
+        fn combine_all_policy_plans(plans: Vec<#plan_ident>) -> #plan_ident {
+            let mut conditions = Vec::new();
+            let mut binds = Vec::new();
+            for plan in plans {
+                match plan {
+                    #plan_ident::Resolved {
+                        condition,
+                        binds: mut plan_binds,
+                    } => {
+                        conditions.push(condition);
+                        binds.append(&mut plan_binds);
+                    }
+                    #plan_ident::Indeterminate => return #plan_ident::Indeterminate,
+                }
+            }
+
+            #plan_ident::Resolved {
+                condition: format!("({})", conditions.join(" AND ")),
+                binds,
+            }
+        }
+
+        fn combine_any_policy_plans(plans: Vec<#plan_ident>) -> #plan_ident {
+            let mut conditions = Vec::new();
+            let mut binds = Vec::new();
+            for plan in plans {
+                match plan {
+                    #plan_ident::Resolved {
+                        condition,
+                        binds: mut plan_binds,
+                    } => {
+                        conditions.push(condition);
+                        binds.append(&mut plan_binds);
+                    }
+                    #plan_ident::Indeterminate => {}
+                }
+            }
+
+            if conditions.is_empty() {
+                #plan_ident::Indeterminate
+            } else {
+                #plan_ident::Resolved {
+                    condition: format!("({})", conditions.join(" OR ")),
+                    binds,
+                }
+            }
+        }
+
+        fn negate_policy_plan(plan: #plan_ident) -> #plan_ident {
+            match plan {
+                #plan_ident::Resolved { condition, binds } => #plan_ident::Resolved {
+                    condition: format!("NOT ({condition})"),
+                    binds,
+                },
+                #plan_ident::Indeterminate => #plan_ident::Indeterminate,
+            }
+        }
+
+        #read_method
+        #update_method
+        #delete_method
+    }
+}
+
+fn single_policy_plan_method_tokens(
+    scope: &str,
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    expression: &PolicyFilterExpression,
+    bind_ident: &syn::Ident,
+    plan_ident: &syn::Ident,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let method_ident = format_ident!("{}_policy_plan", scope);
+    let next_index_ident = format_ident!("next_index");
+    let current_table_name = Literal::string(&resource.table_name);
+    let expression_tokens = policy_expression_plan_tokens(
+        resource,
+        resources,
+        expression,
+        bind_ident,
+        plan_ident,
+        &next_index_ident,
+        &current_table_name,
+        scope,
+    );
+
+    quote! {
+        fn #method_ident(
+            user: &#runtime_crate::core::auth::UserContext,
+            start_index: usize,
+        ) -> #plan_ident {
+            let mut #next_index_ident = start_index;
+            #expression_tokens
+        }
+    }
+}
+
+fn policy_expression_plan_tokens(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    expression: &PolicyFilterExpression,
+    bind_ident: &syn::Ident,
+    plan_ident: &syn::Ident,
+    next_index_ident: &syn::Ident,
+    current_table_name: &Literal,
+    path: &str,
+) -> TokenStream {
+    match expression {
+        PolicyFilterExpression::Match(filter) => {
+            let field = resource_field(resource, &filter.field);
+            let field_name = Literal::string(&filter.field);
+            let value = maybe_policy_source_value(&filter.source, field);
+            let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
+            quote! {
+                {
+                    match #value {
+                        Some(value) => {
+                            let placeholder = Self::list_placeholder(#next_index_ident);
+                            #next_index_ident += 1;
+                            #plan_ident::Resolved {
+                                condition: format!("{} = {}", #field_name, placeholder),
+                                binds: vec![#bind_value],
+                            }
+                        }
+                        None => #plan_ident::Indeterminate,
+                    }
+                }
+            }
+        }
+        PolicyFilterExpression::All(expressions) => {
+            let expressions = expressions
+                .iter()
+                .enumerate()
+                .map(|(index, expression)| {
+                    policy_expression_plan_tokens(
+                        resource,
+                        resources,
+                        expression,
+                        bind_ident,
+                        plan_ident,
+                        next_index_ident,
+                        current_table_name,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_all_policy_plans(vec![#(#expressions),*]))
+        }
+        PolicyFilterExpression::Any(expressions) => {
+            let expressions = expressions
+                .iter()
+                .enumerate()
+                .map(|(index, expression)| {
+                    policy_expression_plan_tokens(
+                        resource,
+                        resources,
+                        expression,
+                        bind_ident,
+                        plan_ident,
+                        next_index_ident,
+                        current_table_name,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_any_policy_plans(vec![#(#expressions),*]))
+        }
+        PolicyFilterExpression::Not(expression) => {
+            let expression = policy_expression_plan_tokens(
+                resource,
+                resources,
+                expression,
+                bind_ident,
+                plan_ident,
+                next_index_ident,
+                current_table_name,
+                &format!("{path}_not"),
+            );
+            quote!(Self::negate_policy_plan(#expression))
+        }
+        PolicyFilterExpression::Exists(filter) => {
+            let alias = Literal::string(&format!("policy_exists_{path}"));
+            let target_resource = resources
+                .iter()
+                .find(|candidate| {
+                    candidate.struct_ident.to_string() == filter.resource
+                        || candidate.table_name == filter.resource
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "validated resource set is missing exists policy target `{}`",
+                        filter.resource
+                    )
+                });
+            let target_table = Literal::string(&target_resource.table_name);
+            let exists_condition = exists_condition_plan_tokens(
+                target_resource,
+                &filter.condition,
+                bind_ident,
+                plan_ident,
+                next_index_ident,
+                &alias,
+                current_table_name,
+                &format!("{path}_exists"),
+            );
+            quote! {
+                {
+                    match #exists_condition {
+                        #plan_ident::Resolved { condition, binds } => #plan_ident::Resolved {
+                            condition: format!(
+                                "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",
+                                #target_table,
+                                #alias,
+                                condition
+                            ),
+                            binds,
+                        },
+                        #plan_ident::Indeterminate => #plan_ident::Indeterminate,
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn exists_condition_plan_tokens(
+    target_resource: &ResourceSpec,
+    condition: &super::model::PolicyExistsCondition,
+    bind_ident: &syn::Ident,
+    plan_ident: &syn::Ident,
+    next_index_ident: &syn::Ident,
+    alias: &Literal,
+    current_table_name: &Literal,
+    path: &str,
+) -> TokenStream {
+    match condition {
+        super::model::PolicyExistsCondition::Match(filter) => {
+            let field = resource_field(target_resource, &filter.field);
+            let field_name = Literal::string(&filter.field);
+            let value = maybe_policy_source_value(&filter.source, field);
+            let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
+            quote! {
+                match #value {
+                    Some(value) => {
+                        let placeholder = Self::list_placeholder(#next_index_ident);
+                        #next_index_ident += 1;
+                        #plan_ident::Resolved {
+                            condition: format!("{}.{} = {}", #alias, #field_name, placeholder),
+                            binds: vec![#bind_value],
+                        }
+                    }
+                    None => #plan_ident::Indeterminate,
+                }
+            }
+        }
+        super::model::PolicyExistsCondition::CurrentRowField { field, row_field } => {
+            let field_name = Literal::string(field);
+            let row_field_name = Literal::string(row_field);
+            quote! {
+                #plan_ident::Resolved {
+                    condition: format!(
+                        "{}.{} = {}.{}",
+                        #alias,
+                        #field_name,
+                        #current_table_name,
+                        #row_field_name
+                    ),
+                    binds: Vec::<#bind_ident>::new(),
+                }
+            }
+        }
+        super::model::PolicyExistsCondition::All(conditions) => {
+            let conditions = conditions
+                .iter()
+                .enumerate()
+                .map(|(index, condition)| {
+                    exists_condition_plan_tokens(
+                        target_resource,
+                        condition,
+                        bind_ident,
+                        plan_ident,
+                        next_index_ident,
+                        alias,
+                        current_table_name,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_all_policy_plans(vec![#(#conditions),*]))
+        }
+        super::model::PolicyExistsCondition::Any(conditions) => {
+            let conditions = conditions
+                .iter()
+                .enumerate()
+                .map(|(index, condition)| {
+                    exists_condition_plan_tokens(
+                        target_resource,
+                        condition,
+                        bind_ident,
+                        plan_ident,
+                        next_index_ident,
+                        alias,
+                        current_table_name,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_any_policy_plans(vec![#(#conditions),*]))
+        }
+        super::model::PolicyExistsCondition::Not(condition) => {
+            let condition = exists_condition_plan_tokens(
+                target_resource,
+                condition,
+                bind_ident,
+                plan_ident,
+                next_index_ident,
+                alias,
+                current_table_name,
+                &format!("{path}_not"),
+            );
+            quote!(Self::negate_policy_plan(#condition))
+        }
+    }
 }
 
 fn role_guard(runtime_crate: &Path, role: Option<&str>) -> TokenStream {

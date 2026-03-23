@@ -26,4 +26,32 @@ resources: [
             { name: "title", type: String }
         ]
     }
+    {
+        name: "PlanDoc"
+        policies: {
+            read: { field: "plan", equals: "claim.plan" }
+            create: { field: "plan", value: "claim.plan" }
+            update: { field: "plan", equals: "claim.plan" }
+            delete: { field: "plan", equals: "claim.plan" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "plan", type: String }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "StaffDoc"
+        policies: {
+            read: { field: "staff", equals: "claim.staff" }
+            create: { field: "staff", value: "claim.staff" }
+            update: { field: "staff", equals: "claim.staff" }
+            delete: { field: "staff", equals: "claim.staff" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "staff", type: Bool }
+            { name: "title", type: String }
+        ]
+    }
 ]

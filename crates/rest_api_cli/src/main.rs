@@ -469,6 +469,10 @@ enum AuthzCommand {
         #[arg(long = "row", value_name = "KEY=VALUE")]
         row: Vec<String>,
 
+        /// Related rows for EXISTS predicates in `Resource:key=value,other=value` form; may be repeated
+        #[arg(long = "related-row", value_name = "ROW")]
+        related_rows: Vec<String>,
+
         /// Proposed create payload fields in key=value form; may be repeated
         #[arg(long = "proposed", value_name = "KEY=VALUE")]
         proposed: Vec<String>,
@@ -846,6 +850,7 @@ async fn main() -> Result<()> {
                 roles,
                 claims,
                 row,
+                related_rows,
                 proposed,
                 scope,
                 scoped_assignments,
@@ -880,6 +885,7 @@ async fn main() -> Result<()> {
                     roles,
                     claims,
                     row,
+                    related_rows,
                     proposed,
                     scope.as_deref(),
                     scoped_assignments,

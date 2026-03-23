@@ -1,0 +1,18 @@
+resources: [
+    {
+        name: "FamilyMember"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "family_id", type: I64 }
+            { name: "user_id", type: I64 }
+        ]
+    }
+    {
+        name: "SharedDoc"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "family_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

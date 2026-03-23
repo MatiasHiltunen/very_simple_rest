@@ -1,4 +1,4 @@
-error: row policy field `user_id` must use type `i64` or `Option<i64>`
+error: row policy field `user_id` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types
  --> tests/ui/row_policy_non_i64_field.rs:7:8
   |
 7 | struct InvalidPolicyFieldType {

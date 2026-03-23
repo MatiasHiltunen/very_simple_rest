@@ -4,13 +4,16 @@ use crate::{
     auth::AuthClaimType,
     authorization::{
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment, AuthorizationCondition,
-        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationValueSource,
-        ResourceAuthorization,
+        AuthorizationExistsCondition, AuthorizationMatch, AuthorizationModel,
+        AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
     },
     security::SecurityConfig,
 };
 
-use super::model::{PolicyAssignment, PolicyFilter, PolicyValueSource, ResourceSpec, ServiceSpec};
+use super::model::{
+    PolicyAssignment, PolicyExistsCondition, PolicyFilter, PolicyFilterExpression,
+    PolicyValueSource, ResourceSpec, ServiceSpec,
+};
 
 pub fn compile_service_authorization(service: &ServiceSpec) -> AuthorizationModel {
     AuthorizationModel {
@@ -18,13 +21,16 @@ pub fn compile_service_authorization(service: &ServiceSpec) -> AuthorizationMode
         resources: service
             .resources
             .iter()
-            .map(|resource| compile_resource_authorization(resource, &service.security))
+            .map(|resource| {
+                compile_resource_authorization(resource, &service.resources, &service.security)
+            })
             .collect(),
     }
 }
 
 pub fn compile_resource_authorization(
     resource: &ResourceSpec,
+    resources: &[ResourceSpec],
     security: &SecurityConfig,
 ) -> ResourceAuthorization {
     let resource_id = resource_rule_id(&resource.struct_ident.to_string());
@@ -38,7 +44,8 @@ pub fn compile_resource_authorization(
                 &resource_id,
                 AuthorizationAction::Read,
                 resource.roles.read.as_deref(),
-                &resource.policies.read,
+                resource.policies.read.as_ref(),
+                resources,
                 security,
             ),
             compile_assignment_action(
@@ -52,14 +59,16 @@ pub fn compile_resource_authorization(
                 &resource_id,
                 AuthorizationAction::Update,
                 resource.roles.update.as_deref(),
-                &resource.policies.update,
+                resource.policies.update.as_ref(),
+                resources,
                 security,
             ),
             compile_filter_action(
                 &resource_id,
                 AuthorizationAction::Delete,
                 resource.roles.delete.as_deref(),
-                &resource.policies.delete,
+                resource.policies.delete.as_ref(),
+                resources,
                 security,
             ),
         ],
@@ -70,7 +79,8 @@ fn compile_filter_action(
     resource_id: &str,
     action: AuthorizationAction,
     required_role: Option<&str>,
-    filters: &[PolicyFilter],
+    filters: Option<&PolicyFilterExpression>,
+    resources: &[ResourceSpec],
     security: &SecurityConfig,
 ) -> ActionAuthorization {
     let action_id = action_rule_id(resource_id, action);
@@ -79,7 +89,7 @@ fn compile_filter_action(
         action,
         role_rule_id: required_role.map(|_| format!("{action_id}.role")),
         required_role: required_role.map(ToOwned::to_owned),
-        filter: compile_filter_group(&action_id, filters, security),
+        filter: compile_filter_group(&action_id, filters, resources, security),
         assignments: Vec::new(),
     }
 }
@@ -107,30 +117,79 @@ fn compile_assignment_action(
 
 fn compile_filter_group(
     action_id: &str,
-    filters: &[PolicyFilter],
+    filters: Option<&PolicyFilterExpression>,
+    resources: &[ResourceSpec],
     security: &SecurityConfig,
 ) -> Option<AuthorizationCondition> {
-    match filters {
-        [] => None,
-        [filter] => Some(compile_filter(
-            &format!("{action_id}.filter"),
-            filter,
-            security,
-        )),
-        _ => Some(AuthorizationCondition::All {
-            id: format!("{action_id}.filter"),
+    filters.map(|filters| {
+        compile_filter_expression(&format!("{action_id}.filter"), filters, resources, security)
+    })
+}
+
+fn compile_filter_expression(
+    rule_id: &str,
+    filter: &PolicyFilterExpression,
+    resources: &[ResourceSpec],
+    security: &SecurityConfig,
+) -> AuthorizationCondition {
+    match filter {
+        PolicyFilterExpression::Match(filter) => compile_filter(rule_id, filter, security),
+        PolicyFilterExpression::All(filters) => AuthorizationCondition::All {
+            id: rule_id.to_owned(),
             conditions: filters
                 .iter()
                 .enumerate()
                 .map(|(index, filter)| {
-                    compile_filter(
-                        &format!("{action_id}.filter.{}", index + 1),
+                    compile_filter_expression(
+                        &format!("{rule_id}.{}", index + 1),
                         filter,
+                        resources,
                         security,
                     )
                 })
                 .collect(),
-        }),
+        },
+        PolicyFilterExpression::Any(filters) => AuthorizationCondition::Any {
+            id: rule_id.to_owned(),
+            conditions: filters
+                .iter()
+                .enumerate()
+                .map(|(index, filter)| {
+                    compile_filter_expression(
+                        &format!("{rule_id}.{}", index + 1),
+                        filter,
+                        resources,
+                        security,
+                    )
+                })
+                .collect(),
+        },
+        PolicyFilterExpression::Not(filter) => AuthorizationCondition::Not {
+            id: rule_id.to_owned(),
+            condition: Box::new(compile_filter_expression(
+                &format!("{rule_id}.inner"),
+                filter,
+                resources,
+                security,
+            )),
+        },
+        PolicyFilterExpression::Exists(filter) => AuthorizationCondition::Exists {
+            id: rule_id.to_owned(),
+            resource: filter.resource.clone(),
+            table: resources
+                .iter()
+                .find(|resource| {
+                    resource.struct_ident.to_string() == filter.resource
+                        || resource.table_name == filter.resource
+                })
+                .map(|resource| resource.table_name.clone())
+                .unwrap_or_else(|| filter.resource.to_snake_case()),
+            conditions: vec![compile_exists_condition(
+                &format!("{rule_id}.1"),
+                &filter.condition,
+                security,
+            )],
+        },
     }
 }
 
@@ -145,6 +204,62 @@ fn compile_filter(
         operator: AuthorizationOperator::Equals,
         source: compile_source(&filter.source, security),
     })
+}
+
+fn compile_exists_condition(
+    rule_id: &str,
+    condition: &PolicyExistsCondition,
+    security: &SecurityConfig,
+) -> AuthorizationExistsCondition {
+    match condition {
+        PolicyExistsCondition::Match(filter) => match compile_filter(rule_id, filter, security) {
+            AuthorizationCondition::Match(rule) => AuthorizationExistsCondition::Match(rule),
+            _ => unreachable!("exists condition match should compile to a leaf rule"),
+        },
+        PolicyExistsCondition::CurrentRowField { field, row_field } => {
+            AuthorizationExistsCondition::CurrentRowField {
+                id: rule_id.to_owned(),
+                field: field.clone(),
+                row_field: row_field.clone(),
+            }
+        }
+        PolicyExistsCondition::All(conditions) => AuthorizationExistsCondition::All {
+            id: rule_id.to_owned(),
+            conditions: conditions
+                .iter()
+                .enumerate()
+                .map(|(index, condition)| {
+                    compile_exists_condition(
+                        &format!("{rule_id}.{}", index + 1),
+                        condition,
+                        security,
+                    )
+                })
+                .collect(),
+        },
+        PolicyExistsCondition::Any(conditions) => AuthorizationExistsCondition::Any {
+            id: rule_id.to_owned(),
+            conditions: conditions
+                .iter()
+                .enumerate()
+                .map(|(index, condition)| {
+                    compile_exists_condition(
+                        &format!("{rule_id}.{}", index + 1),
+                        condition,
+                        security,
+                    )
+                })
+                .collect(),
+        },
+        PolicyExistsCondition::Not(condition) => AuthorizationExistsCondition::Not {
+            id: rule_id.to_owned(),
+            condition: Box::new(compile_exists_condition(
+                &format!("{rule_id}.inner"),
+                condition,
+                security,
+            )),
+        },
+    }
 }
 
 fn compile_assignment(
@@ -316,8 +431,10 @@ mod tests {
         .expect("fixture should parse");
         let model = compile_service_authorization(&loaded.service);
 
-        let resource = model.resources.first().expect("resource should exist");
-        let read = resource
+        let scoped_doc = model
+            .resource("ScopedDoc")
+            .expect("scoped doc resource should exist");
+        let read = scoped_doc
             .action(AuthorizationAction::Read)
             .expect("read action should exist");
         assert_eq!(
@@ -331,6 +448,191 @@ mod tests {
                     ty: AuthClaimType::I64,
                 },
             }))
+        );
+
+        let plan_doc = model
+            .resource("PlanDoc")
+            .expect("plan doc resource should exist");
+        let plan_read = plan_doc
+            .action(AuthorizationAction::Read)
+            .expect("plan read action should exist");
+        assert_eq!(
+            plan_read.filter,
+            Some(AuthorizationCondition::Match(AuthorizationMatch {
+                id: "resource.plan_doc.action.read.filter".to_owned(),
+                field: "plan".to_owned(),
+                operator: AuthorizationOperator::Equals,
+                source: AuthorizationValueSource::Claim {
+                    name: "plan".to_owned(),
+                    ty: AuthClaimType::String,
+                },
+            }))
+        );
+
+        let staff_doc = model
+            .resource("StaffDoc")
+            .expect("staff doc resource should exist");
+        let staff_read = staff_doc
+            .action(AuthorizationAction::Read)
+            .expect("staff read action should exist");
+        assert_eq!(
+            staff_read.filter,
+            Some(AuthorizationCondition::Match(AuthorizationMatch {
+                id: "resource.staff_doc.action.read.filter".to_owned(),
+                field: "staff".to_owned(),
+                operator: AuthorizationOperator::Equals,
+                source: AuthorizationValueSource::Claim {
+                    name: "staff".to_owned(),
+                    ty: AuthClaimType::Bool,
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn compiles_boolean_filter_groups_into_authorization_conditions() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/composed_policy_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        let shared_doc = model
+            .resource("SharedDoc")
+            .expect("shared doc resource should exist");
+        let read = shared_doc
+            .action(AuthorizationAction::Read)
+            .expect("read action should exist");
+        assert_eq!(
+            read.filter,
+            Some(AuthorizationCondition::Any {
+                id: "resource.shared_doc.action.read.filter".to_owned(),
+                conditions: vec![
+                    AuthorizationCondition::Match(AuthorizationMatch {
+                        id: "resource.shared_doc.action.read.filter.1".to_owned(),
+                        field: "owner_id".to_owned(),
+                        operator: AuthorizationOperator::Equals,
+                        source: AuthorizationValueSource::UserId,
+                    }),
+                    AuthorizationCondition::All {
+                        id: "resource.shared_doc.action.read.filter.2".to_owned(),
+                        conditions: vec![
+                            AuthorizationCondition::Match(AuthorizationMatch {
+                                id: "resource.shared_doc.action.read.filter.2.1".to_owned(),
+                                field: "tenant_id".to_owned(),
+                                operator: AuthorizationOperator::Equals,
+                                source: AuthorizationValueSource::Claim {
+                                    name: "tenant_id".to_owned(),
+                                    ty: AuthClaimType::I64,
+                                },
+                            }),
+                            AuthorizationCondition::Not {
+                                id: "resource.shared_doc.action.read.filter.2.2".to_owned(),
+                                condition: Box::new(AuthorizationCondition::Match(
+                                    AuthorizationMatch {
+                                        id: "resource.shared_doc.action.read.filter.2.2.inner"
+                                            .to_owned(),
+                                        field: "blocked_user_id".to_owned(),
+                                        operator: AuthorizationOperator::Equals,
+                                        source: AuthorizationValueSource::UserId,
+                                    },
+                                )),
+                            },
+                        ],
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn compiles_exists_filter_groups_into_authorization_conditions() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/exists_policy_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        let shared_doc = model
+            .resource("SharedDoc")
+            .expect("shared doc resource should exist");
+        let read = shared_doc
+            .action(AuthorizationAction::Read)
+            .expect("read action should exist");
+        assert_eq!(
+            read.filter,
+            Some(AuthorizationCondition::Exists {
+                id: "resource.shared_doc.action.read.filter".to_owned(),
+                resource: "FamilyMember".to_owned(),
+                table: "family_member".to_owned(),
+                conditions: vec![AuthorizationExistsCondition::All {
+                    id: "resource.shared_doc.action.read.filter.1".to_owned(),
+                    conditions: vec![
+                        AuthorizationExistsCondition::CurrentRowField {
+                            id: "resource.shared_doc.action.read.filter.1.1".to_owned(),
+                            field: "family_id".to_owned(),
+                            row_field: "family_id".to_owned(),
+                        },
+                        AuthorizationExistsCondition::Match(AuthorizationMatch {
+                            id: "resource.shared_doc.action.read.filter.1.2".to_owned(),
+                            field: "user_id".to_owned(),
+                            operator: AuthorizationOperator::Equals,
+                            source: AuthorizationValueSource::UserId,
+                        }),
+                    ],
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn compiles_nested_exists_boolean_groups_into_authorization_conditions() {
+        let loaded = super::super::eon_parser::load_service_from_path(&fixture(
+            "tests/fixtures/exists_group_policy_api.eon",
+        ))
+        .expect("fixture should parse");
+        let model = compile_service_authorization(&loaded.service);
+
+        let shared_doc = model
+            .resource("SharedDoc")
+            .expect("shared doc resource should exist");
+        let read = shared_doc
+            .action(AuthorizationAction::Read)
+            .expect("read action should exist");
+        assert_eq!(
+            read.filter,
+            Some(AuthorizationCondition::Exists {
+                id: "resource.shared_doc.action.read.filter".to_owned(),
+                resource: "FamilyAccess".to_owned(),
+                table: "family_access".to_owned(),
+                conditions: vec![AuthorizationExistsCondition::All {
+                    id: "resource.shared_doc.action.read.filter.1".to_owned(),
+                    conditions: vec![
+                        AuthorizationExistsCondition::CurrentRowField {
+                            id: "resource.shared_doc.action.read.filter.1.1".to_owned(),
+                            field: "family_id".to_owned(),
+                            row_field: "family_id".to_owned(),
+                        },
+                        AuthorizationExistsCondition::Any {
+                            id: "resource.shared_doc.action.read.filter.1.2".to_owned(),
+                            conditions: vec![
+                                AuthorizationExistsCondition::Match(AuthorizationMatch {
+                                    id: "resource.shared_doc.action.read.filter.1.2.1".to_owned(),
+                                    field: "primary_user_id".to_owned(),
+                                    operator: AuthorizationOperator::Equals,
+                                    source: AuthorizationValueSource::UserId,
+                                }),
+                                AuthorizationExistsCondition::Match(AuthorizationMatch {
+                                    id: "resource.shared_doc.action.read.filter.1.2.2".to_owned(),
+                                    field: "delegate_user_id".to_owned(),
+                                    operator: AuthorizationOperator::Equals,
+                                    source: AuthorizationValueSource::UserId,
+                                }),
+                            ],
+                        },
+                    ],
+                }],
+            })
         );
     }
 

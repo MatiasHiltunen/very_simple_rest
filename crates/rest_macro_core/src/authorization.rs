@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use actix_web::{HttpResponse, Responder, web};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row as _;
@@ -98,6 +99,11 @@ pub struct AuthorizationScopedAssignmentRecord {
     pub user_id: i64,
     pub target: AuthorizationScopedAssignmentTarget,
     pub scope: AuthorizationScopeBinding,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -105,6 +111,8 @@ pub struct AuthorizationScopedAssignmentCreateInput {
     pub user_id: i64,
     pub target: AuthorizationScopedAssignmentTarget,
     pub scope: AuthorizationScopeBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -189,6 +197,12 @@ pub enum AuthorizationCondition {
         id: String,
         condition: Box<AuthorizationCondition>,
     },
+    Exists {
+        id: String,
+        resource: String,
+        table: String,
+        conditions: Vec<AuthorizationExistsCondition>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -197,6 +211,29 @@ pub struct AuthorizationMatch {
     pub field: String,
     pub operator: AuthorizationOperator,
     pub source: AuthorizationValueSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthorizationExistsCondition {
+    Match(AuthorizationMatch),
+    CurrentRowField {
+        id: String,
+        field: String,
+        row_field: String,
+    },
+    All {
+        id: String,
+        conditions: Vec<AuthorizationExistsCondition>,
+    },
+    Any {
+        id: String,
+        conditions: Vec<AuthorizationExistsCondition>,
+    },
+    Not {
+        id: String,
+        condition: Box<AuthorizationExistsCondition>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -234,6 +271,8 @@ pub struct AuthorizationSimulationInput {
     pub row: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub proposed: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub related_rows: BTreeMap<String, Vec<BTreeMap<String, Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<AuthorizationScopeBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -308,6 +347,22 @@ pub enum AuthorizationConditionTrace {
         indeterminate: bool,
         condition: Box<AuthorizationConditionTrace>,
     },
+    Exists {
+        id: String,
+        resource: String,
+        table: String,
+        matched: bool,
+        indeterminate: bool,
+        related_row_count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matched_row_index: Option<usize>,
+        missing_related_rows: bool,
+        missing_related_fields: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditions: Vec<AuthorizationExistsConditionTrace>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -326,6 +381,55 @@ pub struct AuthorizationAssignmentTrace {
     pub missing_source: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuthorizationExistsConditionTrace {
+    Match {
+        id: String,
+        field: String,
+        source: AuthorizationValueSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_value: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        related_value: Option<Value>,
+        matched: bool,
+        indeterminate: bool,
+        missing_source: bool,
+        missing_related_field: bool,
+    },
+    CurrentRowField {
+        id: String,
+        field: String,
+        row_field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row_value: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        related_value: Option<Value>,
+        matched: bool,
+        indeterminate: bool,
+        missing_row_field: bool,
+        missing_related_field: bool,
+    },
+    All {
+        id: String,
+        matched: bool,
+        indeterminate: bool,
+        conditions: Vec<AuthorizationExistsConditionTrace>,
+    },
+    Any {
+        id: String,
+        matched: bool,
+        indeterminate: bool,
+        conditions: Vec<AuthorizationExistsConditionTrace>,
+    },
+    Not {
+        id: String,
+        matched: bool,
+        indeterminate: bool,
+        condition: Box<AuthorizationExistsConditionTrace>,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthorizationScopedAssignmentTrace {
     pub id: String,
@@ -333,6 +437,13 @@ pub struct AuthorizationScopedAssignmentTrace {
     pub scope: AuthorizationScopeBinding,
     pub scope_matched: bool,
     pub target_matched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub expired: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_permissions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +503,41 @@ impl AuthorizationScopedAssignmentRecord {
             user_id,
             target,
             scope,
+            created_at: runtime_assignment_timestamp_now(),
+            created_by_user_id: None,
+            expires_at: None,
+        }
+    }
+
+    pub fn with_created_by_user_id(mut self, created_by_user_id: i64) -> Self {
+        self.created_by_user_id = Some(created_by_user_id);
+        self
+    }
+
+    pub fn with_expires_at(mut self, expires_at: Option<String>) -> Self {
+        self.expires_at = expires_at;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let created_at = parse_runtime_assignment_timestamp("created_at", &self.created_at)?;
+        if let Some(expires_at) = &self.expires_at {
+            let expires_at = parse_runtime_assignment_timestamp("expires_at", expires_at)?;
+            if expires_at <= created_at {
+                return Err(
+                    "runtime assignment `expires_at` must be later than `created_at`".to_owned(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_active_at(&self, timestamp: &DateTime<Utc>) -> Result<bool, String> {
+        match self.expires_at.as_deref() {
+            Some(expires_at) => {
+                Ok(parse_runtime_assignment_timestamp("expires_at", expires_at)? > *timestamp)
+            }
+            None => Ok(true),
         }
     }
 
@@ -405,8 +551,18 @@ impl AuthorizationScopedAssignmentRecord {
 }
 
 impl AuthorizationScopedAssignmentCreateInput {
-    pub fn into_record(self) -> AuthorizationScopedAssignmentRecord {
-        AuthorizationScopedAssignmentRecord::new(self.user_id, self.target, self.scope)
+    pub fn into_record(
+        self,
+        created_by_user_id: Option<i64>,
+    ) -> Result<AuthorizationScopedAssignmentRecord, String> {
+        let mut record =
+            AuthorizationScopedAssignmentRecord::new(self.user_id, self.target, self.scope)
+                .with_expires_at(self.expires_at);
+        if let Some(created_by_user_id) = created_by_user_id {
+            record = record.with_created_by_user_id(created_by_user_id);
+        }
+        record.validate()?;
+        Ok(record)
     }
 }
 
@@ -465,6 +621,18 @@ impl ResourceAuthorization {
                 let trace = evaluate_condition_trace(filter, input);
                 if trace.is_indeterminate() && trace.has_missing_field() {
                     notes.push("Simulation row is missing one or more policy fields".to_owned());
+                    outcome = AuthorizationOutcome::Incomplete;
+                } else if trace.is_indeterminate() && trace.has_missing_related_rows() {
+                    notes.push(
+                        "Simulation is missing related rows required by relation-aware exists policies"
+                            .to_owned(),
+                    );
+                    outcome = AuthorizationOutcome::Incomplete;
+                } else if trace.is_indeterminate() && trace.has_missing_related_fields() {
+                    notes.push(
+                        "Related rows are missing one or more fields required by relation-aware exists policies"
+                            .to_owned(),
+                    );
                     outcome = AuthorizationOutcome::Incomplete;
                 } else if trace.is_indeterminate() && trace.has_missing_source() {
                     notes.push("Missing principal values required by the row policy".to_owned());
@@ -699,6 +867,7 @@ impl AuthorizationModel {
             claims: BTreeMap::new(),
             row: BTreeMap::new(),
             proposed: BTreeMap::new(),
+            related_rows: BTreeMap::new(),
             scope: Some(scope.clone()),
             scoped_assignments: scoped_assignments.to_vec(),
         };
@@ -793,6 +962,10 @@ impl AuthorizationModel {
                 scope: assignment.scope.clone(),
                 scope_matched,
                 target_matched,
+                created_at: None,
+                created_by_user_id: None,
+                expires_at: None,
+                expired: false,
                 resolved_permissions,
                 resolved_template,
             });
@@ -829,6 +1002,7 @@ impl AuthorizationRuntime {
         &self,
         assignment: AuthorizationScopedAssignmentRecord,
     ) -> Result<AuthorizationScopedAssignmentRecord, String> {
+        assignment.validate()?;
         self.model
             .validate_scoped_assignments(std::slice::from_ref(&assignment.scoped_assignment()))?;
         insert_runtime_assignment(&self.pool, &assignment).await?;
@@ -927,12 +1101,27 @@ pub fn authorization_runtime_migration_sql(backend: AuthDbBackend) -> String {
         AuthDbBackend::Sqlite => "user_id INTEGER NOT NULL",
         AuthDbBackend::Postgres | AuthDbBackend::Mysql => "user_id BIGINT NOT NULL",
     };
+    let created_by_user_id_column = match backend {
+        AuthDbBackend::Sqlite => "created_by_user_id INTEGER",
+        AuthDbBackend::Postgres | AuthDbBackend::Mysql => "created_by_user_id BIGINT",
+    };
+    let created_at_column = match backend {
+        AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "created_at TEXT NOT NULL",
+        AuthDbBackend::Mysql => "created_at VARCHAR(64) NOT NULL",
+    };
+    let expires_at_column = match backend {
+        AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "expires_at TEXT",
+        AuthDbBackend::Mysql => "expires_at VARCHAR(64)",
+    };
 
     format!(
         "-- Generated by very_simple_rest for runtime authorization assignments.\n\n\
          CREATE TABLE {table} (\n\
              {id_column},\n\
              {user_id_column},\n\
+             {created_by_user_id_column},\n\
+             {created_at_column},\n\
+             {expires_at_column},\n\
              {target_kind_column},\n\
              {target_name_column},\n\
              {scope_name_column},\n\
@@ -968,6 +1157,10 @@ pub fn new_runtime_assignment_id() -> String {
     format!("runtime.assignment.{}", Uuid::new_v4())
 }
 
+pub fn runtime_assignment_timestamp_now() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Micros, false)
+}
+
 pub async fn insert_runtime_assignment(
     pool: &DbPool,
     assignment: &AuthorizationScopedAssignmentRecord,
@@ -975,11 +1168,14 @@ pub async fn insert_runtime_assignment(
     let (target_kind, target_name) = runtime_assignment_target_parts(&assignment.target);
     query(&format!(
         "INSERT INTO {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} \
-         (id, user_id, target_kind, target_name, scope_name, scope_value) \
-         VALUES (?, ?, ?, ?, ?, ?)"
+         (id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ))
     .bind(&assignment.id)
     .bind(assignment.user_id)
+    .bind(assignment.created_by_user_id)
+    .bind(&assignment.created_at)
+    .bind(&assignment.expires_at)
     .bind(target_kind)
     .bind(target_name)
     .bind(&assignment.scope.scope)
@@ -995,8 +1191,8 @@ pub async fn list_runtime_assignments_for_user(
     user_id: i64,
 ) -> Result<Vec<AuthorizationScopedAssignmentRecord>, String> {
     let rows = query(&format!(
-        "SELECT id, user_id, target_kind, target_name, scope_name, scope_value \
-         FROM {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} WHERE user_id = ? ORDER BY id"
+        "SELECT id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value \
+         FROM {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} WHERE user_id = ? ORDER BY created_at, id"
     ))
     .bind(user_id)
     .fetch_all(pool)
@@ -1023,13 +1219,19 @@ pub async fn load_runtime_assignments_for_user(
     pool: &DbPool,
     user_id: i64,
 ) -> Result<Vec<AuthorizationScopedAssignment>, String> {
+    let now = Utc::now();
     list_runtime_assignments_for_user(pool, user_id)
         .await
-        .map(|assignments| {
-            assignments
+        .and_then(|assignments| {
+            let active = assignments
                 .into_iter()
-                .map(|assignment| assignment.scoped_assignment())
-                .collect()
+                .filter_map(|assignment| match assignment.is_active_at(&now) {
+                    Ok(true) => Some(Ok(assignment.scoped_assignment())),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(active)
         })
 }
 
@@ -1045,6 +1247,11 @@ impl AuthorizationCondition {
                 }
             }
             Self::Not { condition, .. } => condition.collect_fields(fields),
+            Self::Exists { conditions, .. } => {
+                for condition in conditions {
+                    collect_exists_controlled_fields(condition, fields);
+                }
+            }
         }
     }
 }
@@ -1059,6 +1266,17 @@ impl AuthorizationSimulationInput {
     pub fn is_admin(&self) -> bool {
         self.roles.iter().any(|role| role == "admin")
     }
+
+    pub fn related_rows_for(
+        &self,
+        resource: &str,
+        table: &str,
+    ) -> Option<&[BTreeMap<String, Value>]> {
+        self.related_rows
+            .get(resource)
+            .or_else(|| self.related_rows.get(table))
+            .map(Vec::as_slice)
+    }
 }
 
 impl AuthorizationConditionTrace {
@@ -1067,7 +1285,8 @@ impl AuthorizationConditionTrace {
             Self::Match { matched, .. }
             | Self::All { matched, .. }
             | Self::Any { matched, .. }
-            | Self::Not { matched, .. } => *matched,
+            | Self::Not { matched, .. }
+            | Self::Exists { matched, .. } => *matched,
         }
     }
 
@@ -1076,7 +1295,8 @@ impl AuthorizationConditionTrace {
             Self::Match { indeterminate, .. }
             | Self::All { indeterminate, .. }
             | Self::Any { indeterminate, .. }
-            | Self::Not { indeterminate, .. } => *indeterminate,
+            | Self::Not { indeterminate, .. }
+            | Self::Exists { indeterminate, .. } => *indeterminate,
         }
     }
 
@@ -1087,6 +1307,9 @@ impl AuthorizationConditionTrace {
                 conditions.iter().any(Self::has_missing_field)
             }
             Self::Not { condition, .. } => condition.has_missing_field(),
+            Self::Exists { conditions, .. } => {
+                conditions.iter().any(exists_trace_has_missing_field)
+            }
         }
     }
 
@@ -1097,6 +1320,43 @@ impl AuthorizationConditionTrace {
                 conditions.iter().any(Self::has_missing_source)
             }
             Self::Not { condition, .. } => condition.has_missing_source(),
+            Self::Exists { conditions, .. } => {
+                conditions.iter().any(exists_trace_has_missing_source)
+            }
+        }
+    }
+
+    pub fn has_missing_related_rows(&self) -> bool {
+        match self {
+            Self::Match { .. } => false,
+            Self::All { conditions, .. } | Self::Any { conditions, .. } => {
+                conditions.iter().any(Self::has_missing_related_rows)
+            }
+            Self::Not { condition, .. } => condition.has_missing_related_rows(),
+            Self::Exists {
+                missing_related_rows,
+                ..
+            } => *missing_related_rows,
+        }
+    }
+
+    pub fn has_missing_related_fields(&self) -> bool {
+        match self {
+            Self::Match { .. } => false,
+            Self::All { conditions, .. } | Self::Any { conditions, .. } => {
+                conditions.iter().any(Self::has_missing_related_fields)
+            }
+            Self::Not { condition, .. } => condition.has_missing_related_fields(),
+            Self::Exists {
+                missing_related_fields,
+                conditions,
+                ..
+            } => {
+                *missing_related_fields
+                    || conditions
+                        .iter()
+                        .any(exists_trace_has_missing_related_field)
+            }
         }
     }
 }
@@ -1191,6 +1451,288 @@ fn evaluate_condition_trace(
                 condition,
             }
         }
+        AuthorizationCondition::Exists {
+            id,
+            resource,
+            table,
+            conditions,
+        } => {
+            let related_rows = input.related_rows_for(resource, table);
+            let related_row_count = related_rows.map_or(0, |rows| rows.len());
+            let mut matched_row_index = None;
+            let mut missing_related_rows = false;
+            let mut missing_related_fields = false;
+            let mut condition_traces = None;
+            match related_rows {
+                Some(related_rows) => {
+                    for (index, related_row) in related_rows.iter().enumerate() {
+                        let traces = conditions
+                            .iter()
+                            .map(|condition| {
+                                evaluate_exists_condition_trace(condition, input, Some(related_row))
+                            })
+                            .collect::<Vec<_>>();
+                        if condition_traces.is_none() {
+                            condition_traces = Some(traces.clone());
+                        }
+                        if traces.iter().any(exists_trace_has_missing_related_field) {
+                            missing_related_fields = true;
+                        }
+                        let matched = traces.iter().all(exists_trace_matched)
+                            && !traces.iter().any(exists_trace_is_indeterminate);
+                        if matched {
+                            matched_row_index = Some(index);
+                            condition_traces = Some(traces);
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    missing_related_rows = true;
+                }
+            }
+            let conditions = condition_traces.unwrap_or_else(|| {
+                conditions
+                    .iter()
+                    .map(|condition| evaluate_exists_condition_trace(condition, input, None))
+                    .collect::<Vec<_>>()
+            });
+            let missing_source = conditions.iter().any(exists_trace_has_missing_source);
+            let missing_row_field = conditions.iter().any(exists_trace_has_missing_field);
+
+            let matched = matched_row_index.is_some();
+            let indeterminate = !matched
+                && (missing_source
+                    || missing_row_field
+                    || missing_related_rows
+                    || missing_related_fields);
+            let note = if matched {
+                matched_row_index.map(|index| format!("Matched related row {}", index + 1))
+            } else if missing_related_rows {
+                Some(
+                    "Provide related rows for this target resource to fully evaluate EXISTS"
+                        .to_owned(),
+                )
+            } else if missing_related_fields {
+                Some(
+                    "One or more related rows were missing fields referenced by the EXISTS predicate"
+                        .to_owned(),
+                )
+            } else if missing_source {
+                Some("Exists predicate is missing one or more principal values".to_owned())
+            } else if missing_row_field {
+                Some(
+                    "Simulation row is missing one or more fields referenced by the EXISTS predicate"
+                        .to_owned(),
+                )
+            } else if related_row_count == 0 {
+                Some("No related rows were supplied for the EXISTS predicate".to_owned())
+            } else {
+                Some("No related rows matched the EXISTS predicate".to_owned())
+            };
+            AuthorizationConditionTrace::Exists {
+                id: id.clone(),
+                resource: resource.clone(),
+                table: table.clone(),
+                matched,
+                indeterminate,
+                related_row_count,
+                matched_row_index,
+                missing_related_rows,
+                missing_related_fields,
+                conditions,
+                note,
+            }
+        }
+    }
+}
+
+fn collect_exists_controlled_fields(
+    condition: &AuthorizationExistsCondition,
+    fields: &mut BTreeSet<String>,
+) {
+    match condition {
+        AuthorizationExistsCondition::Match(_) => {}
+        AuthorizationExistsCondition::CurrentRowField { row_field, .. } => {
+            fields.insert(row_field.clone());
+        }
+        AuthorizationExistsCondition::All { conditions, .. }
+        | AuthorizationExistsCondition::Any { conditions, .. } => {
+            for condition in conditions {
+                collect_exists_controlled_fields(condition, fields);
+            }
+        }
+        AuthorizationExistsCondition::Not { condition, .. } => {
+            collect_exists_controlled_fields(condition, fields)
+        }
+    }
+}
+
+fn exists_trace_matched(trace: &AuthorizationExistsConditionTrace) -> bool {
+    match trace {
+        AuthorizationExistsConditionTrace::Match { matched, .. }
+        | AuthorizationExistsConditionTrace::CurrentRowField { matched, .. }
+        | AuthorizationExistsConditionTrace::All { matched, .. }
+        | AuthorizationExistsConditionTrace::Any { matched, .. }
+        | AuthorizationExistsConditionTrace::Not { matched, .. } => *matched,
+    }
+}
+
+fn exists_trace_is_indeterminate(trace: &AuthorizationExistsConditionTrace) -> bool {
+    match trace {
+        AuthorizationExistsConditionTrace::Match { indeterminate, .. }
+        | AuthorizationExistsConditionTrace::CurrentRowField { indeterminate, .. }
+        | AuthorizationExistsConditionTrace::All { indeterminate, .. }
+        | AuthorizationExistsConditionTrace::Any { indeterminate, .. }
+        | AuthorizationExistsConditionTrace::Not { indeterminate, .. } => *indeterminate,
+    }
+}
+
+fn exists_trace_has_missing_field(trace: &AuthorizationExistsConditionTrace) -> bool {
+    match trace {
+        AuthorizationExistsConditionTrace::Match { .. } => false,
+        AuthorizationExistsConditionTrace::CurrentRowField {
+            missing_row_field, ..
+        } => *missing_row_field,
+        AuthorizationExistsConditionTrace::All { conditions, .. }
+        | AuthorizationExistsConditionTrace::Any { conditions, .. } => {
+            conditions.iter().any(exists_trace_has_missing_field)
+        }
+        AuthorizationExistsConditionTrace::Not { condition, .. } => {
+            exists_trace_has_missing_field(condition)
+        }
+    }
+}
+
+fn exists_trace_has_missing_source(trace: &AuthorizationExistsConditionTrace) -> bool {
+    match trace {
+        AuthorizationExistsConditionTrace::Match { missing_source, .. } => *missing_source,
+        AuthorizationExistsConditionTrace::CurrentRowField { .. } => false,
+        AuthorizationExistsConditionTrace::All { conditions, .. }
+        | AuthorizationExistsConditionTrace::Any { conditions, .. } => {
+            conditions.iter().any(exists_trace_has_missing_source)
+        }
+        AuthorizationExistsConditionTrace::Not { condition, .. } => {
+            exists_trace_has_missing_source(condition)
+        }
+    }
+}
+
+fn exists_trace_has_missing_related_field(trace: &AuthorizationExistsConditionTrace) -> bool {
+    match trace {
+        AuthorizationExistsConditionTrace::Match {
+            missing_related_field,
+            ..
+        }
+        | AuthorizationExistsConditionTrace::CurrentRowField {
+            missing_related_field,
+            ..
+        } => *missing_related_field,
+        AuthorizationExistsConditionTrace::All { conditions, .. }
+        | AuthorizationExistsConditionTrace::Any { conditions, .. } => conditions
+            .iter()
+            .any(exists_trace_has_missing_related_field),
+        AuthorizationExistsConditionTrace::Not { condition, .. } => {
+            exists_trace_has_missing_related_field(condition)
+        }
+    }
+}
+
+fn evaluate_exists_condition_trace(
+    condition: &AuthorizationExistsCondition,
+    input: &AuthorizationSimulationInput,
+    related_row: Option<&BTreeMap<String, Value>>,
+) -> AuthorizationExistsConditionTrace {
+    match condition {
+        AuthorizationExistsCondition::Match(rule) => {
+            let source_value = resolve_source_value(&rule.source, input);
+            let related_value = related_row.and_then(|row| row.get(&rule.field).cloned());
+            let missing_source = source_value.is_none();
+            let missing_related_field = related_row.is_some() && related_value.is_none();
+            let indeterminate = missing_source || missing_related_field;
+            let matched = !indeterminate && related_value.as_ref() == source_value.as_ref();
+            AuthorizationExistsConditionTrace::Match {
+                id: rule.id.clone(),
+                field: rule.field.clone(),
+                source: rule.source.clone(),
+                source_value,
+                related_value,
+                matched,
+                indeterminate,
+                missing_source,
+                missing_related_field,
+            }
+        }
+        AuthorizationExistsCondition::CurrentRowField {
+            id,
+            field,
+            row_field,
+        } => {
+            let row_value = input.row.get(row_field).cloned();
+            let related_value = related_row.and_then(|row| row.get(field).cloned());
+            let missing_row_field = row_value.is_none();
+            let missing_related_field = related_row.is_some() && related_value.is_none();
+            let indeterminate = missing_row_field || missing_related_field;
+            let matched = !indeterminate && related_value.as_ref() == row_value.as_ref();
+            AuthorizationExistsConditionTrace::CurrentRowField {
+                id: id.clone(),
+                field: field.clone(),
+                row_field: row_field.clone(),
+                row_value,
+                related_value,
+                matched,
+                indeterminate,
+                missing_row_field,
+                missing_related_field,
+            }
+        }
+        AuthorizationExistsCondition::All { id, conditions } => {
+            let conditions = conditions
+                .iter()
+                .map(|condition| evaluate_exists_condition_trace(condition, input, related_row))
+                .collect::<Vec<_>>();
+            let any_definite_false = conditions.iter().any(|condition| {
+                !exists_trace_matched(condition) && !exists_trace_is_indeterminate(condition)
+            });
+            let indeterminate =
+                !any_definite_false && conditions.iter().any(exists_trace_is_indeterminate);
+            let matched = !indeterminate && conditions.iter().all(exists_trace_matched);
+            AuthorizationExistsConditionTrace::All {
+                id: id.clone(),
+                matched,
+                indeterminate,
+                conditions,
+            }
+        }
+        AuthorizationExistsCondition::Any { id, conditions } => {
+            let conditions = conditions
+                .iter()
+                .map(|condition| evaluate_exists_condition_trace(condition, input, related_row))
+                .collect::<Vec<_>>();
+            let matched = conditions.iter().any(exists_trace_matched);
+            let indeterminate = !matched && conditions.iter().any(exists_trace_is_indeterminate);
+            AuthorizationExistsConditionTrace::Any {
+                id: id.clone(),
+                matched,
+                indeterminate,
+                conditions,
+            }
+        }
+        AuthorizationExistsCondition::Not { id, condition } => {
+            let condition = Box::new(evaluate_exists_condition_trace(
+                condition,
+                input,
+                related_row,
+            ));
+            let indeterminate = exists_trace_is_indeterminate(&condition);
+            let matched = !indeterminate && !exists_trace_matched(&condition);
+            AuthorizationExistsConditionTrace::Not {
+                id: id.clone(),
+                matched,
+                indeterminate,
+                condition,
+            }
+        }
     }
 }
 
@@ -1262,11 +1804,29 @@ fn runtime_assignment_target_parts(
     }
 }
 
+fn parse_runtime_assignment_timestamp(field: &str, value: &str) -> Result<DateTime<Utc>, String> {
+    if value.trim().is_empty() {
+        return Err(format!("runtime assignment `{field}` cannot be empty"));
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| format!("runtime assignment `{field}` must be RFC3339: {error}"))
+}
+
 fn runtime_assignment_record_from_row(
     row: sqlx::any::AnyRow,
 ) -> Result<AuthorizationScopedAssignmentRecord, String> {
     let id: String = row.try_get("id").map_err(|error| error.to_string())?;
     let user_id: i64 = row.try_get("user_id").map_err(|error| error.to_string())?;
+    let created_by_user_id: Option<i64> = row
+        .try_get("created_by_user_id")
+        .map_err(|error| error.to_string())?;
+    let created_at: String = row
+        .try_get("created_at")
+        .map_err(|error| error.to_string())?;
+    let expires_at: Option<String> = row
+        .try_get("expires_at")
+        .map_err(|error| error.to_string())?;
     let target_kind: String = row
         .try_get("target_kind")
         .map_err(|error| error.to_string())?;
@@ -1280,7 +1840,7 @@ fn runtime_assignment_record_from_row(
         .try_get("scope_value")
         .map_err(|error| error.to_string())?;
     let target = parse_stored_scoped_assignment_target(&id, &target_kind, &target_name)?;
-    Ok(AuthorizationScopedAssignmentRecord {
+    let record = AuthorizationScopedAssignmentRecord {
         id,
         user_id,
         target,
@@ -1288,13 +1848,22 @@ fn runtime_assignment_record_from_row(
             scope: scope_name,
             value: scope_value,
         },
-    })
+        created_at,
+        created_by_user_id,
+        expires_at,
+    };
+    record.validate()?;
+    Ok(record)
 }
 
 fn runtime_assignment_storage_error(error: sqlx::Error) -> String {
     if is_missing_runtime_assignment_table(&error) {
         format!(
             "runtime authorization assignment table `{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}` does not exist; generate and apply the authz runtime migration first"
+        )
+    } else if is_outdated_runtime_assignment_table(&error) {
+        format!(
+            "runtime authorization assignment table `{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}` is missing required lifecycle columns; regenerate and apply the authz runtime migration"
         )
     } else {
         error.to_string()
@@ -1361,10 +1930,12 @@ async fn create_runtime_assignment_endpoint(
         return errors::forbidden("forbidden", "Admin role is required");
     }
 
-    match runtime
-        .create_assignment(input.into_inner().into_record())
-        .await
-    {
+    let record = match input.into_inner().into_record(Some(user.id)) {
+        Ok(record) => record,
+        Err(message) => return errors::bad_request("invalid_runtime_assignment", message),
+    };
+
+    match runtime.create_assignment(record).await {
         Ok(assignment) => HttpResponse::Created().json(assignment),
         Err(message) if message.contains("undeclared") || message.contains("only supports") => {
             errors::bad_request("invalid_runtime_assignment", message)
@@ -1399,6 +1970,24 @@ fn is_missing_runtime_assignment_table(error: &sqlx::Error) -> bool {
     }
 }
 
+fn is_outdated_runtime_assignment_table(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database_error) => {
+            let message = database_error.message().to_ascii_lowercase();
+            message.contains("no such column: created_at")
+                || message.contains("column \"created_at\" does not exist")
+                || message.contains("unknown column 'created_at'")
+                || message.contains("no such column: created_by_user_id")
+                || message.contains("column \"created_by_user_id\" does not exist")
+                || message.contains("unknown column 'created_by_user_id'")
+                || message.contains("no such column: expires_at")
+                || message.contains("column \"expires_at\" does not exist")
+                || message.contains("unknown column 'expires_at'")
+        }
+        _ => false,
+    }
+}
+
 fn collapse_conditions(
     mut conditions: Vec<AuthorizationCondition>,
     wrap: impl FnOnce(Vec<AuthorizationCondition>) -> AuthorizationCondition,
@@ -1421,6 +2010,62 @@ mod tests {
             operator: AuthorizationOperator::Equals,
             source: AuthorizationValueSource::UserId,
         })
+    }
+
+    fn exists_family_member() -> AuthorizationCondition {
+        AuthorizationCondition::Exists {
+            id: "condition.exists.family_member".to_owned(),
+            resource: "FamilyMember".to_owned(),
+            table: "family_member".to_owned(),
+            conditions: vec![
+                AuthorizationExistsCondition::CurrentRowField {
+                    id: "condition.exists.family_member.1".to_owned(),
+                    field: "family_id".to_owned(),
+                    row_field: "family_id".to_owned(),
+                },
+                AuthorizationExistsCondition::Match(AuthorizationMatch {
+                    id: "condition.exists.family_member.2".to_owned(),
+                    field: "user_id".to_owned(),
+                    operator: AuthorizationOperator::Equals,
+                    source: AuthorizationValueSource::UserId,
+                }),
+            ],
+        }
+    }
+
+    fn exists_family_access_any_of() -> AuthorizationCondition {
+        AuthorizationCondition::Exists {
+            id: "condition.exists.family_access".to_owned(),
+            resource: "FamilyAccess".to_owned(),
+            table: "family_access".to_owned(),
+            conditions: vec![AuthorizationExistsCondition::All {
+                id: "condition.exists.family_access.1".to_owned(),
+                conditions: vec![
+                    AuthorizationExistsCondition::CurrentRowField {
+                        id: "condition.exists.family_access.1.1".to_owned(),
+                        field: "family_id".to_owned(),
+                        row_field: "family_id".to_owned(),
+                    },
+                    AuthorizationExistsCondition::Any {
+                        id: "condition.exists.family_access.1.2".to_owned(),
+                        conditions: vec![
+                            AuthorizationExistsCondition::Match(AuthorizationMatch {
+                                id: "condition.exists.family_access.1.2.1".to_owned(),
+                                field: "primary_user_id".to_owned(),
+                                operator: AuthorizationOperator::Equals,
+                                source: AuthorizationValueSource::UserId,
+                            }),
+                            AuthorizationExistsCondition::Match(AuthorizationMatch {
+                                id: "condition.exists.family_access.1.2.2".to_owned(),
+                                field: "delegate_user_id".to_owned(),
+                                operator: AuthorizationOperator::Equals,
+                                source: AuthorizationValueSource::UserId,
+                            }),
+                        ],
+                    },
+                ],
+            }],
+        }
     }
 
     #[test]
@@ -1498,6 +2143,7 @@ mod tests {
                 claims: BTreeMap::new(),
                 row: BTreeMap::from([("user_id".to_owned(), Value::from(7))]),
                 proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
                 scope: None,
                 scoped_assignments: Vec::new(),
             })
@@ -1538,6 +2184,7 @@ mod tests {
                 claims: BTreeMap::new(),
                 row: BTreeMap::new(),
                 proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
                 scope: None,
                 scoped_assignments: Vec::new(),
             })
@@ -1578,6 +2225,7 @@ mod tests {
                 claims: BTreeMap::new(),
                 row: BTreeMap::from([("user_id".to_owned(), Value::from(7))]),
                 proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
                 scope: None,
                 scoped_assignments: Vec::new(),
             })
@@ -1619,6 +2267,7 @@ mod tests {
                 claims: BTreeMap::new(),
                 row: BTreeMap::new(),
                 proposed: BTreeMap::from([("tenant_id".to_owned(), Value::from(42))]),
+                related_rows: BTreeMap::new(),
                 scope: None,
                 scoped_assignments: Vec::new(),
             })
@@ -1628,6 +2277,146 @@ mod tests {
         assert_eq!(result.assignments.len(), 1);
         assert!(result.assignments[0].admin_override_applied);
         assert_eq!(result.assignments[0].effective_value, Some(Value::from(42)));
+    }
+
+    #[test]
+    fn simulate_action_allows_exists_predicate_when_related_row_matches() {
+        let resource = ResourceAuthorization {
+            id: "resource.shared_doc".to_owned(),
+            resource: "SharedDoc".to_owned(),
+            table: "shared_doc".to_owned(),
+            admin_bypass: false,
+            actions: vec![ActionAuthorization {
+                id: "resource.shared_doc.action.read".to_owned(),
+                action: AuthorizationAction::Read,
+                role_rule_id: None,
+                required_role: None,
+                filter: Some(exists_family_member()),
+                assignments: Vec::new(),
+            }],
+        };
+
+        let result = resource
+            .simulate_action(&AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([("family_id".to_owned(), Value::from(42))]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::from([(
+                    "FamilyMember".to_owned(),
+                    vec![BTreeMap::from([
+                        ("family_id".to_owned(), Value::from(42)),
+                        ("user_id".to_owned(), Value::from(7)),
+                    ])],
+                )]),
+                scope: None,
+                scoped_assignments: Vec::new(),
+            })
+            .expect("action should exist");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Allowed);
+        let AuthorizationConditionTrace::Exists {
+            matched,
+            indeterminate,
+            related_row_count,
+            matched_row_index,
+            ..
+        } = result.filter.expect("filter trace should exist")
+        else {
+            panic!("filter trace should be exists");
+        };
+        assert!(matched);
+        assert!(!indeterminate);
+        assert_eq!(related_row_count, 1);
+        assert_eq!(matched_row_index, Some(0));
+    }
+
+    #[test]
+    fn simulate_action_marks_exists_predicate_incomplete_without_related_rows() {
+        let resource = ResourceAuthorization {
+            id: "resource.shared_doc".to_owned(),
+            resource: "SharedDoc".to_owned(),
+            table: "shared_doc".to_owned(),
+            admin_bypass: false,
+            actions: vec![ActionAuthorization {
+                id: "resource.shared_doc.action.read".to_owned(),
+                action: AuthorizationAction::Read,
+                role_rule_id: None,
+                required_role: None,
+                filter: Some(exists_family_member()),
+                assignments: Vec::new(),
+            }],
+        };
+
+        let result = resource
+            .simulate_action(&AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([("family_id".to_owned(), Value::from(42))]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
+                scope: None,
+                scoped_assignments: Vec::new(),
+            })
+            .expect("action should exist");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Incomplete);
+        let filter = result.filter.expect("filter trace should exist");
+        assert!(filter.has_missing_related_rows());
+    }
+
+    #[test]
+    fn simulate_action_allows_exists_predicate_with_nested_any_of_match() {
+        let resource = ResourceAuthorization {
+            id: "resource.shared_doc".to_owned(),
+            resource: "SharedDoc".to_owned(),
+            table: "shared_doc".to_owned(),
+            admin_bypass: false,
+            actions: vec![ActionAuthorization {
+                id: "resource.shared_doc.action.read".to_owned(),
+                action: AuthorizationAction::Read,
+                role_rule_id: None,
+                required_role: None,
+                filter: Some(exists_family_access_any_of()),
+                assignments: Vec::new(),
+            }],
+        };
+
+        let result = resource
+            .simulate_action(&AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(12),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([("family_id".to_owned(), Value::from(42))]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::from([(
+                    "FamilyAccess".to_owned(),
+                    vec![BTreeMap::from([
+                        ("family_id".to_owned(), Value::from(42)),
+                        ("primary_user_id".to_owned(), Value::from(11)),
+                        ("delegate_user_id".to_owned(), Value::from(12)),
+                    ])],
+                )]),
+                scope: None,
+                scoped_assignments: Vec::new(),
+            })
+            .expect("action should exist");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Allowed);
+        let AuthorizationConditionTrace::Exists { conditions, .. } =
+            result.filter.expect("filter trace should exist")
+        else {
+            panic!("filter trace should be exists");
+        };
+        assert!(matches!(
+            &conditions[0],
+            AuthorizationExistsConditionTrace::All { matched: true, .. }
+        ));
     }
 
     #[test]
@@ -1679,6 +2468,7 @@ mod tests {
                     claims: BTreeMap::new(),
                     row: BTreeMap::new(),
                     proposed: BTreeMap::new(),
+                    related_rows: BTreeMap::new(),
                     scope: Some(AuthorizationScopeBinding {
                         scope: "Family".to_owned(),
                         value: "42".to_owned(),
@@ -1755,6 +2545,7 @@ mod tests {
                     claims: BTreeMap::new(),
                     row: BTreeMap::new(),
                     proposed: BTreeMap::new(),
+                    related_rows: BTreeMap::new(),
                     scope: Some(AuthorizationScopeBinding {
                         scope: "Household".to_owned(),
                         value: "42".to_owned(),
@@ -1782,6 +2573,8 @@ mod tests {
         assert!(sql.contains(&format!(
             "CREATE TABLE {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}"
         )));
+        assert!(sql.contains("created_at"));
+        assert!(sql.contains("expires_at"));
         assert!(sql.contains("target_kind"));
         assert!(sql.contains("scope_name"));
     }
@@ -1843,6 +2636,8 @@ mod tests {
             .expect("runtime migration should apply");
 
         let runtime = AuthorizationRuntime::new(scoped_doc_runtime_model(), pool.clone());
+        let expires_at =
+            (Utc::now() + chrono::Duration::days(1)).to_rfc3339_opts(SecondsFormat::Micros, false);
         let assignment = AuthorizationScopedAssignmentRecord::new(
             7,
             AuthorizationScopedAssignmentTarget::Template {
@@ -1852,13 +2647,17 @@ mod tests {
                 scope: "Family".to_owned(),
                 value: "42".to_owned(),
             },
-        );
+        )
+        .with_created_by_user_id(3)
+        .with_expires_at(Some(expires_at.clone()));
 
         let created = runtime
             .create_assignment(assignment.clone())
             .await
             .expect("assignment should persist");
         assert_eq!(created.user_id, 7);
+        assert_eq!(created.created_by_user_id, Some(3));
+        assert_eq!(created.expires_at.as_deref(), Some(expires_at.as_str()));
 
         let stored = runtime
             .list_assignments_for_user(7)
@@ -1876,6 +2675,7 @@ mod tests {
                     claims: BTreeMap::new(),
                     row: BTreeMap::new(),
                     proposed: BTreeMap::new(),
+                    related_rows: BTreeMap::new(),
                     scope: Some(AuthorizationScopeBinding {
                         scope: "Family".to_owned(),
                         value: "42".to_owned(),
@@ -1922,5 +2722,98 @@ mod tests {
                 .expect("assignment list should reload")
                 .is_empty()
         );
+    }
+
+    #[actix_web::test]
+    async fn authorization_runtime_rejects_expired_assignment_creation_and_ignores_expired_rows() {
+        sqlx::any::install_default_drivers();
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let database_path =
+            std::env::temp_dir().join(format!("vsr_authz_runtime_expired_{stamp}.db"));
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+        let pool = DbPool::connect(&database_url)
+            .await
+            .expect("database should connect");
+        pool.execute_batch(&authorization_runtime_migration_sql(AuthDbBackend::Sqlite))
+            .await
+            .expect("runtime migration should apply");
+
+        let runtime = AuthorizationRuntime::new(scoped_doc_runtime_model(), pool.clone());
+        let expired_assignment = AuthorizationScopedAssignmentRecord::new(
+            7,
+            AuthorizationScopedAssignmentTarget::Template {
+                name: "FamilyMember".to_owned(),
+            },
+            AuthorizationScopeBinding {
+                scope: "Family".to_owned(),
+                value: "42".to_owned(),
+            },
+        )
+        .with_expires_at(Some(
+            (Utc::now() - chrono::Duration::minutes(5))
+                .to_rfc3339_opts(SecondsFormat::Micros, false),
+        ));
+
+        let error = runtime
+            .create_assignment(expired_assignment)
+            .await
+            .expect_err("expired assignments should be rejected on create");
+        assert!(error.contains("expires_at"));
+
+        let created_at =
+            (Utc::now() - chrono::Duration::days(2)).to_rfc3339_opts(SecondsFormat::Micros, false);
+        let expired_at =
+            (Utc::now() - chrono::Duration::days(1)).to_rfc3339_opts(SecondsFormat::Micros, false);
+        query(&format!(
+            "INSERT INTO {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} \
+             (id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ))
+        .bind("runtime.assignment.expired")
+        .bind(7_i64)
+        .bind(1_i64)
+        .bind(created_at)
+        .bind(expired_at)
+        .bind("template")
+        .bind("FamilyMember")
+        .bind("Family")
+        .bind("42")
+        .execute(&pool)
+        .await
+        .expect("expired assignment should insert directly");
+
+        let listed = runtime
+            .list_assignments_for_user(7)
+            .await
+            .expect("expired assignments should still list");
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].expires_at.is_some());
+
+        let result = runtime
+            .simulate_resource_action_with_user_assignments(
+                Some("ScopedDoc"),
+                AuthorizationSimulationInput {
+                    action: AuthorizationAction::Read,
+                    user_id: Some(7),
+                    roles: Vec::new(),
+                    claims: BTreeMap::new(),
+                    row: BTreeMap::new(),
+                    proposed: BTreeMap::new(),
+                    related_rows: BTreeMap::new(),
+                    scope: Some(AuthorizationScopeBinding {
+                        scope: "Family".to_owned(),
+                        value: "42".to_owned(),
+                    }),
+                    scoped_assignments: Vec::new(),
+                },
+            )
+            .await
+            .expect("runtime simulation should ignore expired assignments");
+        assert!(result.resolved_permissions.is_empty());
+        assert!(result.resolved_templates.is_empty());
     }
 }

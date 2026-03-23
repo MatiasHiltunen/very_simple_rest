@@ -360,7 +360,7 @@ pub async fn inspect_live_schema(
             }
         }
 
-        for index in required_index_names(resource) {
+        for index in required_index_names(resource, &service.resources) {
             if !live.indexes.contains(&index) {
                 issues.push(format!(
                     "missing index `{}` on `{}`",
@@ -858,7 +858,10 @@ async fn inspect_mysql_table(pool: &DbPool, table: &str) -> Result<Option<LiveTa
     Ok(Some(schema))
 }
 
-fn required_index_names(resource: &compiler::ResourceSpec) -> BTreeSet<String> {
+fn required_index_names(
+    resource: &compiler::ResourceSpec,
+    resources: &[compiler::ResourceSpec],
+) -> BTreeSet<String> {
     let mut indexes = BTreeSet::new();
 
     for field in &resource.fields {
@@ -870,8 +873,16 @@ fn required_index_names(resource: &compiler::ResourceSpec) -> BTreeSet<String> {
     indexes.extend(
         resource
             .policies
-            .iter_filters()
-            .map(|(_, policy)| format!("idx_{}_{}", resource.table_name, policy.field)),
+            .controlled_filter_fields()
+            .into_iter()
+            .map(|field| format!("idx_{}_{}", resource.table_name, field)),
+    );
+    indexes.extend(
+        exists_target_index_fields(resources)
+            .remove(resource.table_name.as_str())
+            .into_iter()
+            .flatten()
+            .map(|field| format!("idx_{}_{}", resource.table_name, field)),
     );
     indexes.extend(
         resource
@@ -880,6 +891,30 @@ fn required_index_names(resource: &compiler::ResourceSpec) -> BTreeSet<String> {
             .map(|(_, policy)| format!("idx_{}_{}", resource.table_name, policy.field)),
     );
     indexes
+}
+
+fn exists_target_index_fields(
+    resources: &[compiler::ResourceSpec],
+) -> HashMap<&str, BTreeSet<String>> {
+    let mut indexed = HashMap::<&str, BTreeSet<String>>::new();
+
+    for resource in resources {
+        for (target_resource, field_name) in resource.policies.exists_index_targets() {
+            let Some(target_table) = resources
+                .iter()
+                .find(|candidate| {
+                    candidate.table_name == target_resource
+                        || candidate.struct_ident.to_string() == target_resource
+                })
+                .map(|resource| resource.table_name.as_str())
+            else {
+                continue;
+            };
+            indexed.entry(target_table).or_default().insert(field_name);
+        }
+    }
+
+    indexed
 }
 
 fn default_is_current_timestamp(value: Option<&str>) -> bool {

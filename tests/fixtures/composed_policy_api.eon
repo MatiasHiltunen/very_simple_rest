@@ -1,0 +1,42 @@
+resources: [
+    {
+        name: "SharedDoc"
+        policies: {
+            admin_bypass: false
+            read: {
+                any_of: [
+                    "owner_id=user.id"
+                    {
+                        all_of: [
+                            "tenant_id=claim.tenant_id"
+                            { not: { field: "blocked_user_id", equals: "user.id" } }
+                        ]
+                    }
+                ]
+            }
+            create: [
+                { field: "owner_id", value: "user.id" }
+                { field: "tenant_id", value: "claim.tenant_id" }
+            ]
+            update: {
+                any_of: [
+                    "owner_id=user.id"
+                    {
+                        all_of: [
+                            "tenant_id=claim.tenant_id"
+                            { not: { field: "blocked_user_id", equals: "user.id" } }
+                        ]
+                    }
+                ]
+            }
+            delete: "owner_id=user.id"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "owner_id", type: I64 }
+            { name: "tenant_id", type: I64 }
+            { name: "blocked_user_id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

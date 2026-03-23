@@ -1221,8 +1221,8 @@ fn update_payload_fields(resource: &ResourceSpec) -> Vec<&FieldSpec> {
 fn policy_controlled_fields(resource: &ResourceSpec) -> BTreeSet<String> {
     resource
         .policies
-        .iter_filters()
-        .map(|(_, policy)| policy.field.clone())
+        .controlled_filter_fields()
+        .into_iter()
         .chain(
             resource
                 .policies

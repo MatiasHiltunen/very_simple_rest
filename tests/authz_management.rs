@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use very_simple_rest::actix_web::{App, HttpResponse, http::StatusCode, test, web};
@@ -61,13 +62,11 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
     .expect("authz runtime migration should apply");
 
     let security = authz_management_api::security();
-    let app =
-        test::init_service(App::new().service(
-            scope("/api").configure(|cfg| {
-                auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
-                authz_management_api::configure(cfg, pool.clone());
-                authz_management_api::configure_authorization_management(cfg, pool.clone());
-                cfg.route(
+    let app = test::init_service(App::new().service(scope("/api").configure(|cfg| {
+        auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
+        authz_management_api::configure(cfg, pool.clone());
+        authz_management_api::configure_authorization_management(cfg, pool.clone());
+        cfg.route(
                     "/runtime-docs/{family_id}",
                     web::get().to(
                         |path: web::Path<i64>,
@@ -93,9 +92,8 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
                         },
                     ),
                 );
-            }),
-        ))
-        .await;
+    })))
+    .await;
 
     let register_request = test::TestRequest::post()
         .uri("/api/auth/register")
@@ -192,7 +190,8 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
         .set_json(json!({
             "user_id": member_user_id,
             "target": { "kind": "template", "name": "FamilyMember" },
-            "scope": { "scope": "Family", "value": "42" }
+            "scope": { "scope": "Family", "value": "42" },
+            "expires_at": (Utc::now() + Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
         }))
         .to_request();
     let create_response = test::call_service(&app, create_request).await;
@@ -206,6 +205,9 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
             name: "FamilyMember".to_owned(),
         }
     );
+    assert_eq!(created.created_by_user_id, Some(admin_user_id));
+    assert!(!created.created_at.is_empty());
+    assert!(created.expires_at.is_some());
     assert_eq!(created.scope.scope, "Family");
     assert_eq!(created.scope.value, "42");
 
@@ -299,6 +301,24 @@ async fn authorization_management_routes_allow_admin_runtime_assignment_crud() {
     assert_eq!(invalid_create_response.status(), StatusCode::BAD_REQUEST);
     let invalid_body: ApiErrorResponse = test::read_body_json(invalid_create_response).await;
     assert_eq!(invalid_body.code, "invalid_runtime_assignment");
+
+    let expired_create_request = test::TestRequest::post()
+        .uri("/api/authz/runtime/assignments")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(json!({
+            "user_id": member_user_id,
+            "target": { "kind": "template", "name": "FamilyMember" },
+            "scope": { "scope": "Family", "value": "77" },
+            "expires_at": (Utc::now() - Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+        }))
+        .to_request();
+    let expired_create_response = test::call_service(&app, expired_create_request).await;
+    assert_eq!(expired_create_response.status(), StatusCode::BAD_REQUEST);
+    let expired_body: ApiErrorResponse = test::read_body_json(expired_create_response).await;
+    assert_eq!(expired_body.code, "invalid_runtime_assignment");
 
     let self_evaluate_request = test::TestRequest::post()
         .uri("/api/authz/runtime/evaluate")

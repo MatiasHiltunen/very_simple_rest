@@ -358,16 +358,21 @@ You can also simulate one authorization decision against that compiled model:
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --user-id 7 --claim tenant_id=3 --row tenant_id=3
 vsr authz simulate --input api.eon --resource ScopedDoc --action create --role admin --proposed tenant_id=42 --format json
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --scope Family=42 --scoped-assignment template:FamilyMember@Family=42
+vsr authz simulate --input api.eon --resource SharedDoc --action read --user-id 7 --row family_id=42 --related-row FamilyMember:family_id=42,user_id=7
 vsr --database-url sqlite:app.db?mode=rwc authz simulate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42 --load-runtime-assignments
 ```
 
 `--claim`, `--row`, and `--proposed` accept repeated `key=value` pairs. Values are inferred as
-`null`, `bool`, `i64`, or `String`. `--scope` accepts `ScopeName=value`, and repeated
+`null`, `bool`, `i64`, or `String`. Repeated `--related-row` values use
+`Resource:key=value,other=value` syntax so the simulator can evaluate relation-aware `exists`
+predicates against explicit related rows. `--scope` accepts `ScopeName=value`, and repeated
 `--scoped-assignment` values accept `permission:Name@Scope=value` or
 `template:Name@Scope=value`. `--load-runtime-assignments` fetches stored assignments for
 `--user-id` from the configured database, using the runtime authz table created by
 `vsr migrate authz`. Runtime scoped assignments are resolved and validated against the static
 `authorization` contract in the simulator, but generated handlers do not enforce them yet.
+Stored runtime assignments now include `created_at`, `created_by_user_id`, and optional
+`expires_at`; expired assignments are ignored by runtime simulation and runtime access checks.
 
 `.eon` also now accepts an optional static `authorization` block for declaring scopes,
 permissions, and templates. That block is contract-only in this slice: it is validated, included
@@ -388,10 +393,12 @@ When you want a basic admin-only runtime assignment API, call
 - `DELETE /authz/runtime/assignments/{id}`
 
 Those endpoints manage persisted scoped permission/template assignments through the shared
-authorization runtime. `POST /authz/runtime/evaluate` checks which persisted scoped permissions
-apply to an explicit `resource + action + scope` for the current user or an admin-selected user.
-It still does not run static role checks, row policies, or create-time assignments, so CRUD
-enforcement remains unchanged.
+authorization runtime. Assignment records include `created_at`, `created_by_user_id`, and an
+optional `expires_at`, and expired assignments are ignored by runtime evaluation. `POST
+/authz/runtime/evaluate` checks which persisted scoped permissions apply to an explicit
+`resource + action + scope` for the current user or an admin-selected user. It still does not
+run static role checks, row policies, or create-time assignments, so CRUD enforcement remains
+unchanged.
 
 For real custom endpoint enforcement, handlers can inject
 `web::Data<very_simple_rest::authorization::AuthorizationRuntime>` and call
@@ -645,12 +652,12 @@ The generated SQL includes:
 
 - `CREATE TABLE` statements for each resource
 - Foreign keys for declared relations
-- Indexes for relation fields and row-policy fields
+- Indexes for relation fields, direct row-policy fields, and `exists` target fields
 
 Built-in auth now has the same explicit schema path:
 
 - `vsr migrate auth` generates the `user` table migration
-- `vsr migrate authz` generates the runtime authorization assignment table used by authz diagnostics and future policy-management APIs
+- `vsr migrate authz` generates the runtime authorization assignment table, including audit and expiry columns used by authz diagnostics and policy-management APIs
 - `vsr setup` applies that auth migration before prompting for the first admin user
 - `ensure_admin_exists` no longer creates tables at server startup
 
@@ -743,6 +750,66 @@ This makes the generated handlers:
 - Keep tenant-scoped fields out of generated `Create`/`Update` DTOs
 - Apply the same tenant filter to admin users when `admin_bypass = false`
 
+In `.eon`, `read`, `update`, and `delete` filters can also use boolean composition. A single
+policy entry stays as-is, arrays imply `all_of`, and you can nest `all_of`, `any_of`, `not`, and
+`exists` explicitly. `create` policies remain flat assignments and do not support boolean groups.
+
+```eon
+policies: {
+    admin_bypass: false
+    read: {
+        any_of: [
+            "owner_id=user.id"
+            {
+                all_of: [
+                    "tenant_id=claim.tenant_id"
+                    { not: "blocked_user_id=user.id" }
+                ]
+            }
+        ]
+    }
+    create: [
+        "owner_id=user.id"
+        { field: "tenant_id", value: "claim.tenant_id" }
+    ]
+    update: {
+        any_of: [
+            "owner_id=user.id"
+            "tenant_id=claim.tenant_id"
+        ]
+    }
+    delete: "Owner:owner_id"
+}
+```
+
+The first relation-aware form is `exists`, which compiles to a correlated subquery against another
+declared resource:
+
+```eon
+read: {
+    exists: {
+        resource: "FamilyMember"
+        where: [
+            { field: "family_id", equals_field: "family_id" }
+            {
+                any_of: [
+                    "user_id=user.id"
+                    "delegate_user_id=user.id"
+                ]
+            }
+        ]
+    }
+}
+```
+
+That shape is intentionally narrow for now:
+
+- `exists` targets another declared resource
+- `where` accepts leaf comparisons plus nested `all_of`, `any_of`, and `not` groups
+- list entries inside `where` still imply `AND`
+- each condition is either `related_field = user.id` / `claim.<name>` or
+  `related_field = row.<current_field>`
+
 When you use the built-in auth routes, `/auth/login` now emits numeric claims automatically from
 the `user` row. You can also make those claim names explicit in `.eon`:
 
@@ -771,8 +838,13 @@ If you do not configure `security.auth.claims`, the legacy implicit behavior sti
 - Any numeric column named `claim_<name>` becomes a claim named `<name>`
 
 That lets claim-scoped policies work without a custom token issuer, as long as your user records
-carry the relevant columns. Current boundary: row policies still require `I64` claims, so
-`claim.<name>` policies must resolve to integer values.
+carry the relevant columns. Row policies can now consume explicit `I64`, `String`, and `Bool`
+claims when the target resource field uses the matching type. The legacy implicit claim path
+remains numeric-only, so undeclared `claim.<name>` usage is still limited to `*_id`-style claims.
+Policy comparisons are still equality-only today; boolean composition and `exists` change how
+filters combine, not which operators are available. `vsr authz simulate` can fully evaluate
+`exists` predicates when you provide related rows with repeated `--related-row` arguments; if you
+omit them, the trace stays incomplete and tells you which related resource data is missing.
 
 ## Relationships
 

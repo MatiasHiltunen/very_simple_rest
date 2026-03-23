@@ -483,7 +483,9 @@ object or just a type such as `title: String`.",
     push_section(
         &mut markdown,
         "Row Policies",
-        "Row policies support both the newer explicit form and older owner/set-owner shorthands.",
+        "Row policies support both the newer explicit form and older owner/set-owner shorthands. \
+`read`, `update`, and `delete` accept a single filter, an array that implies `all_of`, or an \
+explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` stays a flat assignment list.",
         &[
             row(
                 "resources[].policies.admin_bypass",
@@ -495,35 +497,35 @@ object or just a type such as `title: String`.",
             ),
             row(
                 "resources[].policies.read",
-                "Policy, [Policy]",
+                "PolicyFilter, [PolicyFilter], PolicyGroup",
                 "None",
                 "No",
-                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`",
-                "Filters read queries. `SetOwner` syntax is rejected here.",
+                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }`",
+                "Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `SetOwner` syntax is rejected here.",
             ),
             row(
                 "resources[].policies.create",
-                "Policy, [Policy]",
+                "PolicyAssignment, [PolicyAssignment]",
                 "None",
                 "No",
                 "`field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field`",
-                "Assigns values during create operations. `Owner` syntax is rejected here.",
+                "Assigns values during create operations. Boolean groups are not supported here. `Owner` syntax is rejected here.",
             ),
             row(
                 "resources[].policies.update",
-                "Policy, [Policy]",
+                "PolicyFilter, [PolicyFilter], PolicyGroup",
                 "None",
                 "No",
-                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`",
-                "Filters update queries.",
+                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }`",
+                "Filters update queries. Arrays imply `all_of`.",
             ),
             row(
                 "resources[].policies.delete",
-                "Policy, [Policy]",
+                "PolicyFilter, [PolicyFilter], PolicyGroup",
                 "None",
                 "No",
-                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`",
-                "Filters delete queries.",
+                "`field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }`",
+                "Filters delete queries. Arrays imply `all_of`.",
             ),
         ],
     );
@@ -533,11 +535,54 @@ object or just a type such as `title: String`.",
         "eon",
         r#"policies: {
     admin_bypass: true
-    read: "tenant_id=claim.tenant_id"
-    create: "tenant_id=claim.tenant_id"
+    read: {
+        any_of: [
+            "owner_id=user.id"
+            {
+                all_of: [
+                    "tenant_id=claim.tenant_id"
+                    { not: "blocked_user_id=user.id" }
+                ]
+            }
+        ]
+    }
+    create: [
+        "owner_id=user.id"
+        { field: "tenant_id", value: "claim.tenant_id" }
+    ]
     update: [{ field: "tenant_id", equals: "claim.tenant_id" }]
     delete: "Owner:owner_id"
 }"#,
+    );
+
+    markdown.push_str(
+        "The first relation-aware filter form is `exists`, which targets another declared \
+resource and correlates it with the current row:\n\n",
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"read: {
+    exists: {
+        resource: "FamilyMember"
+        where: [
+            { field: "family_id", equals_field: "family_id" }
+            {
+                any_of: [
+                    "user_id=user.id"
+                    "delegate_user_id=user.id"
+                ]
+            }
+        ]
+    }
+}"#,
+    );
+
+    markdown.push_str(
+        "Generated migrations and live-schema checks also treat row-policy fields as index hints. \
+That includes direct policy-controlled fields on the current resource and target-resource fields \
+referenced by `exists` conditions.\n\n",
     );
 
     push_section(
@@ -1261,9 +1306,9 @@ object or just a type such as `title: String`.",
     );
     markdown.push_str(
         "Current runtime boundary:\n\n\
-- Row policies can only consume `I64` claims today.\n\
+- Row policies can consume explicit `I64`, `String`, and `Bool` claims when the target field uses the matching type.\n\
 - When `security.auth.claims` is configured, non-legacy `claim.<name>` references in row policies must be declared there.\n\
-- Legacy numeric `*_id` claims still work even without an explicit mapping.\n\n",
+- Legacy undeclared `claim.<name>` usage still only works for numeric `*_id` claims.\n\n",
     );
 
     push_section(

@@ -64,6 +64,28 @@ async fn auth_claim_mapping_emits_explicit_claims_and_powers_claim_scoped_resour
     .await
     .expect("scoped_doc table should be created");
 
+    query(
+        "CREATE TABLE plan_doc (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan TEXT NOT NULL,
+            title TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("plan_doc table should be created");
+
+    query(
+        "CREATE TABLE staff_doc (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff INTEGER NOT NULL,
+            title TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("staff_doc table should be created");
+
     let security = auth_claims_api::security();
     let app = test::init_service(App::new().service(scope("/api").configure(|cfg| {
         auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
@@ -103,6 +125,40 @@ async fn auth_claim_mapping_emits_explicit_claims_and_powers_claim_scoped_resour
         })
         .to_request();
     let token_response: TokenResponse = test::call_and_read_body_json(&app, login_request).await;
+
+    let register_request = test::TestRequest::post()
+        .uri("/api/auth/register")
+        .set_json(&auth::RegisterInput {
+            email: "claims-basic@example.com".to_owned(),
+            password: "password123".to_owned(),
+        })
+        .to_request();
+    let register_response = test::call_service(&app, register_request).await;
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    query(
+        "UPDATE user
+         SET tenant_scope = ?, claim_workspace_id = ?, is_staff = ?, plan = ?
+         WHERE email = ?",
+    )
+    .bind(8_i64)
+    .bind(43_i64)
+    .bind(false)
+    .bind("basic")
+    .bind("claims-basic@example.com")
+    .execute(&pool)
+    .await
+    .expect("second mapped claim row should update");
+
+    let basic_login_request = test::TestRequest::post()
+        .uri("/api/auth/login")
+        .set_json(&auth::LoginInput {
+            email: "claims-basic@example.com".to_owned(),
+            password: "password123".to_owned(),
+        })
+        .to_request();
+    let basic_token_response: TokenResponse =
+        test::call_and_read_body_json(&app, basic_login_request).await;
 
     let me_request = test::TestRequest::get()
         .uri("/api/auth/me")
@@ -188,6 +244,118 @@ async fn auth_claim_mapping_emits_explicit_claims_and_powers_claim_scoped_resour
     assert_eq!(list_response.total, 1);
     assert_eq!(list_response.count, 1);
     assert_eq!(list_response.items[0].tenant_id, 7);
+
+    let pro_plan_create = test::TestRequest::post()
+        .uri("/api/plan_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(&auth_claims_api::PlanDocCreate {
+            plan: None,
+            title: "pro plan".to_owned(),
+        })
+        .to_request();
+    let pro_plan_create_response = test::call_service(&app, pro_plan_create).await;
+    assert_eq!(pro_plan_create_response.status(), StatusCode::CREATED);
+
+    let basic_plan_create = test::TestRequest::post()
+        .uri("/api/plan_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", basic_token_response.token.as_str()),
+        ))
+        .set_json(&auth_claims_api::PlanDocCreate {
+            plan: None,
+            title: "basic plan".to_owned(),
+        })
+        .to_request();
+    let basic_plan_create_response = test::call_service(&app, basic_plan_create).await;
+    assert_eq!(basic_plan_create_response.status(), StatusCode::CREATED);
+
+    let pro_plan_list = test::TestRequest::get()
+        .uri("/api/plan_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .to_request();
+    let pro_plan_response: auth_claims_api::PlanDocListResponse =
+        test::call_and_read_body_json(&app, pro_plan_list).await;
+    assert_eq!(pro_plan_response.total, 1);
+    assert_eq!(pro_plan_response.count, 1);
+    assert_eq!(pro_plan_response.items[0].plan, "pro");
+    assert_eq!(pro_plan_response.items[0].title, "pro plan");
+
+    let basic_plan_list = test::TestRequest::get()
+        .uri("/api/plan_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", basic_token_response.token.as_str()),
+        ))
+        .to_request();
+    let basic_plan_response: auth_claims_api::PlanDocListResponse =
+        test::call_and_read_body_json(&app, basic_plan_list).await;
+    assert_eq!(basic_plan_response.total, 1);
+    assert_eq!(basic_plan_response.count, 1);
+    assert_eq!(basic_plan_response.items[0].plan, "basic");
+    assert_eq!(basic_plan_response.items[0].title, "basic plan");
+
+    let staff_create = test::TestRequest::post()
+        .uri("/api/staff_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .set_json(&auth_claims_api::StaffDocCreate {
+            staff: None,
+            title: "staff only".to_owned(),
+        })
+        .to_request();
+    let staff_create_response = test::call_service(&app, staff_create).await;
+    assert_eq!(staff_create_response.status(), StatusCode::CREATED);
+
+    let non_staff_create = test::TestRequest::post()
+        .uri("/api/staff_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", basic_token_response.token.as_str()),
+        ))
+        .set_json(&auth_claims_api::StaffDocCreate {
+            staff: None,
+            title: "non staff".to_owned(),
+        })
+        .to_request();
+    let non_staff_create_response = test::call_service(&app, non_staff_create).await;
+    assert_eq!(non_staff_create_response.status(), StatusCode::CREATED);
+
+    let staff_list = test::TestRequest::get()
+        .uri("/api/staff_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token_response.token.as_str()),
+        ))
+        .to_request();
+    let staff_list_response: auth_claims_api::StaffDocListResponse =
+        test::call_and_read_body_json(&app, staff_list).await;
+    assert_eq!(staff_list_response.total, 1);
+    assert_eq!(staff_list_response.count, 1);
+    assert!(staff_list_response.items[0].staff);
+    assert_eq!(staff_list_response.items[0].title, "staff only");
+
+    let non_staff_list = test::TestRequest::get()
+        .uri("/api/staff_doc")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", basic_token_response.token.as_str()),
+        ))
+        .to_request();
+    let non_staff_list_response: auth_claims_api::StaffDocListResponse =
+        test::call_and_read_body_json(&app, non_staff_list).await;
+    assert_eq!(non_staff_list_response.total, 1);
+    assert_eq!(non_staff_list_response.count, 1);
+    assert!(!non_staff_list_response.items[0].staff);
+    assert_eq!(non_staff_list_response.items[0].title, "non staff");
 }
 
 fn unique_sqlite_url(prefix: &str) -> String {

@@ -12,14 +12,15 @@ use syn::{LitStr, Type};
 use super::model::{
     DbBackend, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
     GENERATED_DECIMAL_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
-    ListConfig, NumericBound, PolicyAssignment, PolicyFilter, PolicyValueSource, ReferentialAction,
-    ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile,
-    StaticMode, StaticMountSpec, WriteModelStyle, default_resource_module_ident,
-    infer_generated_value, infer_sql_type, sanitize_module_ident, sanitize_struct_ident,
-    validate_authorization_contract, validate_field_validations, validate_list_config,
-    validate_logging_config, validate_policy_claim_sources, validate_relations,
-    validate_row_policies, validate_runtime_config, validate_security_config,
-    validate_sql_identifier, validate_tls_config,
+    ListConfig, NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter,
+    PolicyFilter, PolicyFilterExpression, PolicyValueSource, ReferentialAction, ResourceSpec,
+    RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
+    StaticMountSpec, WriteModelStyle, default_resource_module_ident, infer_generated_value,
+    infer_sql_type, sanitize_module_ident, sanitize_struct_ident, validate_authorization_contract,
+    validate_field_validations, validate_list_config, validate_logging_config,
+    validate_policy_claim_sources, validate_relations, validate_row_policies,
+    validate_runtime_config, validate_security_config, validate_sql_identifier,
+    validate_tls_config,
 };
 use crate::{
     auth::{
@@ -399,13 +400,34 @@ struct RowPoliciesDocument {
     #[serde(default = "default_admin_bypass")]
     admin_bypass: bool,
     #[serde(default)]
-    read: Option<ScopePoliciesDocument>,
+    read: Option<FilterPoliciesDocument>,
     #[serde(default)]
     create: Option<ScopePoliciesDocument>,
     #[serde(default)]
-    update: Option<ScopePoliciesDocument>,
+    update: Option<FilterPoliciesDocument>,
     #[serde(default)]
-    delete: Option<ScopePoliciesDocument>,
+    delete: Option<FilterPoliciesDocument>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum FilterPoliciesDocument {
+    Group(FilterPolicyGroupDocument),
+    Many(Vec<FilterPoliciesDocument>),
+    Single(PolicyEntryDocument),
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilterPolicyGroupDocument {
+    #[serde(default)]
+    all_of: Option<Vec<FilterPoliciesDocument>>,
+    #[serde(default)]
+    any_of: Option<Vec<FilterPoliciesDocument>>,
+    #[serde(default)]
+    not: Option<Box<FilterPoliciesDocument>>,
+    #[serde(default)]
+    exists: Option<ExistsPolicyDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -418,24 +440,71 @@ enum ScopePoliciesDocument {
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum PolicyEntryDocument {
-    Legacy(LegacyRowPolicyDocument),
-    Rule(PolicyRuleDocument),
     Shorthand(String),
+    Rule(PolicyRuleDocument),
+    Legacy(LegacyRowPolicyDocument),
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExistsPolicyDocument {
+    resource: String,
+    #[serde(default, rename = "where")]
+    condition: Option<ExistsPolicyEntriesDocument>,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ExistsPolicyEntriesDocument {
+    Group(ExistsPolicyGroupDocument),
+    Many(Vec<ExistsPolicyEntriesDocument>),
+    Single(ExistsPolicyEntryDocument),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ExistsPolicyEntryDocument {
+    Shorthand(String),
+    Rule(ExistsPolicyRuleDocument),
+    Legacy(LegacyRowPolicyDocument),
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExistsPolicyGroupDocument {
+    #[serde(default)]
+    all_of: Option<Vec<ExistsPolicyEntriesDocument>>,
+    #[serde(default)]
+    any_of: Option<Vec<ExistsPolicyEntriesDocument>>,
+    #[serde(default)]
+    not: Option<Box<ExistsPolicyEntriesDocument>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyRowPolicyDocument {
     kind: String,
     field: String,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyRuleDocument {
     field: String,
     #[serde(default)]
     equals: Option<String>,
     #[serde(default)]
     value: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExistsPolicyRuleDocument {
+    field: String,
+    #[serde(default)]
+    equals: Option<String>,
+    #[serde(default)]
+    equals_field: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -888,12 +957,13 @@ fn build_resources(
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
         });
+    }
 
-        let last = result.last().expect("just pushed resource");
-        validate_row_policies(&last.fields, &last.policies, Span::call_site())?;
-        validate_relations(&last.fields, Span::call_site())?;
-        validate_field_validations(&last.fields, Span::call_site())?;
-        validate_list_config(&last.list, Span::call_site())?;
+    for resource in &result {
+        validate_row_policies(resource, &result, &resource.policies, Span::call_site())?;
+        validate_relations(&resource.fields, Span::call_site())?;
+        validate_field_validations(&resource.fields, Span::call_site())?;
+        validate_list_config(&resource.list, Span::call_site())?;
     }
 
     Ok(result)
@@ -1723,12 +1793,11 @@ fn default_admin_bypass() -> bool {
 
 fn parse_filter_policies(
     scope: &'static str,
-    policies: Option<ScopePoliciesDocument>,
-) -> syn::Result<Vec<PolicyFilter>> {
-    expand_policy_entries(policies)?
-        .into_iter()
-        .map(|policy| parse_filter_policy(scope, policy))
-        .collect()
+    policies: Option<FilterPoliciesDocument>,
+) -> syn::Result<Option<PolicyFilterExpression>> {
+    policies
+        .map(|policy| parse_filter_policy_expression(scope, policy))
+        .transpose()
 }
 
 fn parse_assignment_policies(
@@ -1763,6 +1832,266 @@ fn expand_policy_entries(
     Ok(entries)
 }
 
+fn parse_filter_policy_expression(
+    scope: &'static str,
+    policy: FilterPoliciesDocument,
+) -> syn::Result<PolicyFilterExpression> {
+    match policy {
+        FilterPoliciesDocument::Group(group) => parse_filter_policy_group(scope, group),
+        FilterPoliciesDocument::Many(entries) => {
+            if entries.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "row policy entries cannot be empty",
+                ));
+            }
+            let expressions = entries
+                .into_iter()
+                .map(|entry| parse_filter_policy_expression(scope, entry))
+                .collect::<syn::Result<Vec<_>>>()?;
+            PolicyFilterExpression::all(expressions).ok_or_else(|| {
+                syn::Error::new(Span::call_site(), "row policy entries cannot be empty")
+            })
+        }
+        FilterPoliciesDocument::Single(policy) => {
+            parse_filter_policy(scope, policy).map(PolicyFilterExpression::Match)
+        }
+    }
+}
+
+fn parse_filter_policy_group(
+    scope: &'static str,
+    group: FilterPolicyGroupDocument,
+) -> syn::Result<PolicyFilterExpression> {
+    let present = usize::from(group.all_of.is_some())
+        + usize::from(group.any_of.is_some())
+        + usize::from(group.not.is_some())
+        + usize::from(group.exists.is_some());
+    if present != 1 {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "{scope} row policy groups must set exactly one of `all_of`, `any_of`, `not`, or `exists`"
+            ),
+        ));
+    }
+
+    if let Some(entries) = group.all_of {
+        if entries.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy `all_of` entries cannot be empty"),
+            ));
+        }
+        let expressions = entries
+            .into_iter()
+            .map(|entry| parse_filter_policy_expression(scope, entry))
+            .collect::<syn::Result<Vec<_>>>()?;
+        return PolicyFilterExpression::all(expressions).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy `all_of` entries cannot be empty"),
+            )
+        });
+    }
+
+    if let Some(entries) = group.any_of {
+        if entries.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy `any_of` entries cannot be empty"),
+            ));
+        }
+        let expressions = entries
+            .into_iter()
+            .map(|entry| parse_filter_policy_expression(scope, entry))
+            .collect::<syn::Result<Vec<_>>>()?;
+        return PolicyFilterExpression::any(expressions).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy `any_of` entries cannot be empty"),
+            )
+        });
+    }
+
+    let Some(policy) = group.not else {
+        if let Some(filter) = group.exists {
+            return parse_exists_policy(scope, filter);
+        }
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "{scope} row policy groups must set exactly one of `all_of`, `any_of`, `not`, or `exists`"
+            ),
+        ));
+    };
+    Ok(PolicyFilterExpression::Not(Box::new(
+        parse_filter_policy_expression(scope, *policy)?,
+    )))
+}
+
+fn parse_exists_policy(
+    scope: &'static str,
+    policy: ExistsPolicyDocument,
+) -> syn::Result<PolicyFilterExpression> {
+    if policy.resource.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{scope} row policy exists resource cannot be empty"),
+        ));
+    }
+    Ok(PolicyFilterExpression::Exists(PolicyExistsFilter {
+        resource: policy.resource,
+        condition: parse_exists_policy_expression(scope, policy.condition)?,
+    }))
+}
+
+fn parse_exists_policy_expression(
+    scope: &'static str,
+    policy: Option<ExistsPolicyEntriesDocument>,
+) -> syn::Result<PolicyExistsCondition> {
+    let Some(policy) = policy else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{scope} row policy exists conditions cannot be empty"),
+        ));
+    };
+    parse_exists_policy_node(scope, policy)
+}
+
+fn parse_exists_policy_node(
+    scope: &'static str,
+    policy: ExistsPolicyEntriesDocument,
+) -> syn::Result<PolicyExistsCondition> {
+    match policy {
+        ExistsPolicyEntriesDocument::Group(group) => parse_exists_policy_group(scope, group),
+        ExistsPolicyEntriesDocument::Many(entries) => {
+            if entries.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("{scope} row policy exists conditions cannot be empty"),
+                ));
+            }
+            let expressions = entries
+                .into_iter()
+                .map(|entry| parse_exists_policy_node(scope, entry))
+                .collect::<syn::Result<Vec<_>>>()?;
+            PolicyExistsCondition::all(expressions).ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!("{scope} row policy exists conditions cannot be empty"),
+                )
+            })
+        }
+        ExistsPolicyEntriesDocument::Single(entry) => parse_exists_policy_entry(scope, entry),
+    }
+}
+
+fn parse_exists_policy_group(
+    scope: &'static str,
+    group: ExistsPolicyGroupDocument,
+) -> syn::Result<PolicyExistsCondition> {
+    let present = usize::from(group.all_of.is_some())
+        + usize::from(group.any_of.is_some())
+        + usize::from(group.not.is_some());
+    if present != 1 {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "{scope} row policy exists groups must set exactly one of `all_of`, `any_of`, or `not`"
+            ),
+        ));
+    }
+
+    if let Some(entries) = group.all_of {
+        if entries.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy exists `all_of` entries cannot be empty"),
+            ));
+        }
+        let expressions = entries
+            .into_iter()
+            .map(|entry| parse_exists_policy_node(scope, entry))
+            .collect::<syn::Result<Vec<_>>>()?;
+        return PolicyExistsCondition::all(expressions).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy exists `all_of` entries cannot be empty"),
+            )
+        });
+    }
+
+    if let Some(entries) = group.any_of {
+        if entries.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy exists `any_of` entries cannot be empty"),
+            ));
+        }
+        let expressions = entries
+            .into_iter()
+            .map(|entry| parse_exists_policy_node(scope, entry))
+            .collect::<syn::Result<Vec<_>>>()?;
+        return PolicyExistsCondition::any(expressions).ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("{scope} row policy exists `any_of` entries cannot be empty"),
+            )
+        });
+    }
+
+    let Some(policy) = group.not else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "{scope} row policy exists groups must set exactly one of `all_of`, `any_of`, or `not`"
+            ),
+        ));
+    };
+    Ok(PolicyExistsCondition::Not(Box::new(
+        parse_exists_policy_node(scope, *policy)?,
+    )))
+}
+
+fn parse_exists_policy_entry(
+    scope: &'static str,
+    policy: ExistsPolicyEntryDocument,
+) -> syn::Result<PolicyExistsCondition> {
+    match policy {
+        ExistsPolicyEntryDocument::Legacy(policy) => {
+            let filter = parse_filter_policy(scope, PolicyEntryDocument::Legacy(policy))?;
+            Ok(PolicyExistsCondition::Match(filter))
+        }
+        ExistsPolicyEntryDocument::Shorthand(policy) => {
+            let filter = parse_filter_shorthand(scope, &policy)?;
+            Ok(PolicyExistsCondition::Match(filter))
+        }
+        ExistsPolicyEntryDocument::Rule(policy) => {
+            let present =
+                usize::from(policy.equals.is_some()) + usize::from(policy.equals_field.is_some());
+            if present != 1 {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "{scope} row policy exists entries must set exactly one of `equals` or `equals_field`"
+                    ),
+                ));
+            }
+            if let Some(source) = policy.equals {
+                return Ok(PolicyExistsCondition::Match(PolicyFilter {
+                    field: policy.field,
+                    source: parse_policy_source(&source)?,
+                }));
+            }
+            Ok(PolicyExistsCondition::CurrentRowField {
+                field: policy.field,
+                row_field: policy.equals_field.expect("validated above"),
+            })
+        }
+    }
+}
+
 fn parse_filter_policy(
     scope: &'static str,
     policy: PolicyEntryDocument,
@@ -1772,7 +2101,10 @@ fn parse_filter_policy(
             let kind = RowPolicyKind::parse(&policy.kind).ok_or_else(|| {
                 syn::Error::new(
                     Span::call_site(),
-                    "row policy kind must be `Owner` or `SetOwner`",
+                    format!(
+                        "row policy kind must be `Owner` or `SetOwner` (got `{}`)",
+                        policy.kind
+                    ),
                 )
             })?;
             match kind {
@@ -1811,7 +2143,10 @@ fn parse_assignment_policy(
             let kind = RowPolicyKind::parse(&policy.kind).ok_or_else(|| {
                 syn::Error::new(
                     Span::call_site(),
-                    "row policy kind must be `Owner` or `SetOwner`",
+                    format!(
+                        "row policy kind must be `Owner` or `SetOwner` (got `{}`)",
+                        policy.kind
+                    ),
                 )
             })?;
             match kind {
@@ -2226,7 +2561,14 @@ mod tests {
         };
 
         let resource = &service.service.resources[0];
-        assert_eq!(resource.policies.read[0].field, "user_id");
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+        assert_eq!(read_filters[0].field, "user_id");
         assert_eq!(
             resource.policies.create[0].source,
             super::super::model::PolicyValueSource::UserId
@@ -2267,12 +2609,259 @@ mod tests {
             build_resources(document.db, document.resources).expect("resources should build");
         let resource = &resources[0];
         assert!(!resource.policies.admin_bypass);
-        assert_eq!(resource.policies.read.len(), 2);
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+        assert_eq!(read_filters.len(), 2);
         assert_eq!(
-            resource.policies.read[1].source,
+            read_filters[1].source,
             super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
         );
         assert_eq!(resource.policies.create.len(), 2);
+    }
+
+    #[test]
+    fn parses_nested_boolean_row_policies_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    policies: {
+                        read: {
+                            any_of: [
+                                "owner_id=user.id"
+                                {
+                                    all_of: [
+                                        "tenant_id=claim.tenant_id"
+                                        { not: "blocked_user_id=user.id" }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "owner_id", type: I64 }
+                        { name: "tenant_id", type: I64 }
+                        { name: "blocked_user_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let resource = &resources[0];
+        let read = resource
+            .policies
+            .read
+            .as_ref()
+            .expect("read policy should be present");
+        assert!(matches!(read, PolicyFilterExpression::Any(_)));
+
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+        assert_eq!(read_filters.len(), 3);
+        assert_eq!(read_filters[2].field, "blocked_user_id");
+    }
+
+    #[test]
+    fn parses_exists_row_policies_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "FamilyMember"
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "family_id", type: I64 }
+                        { name: "user_id", type: I64 }
+                    ]
+                }
+                {
+                    name: "SharedDoc"
+                    policies: {
+                        read: {
+                            exists: {
+                                resource: "FamilyMember"
+                                where: [
+                                    { field: "family_id", equals_field: "family_id" }
+                                    "user_id=user.id"
+                                ]
+                            }
+                        }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "family_id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let resource = resources
+            .iter()
+            .find(|resource| resource.struct_ident.to_string() == "SharedDoc")
+            .expect("shared doc resource should exist");
+        let read = resource
+            .policies
+            .read
+            .as_ref()
+            .expect("read policy should be present");
+        match read {
+            PolicyFilterExpression::Exists(filter) => {
+                assert_eq!(filter.resource, "FamilyMember");
+                match &filter.condition {
+                    super::super::model::PolicyExistsCondition::All(conditions) => {
+                        assert_eq!(conditions.len(), 2);
+                        assert!(matches!(
+                            conditions[0],
+                            super::super::model::PolicyExistsCondition::CurrentRowField { .. }
+                        ));
+                        assert!(matches!(
+                            conditions[1],
+                            super::super::model::PolicyExistsCondition::Match(_)
+                        ));
+                    }
+                    other => panic!("expected implicit exists all_of group, got {other:?}"),
+                }
+            }
+            other => panic!("expected exists filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_nested_boolean_groups_inside_exists_policies() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "FamilyAccess"
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "family_id", type: I64 }
+                        { name: "primary_user_id", type: I64 }
+                        { name: "delegate_user_id", type: I64 }
+                    ]
+                }
+                {
+                    name: "SharedDoc"
+                    policies: {
+                        read: {
+                            exists: {
+                                resource: "FamilyAccess"
+                                where: [
+                                    { field: "family_id", equals_field: "family_id" }
+                                    {
+                                        any_of: [
+                                            "primary_user_id=user.id"
+                                            "delegate_user_id=user.id"
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "family_id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let resource = resources
+            .iter()
+            .find(|resource| resource.struct_ident.to_string() == "SharedDoc")
+            .expect("shared doc resource should exist");
+        let read = resource
+            .policies
+            .read
+            .as_ref()
+            .expect("read policy should be present");
+        match read {
+            PolicyFilterExpression::Exists(filter) => match &filter.condition {
+                super::super::model::PolicyExistsCondition::All(conditions) => {
+                    assert_eq!(conditions.len(), 2);
+                    assert!(matches!(
+                        conditions[0],
+                        super::super::model::PolicyExistsCondition::CurrentRowField { .. }
+                    ));
+                    match &conditions[1] {
+                        super::super::model::PolicyExistsCondition::Any(inner) => {
+                            assert_eq!(inner.len(), 2);
+                            assert!(matches!(
+                                inner[0],
+                                super::super::model::PolicyExistsCondition::Match(_)
+                            ));
+                            assert!(matches!(
+                                inner[1],
+                                super::super::model::PolicyExistsCondition::Match(_)
+                            ));
+                        }
+                        other => panic!("expected any_of group inside exists, got {other:?}"),
+                    }
+                }
+                other => panic!("expected implicit exists all_of group, got {other:?}"),
+            },
+            other => panic!("expected exists filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_exists_row_policies_for_unknown_resource() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "SharedDoc"
+                    policies: {
+                        read: {
+                            exists: {
+                                resource: "FamilyMember"
+                                where: [
+                                    { field: "family_id", equals_field: "family_id" }
+                                    "user_id=user.id"
+                                ]
+                            }
+                        }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "family_id", type: I64 }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = build_resources(document.db, document.resources)
+            .expect_err("unknown exists resource should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown exists resource `FamilyMember`")
+        );
     }
 
     #[test]
@@ -2594,7 +3183,52 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_integer_explicit_claims_in_row_policies() {
+    fn accepts_typed_explicit_claims_in_row_policies() {
+        let document = parse_document(
+            r#"
+            security: {
+                auth: {
+                    claims: {
+                        tenant_slug: String
+                        staff: Bool
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    policies: {
+                        read: { field: "tenant_id", equals: "claim.tenant_slug" }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "tenant_id", type: String }
+                    ]
+                }
+                {
+                    name: "FlaggedPost"
+                    policies: {
+                        read: { field: "staff_only", equals: "claim.staff" }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "staff_only", type: Bool }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        validate_policy_claim_sources(&resources, &security, Span::call_site())
+            .expect("typed mapped claims should validate");
+    }
+
+    #[test]
+    fn rejects_mismatched_explicit_claim_type_in_row_policy() {
         let document = parse_document(
             r#"
             security: {
@@ -2624,9 +3258,9 @@ mod tests {
         let resources =
             build_resources(document.db, document.resources).expect("resources should build");
         let error = validate_policy_claim_sources(&resources, &security, Span::call_site())
-            .expect_err("non-integer mapped claim should fail");
+            .expect_err("mismatched mapped claim should fail");
         assert!(error.to_string().contains("tenant_slug"));
-        assert!(error.to_string().contains("currently require `I64` claims"));
+        assert!(error.to_string().contains("expects `I64`"));
     }
 
     #[test]
@@ -3189,18 +3823,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_i64_row_policy_field_from_eon() {
+    fn rejects_unsupported_row_policy_field_type_from_eon() {
         let document = parse_document(
             r#"
             resources: [
                 {
                     name: "Post"
                     policies: {
-                        read: { kind: Owner, field: "user_id" }
+                        read: { kind: Owner, field: "created_at" }
                     }
                     fields: [
                         { name: "id", type: I64 }
-                        { name: "user_id", type: String }
+                        { name: "created_at", type: DateTime }
                     ]
                 }
             ]
@@ -3208,13 +3842,13 @@ mod tests {
         );
 
         let error = match build_resources(document.db, document.resources) {
-            Ok(_) => panic!("non-i64 row policy field should fail"),
+            Ok(_) => panic!("unsupported row policy field should fail"),
             Err(error) => error,
         };
         assert!(
             error
                 .to_string()
-                .contains("must use type `i64` or `Option<i64>`")
+                .contains("must use type `i64`, `String`, `bool`, or an `Option<...>`")
         );
     }
 

@@ -105,13 +105,16 @@ assignment storage helpers. They also expose an opt-in
 assignment CRUD plus a request-time runtime access evaluation endpoint, all without
 changing resource enforcement. Custom handlers can now also opt into actual
 request-time runtime grant enforcement through
-`AuthorizationRuntime::enforce_runtime_access(...)`.
+`AuthorizationRuntime::enforce_runtime_access(...)`. Persisted runtime assignments
+now also carry `created_at`, `created_by_user_id`, and optional `expires_at`, and
+expired assignments are ignored by runtime evaluation.
 
 ### Phase 3: Typed Conditions
 
-- Add `all_of`, `any_of`, and `not`
-- Add typed comparisons for `I64`, `String`, `Bool`, enums, and nullable values
-- Keep current shorthand syntax as sugar
+- Implemented for static `.eon` row filters: `all_of`, `any_of`, and `not`
+- Implemented for static `.eon` row filters: typed equality against `I64`, `String`, and `Bool` claims
+- Current shorthand syntax still compiles as sugar
+- Remaining: enums, nullable values, richer operators beyond equality, and parity outside static row filters
 
 ### Phase 4: Scoped Assignments
 
@@ -121,9 +124,13 @@ request-time runtime grant enforcement through
 
 ### Phase 5: Relation-Aware Authorization
 
-- Add relation-aware predicates such as membership or delegation checks
-- Add first-class `exists` style conditions
-- Generate supporting indexes and validation
+- Implemented for static `.eon` row filters: a first bounded `exists` predicate against another declared resource
+- `exists` conditions currently support equality-only correlation clauses: `related_field = user.id` / `claim.*` and `related_field = row.<field>`
+- `exists.where` now also supports nested `all_of`, `any_of`, and `not` groups
+- Validation now rejects unknown target resources and incompatible correlation field types at compile time
+- Generated migrations and live-schema checks now add required indexes for `exists` target fields
+- `vsr authz simulate` can now fully evaluate `exists` predicates when related rows are supplied explicitly
+- Remaining: richer relation predicates beyond equality-only correlation
 
 ### Phase 6: Field-Level Authorization
 
@@ -152,6 +159,6 @@ This slice should establish the reusable base:
 ## Near-Term Next Steps
 
 1. Expose explain-oriented views over the compiled authorization model.
-2. Add typed claim support beyond `I64`.
+2. Extend typed conditions beyond simple equality now that claim-backed `I64`/`String`/`Bool` matches are supported.
 3. Add boolean composition (`all_of`, `any_of`, `not`) to the policy AST.
 4. Introduce scoped runtime-managed assignments before runtime-managed policy bundles.

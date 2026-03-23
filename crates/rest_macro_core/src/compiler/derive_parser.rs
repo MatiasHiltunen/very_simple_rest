@@ -4,8 +4,8 @@ use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
     DbBackend, FieldSpec, FieldValidation, ListConfig, NumericBound, PolicyAssignment,
-    PolicyFilter, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
-    RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
+    PolicyFilter, PolicyFilterExpression, PolicyValueSource, ReferentialAction, ResourceSpec,
+    RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
     validate_relations, validate_row_policies, validate_sql_identifier,
 };
@@ -73,9 +73,10 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
                 match key.as_str() {
                     "read" => {
                         let value = expect_policy_string(meta.path.span(), lit)?;
-                        policies
-                            .read
-                            .extend(parse_filter_policies(&value.value(), value.span())?);
+                        policies.read = merge_filter_policies(
+                            policies.read.take(),
+                            parse_filter_policies(&value.value(), value.span())?,
+                        );
                     }
                     "create" => {
                         let value = expect_policy_string(meta.path.span(), lit)?;
@@ -85,15 +86,17 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
                     }
                     "update" => {
                         let value = expect_policy_string(meta.path.span(), lit)?;
-                        policies
-                            .update
-                            .extend(parse_filter_policies(&value.value(), value.span())?);
+                        policies.update = merge_filter_policies(
+                            policies.update.take(),
+                            parse_filter_policies(&value.value(), value.span())?,
+                        );
                     }
                     "delete" => {
                         let value = expect_policy_string(meta.path.span(), lit)?;
-                        policies
-                            .delete
-                            .extend(parse_filter_policies(&value.value(), value.span())?);
+                        policies.delete = merge_filter_policies(
+                            policies.delete.take(),
+                            parse_filter_policies(&value.value(), value.span())?,
+                        );
                     }
                     "admin_bypass" => policies.admin_bypass = parse_policy_bool(lit)?,
                     _ => return Err(meta.error("unsupported row_policy key")),
@@ -178,12 +181,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
             format!("configured id field `{id_field}` does not exist"),
         ));
     }
-    validate_row_policies(&parsed_fields, &policies, struct_ident.span())?;
-    validate_relations(&parsed_fields, struct_ident.span())?;
-    validate_field_validations(&parsed_fields, struct_ident.span())?;
-    validate_list_config(&list, struct_ident.span())?;
-
-    Ok(ResourceSpec {
+    let parsed = ResourceSpec {
         struct_ident: struct_ident.clone(),
         impl_module_ident: default_resource_module_ident(&struct_ident),
         table_name,
@@ -194,7 +192,18 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         list,
         fields: parsed_fields,
         write_style: WriteModelStyle::ExistingStructWithDtos,
-    })
+    };
+    validate_row_policies(
+        &parsed,
+        std::slice::from_ref(&parsed),
+        &parsed.policies,
+        struct_ident.span(),
+    )?;
+    validate_relations(&parsed.fields, struct_ident.span())?;
+    validate_field_validations(&parsed.fields, struct_ident.span())?;
+    validate_list_config(&parsed.list, struct_ident.span())?;
+
+    Ok(parsed)
 }
 
 fn parse_relation(
@@ -453,11 +462,27 @@ fn parse_u32_literal(lit: &syn::LitInt) -> syn::Result<u32> {
         .map_err(|_| syn::Error::new(lit.span(), "expected a positive integer that fits in u32"))
 }
 
-fn parse_filter_policies(value: &str, span: proc_macro2::Span) -> syn::Result<Vec<PolicyFilter>> {
-    split_policy_entries(value, span)?
+fn parse_filter_policies(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<Option<PolicyFilterExpression>> {
+    let policies = split_policy_entries(value, span)?
         .into_iter()
-        .map(|entry| parse_filter_policy(&entry, span))
-        .collect()
+        .map(|entry| parse_filter_policy(&entry, span).map(PolicyFilterExpression::Match))
+        .collect::<syn::Result<Vec<_>>>()?;
+    Ok(PolicyFilterExpression::all(policies))
+}
+
+fn merge_filter_policies(
+    existing: Option<PolicyFilterExpression>,
+    next: Option<PolicyFilterExpression>,
+) -> Option<PolicyFilterExpression> {
+    match (existing, next) {
+        (Some(existing), Some(next)) => PolicyFilterExpression::all(vec![existing, next]),
+        (Some(existing), None) => Some(existing),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
 }
 
 fn parse_assignment_policies(
@@ -584,7 +609,14 @@ mod tests {
         };
 
         let resource = parse_derive_input(input).expect("row policies should parse");
-        assert_eq!(resource.policies.read[0].field, "user_id");
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+        assert_eq!(read_filters[0].field, "user_id");
         assert_eq!(
             resource.policies.create[0].source,
             super::super::model::PolicyValueSource::UserId
@@ -629,9 +661,16 @@ mod tests {
 
         let resource = parse_derive_input(input).expect("claim row policies should parse");
         assert!(!resource.policies.admin_bypass);
-        assert_eq!(resource.policies.read.len(), 2);
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+        assert_eq!(read_filters.len(), 2);
         assert_eq!(
-            resource.policies.read[1].source,
+            read_filters[1].source,
             super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
         );
         assert_eq!(resource.policies.create.len(), 2);

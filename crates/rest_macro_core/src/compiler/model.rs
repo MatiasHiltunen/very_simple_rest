@@ -1,4 +1,8 @@
-use std::{collections::HashSet, net::IpAddr, str::FromStr};
+use std::{
+    collections::{BTreeSet, HashSet},
+    net::IpAddr,
+    str::FromStr,
+};
 
 use actix_web::http::{Method, Uri, header::HeaderName};
 use heck::{ToSnakeCase, ToUpperCamelCase};
@@ -219,6 +223,158 @@ pub struct PolicyFilter {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PolicyExistsCondition {
+    Match(PolicyFilter),
+    CurrentRowField { field: String, row_field: String },
+    All(Vec<PolicyExistsCondition>),
+    Any(Vec<PolicyExistsCondition>),
+    Not(Box<PolicyExistsCondition>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyExistsFilter {
+    pub resource: String,
+    pub condition: PolicyExistsCondition,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PolicyFilterExpression {
+    Match(PolicyFilter),
+    All(Vec<PolicyFilterExpression>),
+    Any(Vec<PolicyFilterExpression>),
+    Not(Box<PolicyFilterExpression>),
+    Exists(PolicyExistsFilter),
+}
+
+impl PolicyFilterExpression {
+    pub fn all(expressions: Vec<Self>) -> Option<Self> {
+        match expressions.len() {
+            0 => None,
+            1 => expressions.into_iter().next(),
+            _ => Some(Self::All(expressions)),
+        }
+    }
+
+    pub fn any(expressions: Vec<Self>) -> Option<Self> {
+        match expressions.len() {
+            0 => None,
+            1 => expressions.into_iter().next(),
+            _ => Some(Self::Any(expressions)),
+        }
+    }
+
+    pub fn collect_filters<'a>(&'a self, filters: &mut Vec<&'a PolicyFilter>) {
+        match self {
+            Self::Match(filter) => filters.push(filter),
+            Self::All(expressions) | Self::Any(expressions) => {
+                for expression in expressions {
+                    expression.collect_filters(filters);
+                }
+            }
+            Self::Not(expression) => expression.collect_filters(filters),
+            Self::Exists(filter) => filter.condition.collect_filters(filters),
+        }
+    }
+
+    pub fn collect_controlled_fields(&self, fields: &mut BTreeSet<String>) {
+        match self {
+            Self::Match(filter) => {
+                fields.insert(filter.field.clone());
+            }
+            Self::All(expressions) | Self::Any(expressions) => {
+                for expression in expressions {
+                    expression.collect_controlled_fields(fields);
+                }
+            }
+            Self::Not(expression) => expression.collect_controlled_fields(fields),
+            Self::Exists(filter) => filter.condition.collect_controlled_fields(fields),
+        }
+    }
+
+    pub fn collect_exists_index_targets(&self, targets: &mut Vec<(String, String)>) {
+        match self {
+            Self::Match(_) => {}
+            Self::All(expressions) | Self::Any(expressions) => {
+                for expression in expressions {
+                    expression.collect_exists_index_targets(targets);
+                }
+            }
+            Self::Not(expression) => expression.collect_exists_index_targets(targets),
+            Self::Exists(filter) => filter
+                .condition
+                .collect_exists_index_targets(&filter.resource, targets),
+        }
+    }
+}
+
+impl PolicyExistsCondition {
+    pub fn all(expressions: Vec<Self>) -> Option<Self> {
+        match expressions.len() {
+            0 => None,
+            1 => expressions.into_iter().next(),
+            _ => Some(Self::All(expressions)),
+        }
+    }
+
+    pub fn any(expressions: Vec<Self>) -> Option<Self> {
+        match expressions.len() {
+            0 => None,
+            1 => expressions.into_iter().next(),
+            _ => Some(Self::Any(expressions)),
+        }
+    }
+
+    pub fn collect_filters<'a>(&'a self, filters: &mut Vec<&'a PolicyFilter>) {
+        match self {
+            Self::Match(filter) => filters.push(filter),
+            Self::CurrentRowField { .. } => {}
+            Self::All(expressions) | Self::Any(expressions) => {
+                for expression in expressions {
+                    expression.collect_filters(filters);
+                }
+            }
+            Self::Not(expression) => expression.collect_filters(filters),
+        }
+    }
+
+    pub fn collect_controlled_fields(&self, fields: &mut BTreeSet<String>) {
+        match self {
+            Self::Match(_) => {}
+            Self::CurrentRowField { row_field, .. } => {
+                fields.insert(row_field.clone());
+            }
+            Self::All(expressions) | Self::Any(expressions) => {
+                for expression in expressions {
+                    expression.collect_controlled_fields(fields);
+                }
+            }
+            Self::Not(expression) => expression.collect_controlled_fields(fields),
+        }
+    }
+
+    pub fn collect_exists_index_targets(
+        &self,
+        resource: &str,
+        targets: &mut Vec<(String, String)>,
+    ) {
+        match self {
+            Self::Match(condition) => {
+                targets.push((resource.to_owned(), condition.field.clone()));
+            }
+            Self::CurrentRowField { field, .. } => {
+                targets.push((resource.to_owned(), field.clone()));
+            }
+            Self::All(expressions) | Self::Any(expressions) => {
+                for expression in expressions {
+                    expression.collect_exists_index_targets(resource, targets);
+                }
+            }
+            Self::Not(expression) => expression.collect_exists_index_targets(resource, targets),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyAssignment {
     pub field: String,
     pub source: PolicyValueSource,
@@ -227,36 +383,97 @@ pub struct PolicyAssignment {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowPolicies {
     pub admin_bypass: bool,
-    pub read: Vec<PolicyFilter>,
+    pub read: Option<PolicyFilterExpression>,
     pub create: Vec<PolicyAssignment>,
-    pub update: Vec<PolicyFilter>,
-    pub delete: Vec<PolicyFilter>,
+    pub update: Option<PolicyFilterExpression>,
+    pub delete: Option<PolicyFilterExpression>,
 }
 
 impl Default for RowPolicies {
     fn default() -> Self {
         Self {
             admin_bypass: true,
-            read: Vec::new(),
+            read: None,
             create: Vec::new(),
-            update: Vec::new(),
-            delete: Vec::new(),
+            update: None,
+            delete: None,
         }
     }
 }
 
 impl RowPolicies {
-    pub fn iter_filters(&self) -> impl Iterator<Item = (&'static str, &PolicyFilter)> {
-        self.read
-            .iter()
-            .map(|policy| ("read", policy))
-            .chain(self.update.iter().map(|policy| ("update", policy)))
-            .chain(self.delete.iter().map(|policy| ("delete", policy)))
+    pub fn has_read_filters(&self) -> bool {
+        self.read.is_some()
+    }
+
+    pub fn has_update_filters(&self) -> bool {
+        self.update.is_some()
+    }
+
+    pub fn has_delete_filters(&self) -> bool {
+        self.delete.is_some()
+    }
+
+    pub fn iter_filters(&self) -> Vec<(&'static str, &PolicyFilter)> {
+        let mut filters = Vec::new();
+        collect_scope_filters("read", self.read.as_ref(), &mut filters);
+        collect_scope_filters("update", self.update.as_ref(), &mut filters);
+        collect_scope_filters("delete", self.delete.as_ref(), &mut filters);
+        filters
+    }
+
+    pub fn controlled_filter_fields(&self) -> BTreeSet<String> {
+        let mut fields = BTreeSet::new();
+        collect_scope_controlled_fields(self.read.as_ref(), &mut fields);
+        collect_scope_controlled_fields(self.update.as_ref(), &mut fields);
+        collect_scope_controlled_fields(self.delete.as_ref(), &mut fields);
+        fields
     }
 
     pub fn iter_assignments(&self) -> impl Iterator<Item = (&'static str, &PolicyAssignment)> {
         self.create.iter().map(|policy| ("create", policy))
     }
+
+    pub fn exists_index_targets(&self) -> Vec<(String, String)> {
+        let mut targets = Vec::new();
+        collect_scope_exists_index_targets(self.read.as_ref(), &mut targets);
+        collect_scope_exists_index_targets(self.update.as_ref(), &mut targets);
+        collect_scope_exists_index_targets(self.delete.as_ref(), &mut targets);
+        targets
+    }
+}
+
+fn collect_scope_filters<'a>(
+    scope: &'static str,
+    expression: Option<&'a PolicyFilterExpression>,
+    filters: &mut Vec<(&'static str, &'a PolicyFilter)>,
+) {
+    let Some(expression) = expression else {
+        return;
+    };
+    let mut scoped_filters = Vec::new();
+    expression.collect_filters(&mut scoped_filters);
+    filters.extend(scoped_filters.into_iter().map(|filter| (scope, filter)));
+}
+
+fn collect_scope_controlled_fields(
+    expression: Option<&PolicyFilterExpression>,
+    fields: &mut BTreeSet<String>,
+) {
+    let Some(expression) = expression else {
+        return;
+    };
+    expression.collect_controlled_fields(fields);
+}
+
+fn collect_scope_exists_index_targets(
+    expression: Option<&PolicyFilterExpression>,
+    targets: &mut Vec<(String, String)>,
+) {
+    let Some(expression) = expression else {
+        return;
+    };
+    expression.collect_exists_index_targets(targets);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
@@ -549,8 +766,13 @@ pub fn base_type(ty: &Type) -> Type {
     }
 }
 
-pub fn is_i64_field(ty: &Type) -> bool {
-    matches!(type_leaf_name(ty).as_deref(), Some("i64"))
+pub fn policy_field_claim_type(ty: &Type) -> Option<AuthClaimType> {
+    match type_leaf_name(ty).as_deref() {
+        Some("i64") => Some(AuthClaimType::I64),
+        Some("String") => Some(AuthClaimType::String),
+        Some("bool") => Some(AuthClaimType::Bool),
+        _ => None,
+    }
 }
 
 pub fn structured_scalar_kind(ty: &Type) -> Option<StructuredScalarKind> {
@@ -583,7 +805,7 @@ pub fn supports_contains_filters(field: &FieldSpec) -> bool {
 }
 
 pub fn read_requires_auth(resource: &ResourceSpec) -> bool {
-    resource.roles.read.is_some() || !resource.policies.read.is_empty()
+    resource.roles.read.is_some() || resource.policies.has_read_filters()
 }
 
 pub fn supports_sort(ty: &Type) -> bool {
@@ -667,14 +889,27 @@ pub fn default_resource_module_ident(struct_ident: &Ident) -> Ident {
 }
 
 pub fn validate_row_policies(
-    fields: &[FieldSpec],
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
     policies: &RowPolicies,
     span: Span,
 ) -> syn::Result<()> {
-    validate_policy_filters(fields, "read", &policies.read, span)?;
-    validate_policy_assignments(fields, "create", &policies.create, span)?;
-    validate_policy_filters(fields, "update", &policies.update, span)?;
-    validate_policy_filters(fields, "delete", &policies.delete, span)
+    validate_policy_filters(resource, resources, "read", policies.read.as_ref(), span)?;
+    validate_policy_assignments(&resource.fields, "create", &policies.create, span)?;
+    validate_policy_filters(
+        resource,
+        resources,
+        "update",
+        policies.update.as_ref(),
+        span,
+    )?;
+    validate_policy_filters(
+        resource,
+        resources,
+        "delete",
+        policies.delete.as_ref(),
+        span,
+    )
 }
 
 pub fn validate_policy_claim_sources(
@@ -687,16 +922,30 @@ pub fn validate_policy_claim_sources(
     }
 
     for resource in resources {
-        for (scope, filter) in resource.policies.iter_filters() {
-            validate_policy_claim_source(
-                resource,
-                scope,
-                &filter.field,
-                &filter.source,
-                security,
-                span,
-            )?;
-        }
+        validate_policy_claim_sources_in_expression(
+            resource,
+            resources,
+            "read",
+            resource.policies.read.as_ref(),
+            security,
+            span,
+        )?;
+        validate_policy_claim_sources_in_expression(
+            resource,
+            resources,
+            "update",
+            resource.policies.update.as_ref(),
+            security,
+            span,
+        )?;
+        validate_policy_claim_sources_in_expression(
+            resource,
+            resources,
+            "delete",
+            resource.policies.delete.as_ref(),
+            security,
+            span,
+        )?;
         for (scope, assignment) in resource.policies.iter_assignments() {
             validate_policy_claim_source(
                 resource,
@@ -710,6 +959,72 @@ pub fn validate_policy_claim_sources(
     }
 
     Ok(())
+}
+
+fn validate_policy_claim_sources_in_expression(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    scope: &str,
+    expression: Option<&PolicyFilterExpression>,
+    security: &SecurityConfig,
+    span: Span,
+) -> syn::Result<()> {
+    let Some(expression) = expression else {
+        return Ok(());
+    };
+    match expression {
+        PolicyFilterExpression::Match(filter) => validate_policy_claim_source(
+            resource,
+            scope,
+            &filter.field,
+            &filter.source,
+            security,
+            span,
+        ),
+        PolicyFilterExpression::All(expressions) | PolicyFilterExpression::Any(expressions) => {
+            for expression in expressions {
+                validate_policy_claim_sources_in_expression(
+                    resource,
+                    resources,
+                    scope,
+                    Some(expression),
+                    security,
+                    span,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyFilterExpression::Not(expression) => validate_policy_claim_sources_in_expression(
+            resource,
+            resources,
+            scope,
+            Some(expression),
+            security,
+            span,
+        ),
+        PolicyFilterExpression::Exists(filter) => {
+            let target_resource = resources.iter().find(|candidate| {
+                candidate.struct_ident.to_string() == filter.resource
+                    || candidate.table_name == filter.resource
+            });
+            let Some(target_resource) = target_resource else {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "row policy for `{scope}` references unknown exists resource `{}`",
+                        filter.resource
+                    ),
+                ));
+            };
+            validate_exists_policy_claim_sources(
+                target_resource,
+                scope,
+                &filter.condition,
+                security,
+                span,
+            )
+        }
+    }
 }
 
 pub fn validate_relations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
@@ -1421,29 +1736,58 @@ fn validate_policy_claim_source(
         return Ok(());
     };
 
+    let field = resource
+        .fields
+        .iter()
+        .find(|field| field.name() == field_name)
+        .ok_or_else(|| {
+            syn::Error::new(
+                span,
+                format!(
+                    "resource `{}` {scope} row policy references missing field `{field_name}`",
+                    resource.struct_ident,
+                ),
+            )
+        })?;
+    let expected_ty = policy_field_claim_type(&field.ty).ok_or_else(|| {
+        syn::Error::new(
+            span,
+            format!(
+                "resource `{}` {scope} row policy field `{field_name}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types",
+                resource.struct_ident,
+            ),
+        )
+    })?;
+
     if let Some(mapping) = security.auth.claims.get(claim_name) {
-        if mapping.ty != AuthClaimType::I64 {
+        if mapping.ty != expected_ty {
             return Err(syn::Error::new(
                 span,
                 format!(
-                    "resource `{}` {scope} row policy for field `{field_name}` uses `claim.{claim_name}`, but `security.auth.claims.{claim_name}` is `{}`; row policies currently require `I64` claims",
+                    "resource `{}` {scope} row policy for field `{field_name}` uses `claim.{claim_name}`, but `security.auth.claims.{claim_name}` is `{}` while the field expects `{}`",
                     resource.struct_ident,
                     auth_claim_type_label(mapping.ty),
+                    auth_claim_type_label(expected_ty),
                 ),
             ));
         }
         return Ok(());
     }
 
-    if legacy_auth_claim_name_supported(claim_name) {
+    if legacy_auth_claim_name_supported(claim_name) && expected_ty == AuthClaimType::I64 {
         return Ok(());
     }
 
     Err(syn::Error::new(
         span,
         format!(
-            "resource `{}` {scope} row policy for field `{field_name}` references undeclared `claim.{claim_name}`; declare `security.auth.claims.{claim_name}` or keep using a legacy numeric `*_id` claim",
+            "resource `{}` {scope} row policy for field `{field_name}` references undeclared `claim.{claim_name}`; declare `security.auth.claims.{claim_name}`{}",
             resource.struct_ident,
+            if expected_ty == AuthClaimType::I64 {
+                " or keep using a legacy numeric `*_id` claim"
+            } else {
+                ""
+            },
         ),
     ))
 }
@@ -1567,26 +1911,162 @@ fn validate_rate_limit_rule(
 }
 
 fn validate_policy_filters(
-    fields: &[FieldSpec],
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
     scope: &str,
-    policies: &[PolicyFilter],
+    expression: Option<&PolicyFilterExpression>,
     span: Span,
 ) -> syn::Result<()> {
-    let mut seen_fields = HashSet::new();
-    for policy in policies {
-        validate_policy_field(fields, scope, &policy.field, span)?;
-        if !seen_fields.insert(policy.field.clone()) {
-            return Err(syn::Error::new(
-                span,
-                format!(
-                    "duplicate row policy field `{}` for `{scope}`",
-                    policy.field
-                ),
-            ));
+    let Some(expression) = expression else {
+        return Ok(());
+    };
+    validate_policy_filter_expression(resource, resources, scope, expression, span)
+}
+
+fn validate_policy_filter_expression(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    scope: &str,
+    expression: &PolicyFilterExpression,
+    span: Span,
+) -> syn::Result<()> {
+    match expression {
+        PolicyFilterExpression::Match(policy) => {
+            validate_policy_field(&resource.fields, scope, &policy.field, span).map(|_| ())
+        }
+        PolicyFilterExpression::All(expressions) | PolicyFilterExpression::Any(expressions) => {
+            for expression in expressions {
+                validate_policy_filter_expression(resource, resources, scope, expression, span)?;
+            }
+            Ok(())
+        }
+        PolicyFilterExpression::Not(expression) => {
+            validate_policy_filter_expression(resource, resources, scope, expression, span)
+        }
+        PolicyFilterExpression::Exists(filter) => {
+            validate_exists_policy_filter(resource, resources, scope, filter, span)
         }
     }
+}
 
-    Ok(())
+fn validate_exists_policy_filter(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    scope: &str,
+    filter: &PolicyExistsFilter,
+    span: Span,
+) -> syn::Result<()> {
+    let target_resource = resources.iter().find(|candidate| {
+        candidate.struct_ident.to_string() == filter.resource
+            || candidate.table_name == filter.resource
+    });
+    let Some(target_resource) = target_resource else {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "row policy for `{scope}` references unknown exists resource `{}`",
+                filter.resource
+            ),
+        ));
+    };
+
+    validate_exists_policy_condition(resource, target_resource, scope, &filter.condition, span)
+}
+
+fn validate_exists_policy_condition(
+    resource: &ResourceSpec,
+    target_resource: &ResourceSpec,
+    scope: &str,
+    condition: &PolicyExistsCondition,
+    span: Span,
+) -> syn::Result<()> {
+    match condition {
+        PolicyExistsCondition::Match(policy) => {
+            validate_policy_field(&target_resource.fields, scope, &policy.field, span)?;
+            Ok(())
+        }
+        PolicyExistsCondition::CurrentRowField { field, row_field } => {
+            let target_field = validate_policy_field(&target_resource.fields, scope, field, span)?;
+            let row_field_spec = validate_policy_field(&resource.fields, scope, row_field, span)?;
+            let target_ty = policy_field_claim_type(&target_field.ty).ok_or_else(|| {
+                syn::Error::new(
+                    span,
+                    format!(
+                        "exists row policy field `{field}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types"
+                    ),
+                )
+            })?;
+            let row_ty = policy_field_claim_type(&row_field_spec.ty).ok_or_else(|| {
+                syn::Error::new(
+                    span,
+                    format!(
+                        "exists row policy outer field `{row_field}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types"
+                    ),
+                )
+            })?;
+            if target_ty != row_ty {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "exists row policy `{field} = row.{row_field}` compares incompatible field types `{}` and `{}`",
+                        auth_claim_type_label(target_ty),
+                        auth_claim_type_label(row_ty),
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        PolicyExistsCondition::All(expressions) | PolicyExistsCondition::Any(expressions) => {
+            for expression in expressions {
+                validate_exists_policy_condition(
+                    resource,
+                    target_resource,
+                    scope,
+                    expression,
+                    span,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExistsCondition::Not(expression) => {
+            validate_exists_policy_condition(resource, target_resource, scope, expression, span)
+        }
+    }
+}
+
+fn validate_exists_policy_claim_sources(
+    target_resource: &ResourceSpec,
+    scope: &str,
+    condition: &PolicyExistsCondition,
+    security: &SecurityConfig,
+    span: Span,
+) -> syn::Result<()> {
+    match condition {
+        PolicyExistsCondition::Match(condition) => validate_policy_claim_source(
+            target_resource,
+            scope,
+            &condition.field,
+            &condition.source,
+            security,
+            span,
+        ),
+        PolicyExistsCondition::CurrentRowField { .. } => Ok(()),
+        PolicyExistsCondition::All(expressions) | PolicyExistsCondition::Any(expressions) => {
+            for expression in expressions {
+                validate_exists_policy_claim_sources(
+                    target_resource,
+                    scope,
+                    expression,
+                    security,
+                    span,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExistsCondition::Not(expression) => {
+            validate_exists_policy_claim_sources(target_resource, scope, expression, security, span)
+        }
+    }
 }
 
 fn validate_policy_assignments(
@@ -1612,12 +2092,12 @@ fn validate_policy_assignments(
     Ok(())
 }
 
-fn validate_policy_field(
-    fields: &[FieldSpec],
+fn validate_policy_field<'a>(
+    fields: &'a [FieldSpec],
     scope: &str,
     field_name: &str,
     span: Span,
-) -> syn::Result<()> {
+) -> syn::Result<&'a FieldSpec> {
     let field = fields
         .iter()
         .find(|field| field.name() == field_name)
@@ -1628,12 +2108,14 @@ fn validate_policy_field(
             )
         })?;
 
-    if !is_i64_field(&field.ty) {
+    if policy_field_claim_type(&field.ty).is_none() {
         return Err(syn::Error::new(
             span,
-            format!("row policy field `{field_name}` must use type `i64` or `Option<i64>`"),
+            format!(
+                "row policy field `{field_name}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types"
+            ),
         ));
     }
 
-    Ok(())
+    Ok(field)
 }

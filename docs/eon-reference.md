@@ -153,25 +153,59 @@ List settings tune generated list endpoint defaults.
 
 ## Row Policies
 
-Row policies support both the newer explicit form and older owner/set-owner shorthands.
+Row policies support both the newer explicit form and older owner/set-owner shorthands. `read`, `update`, and `delete` accept a single filter, an array that implies `all_of`, or an explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` stays a flat assignment list.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].policies.admin_bypass | Bool | true | No | true, false | When true, admin-role users bypass the configured row-level policies. |
-| resources[].policies.read | Policy, [Policy] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field` | Filters read queries. `SetOwner` syntax is rejected here. |
-| resources[].policies.create | Policy, [Policy] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field` | Assigns values during create operations. `Owner` syntax is rejected here. |
-| resources[].policies.update | Policy, [Policy] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field` | Filters update queries. |
-| resources[].policies.delete | Policy, [Policy] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field` | Filters delete queries. |
+| resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `SetOwner` syntax is rejected here. |
+| resources[].policies.create | PolicyAssignment, [PolicyAssignment] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field` | Assigns values during create operations. Boolean groups are not supported here. `Owner` syntax is rejected here. |
+| resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. |
+| resources[].policies.delete | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters delete queries. Arrays imply `all_of`. |
 
 ```eon
 policies: {
     admin_bypass: true
-    read: "tenant_id=claim.tenant_id"
-    create: "tenant_id=claim.tenant_id"
+    read: {
+        any_of: [
+            "owner_id=user.id"
+            {
+                all_of: [
+                    "tenant_id=claim.tenant_id"
+                    { not: "blocked_user_id=user.id" }
+                ]
+            }
+        ]
+    }
+    create: [
+        "owner_id=user.id"
+        { field: "tenant_id", value: "claim.tenant_id" }
+    ]
     update: [{ field: "tenant_id", equals: "claim.tenant_id" }]
     delete: "Owner:owner_id"
 }
 ```
+
+The first relation-aware filter form is `exists`, which targets another declared resource and correlates it with the current row:
+
+```eon
+read: {
+    exists: {
+        resource: "FamilyMember"
+        where: [
+            { field: "family_id", equals_field: "family_id" }
+            {
+                any_of: [
+                    "user_id=user.id"
+                    "delegate_user_id=user.id"
+                ]
+            }
+        ]
+    }
+}
+```
+
+Generated migrations and live-schema checks also treat row-policy fields as index hints. That includes direct policy-controlled fields on the current resource and target-resource fields referenced by `exists` conditions.
 
 ## Field Keys
 
@@ -366,9 +400,9 @@ Explicit auth claim mappings let built-in auth expose predictable claim names wi
 
 Current runtime boundary:
 
-- Row policies can only consume `I64` claims today.
+- Row policies can consume explicit `I64`, `String`, and `Bool` claims when the target field uses the matching type.
 - When `security.auth.claims` is configured, non-legacy `claim.<name>` references in row policies must be declared there.
-- Legacy numeric `*_id` claims still work even without an explicit mapping.
+- Legacy undeclared `claim.<name>` usage still only works for numeric `*_id` claims.
 
 ## Session Cookie
 

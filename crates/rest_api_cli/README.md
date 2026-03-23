@@ -230,16 +230,26 @@ You can also simulate a single authorization decision:
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --user-id 7 --claim tenant_id=3 --row tenant_id=3
 vsr authz simulate --input api.eon --resource ScopedDoc --action create --role admin --proposed tenant_id=42 --format json
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --scope Family=42 --scoped-assignment template:FamilyMember@Family=42
+vsr authz simulate --input api.eon --resource SharedDoc --action read --user-id 7 --row family_id=42 --related-row FamilyMember:family_id=42,user_id=7
 vsr --database-url sqlite:app.db?mode=rwc authz simulate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42 --load-runtime-assignments
 ```
 
 Repeated `--claim`, `--row`, and `--proposed` arguments use `key=value` syntax. Values are
-inferred as `null`, `bool`, `i64`, or `String`. `--scope` uses `ScopeName=value`, and repeated
+inferred as `null`, `bool`, `i64`, or `String`. Repeated `--related-row` arguments use
+`Resource:key=value,other=value` syntax so the simulator can evaluate relation-aware `exists`
+predicates against explicit related rows. `--scope` uses `ScopeName=value`, and repeated
 `--scoped-assignment` arguments use `permission:Name@Scope=value` or
 `template:Name@Scope=value`. `--load-runtime-assignments` loads stored assignments for
 `--user-id` from the configured database, using the table created by `vsr migrate authz`.
 These runtime scoped assignments are validated and resolved by the simulator, but they are not
-yet enforced by generated handlers.
+yet enforced by generated handlers. Stored assignments include `created_at`,
+`created_by_user_id`, and optional `expires_at`; expired assignments are ignored by runtime
+simulation and runtime access checks.
+
+Static `.eon` row policies also support `all_of`, `any_of`, `not`, and a first bounded
+relation-aware `exists` form. `vsr authz simulate` can fully evaluate `exists` predicates when
+you supply matching related rows with repeated `--related-row` arguments; otherwise the trace
+stays incomplete and reports the missing related resource data.
 
 The `.eon` format also supports an optional static `authorization` block for declaring scopes,
 permissions, and templates. In this slice it is contract-only: validated and surfaced by the
