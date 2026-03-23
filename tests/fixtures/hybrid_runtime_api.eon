@@ -21,12 +21,12 @@ authorization: {
     permissions: {
         FamilyManage: {
             actions: ["Create", "Read", "Update", "Delete"]
-            resources: ["ScopedDoc"]
+            resources: ["ScopedDoc", "ScopedClaimDoc"]
             scopes: ["Family"]
         }
         FamilyRead: {
             actions: ["Read"]
-            resources: ["ScopedDoc"]
+            resources: ["ScopedDoc", "ScopedClaimDoc"]
             scopes: ["Family"]
         }
     }
@@ -43,10 +43,21 @@ authorization: {
                 scope_field: "family_id"
                 actions: ["Create", "Read", "Update", "Delete"]
             }
+            ScopedClaimDoc: {
+                scope: "Family"
+                scope_field: "family_id"
+                actions: ["Create", "Read"]
+            }
         }
     }
 }
 resources: [
+    {
+        name: "Family"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
     {
         name: "ScopedDoc"
         roles: {
@@ -67,6 +78,31 @@ resources: [
         fields: [
             { name: "id", type: I64, id: true }
             { name: "user_id", type: I64 }
+            {
+                name: "family_id"
+                type: I64
+                relation: {
+                    references: "family.id"
+                    nested_route: true
+                }
+            }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "ScopedClaimDoc"
+        roles: {
+            create: "member"
+            read: "member"
+        }
+        policies: {
+            create: [
+                { field: "family_id", value: "claim.family_id" }
+            ]
+            read: { field: "family_id", equals: "claim.family_id" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
             { name: "family_id", type: I64 }
             { name: "title", type: String }
         ]

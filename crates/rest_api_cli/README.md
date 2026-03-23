@@ -304,14 +304,20 @@ authorization: {
 }
 ```
 
-This is additive and item-scoped only. Generated `GET /resource/{id}`, `PUT /resource/{id}`, and
+This is additive only. Generated `GET /resource/{id}`, `PUT /resource/{id}`, and
 `DELETE /resource/{id}` still require the static role check to pass first. When the static row
 policy denies the row, the handler can derive a runtime scope from the stored row and consult the
-persisted runtime assignment layer. Generated `POST /resource` can also opt into a narrow hybrid
-create fallback when the configured `scope_field` is already assigned from a claim in
+persisted runtime assignment layer. Top-level `GET /resource` can also use runtime `Read` grants,
+but only when the request includes an exact `filter_<scope_field>=...` value so the handler can
+derive one concrete scope from the query. Nested collection routes can also use runtime `Read`
+grants when the nested parent filter is the configured `scope_field`. Generated `POST /resource`
+can also opt into a narrow hybrid create fallback, and when the created row is only
+runtime-readable the generated `201` response can still return the created item through the same
+hybrid read fallback. The create path remains narrow:
+the handler only opens the configured scope field when it is already assigned from a claim in
 `policies.create`; in that case the create DTO exposes that one field as an optional fallback and
 the handler uses it only when the claim is missing and a matching runtime `Create` grant exists
-for the supplied scope. Collection/list routes are unchanged in this slice.
+for the supplied scope.
 
 ### Static Files In `.eon`
 

@@ -1957,6 +1957,8 @@ fn resource_impl_tokens(
         let scope_name = Literal::string(hybrid.scope);
         let resource_name = Literal::string(&resource.struct_ident.to_string());
         let scope_field_ident = &hybrid.scope_field.ident;
+        let scope_field_name = Literal::string(&hybrid.scope_field.name());
+        let scope_query_filter_ident = format_ident!("filter_{}", scope_field_ident);
         let scope_value = match super::model::policy_field_claim_type(&hybrid.scope_field.ty)
             .unwrap_or_else(|| panic!("validated hybrid scope field type is unsupported"))
         {
@@ -1986,6 +1988,16 @@ fn resource_impl_tokens(
         let hybrid_create = hybrid.create;
         let hybrid_update = hybrid.update;
         let hybrid_delete = hybrid.delete;
+        let list_scope_value = match super::model::policy_field_claim_type(&hybrid.scope_field.ty)
+            .unwrap_or_else(|| panic!("validated hybrid scope field type is unsupported"))
+        {
+            crate::auth::AuthClaimType::I64 | crate::auth::AuthClaimType::Bool => {
+                quote!(query.#scope_query_filter_ident.map(|value| value.to_string()))
+            }
+            crate::auth::AuthClaimType::String => {
+                quote!(query.#scope_query_filter_ident.clone())
+            }
+        };
         let hybrid_create_scope_tokens = if hybrid_create {
             let create_scope_value =
                 match super::model::policy_field_claim_type(&hybrid.scope_field.ty)
@@ -2039,6 +2051,59 @@ fn resource_impl_tokens(
         } else {
             quote!()
         };
+        let hybrid_list_scope_tokens = if hybrid_read {
+            quote! {
+                fn hybrid_scope_binding_for_list_request(
+                    query: &#list_query_ty,
+                    parent_filter: Option<(&'static str, i64)>,
+                ) -> Option<#runtime_crate::core::authorization::AuthorizationScopeBinding> {
+                    if let Some((field_name, value)) = parent_filter {
+                        if field_name == #scope_field_name {
+                            return Some(#runtime_crate::core::authorization::AuthorizationScopeBinding {
+                                scope: #scope_name.to_owned(),
+                                value: value.to_string(),
+                            });
+                        }
+                    }
+                    let value = #list_scope_value;
+                    value.map(|value| #runtime_crate::core::authorization::AuthorizationScopeBinding {
+                        scope: #scope_name.to_owned(),
+                        value,
+                    })
+                }
+
+                async fn build_list_plan_with_hybrid_read(
+                    query: &#list_query_ty,
+                    user: &#runtime_crate::core::auth::UserContext,
+                    runtime: &#runtime_crate::core::authorization::AuthorizationRuntime,
+                    parent_filter: Option<(&'static str, i64)>,
+                ) -> Result<#list_plan_ty, HttpResponse> {
+                    let mut skip_static_read_policy = false;
+                    if let Some(scope) = Self::hybrid_scope_binding_for_list_request(query, parent_filter) {
+                        match runtime
+                            .evaluate_runtime_access_for_user(
+                                user.id,
+                                #resource_name,
+                                #runtime_crate::core::authorization::AuthorizationAction::Read,
+                                scope,
+                            )
+                            .await
+                        {
+                            Ok(result) if result.allowed => {
+                                skip_static_read_policy = true;
+                            }
+                            Ok(_) => {}
+                            Err(message) => {
+                                return Err(#runtime_crate::core::errors::internal_error(message));
+                            }
+                        }
+                    }
+                    Self::build_list_plan_internal(query, user, parent_filter, skip_static_read_policy)
+                }
+            }
+        } else {
+            quote!()
+        };
         quote! {
             fn hybrid_runtime_supports_action(
                 action: #runtime_crate::core::authorization::AuthorizationAction,
@@ -2073,6 +2138,7 @@ fn resource_impl_tokens(
             }
 
             #hybrid_create_scope_tokens
+            #hybrid_list_scope_tokens
 
             async fn fetch_runtime_authorized_by_id(
                 id: i64,
@@ -2166,6 +2232,39 @@ fn resource_impl_tokens(
             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
         }
     };
+    let created_response_fallback = if hybrid.map(|config| config.read).unwrap_or(false) {
+        quote! {
+            if let Some(runtime) = runtime {
+                match Self::fetch_runtime_authorized_by_id(
+                    id,
+                    user,
+                    runtime,
+                    db,
+                    #runtime_crate::core::authorization::AuthorizationAction::Read,
+                )
+                .await
+                {
+                    Ok(Some(item)) => HttpResponse::Created()
+                        .append_header(("Location", Self::created_location(req, id)))
+                        .json(item),
+                    Ok(None) => HttpResponse::Created().finish(),
+                    Err(response) => response,
+                }
+            } else {
+                HttpResponse::Created().finish()
+            }
+        }
+    } else {
+        quote!(HttpResponse::Created().finish())
+    };
+    let created_response_runtime = if hybrid
+        .map(|config| config.read || config.create)
+        .unwrap_or(false)
+    {
+        quote!(Some(runtime.get_ref()))
+    } else {
+        quote!(None)
+    };
 
     let create_body = match (resource.db, insert_fields.is_empty()) {
         (super::model::DbBackend::Postgres | super::model::DbBackend::Sqlite, true) => {
@@ -2175,7 +2274,7 @@ fn resource_impl_tokens(
                     .fetch_one(db.get_ref())
                     .await
                 {
-                    Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref()).await,
+                    Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
@@ -2192,7 +2291,7 @@ fn resource_impl_tokens(
                 let mut q = #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql);
                 #create_insert_binds
                 match q.fetch_one(db.get_ref()).await {
-                    Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref()).await,
+                    Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
@@ -2203,7 +2302,7 @@ fn resource_impl_tokens(
                 match #runtime_crate::db::query(&sql).execute(db.get_ref()).await {
                     Ok(result) => match result.last_insert_rowid() {
                         Some(created_id) => {
-                            Self::created_response(created_id, &req, &user, db.get_ref()).await
+                            Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await
                         }
                         None => HttpResponse::Created().finish(),
                     },
@@ -2219,7 +2318,7 @@ fn resource_impl_tokens(
                 match q.execute(db.get_ref()).await {
                     Ok(result) => match result.last_insert_rowid() {
                         Some(created_id) => {
-                            Self::created_response(created_id, &req, &user, db.get_ref()).await
+                            Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await
                         }
                         None => HttpResponse::Created().finish(),
                     },
@@ -2453,48 +2552,101 @@ fn resource_impl_tokens(
     let nested_handlers = relation_routes.map(|(field_ident, _)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
         if read_requires_auth {
-            quote! {
-                async fn #handler_ident(
-                    path: web::Path<i64>,
-                    query: web::Query<#list_query_ty>,
-                    user: #runtime_crate::core::auth::UserContext,
-                    db: web::Data<DbPool>,
-                ) -> impl Responder {
-                    #read_check
+            if hybrid.map(|config| config.read).unwrap_or(false) {
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        query: web::Query<#list_query_ty>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>,
+                        runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
+                    ) -> impl Responder {
+                        #read_check
 
-                    let parent_id = path.into_inner();
-                    let query = query.into_inner();
-                    let plan = match Self::build_list_plan(
-                        &query,
-                        &user,
-                        Some((stringify!(#field_ident), parent_id)),
-                    ) {
-                        Ok(parts) => parts,
-                        Err(response) => return response,
-                    };
-                    let mut count_query =
-                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                    for bind in &plan.filter_binds {
-                        count_query = match bind.clone() {
-                            #(#count_bind_matches)*
+                        let parent_id = path.into_inner();
+                        let query = query.into_inner();
+                        let parent_filter = Some((stringify!(#field_ident), parent_id));
+                        let plan = match Self::build_list_plan_with_hybrid_read(
+                            &query,
+                            &user,
+                            runtime.get_ref(),
+                            parent_filter,
+                        )
+                        .await
+                        {
+                            Ok(parts) => parts,
+                            Err(response) => return response,
                         };
-                    }
-                    let total = match count_query.fetch_one(db.get_ref()).await {
-                        Ok(total) => total,
-                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                    };
-                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                    for bind in &plan.select_binds {
-                        q = match bind.clone() {
-                            #(#list_bind_matches)*
+                        let mut count_query =
+                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                        for bind in &plan.filter_binds {
+                            count_query = match bind.clone() {
+                                #(#count_bind_matches)*
+                            };
+                        }
+                        let total = match count_query.fetch_one(db.get_ref()).await {
+                            Ok(total) => total,
+                            Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
                         };
+                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                        for bind in &plan.select_binds {
+                            q = match bind.clone() {
+                                #(#list_bind_matches)*
+                            };
+                        }
+                        match q.fetch_all(db.get_ref()).await {
+                            Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                                Ok(response) => HttpResponse::Ok().json(response),
+                                Err(response) => response,
+                            },
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
                     }
-                    match q.fetch_all(db.get_ref()).await {
-                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => HttpResponse::Ok().json(response),
-                            Err(response) => response,
-                        },
-                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                }
+            } else {
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        query: web::Query<#list_query_ty>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>,
+                    ) -> impl Responder {
+                        #read_check
+
+                        let parent_id = path.into_inner();
+                        let query = query.into_inner();
+                        let plan = match Self::build_list_plan(
+                            &query,
+                            &user,
+                            Some((stringify!(#field_ident), parent_id)),
+                        ) {
+                            Ok(parts) => parts,
+                            Err(response) => return response,
+                        };
+                        let mut count_query =
+                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                        for bind in &plan.filter_binds {
+                            count_query = match bind.clone() {
+                                #(#count_bind_matches)*
+                            };
+                        }
+                        let total = match count_query.fetch_one(db.get_ref()).await {
+                            Ok(total) => total,
+                            Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                        };
+                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                        for bind in &plan.select_binds {
+                            q = match bind.clone() {
+                                #(#list_bind_matches)*
+                            };
+                        }
+                        match q.fetch_all(db.get_ref()).await {
+                            Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                                Ok(response) => HttpResponse::Ok().json(response),
+                                Err(response) => response,
+                            },
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
                     }
                 }
             }
@@ -2545,41 +2697,90 @@ fn resource_impl_tokens(
         }
     });
     let get_all_handler = if read_requires_auth {
-        quote! {
-            async fn get_all(
-                query: web::Query<#list_query_ty>,
-                user: #runtime_crate::core::auth::UserContext,
-                db: web::Data<DbPool>,
-            ) -> impl Responder {
-                #read_check
-                let query = query.into_inner();
-                let plan = match Self::build_list_plan(&query, &user, None) {
-                    Ok(parts) => parts,
-                    Err(response) => return response,
-                };
-                let mut count_query =
-                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                for bind in &plan.filter_binds {
-                    count_query = match bind.clone() {
-                        #(#count_bind_matches)*
+        if hybrid.map(|config| config.read).unwrap_or(false) {
+            quote! {
+                async fn get_all(
+                    query: web::Query<#list_query_ty>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                    runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
+                ) -> impl Responder {
+                    #read_check
+                    let query = query.into_inner();
+                    let plan = match Self::build_list_plan_with_hybrid_read(
+                        &query,
+                        &user,
+                        runtime.get_ref(),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
                     };
-                }
-                let total = match count_query.fetch_one(db.get_ref()).await {
-                    Ok(total) => total,
-                    Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                };
-                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                for bind in &plan.select_binds {
-                    q = match bind.clone() {
-                        #(#list_bind_matches)*
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    let total = match count_query.fetch_one(db.get_ref()).await {
+                        Ok(total) => total,
+                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
                     };
+                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                    for bind in &plan.select_binds {
+                        q = match bind.clone() {
+                            #(#list_bind_matches)*
+                        };
+                    }
+                    match q.fetch_all(db.get_ref()).await {
+                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                            Ok(response) => HttpResponse::Ok().json(response),
+                            Err(response) => response,
+                        },
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
                 }
-                match q.fetch_all(db.get_ref()).await {
-                    Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                        Ok(response) => HttpResponse::Ok().json(response),
-                        Err(response) => response,
-                    },
-                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+            }
+        } else {
+            quote! {
+                async fn get_all(
+                    query: web::Query<#list_query_ty>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                ) -> impl Responder {
+                    #read_check
+                    let query = query.into_inner();
+                    let plan = match Self::build_list_plan(&query, &user, None) {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
+                    };
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    let total = match count_query.fetch_one(db.get_ref()).await {
+                        Ok(total) => total,
+                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                    };
+                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                    for bind in &plan.select_binds {
+                        q = match bind.clone() {
+                            #(#list_bind_matches)*
+                        };
+                    }
+                    match q.fetch_all(db.get_ref()).await {
+                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                            Ok(response) => HttpResponse::Ok().json(response),
+                            Err(response) => response,
+                        },
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
                 }
             }
         }
@@ -2680,7 +2881,10 @@ fn resource_impl_tokens(
     } else {
         quote!()
     };
-    let create_runtime_arg = if hybrid.map(|config| config.create).unwrap_or(false) {
+    let create_runtime_arg = if hybrid
+        .map(|config| config.create || config.read)
+        .unwrap_or(false)
+    {
         quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
     } else {
         quote!()
@@ -2746,12 +2950,13 @@ fn resource_impl_tokens(
                 req: &HttpRequest,
                 user: &#runtime_crate::core::auth::UserContext,
                 db: &DbPool,
+                runtime: Option<&#runtime_crate::core::authorization::AuthorizationRuntime>,
             ) -> HttpResponse {
                 match Self::fetch_readable_by_id(id, user, db).await {
                     Ok(Some(item)) => HttpResponse::Created()
                         .append_header(("Location", Self::created_location(req, id)))
                         .json(item),
-                    Ok(None) => HttpResponse::Created().finish(),
+                    Ok(None) => #created_response_fallback,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
             }
@@ -2820,10 +3025,11 @@ fn resource_impl_tokens(
                 })
             }
 
-            fn build_list_plan(
+            fn build_list_plan_internal(
                 query: &#list_query_ty,
                 user: &#runtime_crate::core::auth::UserContext,
                 parent_filter: Option<(&'static str, i64)>,
+                skip_static_read_policy: bool,
             ) -> Result<#list_plan_ty, HttpResponse> {
                 let mut select_sql = format!("SELECT * FROM {}", #table_name);
                 let mut count_sql = format!("SELECT COUNT(*) FROM {}", #table_name);
@@ -2927,7 +3133,7 @@ fn resource_impl_tokens(
                     filter_binds.push(#list_bind_ty::Integer(value));
                 }
 
-                if !(#admin_bypass && is_admin) {
+                if !skip_static_read_policy && !(#admin_bypass && is_admin) {
                     #read_policy_list_conditions
                 }
 
@@ -3016,6 +3222,14 @@ fn resource_impl_tokens(
                     order,
                     cursor_mode,
                 })
+            }
+
+            fn build_list_plan(
+                query: &#list_query_ty,
+                user: &#runtime_crate::core::auth::UserContext,
+                parent_filter: Option<(&'static str, i64)>,
+            ) -> Result<#list_plan_ty, HttpResponse> {
+                Self::build_list_plan_internal(query, user, parent_filter, false)
             }
 
             fn finalize_list_response(

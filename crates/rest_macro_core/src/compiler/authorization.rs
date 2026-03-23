@@ -689,23 +689,35 @@ mod tests {
         );
         assert_eq!(model.contract.templates.len(), 1);
         assert_eq!(model.contract.templates[0].name, "FamilyMember");
-        assert_eq!(model.contract.hybrid_enforcement.resources.len(), 1);
+        assert_eq!(model.contract.hybrid_enforcement.resources.len(), 2);
+        let scoped_doc = model
+            .contract
+            .hybrid_enforcement
+            .resources
+            .iter()
+            .find(|resource| resource.resource == "ScopedDoc")
+            .expect("scoped doc hybrid resource should exist");
+        assert_eq!(scoped_doc.scope_field, "family_id");
         assert_eq!(
-            model.contract.hybrid_enforcement.resources[0].resource,
-            "ScopedDoc"
-        );
-        assert_eq!(
-            model.contract.hybrid_enforcement.resources[0].scope_field,
-            "family_id"
-        );
-        assert_eq!(
-            model.contract.hybrid_enforcement.resources[0].actions,
+            scoped_doc.actions,
             vec![
                 AuthorizationAction::Create,
                 AuthorizationAction::Read,
                 AuthorizationAction::Update,
                 AuthorizationAction::Delete
             ]
+        );
+        let scoped_claim_doc = model
+            .contract
+            .hybrid_enforcement
+            .resources
+            .iter()
+            .find(|resource| resource.resource == "ScopedClaimDoc")
+            .expect("scoped claim doc hybrid resource should exist");
+        assert_eq!(scoped_claim_doc.scope_field, "family_id");
+        assert_eq!(
+            scoped_claim_doc.actions,
+            vec![AuthorizationAction::Create, AuthorizationAction::Read]
         );
     }
 

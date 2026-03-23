@@ -127,6 +127,8 @@ expired assignments are ignored by runtime evaluation.
 - Implemented: persisted runtime assignments now support non-destructive revoke/renew lifecycle updates with append-only history, generated management endpoints, and matching `vsr authz runtime revoke|renew` commands
 - Implemented: the first hybrid enforcement mode now lets generated item-scoped `Read`/`Update`/`Delete` handlers fall back to persisted runtime grants after static row-policy denial, using explicit `.eon` scope derivation from a configured row field
 - Implemented: hybrid `Create` can now use the same runtime grant layer as an additive fallback, but only when the configured `scope_field` is already claim-controlled in `policies.create`
+- Implemented: top-level collection `Read` can now use the same runtime grant layer when the request includes an exact `filter_<scope_field>` value, keeping scope derivation explicit instead of inferring it from an unrestricted result set
+- Implemented: nested collection `Read` and created-response rendering now use the same explicit-scope runtime path when the parent filter or created row carries the configured `scope_field`
 
 ### Phase 5: Relation-Aware Authorization
 

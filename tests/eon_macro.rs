@@ -133,8 +133,15 @@ fn eon_macro_exposes_hybrid_create_scope_field_in_generated_dto() {
     };
 
     let authorization = hybrid_runtime_api::authorization();
+    let scoped_doc_hybrid = authorization
+        .contract
+        .hybrid_enforcement
+        .resources
+        .iter()
+        .find(|resource| resource.resource == "ScopedDoc")
+        .expect("scoped doc hybrid resource should exist");
     assert_eq!(
-        authorization.contract.hybrid_enforcement.resources[0].actions,
+        scoped_doc_hybrid.actions,
         vec![
             very_simple_rest::authorization::AuthorizationAction::Create,
             very_simple_rest::authorization::AuthorizationAction::Read,

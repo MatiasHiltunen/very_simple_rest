@@ -135,10 +135,15 @@ evaluation endpoint for explicit `resource + action + scope` checks. Custom hand
 enforcement. Generated item routes can also opt into hybrid enforcement through
 `authorization.hybrid_enforcement`, which lets `GET /resource/{id}`, `PUT /resource/{id}`, and
 `DELETE /resource/{id}` fall back to persisted runtime scoped grants after the static row-policy
-path denies a row. `POST /resource` can also opt into a narrow hybrid create fallback when the
-configured `scope_field` is already claim-controlled in `policies.create`, so the generated create
-DTO can accept that one field as an optional runtime-authorized fallback. This slice is additive
-only and still requires the static role check to pass first.
+path denies a row. Top-level `GET /resource` can also use runtime `Read` grants when the request
+includes an exact `filter_<scope_field>` value, giving the handler one concrete scope to evaluate.
+Nested collection routes can do the same when their parent filter targets that configured
+`scope_field`.
+`POST /resource` can also opt into a narrow hybrid create fallback when the configured
+`scope_field` is already claim-controlled in `policies.create`, so the generated create DTO can
+accept that one field as an optional runtime-authorized fallback. When the created row is only
+runtime-readable, the generated created response can also return that row through the same hybrid
+read fallback. This slice is additive only and still requires the static role check to pass first.
 Secrets such as `JWT_SECRET` still belong in the environment.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or

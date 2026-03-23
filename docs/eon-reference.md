@@ -65,14 +65,14 @@ The optional `authorization` block declares static scope, permission, template, 
 
 ## Authorization Hybrid Enforcement
 
-Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. Item-scoped `Read`/`Update`/`Delete` derive scope from stored rows, while `Create` is supported only as an additive fallback for a claim-controlled `policies.create` scope field.
+Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. Item-scoped `Read`/`Update`/`Delete` derive scope from stored rows, top-level collection `Read` derives scope only from an exact `filter_<scope_field>` query value, nested collection `Read` derives scope from the parent filter when it matches `scope_field`, and `Create` is supported only as an additive fallback for a claim-controlled `policies.create` scope field.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | authorization.hybrid_enforcement.resources | Map<ResourceName, HybridResource> | None | No | Keyed resource map | Each entry must reference a declared resource, declared scope, and at least one matching permission action. |
 | authorization.hybrid_enforcement.resources.<resource>.scope | String | Required | Yes | Declared scope name such as `Family` | Runtime grants are evaluated against this scope for the configured resource. |
 | authorization.hybrid_enforcement.resources.<resource>.scope_field | String | Required | Yes | Declared resource field name such as `family_id` | The generated handler derives the runtime scope value from this row field. |
-| authorization.hybrid_enforcement.resources.<resource>.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
+| authorization.hybrid_enforcement.resources.<resource>.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. Top-level collection `Read` participates only when the request includes an exact `filter_<scope_field>` value, and nested collection `Read` participates only when the parent filter targets that same `scope_field`. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
 
 ## Authorization Management API
 

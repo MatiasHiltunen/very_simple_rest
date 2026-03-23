@@ -247,7 +247,7 @@ object or just a type such as `title: String`.",
     push_section(
         &mut markdown,
         "Authorization Hybrid Enforcement",
-        "Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. Item-scoped `Read`/`Update`/`Delete` derive scope from stored rows, while `Create` is supported only as an additive fallback for a claim-controlled `policies.create` scope field.",
+        "Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. Item-scoped `Read`/`Update`/`Delete` derive scope from stored rows, top-level collection `Read` derives scope only from an exact `filter_<scope_field>` query value, nested collection `Read` derives scope from the parent filter when it matches `scope_field`, and `Create` is supported only as an additive fallback for a claim-controlled `policies.create` scope field.",
         &[
             row(
                 "authorization.hybrid_enforcement.resources",
@@ -279,7 +279,7 @@ object or just a type such as `title: String`.",
                 "Required",
                 "Yes",
                 "Create, Read, Update, Delete",
-                "`Read`, `Update`, and `Delete` require matching static row policies to supplement. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`.",
+                "`Read`, `Update`, and `Delete` require matching static row policies to supplement. Top-level collection `Read` participates only when the request includes an exact `filter_<scope_field>` value, and nested collection `Read` participates only when the parent filter targets that same `scope_field`. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`.",
             ),
         ],
     );

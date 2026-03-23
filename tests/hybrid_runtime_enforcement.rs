@@ -54,6 +54,10 @@ async fn generated_item_routes_support_hybrid_runtime_enforcement() {
     )
     .await
     .expect("authz runtime migration should apply");
+    query("CREATE TABLE family (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+        .execute(&pool)
+        .await
+        .expect("family table should create");
     query(
         "CREATE TABLE scoped_doc (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
@@ -65,6 +69,16 @@ async fn generated_item_routes_support_hybrid_runtime_enforcement() {
     .execute(&pool)
     .await
     .expect("scoped_doc table should create");
+    query(
+        "CREATE TABLE scoped_claim_doc (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            family_id INTEGER NOT NULL,\
+            title TEXT NOT NULL\
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("scoped_claim_doc table should create");
 
     let security = hybrid_runtime_api::security();
     let app = test::init_service(App::new().service(web::scope("/api").configure(|cfg| {
@@ -170,6 +184,24 @@ async fn generated_item_routes_support_hybrid_runtime_enforcement() {
     let before_read_response = test::call_service(&app, before_read_request).await;
     assert_eq!(before_read_response.status(), StatusCode::NOT_FOUND);
 
+    let before_list_request = test::TestRequest::get()
+        .uri("/api/scoped_doc?filter_family_id=42")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let before_list: hybrid_runtime_api::ScopedDocListResponse =
+        test::call_and_read_body_json(&app, before_list_request).await;
+    assert_eq!(before_list.total, 0);
+    assert_eq!(before_list.count, 0);
+
+    let before_nested_list_request = test::TestRequest::get()
+        .uri("/api/family/42/scoped_doc")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let before_nested_list: hybrid_runtime_api::ScopedDocListResponse =
+        test::call_and_read_body_json(&app, before_nested_list_request).await;
+    assert_eq!(before_nested_list.total, 0);
+    assert_eq!(before_nested_list.count, 0);
+
     let create_before_assignment_request = test::TestRequest::post()
         .uri("/api/scoped_doc")
         .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
@@ -197,6 +229,32 @@ async fn generated_item_routes_support_hybrid_runtime_enforcement() {
     let create_assignment_response = test::call_service(&app, create_assignment_request).await;
     assert_eq!(create_assignment_response.status(), StatusCode::CREATED);
 
+    let scoped_list_request = test::TestRequest::get()
+        .uri("/api/scoped_doc?filter_family_id=42")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let scoped_list_after_assignment: hybrid_runtime_api::ScopedDocListResponse =
+        test::call_and_read_body_json(&app, scoped_list_request).await;
+    assert_eq!(scoped_list_after_assignment.total, 1);
+    assert_eq!(scoped_list_after_assignment.count, 1);
+    assert_eq!(
+        scoped_list_after_assignment.items[0].id,
+        Some(shared_doc_id)
+    );
+
+    let nested_list_request = test::TestRequest::get()
+        .uri("/api/family/42/scoped_doc")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let nested_list_after_assignment: hybrid_runtime_api::ScopedDocListResponse =
+        test::call_and_read_body_json(&app, nested_list_request).await;
+    assert_eq!(nested_list_after_assignment.total, 1);
+    assert_eq!(nested_list_after_assignment.count, 1);
+    assert_eq!(
+        nested_list_after_assignment.items[0].id,
+        Some(shared_doc_id)
+    );
+
     let create_after_assignment_request = test::TestRequest::post()
         .uri("/api/scoped_doc")
         .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
@@ -210,6 +268,38 @@ async fn generated_item_routes_support_hybrid_runtime_enforcement() {
     assert_eq!(created_doc.user_id, member_user_id);
     assert_eq!(created_doc.family_id, 42);
     assert_eq!(created_doc.title, "Runtime-created household note");
+
+    let claim_doc_create_request = test::TestRequest::post()
+        .uri("/api/scoped_claim_doc")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .set_json(json!({
+            "family_id": 42,
+            "title": "Runtime-readable create response"
+        }))
+        .to_request();
+    let created_claim_doc: hybrid_runtime_api::ScopedClaimDoc =
+        test::call_and_read_body_json(&app, claim_doc_create_request).await;
+    assert_eq!(created_claim_doc.family_id, 42);
+    assert_eq!(created_claim_doc.title, "Runtime-readable create response");
+
+    let unscoped_list_request = test::TestRequest::get()
+        .uri("/api/scoped_doc")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let unscoped_list: hybrid_runtime_api::ScopedDocListResponse =
+        test::call_and_read_body_json(&app, unscoped_list_request).await;
+    assert_eq!(unscoped_list.total, 1);
+    assert_eq!(unscoped_list.count, 1);
+    assert_eq!(unscoped_list.items[0].id, created_doc.id);
+
+    let scoped_list_with_created_request = test::TestRequest::get()
+        .uri("/api/scoped_doc?filter_family_id=42")
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let scoped_list_with_created: hybrid_runtime_api::ScopedDocListResponse =
+        test::call_and_read_body_json(&app, scoped_list_with_created_request).await;
+    assert_eq!(scoped_list_with_created.total, 2);
+    assert_eq!(scoped_list_with_created.count, 2);
 
     let wrong_scope_create_request = test::TestRequest::post()
         .uri("/api/scoped_doc")

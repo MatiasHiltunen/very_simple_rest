@@ -420,7 +420,7 @@ authorization: {
 }
 ```
 
-For generated item routes, `.eon` can also opt into the first hybrid-enforcement slice:
+For generated routes, `.eon` can also opt into the first hybrid-enforcement slice:
 
 ```eon
 authorization: {
@@ -457,8 +457,15 @@ generated create DTO exposes that one field as an optional fallback, and the han
 when the claim is missing and a matching runtime scoped `Create` grant exists for the supplied
 scope.
 
-This is additive only: it does not bypass static role requirements, it does not affect
-collection/list routes, and it does not let runtime grants override unrelated create assignments.
+Top-level `GET /resource` can also use runtime `Read` grants when the request includes an exact
+`filter_<scope_field>=...` value, and nested collection routes such as
+`GET /parent/{id}/resource` can do the same when the nested parent filter is the configured
+`scope_field`. When a `POST /resource` request creates a row that is only runtime-readable, the
+created response can also render that row through the same hybrid read fallback instead of
+returning an empty `201`.
+
+This is additive only: it does not bypass static role requirements, it still needs one concrete
+scope per request, and it does not let runtime grants override unrelated create assignments.
 
 Generated `.eon` modules expose the compiled authorization view through `module::authorization()`
 so manual apps or emitted servers can build custom policy-management and diagnostics surfaces on
