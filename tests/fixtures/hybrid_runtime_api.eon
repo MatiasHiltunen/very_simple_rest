@@ -41,11 +41,23 @@ authorization: {
             ScopedDoc: {
                 scope: "Family"
                 scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
+                    create_payload: true
+                }
                 actions: ["Create", "Read", "Update", "Delete"]
             }
             ScopedClaimDoc: {
                 scope: "Family"
                 scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: false
+                    nested_parent: false
+                    create_payload: true
+                }
                 actions: ["Create", "Read"]
             }
         }

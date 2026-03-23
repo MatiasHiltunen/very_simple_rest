@@ -230,6 +230,8 @@ You can also simulate a single authorization decision:
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --user-id 7 --claim tenant_id=3 --row tenant_id=3
 vsr authz simulate --input api.eon --resource ScopedDoc --action create --role admin --proposed tenant_id=42 --format json
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --scope Family=42 --scoped-assignment template:FamilyMember@Family=42
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --role member --row user_id=1 --row family_id=42 --hybrid-source item --scoped-assignment template:FamilyMember@Family=42
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --role member --scope Family=42 --hybrid-source collection_filter --scoped-assignment template:FamilyMember@Family=42
 vsr authz simulate --input api.eon --resource SharedDoc --action read --user-id 7 --row family_id=42 --related-row FamilyMember:family_id=42,user_id=7
 vsr --database-url sqlite:app.db?mode=rwc authz simulate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42 --load-runtime-assignments
 ```
@@ -241,8 +243,10 @@ predicates against explicit related rows. `--scope` uses `ScopeName=value`, and 
 `--scoped-assignment` arguments use `permission:Name@Scope=value` or
 `template:Name@Scope=value`. `--load-runtime-assignments` loads stored assignments for
 `--user-id` from the configured database, using the table created by `vsr migrate authz`.
-These runtime scoped assignments are validated and resolved by the simulator, but they are not
-yet enforced by generated handlers. Stored assignments include `created_at`,
+These runtime scoped assignments are validated and resolved by the simulator. `--hybrid-source`
+adds a second, generated-handler view for `item`, `collection_filter`, `nested_parent`, or
+`create_payload` scope derivation when the resource declares
+`authorization.hybrid_enforcement`. Stored assignments include `created_at`,
 `created_by_user_id`, and optional `expires_at`; expired assignments are ignored by runtime
 simulation and runtime access checks.
 
@@ -297,6 +301,12 @@ authorization: {
             ScopedDoc: {
                 scope: "Family"
                 scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
+                    create_payload: true
+                }
                 actions: ["Create", "Read", "Update", "Delete"]
             }
         }
@@ -309,11 +319,12 @@ This is additive only. Generated `GET /resource/{id}`, `PUT /resource/{id}`, and
 policy denies the row, the handler can derive a runtime scope from the stored row and consult the
 persisted runtime assignment layer. Top-level `GET /resource` can also use runtime `Read` grants,
 but only when the request includes an exact `filter_<scope_field>=...` value so the handler can
-derive one concrete scope from the query. Nested collection routes can also use runtime `Read`
-grants when the nested parent filter is the configured `scope_field`. Generated `POST /resource`
-can also opt into a narrow hybrid create fallback, and when the created row is only
-runtime-readable the generated `201` response can still return the created item through the same
-hybrid read fallback. The create path remains narrow:
+derive one concrete scope from the query and `scope_sources.collection_filter = true`. Nested
+collection routes can also use runtime `Read` grants when `scope_sources.nested_parent = true`
+and the nested parent filter is the configured `scope_field`. Generated `POST /resource` can also
+opt into a narrow hybrid create fallback, and when the created row is only runtime-readable the
+generated `201` response can still return the created item through the same hybrid read fallback.
+The create path remains narrow:
 the handler only opens the configured scope field when it is already assigned from a claim in
 `policies.create`; in that case the create DTO exposes that one field as an optional fallback and
 the handler uses it only when the claim is missing and a matching runtime `Create` grant exists

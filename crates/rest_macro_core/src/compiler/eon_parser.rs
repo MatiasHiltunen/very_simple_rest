@@ -29,8 +29,9 @@ use crate::{
     },
     authorization::{
         AuthorizationAction, AuthorizationContract, AuthorizationHybridEnforcementConfig,
-        AuthorizationHybridResource, AuthorizationManagementApiConfig, AuthorizationPermission,
-        AuthorizationScope, AuthorizationTemplate, DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT,
+        AuthorizationHybridResource, AuthorizationHybridScopeSources,
+        AuthorizationManagementApiConfig, AuthorizationPermission, AuthorizationScope,
+        AuthorizationTemplate, DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT,
     },
     database::{
         DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
@@ -310,7 +311,21 @@ struct AuthorizationHybridResourceDocument {
     #[serde(default)]
     scope_field: Option<String>,
     #[serde(default)]
+    scope_sources: Option<AuthorizationHybridScopeSourcesDocument>,
+    #[serde(default)]
     actions: Vec<AuthorizationActionDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthorizationHybridScopeSourcesDocument {
+    #[serde(default)]
+    item: Option<bool>,
+    #[serde(default)]
+    collection_filter: Option<bool>,
+    #[serde(default)]
+    nested_parent: Option<bool>,
+    #[serde(default)]
+    create_payload: Option<bool>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -1227,6 +1242,11 @@ fn parse_authorization_hybrid_enforcement_document(
             .resources
             .into_iter()
             .map(|(resource, config)| {
+                let actions = config
+                    .actions
+                    .into_iter()
+                    .map(parse_authorization_action_document)
+                    .collect::<Vec<_>>();
                 let scope = config.scope.ok_or_else(|| {
                     syn::Error::new(
                         Span::call_site(),
@@ -1247,15 +1267,34 @@ fn parse_authorization_hybrid_enforcement_document(
                     resource,
                     scope,
                     scope_field,
-                    actions: config
-                        .actions
-                        .into_iter()
-                        .map(parse_authorization_action_document)
-                        .collect(),
+                    scope_sources: parse_authorization_hybrid_scope_sources_document(
+                        config.scope_sources,
+                        &actions,
+                    ),
+                    actions,
                 })
             })
             .collect::<syn::Result<Vec<_>>>()?,
     })
+}
+
+fn parse_authorization_hybrid_scope_sources_document(
+    document: Option<AuthorizationHybridScopeSourcesDocument>,
+    actions: &[AuthorizationAction],
+) -> AuthorizationHybridScopeSources {
+    let supports_read = actions.contains(&AuthorizationAction::Read);
+    let supports_update = actions.contains(&AuthorizationAction::Update);
+    let supports_delete = actions.contains(&AuthorizationAction::Delete);
+    let supports_create = actions.contains(&AuthorizationAction::Create);
+    let item_default = supports_read || supports_update || supports_delete;
+
+    let document = document.unwrap_or_default();
+    AuthorizationHybridScopeSources {
+        item: document.item.unwrap_or(item_default),
+        collection_filter: document.collection_filter.unwrap_or(supports_read),
+        nested_parent: document.nested_parent.unwrap_or(supports_read),
+        create_payload: document.create_payload.unwrap_or(supports_create),
+    }
 }
 
 fn parse_authorization_management_api_document(
@@ -3502,10 +3541,104 @@ mod tests {
             authorization.hybrid_enforcement.resources[0].scope_field,
             "family_id"
         );
+        assert!(
+            authorization.hybrid_enforcement.resources[0]
+                .scope_sources
+                .item
+        );
+        assert!(
+            authorization.hybrid_enforcement.resources[0]
+                .scope_sources
+                .collection_filter
+        );
+        assert!(
+            authorization.hybrid_enforcement.resources[0]
+                .scope_sources
+                .nested_parent
+        );
+        assert!(
+            !authorization.hybrid_enforcement.resources[0]
+                .scope_sources
+                .create_payload
+        );
         assert_eq!(
             authorization.hybrid_enforcement.resources[0].actions,
             vec![AuthorizationAction::Read]
         );
+    }
+
+    #[test]
+    fn parses_explicit_authorization_hybrid_scope_sources_from_eon() {
+        let document = parse_document(
+            r#"
+            authorization: {
+                scopes: {
+                    Family: {}
+                }
+                permissions: {
+                    FamilyRead: {
+                        actions: ["Read"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                    FamilyCreate: {
+                        actions: ["Create"]
+                        resources: ["ScopedDoc"]
+                        scopes: ["Family"]
+                    }
+                }
+                hybrid_enforcement: {
+                    resources: {
+                        ScopedDoc: {
+                            scope: "Family"
+                            scope_field: "family_id"
+                            scope_sources: {
+                                item: false
+                                collection_filter: true
+                                nested_parent: false
+                                create_payload: true
+                            }
+                            actions: ["Create", "Read"]
+                        }
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "ScopedDoc"
+                    roles: {
+                        read: "member"
+                        create: "member"
+                    }
+                    policies: {
+                        read: "user_id=user.id"
+                        create: [
+                            "user_id=user.id"
+                            { field: "family_id", value: "claim.family_id" }
+                        ]
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "user_id", type: I64 }
+                        { name: "family_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let authorization = parse_authorization_document(document.authorization)
+            .expect("authorization should parse");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        validate_authorization_contract(&authorization, &resources, Span::call_site())
+            .expect("authorization contract should validate");
+
+        let resource = &authorization.hybrid_enforcement.resources[0];
+        assert!(!resource.scope_sources.item);
+        assert!(resource.scope_sources.collection_filter);
+        assert!(!resource.scope_sources.nested_parent);
+        assert!(resource.scope_sources.create_payload);
     }
 
     #[test]

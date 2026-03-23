@@ -358,6 +358,8 @@ You can also simulate one authorization decision against that compiled model:
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --user-id 7 --claim tenant_id=3 --row tenant_id=3
 vsr authz simulate --input api.eon --resource ScopedDoc --action create --role admin --proposed tenant_id=42 --format json
 vsr authz simulate --input api.eon --resource ScopedDoc --action read --scope Family=42 --scoped-assignment template:FamilyMember@Family=42
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --role member --row user_id=1 --row family_id=42 --hybrid-source item --scoped-assignment template:FamilyMember@Family=42
+vsr authz simulate --input api.eon --resource ScopedDoc --action read --role member --scope Family=42 --hybrid-source collection_filter --scoped-assignment template:FamilyMember@Family=42
 vsr authz simulate --input api.eon --resource SharedDoc --action read --user-id 7 --row family_id=42 --related-row FamilyMember:family_id=42,user_id=7
 vsr --database-url sqlite:app.db?mode=rwc authz simulate --config api.eon --resource ScopedDoc --action read --user-id 7 --scope Family=42 --load-runtime-assignments
 ```
@@ -370,7 +372,9 @@ predicates against explicit related rows. `--scope` accepts `ScopeName=value`, a
 `template:Name@Scope=value`. `--load-runtime-assignments` fetches stored assignments for
 `--user-id` from the configured database, using the runtime authz table created by
 `vsr migrate authz`. Runtime scoped assignments are resolved and validated against the static
-`authorization` contract in the simulator, but generated handlers do not enforce them yet.
+`authorization` contract in the simulator. `--hybrid-source` adds a second, generated-handler
+view for `item`, `collection_filter`, `nested_parent`, or `create_payload` scope derivation when
+the resource declares `authorization.hybrid_enforcement`.
 Stored runtime assignments now include `created_at`, `created_by_user_id`, and optional
 `expires_at`; expired assignments are ignored by runtime simulation and runtime access checks.
 
@@ -439,6 +443,12 @@ authorization: {
             ScopedDoc: {
                 scope: "Family"
                 scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
+                    create_payload: true
+                }
                 actions: ["Create", "Read", "Update", "Delete"]
             }
         }
@@ -459,10 +469,10 @@ scope.
 
 Top-level `GET /resource` can also use runtime `Read` grants when the request includes an exact
 `filter_<scope_field>=...` value, and nested collection routes such as
-`GET /parent/{id}/resource` can do the same when the nested parent filter is the configured
-`scope_field`. When a `POST /resource` request creates a row that is only runtime-readable, the
-created response can also render that row through the same hybrid read fallback instead of
-returning an empty `201`.
+`GET /parent/{id}/resource` can do the same when `scope_sources.nested_parent = true` and the
+nested parent filter is the configured `scope_field`. When a `POST /resource` request creates a
+row that is only runtime-readable, the created response can also render that row through the same
+hybrid read fallback instead of returning an empty `201`.
 
 This is additive only: it does not bypass static role requirements, it still needs one concrete
 scope per request, and it does not let runtime grants override unrelated create assignments.

@@ -7,13 +7,14 @@ use rest_macro_core::{
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment,
         AuthorizationAssignmentTrace, AuthorizationCondition, AuthorizationConditionTrace,
         AuthorizationContract, AuthorizationExistsCondition, AuthorizationExistsConditionTrace,
-        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationOutcome,
-        AuthorizationRuntime, AuthorizationRuntimeAccessResult, AuthorizationScopeBinding,
-        AuthorizationScopedAssignment, AuthorizationScopedAssignmentCreateInput,
-        AuthorizationScopedAssignmentEventKind, AuthorizationScopedAssignmentEventRecord,
-        AuthorizationScopedAssignmentRecord, AuthorizationScopedAssignmentTarget,
-        AuthorizationScopedAssignmentTrace, AuthorizationSimulationInput,
-        AuthorizationSimulationResult, AuthorizationValueSource, ResourceAuthorization,
+        AuthorizationHybridSource, AuthorizationMatch, AuthorizationModel, AuthorizationOperator,
+        AuthorizationOutcome, AuthorizationRuntime, AuthorizationRuntimeAccessResult,
+        AuthorizationScopeBinding, AuthorizationScopedAssignment,
+        AuthorizationScopedAssignmentCreateInput, AuthorizationScopedAssignmentEventKind,
+        AuthorizationScopedAssignmentEventRecord, AuthorizationScopedAssignmentRecord,
+        AuthorizationScopedAssignmentTarget, AuthorizationScopedAssignmentTrace,
+        AuthorizationSimulationInput, AuthorizationSimulationResult, AuthorizationValueSource,
+        ResourceAuthorization,
         delete_runtime_assignment_with_audit as delete_stored_runtime_assignment_with_audit,
         list_runtime_assignment_events_for_user, list_runtime_assignments_for_user,
         load_runtime_assignments_for_user,
@@ -104,6 +105,7 @@ pub async fn simulate_authorization(
     related_rows: &[String],
     proposed: &[String],
     scope: Option<&str>,
+    hybrid_source: Option<rest_macro_core::authorization::AuthorizationHybridSource>,
     scoped_assignments: &[String],
     load_runtime_assignments: bool,
     database_url: Option<&str>,
@@ -142,6 +144,7 @@ pub async fn simulate_authorization(
             related_rows: parse_related_rows(related_rows)?,
             proposed: parse_key_value_values(proposed, "proposed")?,
             scope: scope.map(parse_scope_binding).transpose()?,
+            hybrid_source,
             scoped_assignments: runtime_assignments,
         }
         .normalized(),
@@ -755,11 +758,13 @@ fn render_contract_text(output: &mut String, contract: &AuthorizationContract) {
         contract.hybrid_enforcement.resources.len()
     ));
     for resource in &contract.hybrid_enforcement.resources {
+        let sources = resource.scope_sources.labels().join(", ");
         output.push_str(&format!(
-            "  - {} [scope={}, scope_field={}, actions={}]\n",
+            "  - {} [scope={}, scope_field={}, sources={}, actions={}]\n",
             resource.resource,
             resource.scope,
             resource.scope_field,
+            if sources.is_empty() { "none" } else { &sources },
             resource
                 .actions
                 .iter()
@@ -861,6 +866,45 @@ fn render_text_simulation(
             "resolved_templates: {}\n",
             result.resolved_templates.join(", ")
         ));
+    }
+
+    if let Some(hybrid) = &result.hybrid {
+        output.push_str("hybrid:\n");
+        output.push_str(&format!(
+            "  source: {}\n",
+            hybrid_source_label(hybrid.source)
+        ));
+        match &hybrid.scope {
+            Some(scope) => output.push_str(&format!("  scope: {}={}\n", scope.scope, scope.value)),
+            None => output.push_str("  scope: none\n"),
+        }
+        output.push_str(&format!("  runtime_allowed: {}\n", hybrid.runtime_allowed));
+        output.push_str(&format!(
+            "  effective_outcome: {}\n",
+            outcome_label(hybrid.effective_outcome)
+        ));
+        output.push_str(&format!(
+            "  effective_allowed: {}\n",
+            hybrid.effective_allowed
+        ));
+        output.push_str(&format!(
+            "  fallback_applied: {}\n",
+            hybrid.fallback_applied
+        ));
+        output.push_str(&format!(
+            "  skip_static_row_policy: {}\n",
+            hybrid.skip_static_row_policy
+        ));
+        if hybrid.notes.is_empty() {
+            output.push_str("  notes: none\n");
+        } else {
+            output.push_str("  notes:\n");
+            for note in &hybrid.notes {
+                output.push_str(&format!("    - {note}\n"));
+            }
+        }
+    } else {
+        output.push_str("hybrid: none\n");
     }
 
     if result.notes.is_empty() {
@@ -1394,6 +1438,15 @@ fn outcome_label(outcome: AuthorizationOutcome) -> &'static str {
     }
 }
 
+fn hybrid_source_label(source: AuthorizationHybridSource) -> &'static str {
+    match source {
+        AuthorizationHybridSource::Item => "item",
+        AuthorizationHybridSource::CollectionFilter => "collection_filter",
+        AuthorizationHybridSource::NestedParent => "nested_parent",
+        AuthorizationHybridSource::CreatePayload => "create_payload",
+    }
+}
+
 fn operator_label(operator: rest_macro_core::authorization::AuthorizationOperator) -> &'static str {
     match operator {
         rest_macro_core::authorization::AuthorizationOperator::Equals => "==",
@@ -1666,6 +1719,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             },
             OutputFormat::Text,
@@ -1701,6 +1755,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: Some(parse_scope_binding("Family=42").expect("scope should parse")),
+                hybrid_source: None,
                 scoped_assignments: parse_scoped_assignments(&[
                     "template:FamilyMember@Family=42".to_owned()
                 ])
@@ -1716,6 +1771,75 @@ mod tests {
         assert!(rendered.contains("resolved_permissions: FamilyRead"));
         assert!(rendered.contains("resolved_templates: FamilyMember"));
         assert!(rendered.contains("generated handlers do not enforce"));
+    }
+
+    #[test]
+    fn render_authorization_simulation_reports_hybrid_item_fallback() {
+        let rendered = render_authorization_simulation(
+            &load_service("hybrid_runtime_api.eon"),
+            Some("ScopedDoc"),
+            AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: vec!["member".to_owned()],
+                claims: BTreeMap::new(),
+                row: BTreeMap::from([
+                    ("user_id".to_owned(), Value::from(1)),
+                    ("family_id".to_owned(), Value::from(42)),
+                ]),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
+                scope: None,
+                hybrid_source: Some(
+                    rest_macro_core::authorization::AuthorizationHybridSource::Item,
+                ),
+                scoped_assignments: parse_scoped_assignments(&[
+                    "template:FamilyMember@Family=42".to_owned()
+                ])
+                .expect("scoped assignments should parse"),
+            },
+            OutputFormat::Text,
+        )
+        .expect("simulation should render");
+
+        assert!(rendered.contains("outcome: denied"));
+        assert!(rendered.contains("hybrid:"));
+        assert!(rendered.contains("source: item"));
+        assert!(rendered.contains("scope: Family=42"));
+        assert!(rendered.contains("effective_outcome: allowed"));
+        assert!(rendered.contains("fallback_applied: true"));
+    }
+
+    #[test]
+    fn render_authorization_simulation_reports_hybrid_collection_scope_widening() {
+        let rendered = render_authorization_simulation(
+            &load_service("hybrid_runtime_api.eon"),
+            Some("ScopedDoc"),
+            AuthorizationSimulationInput {
+                action: AuthorizationAction::Read,
+                user_id: Some(7),
+                roles: vec!["member".to_owned()],
+                claims: BTreeMap::new(),
+                row: BTreeMap::new(),
+                proposed: BTreeMap::new(),
+                related_rows: BTreeMap::new(),
+                scope: Some(parse_scope_binding("Family=42").expect("scope should parse")),
+                hybrid_source: Some(
+                    rest_macro_core::authorization::AuthorizationHybridSource::CollectionFilter,
+                ),
+                scoped_assignments: parse_scoped_assignments(&[
+                    "template:FamilyMember@Family=42".to_owned()
+                ])
+                .expect("scoped assignments should parse"),
+            },
+            OutputFormat::Text,
+        )
+        .expect("simulation should render");
+
+        assert!(rendered.contains("outcome: incomplete"));
+        assert!(rendered.contains("source: collection_filter"));
+        assert!(rendered.contains("effective_outcome: allowed"));
+        assert!(rendered.contains("skip_static_row_policy: true"));
     }
 
     #[test]
@@ -1748,6 +1872,7 @@ mod tests {
             &[],
             &[],
             &["tenant_id=42".to_owned()],
+            None,
             None,
             &[],
             false,
@@ -1837,6 +1962,7 @@ mod tests {
                     ])],
                 )]),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             },
             OutputFormat::Text,
@@ -1897,6 +2023,7 @@ mod tests {
             &[],
             &[],
             Some("Family=42"),
+            None,
             &[],
             true,
             Some(&database_url),

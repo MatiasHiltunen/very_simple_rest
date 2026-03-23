@@ -481,6 +481,10 @@ enum AuthzCommand {
         #[arg(long, value_name = "SCOPE=VALUE")]
         scope: Option<String>,
 
+        /// Optional hybrid request shape to simulate against generated handler behavior
+        #[arg(long = "hybrid-source", value_enum)]
+        hybrid_source: Option<AuthzHybridSourceArg>,
+
         /// Runtime scoped assignments in `permission:Name@Scope=value` or `template:Name@Scope=value` form; may be repeated
         #[arg(
             long = "scoped-assignment",
@@ -721,6 +725,14 @@ enum AuthzActionArg {
     Create,
     Update,
     Delete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum AuthzHybridSourceArg {
+    Item,
+    CollectionFilter,
+    NestedParent,
+    CreatePayload,
 }
 
 #[tokio::main]
@@ -1055,6 +1067,7 @@ async fn main() -> Result<()> {
                 related_rows,
                 proposed,
                 scope,
+                hybrid_source,
                 scoped_assignments,
                 load_runtime_assignments,
                 output,
@@ -1077,6 +1090,7 @@ async fn main() -> Result<()> {
                     related_rows,
                     proposed,
                     scope.as_deref(),
+                    hybrid_source.map(authz_hybrid_source),
                     scoped_assignments,
                     *load_runtime_assignments,
                     Some(&database_url),
@@ -1343,6 +1357,25 @@ fn authz_action(action: AuthzActionArg) -> rest_macro_core::authorization::Autho
     }
 }
 
+fn authz_hybrid_source(
+    source: AuthzHybridSourceArg,
+) -> rest_macro_core::authorization::AuthorizationHybridSource {
+    match source {
+        AuthzHybridSourceArg::Item => {
+            rest_macro_core::authorization::AuthorizationHybridSource::Item
+        }
+        AuthzHybridSourceArg::CollectionFilter => {
+            rest_macro_core::authorization::AuthorizationHybridSource::CollectionFilter
+        }
+        AuthzHybridSourceArg::NestedParent => {
+            rest_macro_core::authorization::AuthorizationHybridSource::NestedParent
+        }
+        AuthzHybridSourceArg::CreatePayload => {
+            rest_macro_core::authorization::AuthorizationHybridSource::CreatePayload
+        }
+    }
+}
+
 fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {
     if without_auth {
         return false;
@@ -1450,6 +1483,8 @@ mod tests {
                 "tenant_id=42",
                 "--scope",
                 "Family=42",
+                "--hybrid-source",
+                "create-payload",
                 "--scoped-assignment",
                 "template:FamilyMember@Family=42",
                 "--load-runtime-assignments",

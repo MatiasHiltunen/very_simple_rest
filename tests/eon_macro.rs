@@ -140,6 +140,10 @@ fn eon_macro_exposes_hybrid_create_scope_field_in_generated_dto() {
         .iter()
         .find(|resource| resource.resource == "ScopedDoc")
         .expect("scoped doc hybrid resource should exist");
+    assert!(scoped_doc_hybrid.scope_sources.item);
+    assert!(scoped_doc_hybrid.scope_sources.collection_filter);
+    assert!(scoped_doc_hybrid.scope_sources.nested_parent);
+    assert!(scoped_doc_hybrid.scope_sources.create_payload);
     assert_eq!(
         scoped_doc_hybrid.actions,
         vec![

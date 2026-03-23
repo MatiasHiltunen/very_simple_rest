@@ -65,14 +65,19 @@ The optional `authorization` block declares static scope, permission, template, 
 
 ## Authorization Hybrid Enforcement
 
-Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. Item-scoped `Read`/`Update`/`Delete` derive scope from stored rows, top-level collection `Read` derives scope only from an exact `filter_<scope_field>` query value, nested collection `Read` derives scope from the parent filter when it matches `scope_field`, and `Create` is supported only as an additive fallback for a claim-controlled `policies.create` scope field.
+Hybrid enforcement lets generated handlers consult runtime scoped grants after static role and row-policy checks fail. `scope_field` still names the canonical scope value source, while `scope_sources` explicitly declares which request shapes may derive scope from it. When `scope_sources` is omitted, current defaults preserve the existing behavior for the configured actions.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | authorization.hybrid_enforcement.resources | Map<ResourceName, HybridResource> | None | No | Keyed resource map | Each entry must reference a declared resource, declared scope, and at least one matching permission action. |
 | authorization.hybrid_enforcement.resources.<resource>.scope | String | Required | Yes | Declared scope name such as `Family` | Runtime grants are evaluated against this scope for the configured resource. |
 | authorization.hybrid_enforcement.resources.<resource>.scope_field | String | Required | Yes | Declared resource field name such as `family_id` | The generated handler derives the runtime scope value from this row field. |
-| authorization.hybrid_enforcement.resources.<resource>.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. Top-level collection `Read` participates only when the request includes an exact `filter_<scope_field>` value, and nested collection `Read` participates only when the parent filter targets that same `scope_field`. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
+| authorization.hybrid_enforcement.resources.<resource>.scope_sources | Map | Action-derived defaults | No | See Hybrid Scope Sources | Explicitly declares which request shapes may derive scope from `scope_field`. Omit it to keep the current action-based defaults. |
+| authorization.hybrid_enforcement.resources.<resource>.scope_sources.item | Bool | true for `Read`/`Update`/`Delete` | No | true, false | Enables row-derived scope for item routes and created-response fallback. `Update` and `Delete` require this source. |
+| authorization.hybrid_enforcement.resources.<resource>.scope_sources.collection_filter | Bool | true for `Read` | No | true, false | Enables top-level collection `Read` when the request includes an exact `filter_<scope_field>` value. |
+| authorization.hybrid_enforcement.resources.<resource>.scope_sources.nested_parent | Bool | true for `Read` | No | true, false | Enables nested collection `Read` when the nested parent filter targets `scope_field`. |
+| authorization.hybrid_enforcement.resources.<resource>.scope_sources.create_payload | Bool | true for `Create` | No | true, false | Enables the create-payload fallback for claim-controlled `policies.create` scope fields. `Create` requires this source. |
+| authorization.hybrid_enforcement.resources.<resource>.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
 
 ## Authorization Management API
 

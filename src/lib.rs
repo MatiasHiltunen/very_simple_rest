@@ -138,7 +138,7 @@ enforcement. Generated item routes can also opt into hybrid enforcement through
 path denies a row. Top-level `GET /resource` can also use runtime `Read` grants when the request
 includes an exact `filter_<scope_field>` value, giving the handler one concrete scope to evaluate.
 Nested collection routes can do the same when their parent filter targets that configured
-`scope_field`.
+`scope_field` and `scope_sources.nested_parent = true`.
 `POST /resource` can also opt into a narrow hybrid create fallback when the configured
 `scope_field` is already claim-controlled in `policies.create`, so the generated create DTO can
 accept that one field as an optional runtime-authorized fallback. When the created row is only
@@ -201,16 +201,18 @@ pub mod authorization {
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment,
         AuthorizationAssignmentTrace, AuthorizationCondition, AuthorizationConditionTrace,
         AuthorizationContract, AuthorizationHybridEnforcementConfig, AuthorizationHybridResource,
-        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationOutcome,
-        AuthorizationPermission, AuthorizationRuntime, AuthorizationRuntimeAccessInput,
-        AuthorizationRuntimeAccessResult, AuthorizationScope, AuthorizationScopeBinding,
-        AuthorizationScopedAssignment, AuthorizationScopedAssignmentCreateInput,
-        AuthorizationScopedAssignmentEventKind, AuthorizationScopedAssignmentEventRecord,
-        AuthorizationScopedAssignmentListQuery, AuthorizationScopedAssignmentRecord,
-        AuthorizationScopedAssignmentRenewInput, AuthorizationScopedAssignmentRevokeInput,
-        AuthorizationScopedAssignmentTarget, AuthorizationScopedAssignmentTrace,
-        AuthorizationSimulationInput, AuthorizationSimulationResult, AuthorizationTemplate,
-        AuthorizationValueSource, ResourceAuthorization, authorization_management_routes,
+        AuthorizationHybridScopeSources, AuthorizationHybridSimulationTrace,
+        AuthorizationHybridSource, AuthorizationMatch, AuthorizationModel, AuthorizationOperator,
+        AuthorizationOutcome, AuthorizationPermission, AuthorizationRuntime,
+        AuthorizationRuntimeAccessInput, AuthorizationRuntimeAccessResult, AuthorizationScope,
+        AuthorizationScopeBinding, AuthorizationScopedAssignment,
+        AuthorizationScopedAssignmentCreateInput, AuthorizationScopedAssignmentEventKind,
+        AuthorizationScopedAssignmentEventRecord, AuthorizationScopedAssignmentListQuery,
+        AuthorizationScopedAssignmentRecord, AuthorizationScopedAssignmentRenewInput,
+        AuthorizationScopedAssignmentRevokeInput, AuthorizationScopedAssignmentTarget,
+        AuthorizationScopedAssignmentTrace, AuthorizationSimulationInput,
+        AuthorizationSimulationResult, AuthorizationTemplate, AuthorizationValueSource,
+        ResourceAuthorization, authorization_management_routes,
         authorization_runtime_migration_sql, create_runtime_assignment_with_audit,
         delete_runtime_assignment_with_audit, insert_runtime_assignment,
         insert_runtime_assignment_event, list_runtime_assignment_events_for_user,

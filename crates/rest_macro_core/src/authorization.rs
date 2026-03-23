@@ -66,11 +66,37 @@ pub struct AuthorizationHybridEnforcementConfig {
     pub resources: Vec<AuthorizationHybridResource>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationHybridScopeSources {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub item: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collection_filter: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nested_parent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create_payload: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationHybridSource {
+    Item,
+    CollectionFilter,
+    NestedParent,
+    CreatePayload,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthorizationHybridResource {
     pub resource: String,
     pub scope: String,
     pub scope_field: String,
+    #[serde(
+        default,
+        skip_serializing_if = "AuthorizationHybridScopeSources::is_default"
+    )]
+    pub scope_sources: AuthorizationHybridScopeSources,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<AuthorizationAction>,
 }
@@ -102,9 +128,60 @@ impl AuthorizationHybridEnforcementConfig {
     }
 }
 
+impl AuthorizationHybridScopeSources {
+    pub fn is_default(config: &Self) -> bool {
+        !config.item && !config.collection_filter && !config.nested_parent && !config.create_payload
+    }
+
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if self.item {
+            labels.push("item");
+        }
+        if self.collection_filter {
+            labels.push("collection_filter");
+        }
+        if self.nested_parent {
+            labels.push("nested_parent");
+        }
+        if self.create_payload {
+            labels.push("create_payload");
+        }
+        labels
+    }
+
+    pub fn supports(&self, source: AuthorizationHybridSource) -> bool {
+        match source {
+            AuthorizationHybridSource::Item => self.item,
+            AuthorizationHybridSource::CollectionFilter => self.collection_filter,
+            AuthorizationHybridSource::NestedParent => self.nested_parent,
+            AuthorizationHybridSource::CreatePayload => self.create_payload,
+        }
+    }
+}
+
 impl AuthorizationHybridResource {
     pub fn supports_action(&self, action: AuthorizationAction) -> bool {
         self.actions.iter().any(|candidate| *candidate == action)
+    }
+
+    pub fn supports_item_action(&self, action: AuthorizationAction) -> bool {
+        match action {
+            AuthorizationAction::Read => self.scope_sources.item && self.supports_action(action),
+            AuthorizationAction::Update => self.scope_sources.item && self.supports_action(action),
+            AuthorizationAction::Delete => self.scope_sources.item && self.supports_action(action),
+            AuthorizationAction::Create => {
+                self.scope_sources.create_payload && self.supports_action(action)
+            }
+        }
+    }
+
+    pub fn supports_collection_read(&self) -> bool {
+        self.scope_sources.collection_filter && self.supports_action(AuthorizationAction::Read)
+    }
+
+    pub fn supports_nested_read(&self) -> bool {
+        self.scope_sources.nested_parent && self.supports_action(AuthorizationAction::Read)
     }
 }
 
@@ -383,6 +460,8 @@ pub struct AuthorizationSimulationInput {
     pub related_rows: BTreeMap<String, Vec<BTreeMap<String, Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<AuthorizationScopeBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hybrid_source: Option<AuthorizationHybridSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scoped_assignments: Vec<AuthorizationScopedAssignment>,
 }
@@ -416,6 +495,22 @@ pub struct AuthorizationSimulationResult {
     pub resolved_templates: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controlled_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hybrid: Option<AuthorizationHybridSimulationTrace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationHybridSimulationTrace {
+    pub source: AuthorizationHybridSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<AuthorizationScopeBinding>,
+    pub runtime_allowed: bool,
+    pub effective_outcome: AuthorizationOutcome,
+    pub effective_allowed: bool,
+    pub fallback_applied: bool,
+    pub skip_static_row_policy: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -821,6 +916,7 @@ impl ResourceAuthorization {
             resolved_permissions: Vec::new(),
             resolved_templates: Vec::new(),
             controlled_fields,
+            hybrid: None,
             notes,
         })
     }
@@ -943,10 +1039,12 @@ impl AuthorizationModel {
         };
 
         if !input.scoped_assignments.is_empty() && input.scope.is_none() {
-            return Err(
-                "runtime scoped assignments require a simulated scope; pass `--scope ScopeName=value`"
-                    .to_owned(),
-            );
+            if input.hybrid_source.is_none() {
+                return Err(
+                    "runtime scoped assignments require a simulated scope; pass `--scope ScopeName=value`"
+                        .to_owned(),
+                );
+            }
         }
 
         self.validate_scoped_assignments(&input.scoped_assignments)?;
@@ -958,12 +1056,22 @@ impl AuthorizationModel {
             )
         })?;
 
-        let resolved = self.resolve_runtime_assignments(resource, input);
-        result.scope = input.scope.clone();
+        let mut runtime_input = input.clone();
+        let hybrid = if let Some(source) = input.hybrid_source {
+            let hybrid = self.simulate_hybrid_resource_action(resource, &result, input, source)?;
+            runtime_input.scope = hybrid.scope.clone();
+            Some(hybrid)
+        } else {
+            None
+        };
+
+        let resolved = self.resolve_runtime_assignments(resource, &runtime_input);
+        result.scope = runtime_input.scope.clone();
         result.runtime_assignments = resolved.traces;
         result.resolved_permissions = resolved.permissions.into_iter().collect();
         result.resolved_templates = resolved.templates.into_iter().collect();
-        if !result.runtime_assignments.is_empty() {
+        result.hybrid = hybrid;
+        if result.hybrid.is_none() && !result.runtime_assignments.is_empty() {
             result.notes.push(
                 "Resolved runtime scoped assignments; generated handlers do not enforce them yet"
                     .to_owned(),
@@ -1008,6 +1116,7 @@ impl AuthorizationModel {
             proposed: BTreeMap::new(),
             related_rows: BTreeMap::new(),
             scope: Some(scope.clone()),
+            hybrid_source: None,
             scoped_assignments: scoped_assignments.to_vec(),
         };
         let resolved = self.resolve_runtime_assignments(resource, &input);
@@ -1035,6 +1144,84 @@ impl AuthorizationModel {
             resolved_permissions: resolved.permissions.into_iter().collect(),
             resolved_templates: resolved.templates.into_iter().collect(),
             runtime_assignments: resolved.traces,
+            notes,
+        })
+    }
+
+    fn simulate_hybrid_resource_action(
+        &self,
+        resource: &ResourceAuthorization,
+        static_result: &AuthorizationSimulationResult,
+        input: &AuthorizationSimulationInput,
+        source: AuthorizationHybridSource,
+    ) -> Result<AuthorizationHybridSimulationTrace, String> {
+        let hybrid = self
+            .contract
+            .hybrid_resource(&resource.resource)
+            .ok_or_else(|| {
+                format!(
+                    "resource `{}` does not declare `authorization.hybrid_enforcement`",
+                    resource.resource
+                )
+            })?;
+        if !hybrid.scope_sources.supports(source) {
+            return Err(format!(
+                "resource `{}` does not allow hybrid source `{}`",
+                resource.resource,
+                hybrid_source_label(source)
+            ));
+        }
+        if !hybrid_supports_action(hybrid, source, input.action) {
+            return Err(format!(
+                "hybrid source `{}` is not valid for `{} {}`",
+                hybrid_source_label(source),
+                resource.resource,
+                authorization_action_label(input.action)
+            ));
+        }
+
+        let mut notes = vec![format!(
+            "Hybrid simulation models generated handler behavior for the `{}` source",
+            hybrid_source_label(source)
+        )];
+        let scope = derive_hybrid_scope_binding(hybrid, input, source, &mut notes);
+        let mut runtime_input = input.clone();
+        runtime_input.scope = scope.clone();
+        let resolved = self.resolve_runtime_assignments(resource, &runtime_input);
+        let runtime_allowed = !resolved.permissions.is_empty();
+
+        let (effective_outcome, fallback_applied, skip_static_row_policy) = match source {
+            AuthorizationHybridSource::Item => simulate_item_hybrid_outcome(
+                static_result,
+                scope.as_ref(),
+                runtime_allowed,
+                &mut notes,
+            ),
+            AuthorizationHybridSource::CreatePayload => simulate_create_hybrid_outcome(
+                static_result,
+                scope.as_ref(),
+                runtime_allowed,
+                &hybrid.scope_field,
+                &mut notes,
+            ),
+            AuthorizationHybridSource::CollectionFilter
+            | AuthorizationHybridSource::NestedParent => simulate_collection_hybrid_outcome(
+                static_result,
+                scope.as_ref(),
+                runtime_allowed,
+                source,
+                &mut notes,
+            ),
+        };
+
+        Ok(AuthorizationHybridSimulationTrace {
+            source,
+            scope,
+            runtime_allowed,
+            effective_outcome,
+            effective_allowed: matches!(effective_outcome, AuthorizationOutcome::Allowed),
+            fallback_applied,
+            skip_static_row_policy,
             notes,
         })
     }
@@ -2039,6 +2226,212 @@ fn evaluate_condition_trace(
     }
 }
 
+fn authorization_action_label(action: AuthorizationAction) -> &'static str {
+    match action {
+        AuthorizationAction::Read => "read",
+        AuthorizationAction::Create => "create",
+        AuthorizationAction::Update => "update",
+        AuthorizationAction::Delete => "delete",
+    }
+}
+
+fn hybrid_source_label(source: AuthorizationHybridSource) -> &'static str {
+    match source {
+        AuthorizationHybridSource::Item => "item",
+        AuthorizationHybridSource::CollectionFilter => "collection_filter",
+        AuthorizationHybridSource::NestedParent => "nested_parent",
+        AuthorizationHybridSource::CreatePayload => "create_payload",
+    }
+}
+
+fn hybrid_supports_action(
+    hybrid: &AuthorizationHybridResource,
+    source: AuthorizationHybridSource,
+    action: AuthorizationAction,
+) -> bool {
+    match source {
+        AuthorizationHybridSource::Item => hybrid.supports_item_action(action),
+        AuthorizationHybridSource::CollectionFilter => {
+            action == AuthorizationAction::Read && hybrid.supports_collection_read()
+        }
+        AuthorizationHybridSource::NestedParent => {
+            action == AuthorizationAction::Read && hybrid.supports_nested_read()
+        }
+        AuthorizationHybridSource::CreatePayload => hybrid.supports_item_action(action),
+    }
+}
+
+fn derive_hybrid_scope_binding(
+    hybrid: &AuthorizationHybridResource,
+    input: &AuthorizationSimulationInput,
+    source: AuthorizationHybridSource,
+    notes: &mut Vec<String>,
+) -> Option<AuthorizationScopeBinding> {
+    match source {
+        AuthorizationHybridSource::Item => derive_scope_from_map(
+            &input.row,
+            &hybrid.scope_field,
+            &hybrid.scope,
+            "simulation row",
+            notes,
+        ),
+        AuthorizationHybridSource::CreatePayload => derive_scope_from_map(
+            &input.proposed,
+            &hybrid.scope_field,
+            &hybrid.scope,
+            "proposed create payload",
+            notes,
+        ),
+        AuthorizationHybridSource::CollectionFilter | AuthorizationHybridSource::NestedParent => {
+            match &input.scope {
+                Some(scope) if scope.scope == hybrid.scope => Some(scope.clone()),
+                Some(scope) => {
+                    notes.push(format!(
+                        "Simulated scope `{}` does not match configured hybrid scope `{}`",
+                        scope.scope, hybrid.scope
+                    ));
+                    None
+                }
+                None => {
+                    notes.push(format!(
+                        "Hybrid `{}` simulation requires `--scope {}=<value>`",
+                        hybrid_source_label(source),
+                        hybrid.scope
+                    ));
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn derive_scope_from_map(
+    values: &BTreeMap<String, Value>,
+    field: &str,
+    scope_name: &str,
+    label: &str,
+    notes: &mut Vec<String>,
+) -> Option<AuthorizationScopeBinding> {
+    match values.get(field) {
+        Some(Value::Null) => {
+            notes.push(format!(
+                "Hybrid scope field `{field}` is null in the {label}"
+            ));
+            None
+        }
+        Some(value) => Some(AuthorizationScopeBinding {
+            scope: scope_name.to_owned(),
+            value: hybrid_scope_value(value),
+        }),
+        None => {
+            notes.push(format!(
+                "Hybrid scope field `{field}` is missing from the {label}"
+            ));
+            None
+        }
+    }
+}
+
+fn hybrid_scope_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn simulate_item_hybrid_outcome(
+    static_result: &AuthorizationSimulationResult,
+    scope: Option<&AuthorizationScopeBinding>,
+    runtime_allowed: bool,
+    notes: &mut Vec<String>,
+) -> (AuthorizationOutcome, bool, bool) {
+    if !static_result.role_check_passed {
+        notes.push("Static role check failed before hybrid fallback could apply".to_owned());
+        return (AuthorizationOutcome::Denied, false, false);
+    }
+    if scope.is_none() {
+        return (AuthorizationOutcome::Incomplete, false, false);
+    }
+    if static_result.allowed {
+        notes.push("Static item policy already allowed this request".to_owned());
+        return (AuthorizationOutcome::Allowed, false, false);
+    }
+    if runtime_allowed {
+        notes.push("Generated item handler would fall back to the runtime scoped grant".to_owned());
+        return (AuthorizationOutcome::Allowed, true, false);
+    }
+    notes.push("No runtime scoped grant matched the derived item scope".to_owned());
+    (AuthorizationOutcome::Denied, false, false)
+}
+
+fn simulate_create_hybrid_outcome(
+    static_result: &AuthorizationSimulationResult,
+    scope: Option<&AuthorizationScopeBinding>,
+    runtime_allowed: bool,
+    scope_field: &str,
+    notes: &mut Vec<String>,
+) -> (AuthorizationOutcome, bool, bool) {
+    if !static_result.role_check_passed {
+        notes.push("Static role check failed before hybrid create fallback could apply".to_owned());
+        return (AuthorizationOutcome::Denied, false, false);
+    }
+    if scope.is_none() {
+        return (AuthorizationOutcome::Incomplete, false, false);
+    }
+    let missing_non_scope_assignments = static_result.assignments.iter().any(|assignment| {
+        assignment.missing_source
+            && !assignment.admin_override_applied
+            && assignment.field != scope_field
+    });
+    if missing_non_scope_assignments {
+        notes.push(format!(
+            "Hybrid create fallback only covers `{scope_field}`; other create-time assignments are still missing"
+        ));
+        return (AuthorizationOutcome::Denied, false, false);
+    }
+    if static_result.allowed {
+        notes.push("Static create policy already allowed this request".to_owned());
+        return (AuthorizationOutcome::Allowed, false, false);
+    }
+    if runtime_allowed {
+        notes.push("Generated create handler would accept the proposed hybrid scope".to_owned());
+        return (AuthorizationOutcome::Allowed, true, false);
+    }
+    notes.push("No runtime scoped grant matched the proposed create scope".to_owned());
+    (AuthorizationOutcome::Denied, false, false)
+}
+
+fn simulate_collection_hybrid_outcome(
+    static_result: &AuthorizationSimulationResult,
+    scope: Option<&AuthorizationScopeBinding>,
+    runtime_allowed: bool,
+    source: AuthorizationHybridSource,
+    notes: &mut Vec<String>,
+) -> (AuthorizationOutcome, bool, bool) {
+    if !static_result.role_check_passed {
+        notes
+            .push("Static role check failed before hybrid collection logic could apply".to_owned());
+        return (AuthorizationOutcome::Denied, false, false);
+    }
+    if scope.is_none() {
+        return (AuthorizationOutcome::Incomplete, false, false);
+    }
+    if runtime_allowed {
+        notes.push(format!(
+            "Generated `{}` read handler would skip the static read row policy for this scoped request",
+            hybrid_source_label(source)
+        ));
+        return (AuthorizationOutcome::Allowed, false, true);
+    }
+    notes.push(format!(
+        "No runtime scoped grant matched this `{}` request; generated handlers would keep the static read row policy",
+        hybrid_source_label(source)
+    ));
+    (AuthorizationOutcome::Allowed, false, false)
+}
+
 fn collect_exists_controlled_fields(
     condition: &AuthorizationExistsCondition,
     fields: &mut BTreeSet<String>,
@@ -2826,6 +3219,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -2867,6 +3261,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -2908,6 +3303,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -2950,6 +3346,7 @@ mod tests {
                 proposed: BTreeMap::from([("tenant_id".to_owned(), Value::from(42))]),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -2992,6 +3389,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -3010,6 +3408,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -3049,6 +3448,7 @@ mod tests {
                     ])],
                 )]),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -3097,6 +3497,7 @@ mod tests {
                 proposed: BTreeMap::new(),
                 related_rows: BTreeMap::new(),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -3140,6 +3541,7 @@ mod tests {
                     ])],
                 )]),
                 scope: None,
+                hybrid_source: None,
                 scoped_assignments: Vec::new(),
             })
             .expect("action should exist");
@@ -3212,6 +3614,7 @@ mod tests {
                         scope: "Family".to_owned(),
                         value: "42".to_owned(),
                     }),
+                    hybrid_source: None,
                     scoped_assignments: vec![AuthorizationScopedAssignment {
                         id: "runtime.assignment.1".to_owned(),
                         target: AuthorizationScopedAssignmentTarget::Template {
@@ -3291,6 +3694,7 @@ mod tests {
                         scope: "Household".to_owned(),
                         value: "42".to_owned(),
                     }),
+                    hybrid_source: None,
                     scoped_assignments: vec![AuthorizationScopedAssignment {
                         id: "runtime.assignment.1".to_owned(),
                         target: AuthorizationScopedAssignmentTarget::Permission {
@@ -3366,6 +3770,221 @@ mod tests {
         }
     }
 
+    fn hybrid_scoped_doc_runtime_model() -> AuthorizationModel {
+        AuthorizationModel {
+            contract: AuthorizationContract {
+                scopes: vec![AuthorizationScope {
+                    name: "Family".to_owned(),
+                    description: None,
+                    parent: None,
+                }],
+                permissions: vec![
+                    AuthorizationPermission {
+                        name: "FamilyRead".to_owned(),
+                        description: None,
+                        actions: vec![AuthorizationAction::Read],
+                        resources: vec!["ScopedDoc".to_owned()],
+                        scopes: vec!["Family".to_owned()],
+                    },
+                    AuthorizationPermission {
+                        name: "FamilyManage".to_owned(),
+                        description: None,
+                        actions: vec![AuthorizationAction::Create],
+                        resources: vec!["ScopedDoc".to_owned()],
+                        scopes: vec!["Family".to_owned()],
+                    },
+                ],
+                templates: vec![AuthorizationTemplate {
+                    name: "FamilyMember".to_owned(),
+                    description: None,
+                    permissions: vec!["FamilyRead".to_owned(), "FamilyManage".to_owned()],
+                    scopes: vec!["Family".to_owned()],
+                }],
+                hybrid_enforcement: AuthorizationHybridEnforcementConfig {
+                    resources: vec![AuthorizationHybridResource {
+                        resource: "ScopedDoc".to_owned(),
+                        scope: "Family".to_owned(),
+                        scope_field: "family_id".to_owned(),
+                        scope_sources: AuthorizationHybridScopeSources {
+                            item: true,
+                            collection_filter: true,
+                            nested_parent: false,
+                            create_payload: true,
+                        },
+                        actions: vec![AuthorizationAction::Read, AuthorizationAction::Create],
+                    }],
+                },
+                management_api: AuthorizationManagementApiConfig::default(),
+            },
+            resources: vec![ResourceAuthorization {
+                id: "resource.scoped_doc".to_owned(),
+                resource: "ScopedDoc".to_owned(),
+                table: "scoped_doc".to_owned(),
+                admin_bypass: false,
+                actions: vec![
+                    ActionAuthorization {
+                        id: "resource.scoped_doc.action.read".to_owned(),
+                        action: AuthorizationAction::Read,
+                        role_rule_id: None,
+                        required_role: None,
+                        filter: Some(AuthorizationCondition::Match(AuthorizationMatch {
+                            id: "resource.scoped_doc.action.read.filter.user_id".to_owned(),
+                            field: "user_id".to_owned(),
+                            operator: AuthorizationOperator::Equals,
+                            source: Some(AuthorizationValueSource::UserId),
+                        })),
+                        assignments: Vec::new(),
+                    },
+                    ActionAuthorization {
+                        id: "resource.scoped_doc.action.create".to_owned(),
+                        action: AuthorizationAction::Create,
+                        role_rule_id: None,
+                        required_role: None,
+                        filter: None,
+                        assignments: vec![AuthorizationAssignment {
+                            id: "resource.scoped_doc.action.create.assignment.family_id".to_owned(),
+                            field: "family_id".to_owned(),
+                            source: AuthorizationValueSource::Claim {
+                                name: "family_id".to_owned(),
+                                ty: AuthClaimType::I64,
+                            },
+                        }],
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn model_simulation_reports_hybrid_item_runtime_fallback() {
+        let model = hybrid_scoped_doc_runtime_model();
+
+        let result = model
+            .simulate_resource_action(
+                Some("ScopedDoc"),
+                &AuthorizationSimulationInput {
+                    action: AuthorizationAction::Read,
+                    user_id: Some(7),
+                    roles: Vec::new(),
+                    claims: BTreeMap::new(),
+                    row: BTreeMap::from([
+                        ("user_id".to_owned(), Value::from(1)),
+                        ("family_id".to_owned(), Value::from(42)),
+                    ]),
+                    proposed: BTreeMap::new(),
+                    related_rows: BTreeMap::new(),
+                    scope: None,
+                    hybrid_source: Some(AuthorizationHybridSource::Item),
+                    scoped_assignments: vec![AuthorizationScopedAssignment {
+                        id: "runtime.assignment.1".to_owned(),
+                        target: AuthorizationScopedAssignmentTarget::Template {
+                            name: "FamilyMember".to_owned(),
+                        },
+                        scope: AuthorizationScopeBinding {
+                            scope: "Family".to_owned(),
+                            value: "42".to_owned(),
+                        },
+                    }],
+                },
+            )
+            .expect("simulation should resolve");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Denied);
+        let hybrid = result.hybrid.expect("hybrid trace should exist");
+        assert_eq!(hybrid.source, AuthorizationHybridSource::Item);
+        assert_eq!(
+            hybrid.scope,
+            Some(AuthorizationScopeBinding {
+                scope: "Family".to_owned(),
+                value: "42".to_owned(),
+            })
+        );
+        assert!(hybrid.runtime_allowed);
+        assert_eq!(hybrid.effective_outcome, AuthorizationOutcome::Allowed);
+        assert!(hybrid.fallback_applied);
+    }
+
+    #[test]
+    fn model_simulation_reports_hybrid_collection_read_widening() {
+        let model = hybrid_scoped_doc_runtime_model();
+
+        let result = model
+            .simulate_resource_action(
+                Some("ScopedDoc"),
+                &AuthorizationSimulationInput {
+                    action: AuthorizationAction::Read,
+                    user_id: Some(7),
+                    roles: Vec::new(),
+                    claims: BTreeMap::new(),
+                    row: BTreeMap::new(),
+                    proposed: BTreeMap::new(),
+                    related_rows: BTreeMap::new(),
+                    scope: Some(AuthorizationScopeBinding {
+                        scope: "Family".to_owned(),
+                        value: "42".to_owned(),
+                    }),
+                    hybrid_source: Some(AuthorizationHybridSource::CollectionFilter),
+                    scoped_assignments: vec![AuthorizationScopedAssignment {
+                        id: "runtime.assignment.1".to_owned(),
+                        target: AuthorizationScopedAssignmentTarget::Template {
+                            name: "FamilyMember".to_owned(),
+                        },
+                        scope: AuthorizationScopeBinding {
+                            scope: "Family".to_owned(),
+                            value: "42".to_owned(),
+                        },
+                    }],
+                },
+            )
+            .expect("simulation should resolve");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Incomplete);
+        let hybrid = result.hybrid.expect("hybrid trace should exist");
+        assert_eq!(hybrid.source, AuthorizationHybridSource::CollectionFilter);
+        assert!(hybrid.runtime_allowed);
+        assert_eq!(hybrid.effective_outcome, AuthorizationOutcome::Allowed);
+        assert!(hybrid.skip_static_row_policy);
+    }
+
+    #[test]
+    fn model_simulation_reports_hybrid_create_runtime_fallback() {
+        let model = hybrid_scoped_doc_runtime_model();
+
+        let result = model
+            .simulate_resource_action(
+                Some("ScopedDoc"),
+                &AuthorizationSimulationInput {
+                    action: AuthorizationAction::Create,
+                    user_id: Some(7),
+                    roles: Vec::new(),
+                    claims: BTreeMap::new(),
+                    row: BTreeMap::new(),
+                    proposed: BTreeMap::from([("family_id".to_owned(), Value::from(42))]),
+                    related_rows: BTreeMap::new(),
+                    scope: None,
+                    hybrid_source: Some(AuthorizationHybridSource::CreatePayload),
+                    scoped_assignments: vec![AuthorizationScopedAssignment {
+                        id: "runtime.assignment.1".to_owned(),
+                        target: AuthorizationScopedAssignmentTarget::Template {
+                            name: "FamilyMember".to_owned(),
+                        },
+                        scope: AuthorizationScopeBinding {
+                            scope: "Family".to_owned(),
+                            value: "42".to_owned(),
+                        },
+                    }],
+                },
+            )
+            .expect("simulation should resolve");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Denied);
+        let hybrid = result.hybrid.expect("hybrid trace should exist");
+        assert_eq!(hybrid.source, AuthorizationHybridSource::CreatePayload);
+        assert!(hybrid.runtime_allowed);
+        assert_eq!(hybrid.effective_outcome, AuthorizationOutcome::Allowed);
+        assert!(hybrid.fallback_applied);
+    }
+
     #[actix_web::test]
     async fn authorization_runtime_persists_and_loads_scoped_assignments() {
         sqlx::any::install_default_drivers();
@@ -3439,6 +4058,7 @@ mod tests {
                         scope: "Family".to_owned(),
                         value: "42".to_owned(),
                     }),
+                    hybrid_source: None,
                     scoped_assignments: Vec::new(),
                 },
             )
@@ -3651,6 +4271,7 @@ mod tests {
                         scope: "Family".to_owned(),
                         value: "42".to_owned(),
                     }),
+                    hybrid_source: None,
                     scoped_assignments: Vec::new(),
                 },
             )

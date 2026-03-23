@@ -58,8 +58,10 @@ pub fn expand_derive_resource(
 struct HybridResourceEnforcement<'a> {
     scope: &'a str,
     scope_field: &'a super::model::FieldSpec,
-    create: bool,
-    read: bool,
+    create_payload: bool,
+    item_read: bool,
+    collection_read: bool,
+    nested_read: bool,
     update: bool,
     delete: bool,
 }
@@ -75,10 +77,13 @@ fn hybrid_resource_enforcement<'a>(
     Some(HybridResourceEnforcement {
         scope: &config.scope,
         scope_field,
-        create: config.supports_action(crate::authorization::AuthorizationAction::Create),
-        read: config.supports_action(crate::authorization::AuthorizationAction::Read),
-        update: config.supports_action(crate::authorization::AuthorizationAction::Update),
-        delete: config.supports_action(crate::authorization::AuthorizationAction::Delete),
+        create_payload: config
+            .supports_item_action(crate::authorization::AuthorizationAction::Create),
+        item_read: config.supports_item_action(crate::authorization::AuthorizationAction::Read),
+        collection_read: config.supports_collection_read(),
+        nested_read: config.supports_nested_read(),
+        update: config.supports_item_action(crate::authorization::AuthorizationAction::Update),
+        delete: config.supports_item_action(crate::authorization::AuthorizationAction::Delete),
     })
 }
 
@@ -373,6 +378,10 @@ fn authorization_model_tokens(model: &AuthorizationModel, runtime_crate: &Path) 
             let resource_name = Literal::string(&resource.resource);
             let scope = Literal::string(&resource.scope);
             let scope_field = Literal::string(&resource.scope_field);
+            let item = resource.scope_sources.item;
+            let collection_filter = resource.scope_sources.collection_filter;
+            let nested_parent = resource.scope_sources.nested_parent;
+            let create_payload = resource.scope_sources.create_payload;
             let actions = resource
                 .actions
                 .iter()
@@ -381,6 +390,12 @@ fn authorization_model_tokens(model: &AuthorizationModel, runtime_crate: &Path) 
                 resource: #resource_name.to_owned(),
                 scope: #scope.to_owned(),
                 scope_field: #scope_field.to_owned(),
+                scope_sources: #runtime_crate::core::authorization::AuthorizationHybridScopeSources {
+                    item: #item,
+                    collection_filter: #collection_filter,
+                    nested_parent: #nested_parent,
+                    create_payload: #create_payload,
+                },
                 actions: vec![#(#actions),*],
             })
         });
@@ -1518,7 +1533,7 @@ fn resource_impl_tokens(
     let admin_bypass = resource.policies.admin_bypass;
     let hybrid = hybrid_resource_enforcement(resource, authorization);
     let hybrid_create_scope_field = hybrid
-        .filter(|config| config.create)
+        .filter(|config| config.create_payload)
         .map(|config| config.scope_field.name());
 
     let insert_fields = insert_fields(resource);
@@ -1984,8 +1999,10 @@ fn resource_impl_tokens(
                 }
             }
         };
-        let hybrid_read = hybrid.read;
-        let hybrid_create = hybrid.create;
+        let hybrid_item_read = hybrid.item_read;
+        let hybrid_collection_read = hybrid.collection_read;
+        let hybrid_nested_read = hybrid.nested_read;
+        let hybrid_create = hybrid.create_payload;
         let hybrid_update = hybrid.update;
         let hybrid_delete = hybrid.delete;
         let list_scope_value = match super::model::policy_field_claim_type(&hybrid.scope_field.ty)
@@ -2051,7 +2068,7 @@ fn resource_impl_tokens(
         } else {
             quote!()
         };
-        let hybrid_list_scope_tokens = if hybrid_read {
+        let hybrid_list_scope_tokens = if hybrid_collection_read || hybrid_nested_read {
             quote! {
                 fn hybrid_scope_binding_for_list_request(
                     query: &#list_query_ty,
@@ -2109,7 +2126,7 @@ fn resource_impl_tokens(
                 action: #runtime_crate::core::authorization::AuthorizationAction,
             ) -> bool {
                 match action {
-                    #runtime_crate::core::authorization::AuthorizationAction::Read => #hybrid_read,
+                    #runtime_crate::core::authorization::AuthorizationAction::Read => #hybrid_item_read,
                     #runtime_crate::core::authorization::AuthorizationAction::Create => #hybrid_create,
                     #runtime_crate::core::authorization::AuthorizationAction::Update => #hybrid_update,
                     #runtime_crate::core::authorization::AuthorizationAction::Delete => #hybrid_delete,
@@ -2232,7 +2249,7 @@ fn resource_impl_tokens(
             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
         }
     };
-    let created_response_fallback = if hybrid.map(|config| config.read).unwrap_or(false) {
+    let created_response_fallback = if hybrid.map(|config| config.item_read).unwrap_or(false) {
         quote! {
             if let Some(runtime) = runtime {
                 match Self::fetch_runtime_authorized_by_id(
@@ -2258,7 +2275,7 @@ fn resource_impl_tokens(
         quote!(HttpResponse::Created().finish())
     };
     let created_response_runtime = if hybrid
-        .map(|config| config.read || config.create)
+        .map(|config| config.item_read || config.create_payload)
         .unwrap_or(false)
     {
         quote!(Some(runtime.get_ref()))
@@ -2552,7 +2569,7 @@ fn resource_impl_tokens(
     let nested_handlers = relation_routes.map(|(field_ident, _)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
         if read_requires_auth {
-            if hybrid.map(|config| config.read).unwrap_or(false) {
+            if hybrid.map(|config| config.nested_read).unwrap_or(false) {
                 quote! {
                     async fn #handler_ident(
                         path: web::Path<i64>,
@@ -2697,7 +2714,7 @@ fn resource_impl_tokens(
         }
     });
     let get_all_handler = if read_requires_auth {
-        if hybrid.map(|config| config.read).unwrap_or(false) {
+        if hybrid.map(|config| config.collection_read).unwrap_or(false) {
             quote! {
                 async fn get_all(
                     query: web::Query<#list_query_ty>,
@@ -2824,7 +2841,7 @@ fn resource_impl_tokens(
         }
     };
     let get_one_handler = if read_requires_auth {
-        if hybrid.map(|config| config.read).unwrap_or(false) {
+        if hybrid.map(|config| config.item_read).unwrap_or(false) {
             quote! {
                 async fn get_one(
                     path: web::Path<i64>,
@@ -2882,7 +2899,7 @@ fn resource_impl_tokens(
         quote!()
     };
     let create_runtime_arg = if hybrid
-        .map(|config| config.create || config.read)
+        .map(|config| config.create_payload || config.item_read)
         .unwrap_or(false)
     {
         quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
@@ -3353,7 +3370,7 @@ fn create_payload_fields<'a>(
     authorization: Option<&'a AuthorizationContract>,
 ) -> Vec<CreatePayloadField<'a>> {
     let hybrid_create_scope_field = hybrid_resource_enforcement(resource, authorization)
-        .filter(|config| config.create)
+        .filter(|config| config.create_payload)
         .map(|config| config.scope_field.name());
     resource
         .fields

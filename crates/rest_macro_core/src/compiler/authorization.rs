@@ -698,6 +698,10 @@ mod tests {
             .find(|resource| resource.resource == "ScopedDoc")
             .expect("scoped doc hybrid resource should exist");
         assert_eq!(scoped_doc.scope_field, "family_id");
+        assert!(scoped_doc.scope_sources.item);
+        assert!(scoped_doc.scope_sources.collection_filter);
+        assert!(scoped_doc.scope_sources.nested_parent);
+        assert!(scoped_doc.scope_sources.create_payload);
         assert_eq!(
             scoped_doc.actions,
             vec![
@@ -715,6 +719,10 @@ mod tests {
             .find(|resource| resource.resource == "ScopedClaimDoc")
             .expect("scoped claim doc hybrid resource should exist");
         assert_eq!(scoped_claim_doc.scope_field, "family_id");
+        assert!(scoped_claim_doc.scope_sources.item);
+        assert!(!scoped_claim_doc.scope_sources.collection_filter);
+        assert!(!scoped_claim_doc.scope_sources.nested_parent);
+        assert!(scoped_claim_doc.scope_sources.create_payload);
         assert_eq!(
             scoped_claim_doc.actions,
             vec![AuthorizationAction::Create, AuthorizationAction::Read]

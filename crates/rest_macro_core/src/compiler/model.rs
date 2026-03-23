@@ -1442,6 +1442,53 @@ fn validate_authorization_hybrid_enforcement(
             ));
         }
 
+        if config.scope_sources.collection_filter
+            && !config.supports_action(crate::authorization::AuthorizationAction::Read)
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}` `scope_sources.collection_filter` requires `Read`",
+                    config.resource
+                ),
+            ));
+        }
+        if config.scope_sources.nested_parent
+            && !config.supports_action(crate::authorization::AuthorizationAction::Read)
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}` `scope_sources.nested_parent` requires `Read`",
+                    config.resource
+                ),
+            ));
+        }
+        if config.scope_sources.create_payload
+            && !config.supports_action(crate::authorization::AuthorizationAction::Create)
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}` `scope_sources.create_payload` requires `Create`",
+                    config.resource
+                ),
+            ));
+        }
+        if config.scope_sources.item
+            && !config.supports_action(crate::authorization::AuthorizationAction::Read)
+            && !config.supports_action(crate::authorization::AuthorizationAction::Update)
+            && !config.supports_action(crate::authorization::AuthorizationAction::Delete)
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.hybrid_enforcement.resources.{}` `scope_sources.item` requires `Read`, `Update`, or `Delete`",
+                    config.resource
+                ),
+            ));
+        }
+
         if config.actions.is_empty() {
             return Err(syn::Error::new(
                 span,
@@ -1484,6 +1531,18 @@ fn validate_authorization_hybrid_enforcement(
                             ),
                         ));
                     }
+                    if !config.scope_sources.item
+                        && !config.scope_sources.collection_filter
+                        && !config.scope_sources.nested_parent
+                    {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Read` requires at least one of `scope_sources.item`, `scope_sources.collection_filter`, or `scope_sources.nested_parent`",
+                                config.resource
+                            ),
+                        ));
+                    }
                 }
                 crate::authorization::AuthorizationAction::Update => {
                     if !resource.policies.has_update_filters() {
@@ -1491,6 +1550,15 @@ fn validate_authorization_hybrid_enforcement(
                             span,
                             format!(
                                 "`authorization.hybrid_enforcement.resources.{}` `Update` requires a static update row policy to supplement",
+                                config.resource
+                            ),
+                        ));
+                    }
+                    if !config.scope_sources.item {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Update` requires `scope_sources.item = true`",
                                 config.resource
                             ),
                         ));
@@ -1506,8 +1574,26 @@ fn validate_authorization_hybrid_enforcement(
                             ),
                         ));
                     }
+                    if !config.scope_sources.item {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Delete` requires `scope_sources.item = true`",
+                                config.resource
+                            ),
+                        ));
+                    }
                 }
                 crate::authorization::AuthorizationAction::Create => {
+                    if !config.scope_sources.create_payload {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`authorization.hybrid_enforcement.resources.{}` `Create` requires `scope_sources.create_payload = true`",
+                                config.resource
+                            ),
+                        ));
+                    }
                     let Some(assignment) = resource
                         .policies
                         .create
