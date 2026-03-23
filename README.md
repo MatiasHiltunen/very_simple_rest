@@ -798,7 +798,8 @@ For a policy-heavy `.eon` example with tenant claims, owner-scoped writes, and s
 resources, see `examples/fine_grained_policies/`.
 
 For a family-management example that combines explicit auth claims, relation-aware `exists`
-policies, runtime templates/scopes, and hybrid enforcement, see `examples/family_app/`.
+policies, runtime templates/scopes, hybrid enforcement, and a same-origin browser SPA, see
+`examples/family_app/`.
 
 For a minimal `.eon`-only app with built-in auth, owner-scoped todos, admin visibility across all
 rows, and a static browser client, see `examples/todo_app/`.
@@ -866,7 +867,8 @@ This makes the generated handlers:
 In `.eon`, `read`, `update`, and `delete` filters can also use boolean composition. A single
 policy entry stays as-is, arrays imply `all_of`, and you can nest `all_of`, `any_of`, `not`, and
 `exists` explicitly. Leaf filters support equality plus `is_null` / `is_not_null` checks on
-nullable fields. `create` policies remain flat assignments and do not support boolean groups.
+nullable fields. `create` still supports the legacy flat assignment list, and it can now also use
+`{ assign, require }` so create-time preconditions stay declarative.
 
 ```eon
 policies: {
@@ -922,8 +924,30 @@ That shape is intentionally narrow for now:
 - `exists` targets another declared resource
 - `where` accepts leaf comparisons plus nested `all_of`, `any_of`, and `not` groups
 - list entries inside `where` still imply `AND`
-- each condition is either `related_field = user.id` / `claim.<name>`,
+- each condition is either `related_field = user.id` / `claim.<name>` / `input.<field>`,
   `related_field = row.<current_field>`, or a nullable `IS NULL` / `IS NOT NULL` check
+
+Create-time requirements use the same tree:
+
+```eon
+create: {
+    assign: [
+        "created_by_user_id=user.id"
+    ]
+    require: {
+        exists: {
+            resource: "Family"
+            where: [
+                { field: "id", equals: "input.family_id" }
+                "owner_user_id=user.id"
+            ]
+        }
+    }
+}
+```
+
+That lets `.eon` express bounded onboarding rules such as “you may add a family member only to a
+family you own” without falling back to handwritten handlers.
 
 When you use the built-in auth routes, `/auth/login` now emits numeric claims automatically from
 the `user` row. You can also make those claim names explicit in `.eon`:

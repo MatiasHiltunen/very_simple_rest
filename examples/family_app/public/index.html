@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Family Atlas</title>
+    <meta
+        name="description"
+        content="Family Atlas is a plain HTML, CSS, and JavaScript workspace for the family_app .eon API example."
+    >
+    <meta name="theme-color" content="#f4ede2">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+</head>
+<body>
+    <div class="page-ambient" aria-hidden="true">
+        <div class="ambient-orb ambient-orb-a"></div>
+        <div class="ambient-orb ambient-orb-b"></div>
+        <div class="ambient-grid"></div>
+    </div>
+
+    <div class="shell">
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">Family App Demo</p>
+                <h1>Family Atlas</h1>
+                <p class="hero-summary">
+                    A browser workspace for the policy-heavy <code>family_app.eon</code> example:
+                    registration, family bootstrap, claim activation, runtime grants, and shared household tools.
+                </p>
+                <div class="hero-pills">
+                    <span class="pill">Built-in auth</span>
+                    <span class="pill">Create.require</span>
+                    <span class="pill">Hybrid runtime grants</span>
+                    <span class="pill">Admin claim patching</span>
+                </div>
+            </div>
+
+            <div class="hero-guide">
+                <h2>Suggested flow</h2>
+                <ol>
+                    <li>Register a guardian or caregiver account, then log in.</li>
+                    <li>Create a family and add family members immediately.</li>
+                    <li>Log in as admin to set <code>active_family_id</code> and <code>preferred_household</code>.</li>
+                    <li>Create a household, then use shopping and calendar sections.</li>
+                    <li>Use runtime assignments to widen access without changing static row policies.</li>
+                </ol>
+            </div>
+        </header>
+
+        <div id="statusBanner" class="status-banner info" role="status" aria-live="polite">
+            Loading Family Atlas...
+        </div>
+
+        <main class="layout">
+            <aside class="rail">
+                <section class="panel session-panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Session</p>
+                        <h2>Current identity</h2>
+                    </div>
+                    <div class="session-meta">
+                        <div id="sessionSummary" class="identity-card">No active session.</div>
+                        <div class="chip-row">
+                            <span id="selectedFamilyChip" class="chip muted">No family selected</span>
+                            <span id="selectedHouseholdChip" class="chip muted">No household selected</span>
+                        </div>
+                    </div>
+                    <dl class="session-list">
+                        <div>
+                            <dt>Auth mode</dt>
+                            <dd id="tokenState">No bearer token loaded</dd>
+                        </div>
+                        <div>
+                            <dt>Portal</dt>
+                            <dd><a href="/api/auth/portal" target="_blank" rel="noreferrer">/api/auth/portal</a></dd>
+                        </div>
+                        <div>
+                            <dt>Admin</dt>
+                            <dd><a href="/api/auth/admin" target="_blank" rel="noreferrer">/api/auth/admin</a></dd>
+                        </div>
+                    </dl>
+                    <div class="claims-wrap">
+                        <h3>Claims and roles</h3>
+                        <pre id="sessionClaims" class="code-block">No claims loaded yet.</pre>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Activity</p>
+                        <h2>Timeline</h2>
+                    </div>
+                    <div id="activityLog" class="activity-log">
+                        <div class="empty-state">Requests, selections, and policy hints will appear here.</div>
+                    </div>
+                </section>
+            </aside>
+
+            <div class="content">
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Auth</p>
+                        <h2>Register and log in</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <form id="registerForm" class="stack">
+                            <label>
+                                <span>Email</span>
+                                <input id="authEmail" name="email" type="email" placeholder="guardian@example.com" required>
+                            </label>
+                            <label>
+                                <span>Password</span>
+                                <input id="authPassword" name="password" type="password" placeholder="password123" required>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Register</button>
+                                <button id="loginBtn" class="button secondary" type="button">Log in</button>
+                                <button id="refreshSessionBtn" class="button subtle" type="button">Refresh session</button>
+                                <button id="logoutBtn" class="button subtle" type="button">Log out</button>
+                            </div>
+                        </form>
+
+                        <div class="helper-card">
+                            <h3>Bootstrap reminder</h3>
+                            <p>
+                                <code>vsr setup</code> creates the admin account, base auth tables, and the family
+                                example migrations. The SPA works against the same generated API and uses bearer tokens
+                                returned by <code>/api/auth/login</code>.
+                            </p>
+                            <p>
+                                Claim updates do not retrofit the current JWT. After an admin patches
+                                <code>active_family_id</code> or <code>preferred_household</code>, log in again to pick
+                                up the new session claims.
+                            </p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Bootstrap</p>
+                        <h2>Family creation and selection</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <form id="familyCreateForm" class="stack">
+                            <label>
+                                <span>Family slug</span>
+                                <input id="familySlug" name="slug" type="text" placeholder="helsinki-household" required>
+                            </label>
+                            <label>
+                                <span>Display name</span>
+                                <input id="familyName" name="name" type="text" placeholder="Helsinki Household" required>
+                            </label>
+                            <label>
+                                <span>Timezone</span>
+                                <input id="familyTimezone" name="timezone" type="text" value="Europe/Helsinki" required>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Create family</button>
+                                <button id="reloadFamiliesBtn" class="button subtle" type="button">Reload families</button>
+                            </div>
+                            <p class="helper">
+                                Family owners can add family members immediately, even before claim activation.
+                            </p>
+                        </form>
+
+                        <div>
+                            <div class="inline-heading">
+                                <h3>Visible families</h3>
+                                <span class="helper">Selection drives the member, household, and runtime panels.</span>
+                            </div>
+                            <div id="familiesList" class="card-list">
+                                <div class="empty-state">Log in to load families.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">People</p>
+                        <h2>Family members</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <form id="familyMemberForm" class="stack">
+                            <label>
+                                <span>Selected family</span>
+                                <input id="memberFamilyPreview" type="text" value="No family selected" readonly>
+                            </label>
+                            <label>
+                                <span>User ID to add</span>
+                                <input id="memberUserId" name="user_id" type="number" min="1" placeholder="2" required>
+                            </label>
+                            <label>
+                                <span>Display name</span>
+                                <input id="memberDisplayName" name="display_name" type="text" placeholder="Spouse" required>
+                            </label>
+                            <label>
+                                <span>Role label</span>
+                                <select id="memberRoleLabel" name="role_label">
+                                    <option value="guardian">guardian</option>
+                                    <option value="caregiver">caregiver</option>
+                                    <option value="child">child</option>
+                                    <option value="viewer">viewer</option>
+                                </select>
+                            </label>
+                            <label class="checkbox">
+                                <input id="memberIsChild" name="is_child" type="checkbox">
+                                <span>Mark as child</span>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Add member</button>
+                                <button id="reloadMembersBtn" class="button subtle" type="button">Reload members</button>
+                            </div>
+                            <p class="helper">
+                                This uses <code>FamilyMember.create.require</code> against the posted
+                                <code>family_id</code> and the current owner.
+                            </p>
+                        </form>
+
+                        <div>
+                            <div class="inline-heading">
+                                <h3>Membership rows</h3>
+                                <span class="helper">Visibility changes with row policies and activated claims.</span>
+                            </div>
+                            <div id="familyMembersList" class="card-list">
+                                <div class="empty-state">Select a family to load members.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Claim-scoped</p>
+                        <h2>Households and shared spaces</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <form id="householdForm" class="stack">
+                            <label>
+                                <span>Selected family</span>
+                                <input id="householdFamilyPreview" type="text" value="No family selected" readonly>
+                            </label>
+                            <label>
+                                <span>Household slug</span>
+                                <input id="householdSlug" name="slug" type="text" placeholder="helsinki-flat" required>
+                            </label>
+                            <label>
+                                <span>Household label</span>
+                                <input id="householdLabel" name="label" type="text" placeholder="Helsinki Flat" required>
+                            </label>
+                            <label>
+                                <span>Timezone</span>
+                                <input id="householdTimezone" name="timezone" type="text" value="Europe/Helsinki" required>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Create household</button>
+                                <button id="reloadHouseholdsBtn" class="button subtle" type="button">Reload households</button>
+                            </div>
+                            <p class="helper">
+                                Household creation requires a fresh session whose claims include
+                                <code>active_family_id</code>.
+                            </p>
+                        </form>
+
+                        <div>
+                            <div class="inline-heading">
+                                <h3>Household rows</h3>
+                                <span class="helper">Preferred household claim helps pick the default workspace.</span>
+                            </div>
+                            <div id="householdsList" class="card-list">
+                                <div class="empty-state">Select a family to load households.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Hybrid access</p>
+                        <h2>Shopping board</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <form id="shoppingForm" class="stack">
+                            <label>
+                                <span>Selected household</span>
+                                <input id="shoppingHouseholdPreview" type="text" value="No household selected" readonly>
+                            </label>
+                            <label>
+                                <span>Item title</span>
+                                <input id="shoppingTitle" name="title" type="text" placeholder="Buy oat milk" required>
+                            </label>
+                            <label class="checkbox">
+                                <input id="shoppingCompleted" name="completed" type="checkbox">
+                                <span>Create as completed</span>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Add shopping item</button>
+                                <button id="reloadShoppingBtn" class="button subtle" type="button">Reload shopping</button>
+                            </div>
+                            <p class="helper">
+                                <code>ShoppingItem</code> supports hybrid runtime create/read/update/delete when the
+                                selected family has a matching scoped grant.
+                            </p>
+                        </form>
+
+                        <div>
+                            <div class="inline-heading">
+                                <h3>Shopping items</h3>
+                                <span class="helper">Toggle and delete call the generated CRUD endpoints.</span>
+                            </div>
+                            <div id="shoppingList" class="card-list">
+                                <div class="empty-state">Select a family or household to load shopping items.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Schedule</p>
+                        <h2>Household calendar</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <form id="calendarForm" class="stack">
+                            <label>
+                                <span>Selected household</span>
+                                <input id="calendarHouseholdPreview" type="text" value="No household selected" readonly>
+                            </label>
+                            <label>
+                                <span>Event title</span>
+                                <input id="calendarTitle" name="title" type="text" placeholder="School pickup" required>
+                            </label>
+                            <label>
+                                <span>Starts at</span>
+                                <input id="calendarStartsAt" name="starts_at" type="datetime-local" required>
+                            </label>
+                            <label>
+                                <span>Ends at</span>
+                                <input id="calendarEndsAt" name="ends_at" type="datetime-local" required>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Create event</button>
+                                <button id="reloadCalendarBtn" class="button subtle" type="button">Reload events</button>
+                            </div>
+                            <p class="helper">
+                                <code>CalendarEvent</code> runtime grants widen read/update/delete. Create still follows
+                                the static family claim path.
+                            </p>
+                        </form>
+
+                        <div>
+                            <div class="inline-heading">
+                                <h3>Calendar events</h3>
+                                <span class="helper">Rendered from the nested household route.</span>
+                            </div>
+                            <div id="calendarList" class="card-list">
+                                <div class="empty-state">Select a household to load events.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel admin-panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Admin</p>
+                        <h2>User directory and claim activation</h2>
+                    </div>
+                    <div class="form-grid two-up">
+                        <div class="stack">
+                            <div class="button-row">
+                                <button id="reloadAdminUsersBtn" class="button primary" type="button">Load users</button>
+                            </div>
+                            <label>
+                                <span>Email filter</span>
+                                <input id="adminUserSearch" type="text" placeholder="guardian@example.com">
+                            </label>
+                            <div id="adminUsersList" class="card-list">
+                                <div class="empty-state">Admin users can list built-in accounts here.</div>
+                            </div>
+                        </div>
+
+                        <form id="claimPatchForm" class="stack">
+                            <label>
+                                <span>Managed user ID</span>
+                                <input id="managedUserId" name="user_id" type="number" min="1" placeholder="2" required>
+                            </label>
+                            <label>
+                                <span>Role override (optional)</span>
+                                <input id="managedRole" name="role" type="text" placeholder="admin">
+                            </label>
+                            <label>
+                                <span>active_family_id</span>
+                                <input id="claimActiveFamilyId" name="active_family_id" type="number" min="1" placeholder="42">
+                            </label>
+                            <label>
+                                <span>preferred_household</span>
+                                <input id="claimPreferredHousehold" name="preferred_household" type="text" placeholder="helsinki-flat">
+                            </label>
+                            <label class="checkbox">
+                                <input id="claimSupportAgent" name="support_agent" type="checkbox">
+                                <span>support_agent = true</span>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Patch claims</button>
+                            </div>
+                            <p class="helper">
+                                The API accepts configured auth claims here even though the current OpenAPI schema still
+                                documents only the core auth fields.
+                            </p>
+                        </form>
+                    </div>
+                </section>
+
+                <section class="panel admin-panel">
+                    <div class="panel-heading">
+                        <p class="eyebrow">Runtime authz</p>
+                        <h2>Assignments, audit trail, and evaluation</h2>
+                    </div>
+                    <div class="form-grid three-up">
+                        <form id="runtimeAssignmentForm" class="stack">
+                            <label>
+                                <span>User ID</span>
+                                <input id="assignmentUserId" name="user_id" type="number" min="1" placeholder="2" required>
+                            </label>
+                            <label>
+                                <span>Target kind</span>
+                                <select id="assignmentKind" name="kind">
+                                    <option value="template">template</option>
+                                    <option value="permission">permission</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Target name</span>
+                                <select id="assignmentName" name="name"></select>
+                            </label>
+                            <label>
+                                <span>Scope</span>
+                                <select id="assignmentScope" name="scope">
+                                    <option value="Family">Family</option>
+                                    <option value="Household">Household</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Scope value</span>
+                                <input id="assignmentScopeValue" name="scope_value" type="text" placeholder="42" required>
+                            </label>
+                            <label>
+                                <span>Expires at (optional)</span>
+                                <input id="assignmentExpiresAt" name="expires_at" type="datetime-local">
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Create assignment</button>
+                                <button id="reloadAssignmentsBtn" class="button subtle" type="button">Load records</button>
+                            </div>
+                        </form>
+
+                        <div class="stack">
+                            <div class="inline-heading">
+                                <h3>Current assignments</h3>
+                                <span class="helper">Revoke and renew are non-destructive.</span>
+                            </div>
+                            <div id="runtimeAssignmentsList" class="card-list compact">
+                                <div class="empty-state">Load a user to inspect runtime assignments.</div>
+                            </div>
+                            <div class="inline-heading">
+                                <h3>Assignment events</h3>
+                                <span class="helper">Append-only history from the runtime authz tables.</span>
+                            </div>
+                            <div id="runtimeEventsList" class="card-list compact">
+                                <div class="empty-state">History will appear after loading assignments.</div>
+                            </div>
+                        </div>
+
+                        <div class="stack">
+                            <form id="runtimeEvaluateForm" class="stack evaluate-form">
+                                <label>
+                                    <span>User ID</span>
+                                    <input id="evaluateUserId" type="number" min="1" placeholder="2" required>
+                                </label>
+                                <label>
+                                    <span>Resource</span>
+                                    <select id="evaluateResource">
+                                        <option value="Family">Family</option>
+                                        <option value="Household">Household</option>
+                                        <option value="FamilyMember">FamilyMember</option>
+                                        <option value="FamilyDelegate">FamilyDelegate</option>
+                                        <option value="ChildProfile">ChildProfile</option>
+                                        <option value="CarePlan">CarePlan</option>
+                                        <option value="GuardianNote">GuardianNote</option>
+                                        <option value="HouseholdAnnouncement">HouseholdAnnouncement</option>
+                                        <option value="ShoppingItem">ShoppingItem</option>
+                                        <option value="CalendarEvent">CalendarEvent</option>
+                                    </select>
+                                </label>
+                                <label>
+                                    <span>Action</span>
+                                    <select id="evaluateAction">
+                                        <option value="read">read</option>
+                                        <option value="create">create</option>
+                                        <option value="update">update</option>
+                                        <option value="delete">delete</option>
+                                    </select>
+                                </label>
+                                <label>
+                                    <span>Scope</span>
+                                    <select id="evaluateScope">
+                                        <option value="Family">Family</option>
+                                        <option value="Household">Household</option>
+                                    </select>
+                                </label>
+                                <label>
+                                    <span>Scope value</span>
+                                    <input id="evaluateScopeValue" type="text" placeholder="42" required>
+                                </label>
+                                <div class="button-row">
+                                    <button class="button primary" type="submit">Evaluate runtime access</button>
+                                </div>
+                            </form>
+                            <pre id="runtimeEvaluateResult" class="code-block">No runtime evaluation yet.</pre>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

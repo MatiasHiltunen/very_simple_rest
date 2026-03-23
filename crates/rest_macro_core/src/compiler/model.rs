@@ -197,6 +197,7 @@ impl RowPolicyKind {
 pub enum PolicyValueSource {
     UserId,
     Claim(String),
+    InputField(String),
 }
 
 impl PolicyValueSource {
@@ -205,13 +206,24 @@ impl PolicyValueSource {
         if value == "user.id" {
             Some(Self::UserId)
         } else {
-            value.strip_prefix("claim.").and_then(|claim| {
-                if claim.is_empty() {
-                    None
-                } else {
-                    Some(Self::Claim(claim.to_owned()))
-                }
-            })
+            value
+                .strip_prefix("claim.")
+                .and_then(|claim| {
+                    if claim.is_empty() {
+                        None
+                    } else {
+                        Some(Self::Claim(claim.to_owned()))
+                    }
+                })
+                .or_else(|| {
+                    value.strip_prefix("input.").and_then(|field| {
+                        if field.is_empty() {
+                            None
+                        } else {
+                            Some(Self::InputField(field.to_owned()))
+                        }
+                    })
+                })
         }
     }
 }
@@ -391,6 +403,7 @@ pub struct PolicyAssignment {
 pub struct RowPolicies {
     pub admin_bypass: bool,
     pub read: Option<PolicyFilterExpression>,
+    pub create_require: Option<PolicyFilterExpression>,
     pub create: Vec<PolicyAssignment>,
     pub update: Option<PolicyFilterExpression>,
     pub delete: Option<PolicyFilterExpression>,
@@ -401,6 +414,7 @@ impl Default for RowPolicies {
         Self {
             admin_bypass: true,
             read: None,
+            create_require: None,
             create: Vec::new(),
             update: None,
             delete: None,
@@ -411,6 +425,10 @@ impl Default for RowPolicies {
 impl RowPolicies {
     pub fn has_read_filters(&self) -> bool {
         self.read.is_some()
+    }
+
+    pub fn has_create_require_filters(&self) -> bool {
+        self.create_require.is_some()
     }
 
     pub fn has_update_filters(&self) -> bool {
@@ -424,6 +442,7 @@ impl RowPolicies {
     pub fn iter_filters(&self) -> Vec<(&'static str, &PolicyFilter)> {
         let mut filters = Vec::new();
         collect_scope_filters("read", self.read.as_ref(), &mut filters);
+        collect_scope_filters("create.require", self.create_require.as_ref(), &mut filters);
         collect_scope_filters("update", self.update.as_ref(), &mut filters);
         collect_scope_filters("delete", self.delete.as_ref(), &mut filters);
         filters
@@ -444,6 +463,7 @@ impl RowPolicies {
     pub fn exists_index_targets(&self) -> Vec<(String, String)> {
         let mut targets = Vec::new();
         collect_scope_exists_index_targets(self.read.as_ref(), &mut targets);
+        collect_scope_exists_index_targets(self.create_require.as_ref(), &mut targets);
         collect_scope_exists_index_targets(self.update.as_ref(), &mut targets);
         collect_scope_exists_index_targets(self.delete.as_ref(), &mut targets);
         targets
@@ -901,13 +921,29 @@ pub fn validate_row_policies(
     policies: &RowPolicies,
     span: Span,
 ) -> syn::Result<()> {
-    validate_policy_filters(resource, resources, "read", policies.read.as_ref(), span)?;
+    validate_policy_filters(
+        resource,
+        resources,
+        "read",
+        policies.read.as_ref(),
+        false,
+        span,
+    )?;
+    validate_policy_filters(
+        resource,
+        resources,
+        "create.require",
+        policies.create_require.as_ref(),
+        true,
+        span,
+    )?;
     validate_policy_assignments(&resource.fields, "create", &policies.create, span)?;
     validate_policy_filters(
         resource,
         resources,
         "update",
         policies.update.as_ref(),
+        false,
         span,
     )?;
     validate_policy_filters(
@@ -915,6 +951,7 @@ pub fn validate_row_policies(
         resources,
         "delete",
         policies.delete.as_ref(),
+        false,
         span,
     )
 }
@@ -934,6 +971,14 @@ pub fn validate_policy_claim_sources(
             resources,
             "read",
             resource.policies.read.as_ref(),
+            security,
+            span,
+        )?;
+        validate_policy_claim_sources_in_expression(
+            resource,
+            resources,
+            "create.require",
+            resource.policies.create_require.as_ref(),
             security,
             span,
         )?;
@@ -2092,9 +2137,12 @@ fn validate_policy_filter_claim_source(
     span: Span,
 ) -> syn::Result<()> {
     match &filter.operator {
-        PolicyFilterOperator::Equals(source) => {
-            validate_policy_claim_source(resource, scope, &filter.field, source, security, span)
-        }
+        PolicyFilterOperator::Equals(source) => match source {
+            PolicyValueSource::InputField(_) => Ok(()),
+            _ => {
+                validate_policy_claim_source(resource, scope, &filter.field, source, security, span)
+            }
+        },
         PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => Ok(()),
     }
 }
@@ -2222,12 +2270,20 @@ fn validate_policy_filters(
     resources: &[ResourceSpec],
     scope: &str,
     expression: Option<&PolicyFilterExpression>,
+    allow_input_fields: bool,
     span: Span,
 ) -> syn::Result<()> {
     let Some(expression) = expression else {
         return Ok(());
     };
-    validate_policy_filter_expression(resource, resources, scope, expression, span)
+    validate_policy_filter_expression(
+        resource,
+        resources,
+        scope,
+        expression,
+        allow_input_fields,
+        span,
+    )
 }
 
 fn validate_policy_filter_expression(
@@ -2235,25 +2291,51 @@ fn validate_policy_filter_expression(
     resources: &[ResourceSpec],
     scope: &str,
     expression: &PolicyFilterExpression,
+    allow_input_fields: bool,
     span: Span,
 ) -> syn::Result<()> {
     match expression {
         PolicyFilterExpression::Match(policy) => {
             let field = validate_policy_field(&resource.fields, scope, &policy.field, span)?;
-            validate_policy_filter_operator(scope, &policy.field, field, &policy.operator, span)
+            validate_policy_filter_operator(
+                resource,
+                scope,
+                &policy.field,
+                field,
+                &policy.operator,
+                allow_input_fields,
+                span,
+            )
         }
         PolicyFilterExpression::All(expressions) | PolicyFilterExpression::Any(expressions) => {
             for expression in expressions {
-                validate_policy_filter_expression(resource, resources, scope, expression, span)?;
+                validate_policy_filter_expression(
+                    resource,
+                    resources,
+                    scope,
+                    expression,
+                    allow_input_fields,
+                    span,
+                )?;
             }
             Ok(())
         }
-        PolicyFilterExpression::Not(expression) => {
-            validate_policy_filter_expression(resource, resources, scope, expression, span)
-        }
-        PolicyFilterExpression::Exists(filter) => {
-            validate_exists_policy_filter(resource, resources, scope, filter, span)
-        }
+        PolicyFilterExpression::Not(expression) => validate_policy_filter_expression(
+            resource,
+            resources,
+            scope,
+            expression,
+            allow_input_fields,
+            span,
+        ),
+        PolicyFilterExpression::Exists(filter) => validate_exists_policy_filter(
+            resource,
+            resources,
+            scope,
+            filter,
+            allow_input_fields,
+            span,
+        ),
     }
 }
 
@@ -2262,6 +2344,7 @@ fn validate_exists_policy_filter(
     resources: &[ResourceSpec],
     scope: &str,
     filter: &PolicyExistsFilter,
+    allow_input_fields: bool,
     span: Span,
 ) -> syn::Result<()> {
     let target_resource = resources.iter().find(|candidate| {
@@ -2278,7 +2361,14 @@ fn validate_exists_policy_filter(
         ));
     };
 
-    validate_exists_policy_condition(resource, target_resource, scope, &filter.condition, span)
+    validate_exists_policy_condition(
+        resource,
+        target_resource,
+        scope,
+        &filter.condition,
+        allow_input_fields,
+        span,
+    )
 }
 
 fn validate_exists_policy_condition(
@@ -2286,12 +2376,21 @@ fn validate_exists_policy_condition(
     target_resource: &ResourceSpec,
     scope: &str,
     condition: &PolicyExistsCondition,
+    allow_input_fields: bool,
     span: Span,
 ) -> syn::Result<()> {
     match condition {
         PolicyExistsCondition::Match(policy) => {
             let field = validate_policy_field(&target_resource.fields, scope, &policy.field, span)?;
-            validate_policy_filter_operator(scope, &policy.field, field, &policy.operator, span)
+            validate_policy_filter_operator(
+                resource,
+                scope,
+                &policy.field,
+                field,
+                &policy.operator,
+                allow_input_fields,
+                span,
+            )
         }
         PolicyExistsCondition::CurrentRowField { field, row_field } => {
             let target_field = validate_policy_field(&target_resource.fields, scope, field, span)?;
@@ -2331,14 +2430,20 @@ fn validate_exists_policy_condition(
                     target_resource,
                     scope,
                     expression,
+                    allow_input_fields,
                     span,
                 )?;
             }
             Ok(())
         }
-        PolicyExistsCondition::Not(expression) => {
-            validate_exists_policy_condition(resource, target_resource, scope, expression, span)
-        }
+        PolicyExistsCondition::Not(expression) => validate_exists_policy_condition(
+            resource,
+            target_resource,
+            scope,
+            expression,
+            allow_input_fields,
+            span,
+        ),
     }
 }
 
@@ -2373,14 +2478,57 @@ fn validate_exists_policy_claim_sources(
 }
 
 fn validate_policy_filter_operator(
+    source_resource: &ResourceSpec,
     scope: &str,
     field_name: &str,
     field: &FieldSpec,
     operator: &PolicyFilterOperator,
+    allow_input_fields: bool,
     span: Span,
 ) -> syn::Result<()> {
     match operator {
-        PolicyFilterOperator::Equals(_) => Ok(()),
+        PolicyFilterOperator::Equals(source) => {
+            if let PolicyValueSource::InputField(input_field_name) = source {
+                if !allow_input_fields {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "{scope} row policy field `{field_name}` cannot use `input.{input_field_name}`"
+                        ),
+                    ));
+                }
+
+                let expected_ty = policy_field_claim_type(&field.ty).ok_or_else(|| {
+                    syn::Error::new(
+                        span,
+                        format!(
+                            "row policy field `{field_name}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types"
+                        ),
+                    )
+                })?;
+                let input_field =
+                    validate_policy_field(&source_resource.fields, scope, input_field_name, span)?;
+                let input_ty = policy_field_claim_type(&input_field.ty).ok_or_else(|| {
+                    syn::Error::new(
+                        span,
+                        format!(
+                            "input row policy field `{input_field_name}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types"
+                        ),
+                    )
+                })?;
+                if expected_ty != input_ty {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "{scope} row policy `{field_name} = input.{input_field_name}` compares incompatible field types `{}` and `{}`",
+                            auth_claim_type_label(expected_ty),
+                            auth_claim_type_label(input_ty),
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
         PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => {
             if is_optional_type(&field.ty) {
                 Ok(())

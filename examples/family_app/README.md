@@ -56,6 +56,29 @@ The auth extension adds these `user` columns:
 Those are mapped by `security.auth.claims` in
 [family_app.eon](/Users/mh/Projects/very_simple_rest/examples/family_app/family_app.eon).
 
+## Browser Workspace
+
+This example now ships a same-origin plain HTML, CSS, and JavaScript SPA in
+[public/](/Users/mh/Projects/very_simple_rest/examples/family_app/public). The `.eon` config
+mounts it at `/`, so once the generated family-app server is running you can open:
+
+```text
+http://127.0.0.1:8080/
+```
+
+The SPA covers the current real flow:
+
+- register and log in with built-in auth
+- create a family and add family members immediately
+- inspect visible family, member, and household rows
+- patch `active_family_id` and `preferred_household` through the admin API
+- manage runtime assignments and inspect their audit trail
+- create and use shared shopping and calendar resources
+
+It is intentionally demo-oriented rather than exhaustive: it focuses on the onboarding, claim
+activation, and hybrid runtime-grant paths that are hardest to understand from curl examples
+alone.
+
 ## Verify The Policy Model
 
 ```bash
@@ -90,9 +113,11 @@ The example now supports this real HTTP flow:
 1. A normal registered `user` can create a `Family`.
 2. The created row is immediately readable by its owner because `Family.read` now includes
    `owner_user_id=user.id`.
-3. An admin can then set that user's `active_family_id` through the built-in auth admin API.
-4. After logging in again, that guardian can create `FamilyMember` rows for self and other
-   registered users.
+3. That guardian can immediately create `FamilyMember` rows for self and other registered users,
+   because `FamilyMember.create.require` checks the posted `family_id` against a `Family` row
+   owned by `user.id`.
+4. An admin can then set that user's `active_family_id` through the built-in auth admin API for
+   later family-scoped resources such as `Household`.
 
 The key admin bootstrap call is:
 
@@ -131,21 +156,8 @@ static `.eon` policies stay owner-scoped by default.
 
 ## Current Limit
 
-The example still does not support a pure self-service first-family bootstrap for additional
-members in `.eon` alone.
+The remaining bootstrap limitation is now narrower.
 
-The reason is current engine scope, not a broken example:
-
-- create policies still do not support relation-aware validation such as
-  “allow `FamilyMember.create` when the posted `family_id` belongs to a `Family` owned by
-  `user.id`”
-- built-in auth claims are now admin-manageable through API, but not self-managed by end users
-
-So today the safe flow is:
-
-1. user creates family
-2. admin sets `active_family_id`
-3. user logs in again
-4. user adds family members
-
-That limitation is now documented explicitly instead of being hidden behind a half-working setup.
+Family membership onboarding works through `.eon` alone, but activating `active_family_id` for
+later claim-scoped resources still requires an admin-side claim update. That is because built-in
+auth claims are manageable through the admin API, not self-managed by end users.

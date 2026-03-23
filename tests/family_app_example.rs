@@ -195,7 +195,7 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
         .uri("/api/family_member")
         .insert_header(("Authorization", format!("Bearer {}", guardian_token.token)))
         .set_json(&family_app_api::FamilyMemberCreate {
-            family_id: None,
+            family_id,
             user_id: guardian_id,
             role_label: "guardian".to_owned(),
             display_name: "Guardian".to_owned(),
@@ -206,7 +206,7 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
         test::call_service(&app, create_member_before_claim).await;
     assert_eq!(
         create_member_before_claim_response.status(),
-        StatusCode::FORBIDDEN
+        StatusCode::CREATED
     );
 
     let patch_guardian_claims = test::TestRequest::patch()
@@ -268,7 +268,7 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
             format!("Bearer {}", guardian_token_after_claim.token),
         ))
         .set_json(&family_app_api::FamilyMemberCreate {
-            family_id: None,
+            family_id,
             user_id: guardian_id,
             role_label: "guardian".to_owned(),
             display_name: "Guardian".to_owned(),
@@ -287,7 +287,7 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
             format!("Bearer {}", guardian_token_after_claim.token),
         ))
         .set_json(&family_app_api::FamilyMemberCreate {
-            family_id: None,
+            family_id,
             user_id: spouse_id,
             role_label: "caregiver".to_owned(),
             display_name: "Spouse".to_owned(),

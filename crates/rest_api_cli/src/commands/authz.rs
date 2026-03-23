@@ -1396,6 +1396,7 @@ fn render_source(source: &AuthorizationValueSource) -> String {
     match source {
         AuthorizationValueSource::UserId => "user.id".to_owned(),
         AuthorizationValueSource::Claim { name, ty } => format!("claim.{name}:{ty:?}"),
+        AuthorizationValueSource::InputField { name } => format!("input.{name}"),
     }
 }
 

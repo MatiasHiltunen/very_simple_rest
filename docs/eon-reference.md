@@ -183,13 +183,13 @@ List settings tune generated list endpoint defaults.
 
 ## Row Policies
 
-Row policies support both the newer explicit form and older owner/set-owner shorthands. `read`, `update`, and `delete` accept a single filter, an array that implies `all_of`, or an explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` stays a flat assignment list.
+Row policies support both the newer explicit form and older owner/set-owner shorthands. `read`, `update`, and `delete` accept a single filter, an array that implies `all_of`, or an explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` supports the legacy flat assignment list and an object form with `assign` plus `require`.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].policies.admin_bypass | Bool | true | No | true, false | When true, admin-role users bypass the configured row-level policies. |
 | resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `is_null` and `is_not_null` require a nullable field. `SetOwner` syntax is rejected here. |
-| resources[].policies.create | PolicyAssignment, [PolicyAssignment] | None | No | `field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field` | Assigns values during create operations. Boolean groups are not supported here. `Owner` syntax is rejected here. |
+| resources[].policies.create | PolicyAssignment, [PolicyAssignment], { assign, require } | None | No | `field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field`, `{ assign: [...], require: PolicyFilter \| [PolicyFilter] \| PolicyGroup }` | Assigns values during create operations and can also enforce preconditions before insert. `require` uses the same boolean filter tree as `read` / `update` / `delete`, plus `input.<field>` sources for the proposed create payload. `Owner` syntax is rejected here. |
 | resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
 | resources[].policies.delete | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters delete queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
 
@@ -222,7 +222,24 @@ policies: {
 }
 ```
 
-The first relation-aware filter form is `exists`, which targets another declared resource and correlates it with the current row. Leaf `where` entries can be equality checks, current-row field correlations, or nullable `is_null` / `is_not_null` checks:
+```eon
+create: {
+    assign: [
+        "created_by_user_id=user.id"
+    ]
+    require: {
+        exists: {
+            resource: "Family"
+            where: [
+                { field: "id", equals: "input.family_id" }
+                "owner_user_id=user.id"
+            ]
+        }
+    }
+}
+```
+
+The first relation-aware filter form is `exists`, which targets another declared resource and correlates it with the current row. Leaf `where` entries can be equality checks, current-row field correlations, `input.<field>` comparisons for `create.require`, or nullable `is_null` / `is_not_null` checks:
 
 ```eon
 read: {

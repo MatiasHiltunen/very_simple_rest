@@ -52,7 +52,9 @@ pub fn compile_resource_authorization(
                 &resource_id,
                 AuthorizationAction::Create,
                 resource.roles.create.as_deref(),
+                resource.policies.create_require.as_ref(),
                 &resource.policies.create,
+                resources,
                 security,
             ),
             compile_filter_action(
@@ -98,7 +100,9 @@ fn compile_assignment_action(
     resource_id: &str,
     action: AuthorizationAction,
     required_role: Option<&str>,
+    filters: Option<&PolicyFilterExpression>,
     assignments: &[PolicyAssignment],
+    resources: &[ResourceSpec],
     security: &SecurityConfig,
 ) -> ActionAuthorization {
     let action_id = action_rule_id(resource_id, action);
@@ -107,7 +111,7 @@ fn compile_assignment_action(
         action,
         role_rule_id: required_role.map(|_| format!("{action_id}.role")),
         required_role: required_role.map(ToOwned::to_owned),
-        filter: None,
+        filter: compile_filter_group(&action_id, filters, resources, security),
         assignments: assignments
             .iter()
             .map(|assignment| compile_assignment(&action_id, assignment, security))
@@ -294,6 +298,9 @@ fn compile_source(
             name: name.clone(),
             ty: configured_claim_type(name, security),
         },
+        PolicyValueSource::InputField(name) => {
+            AuthorizationValueSource::InputField { name: name.clone() }
+        }
     }
 }
 

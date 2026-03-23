@@ -445,12 +445,28 @@ struct RowPoliciesDocument {
     admin_bypass: bool,
     #[serde(default)]
     read: Option<FilterPoliciesDocument>,
-    #[serde(default)]
-    create: Option<ScopePoliciesDocument>,
+    #[serde(default, deserialize_with = "deserialize_create_policies_document")]
+    create: Option<CreatePoliciesDocument>,
     #[serde(default)]
     update: Option<FilterPoliciesDocument>,
     #[serde(default)]
     delete: Option<FilterPoliciesDocument>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum CreatePoliciesDocument {
+    Structured(CreatePoliciesGroupDocument),
+    Assignments(ScopePoliciesDocument),
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatePoliciesGroupDocument {
+    #[serde(default)]
+    assign: Option<ScopePoliciesDocument>,
+    #[serde(default)]
+    require: Option<FilterPoliciesDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -477,8 +493,8 @@ struct FilterPolicyGroupDocument {
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum ScopePoliciesDocument {
-    Single(PolicyEntryDocument),
     Many(Vec<PolicyEntryDocument>),
+    Single(PolicyEntryDocument),
 }
 
 #[derive(serde::Deserialize)]
@@ -997,6 +1013,13 @@ fn build_resources(
             ));
         }
 
+        let policies = parse_row_policies(resource.policies).map_err(|error| {
+            syn::Error::new(
+                error.span(),
+                format!("failed to parse row policies for `{struct_name}`: {error}"),
+            )
+        })?;
+
         result.push(ResourceSpec {
             struct_ident: struct_ident.clone(),
             impl_module_ident: default_resource_module_ident(&struct_ident),
@@ -1004,7 +1027,7 @@ fn build_resources(
             id_field: configured_id,
             db,
             roles: resource.roles.with_legacy_defaults(),
-            policies: parse_row_policies(resource.policies)?,
+            policies,
             list: parse_list_config(resource.list),
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
@@ -1953,10 +1976,12 @@ fn parse_numeric_bound_document(bound: NumericBoundDocument) -> NumericBound {
 }
 
 fn parse_row_policies(policies: RowPoliciesDocument) -> syn::Result<RowPolicies> {
+    let (create_require, create_assignments) = parse_create_policies(policies.create)?;
     Ok(RowPolicies {
         admin_bypass: policies.admin_bypass,
         read: parse_filter_policies("read", policies.read)?,
-        create: parse_assignment_policies("create", policies.create)?,
+        create_require,
+        create: create_assignments,
         update: parse_filter_policies("update", policies.update)?,
         delete: parse_filter_policies("delete", policies.delete)?,
     })
@@ -1964,6 +1989,33 @@ fn parse_row_policies(policies: RowPoliciesDocument) -> syn::Result<RowPolicies>
 
 fn default_admin_bypass() -> bool {
     true
+}
+
+fn deserialize_create_policies_document<'de, D>(
+    deserializer: D,
+) -> Result<Option<CreatePoliciesDocument>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        serde_json::Value::Object(map)
+            if map.contains_key("assign") || map.contains_key("require") =>
+        {
+            serde_json::from_value::<CreatePoliciesGroupDocument>(serde_json::Value::Object(map))
+                .map(CreatePoliciesDocument::Structured)
+                .map(Some)
+                .map_err(serde::de::Error::custom)
+        }
+        other => serde_json::from_value::<ScopePoliciesDocument>(other)
+            .map(CreatePoliciesDocument::Assignments)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 fn parse_filter_policies(
@@ -1983,6 +2035,30 @@ fn parse_assignment_policies(
         .into_iter()
         .map(|policy| parse_assignment_policy(scope, policy))
         .collect()
+}
+
+fn parse_create_policies(
+    policies: Option<CreatePoliciesDocument>,
+) -> syn::Result<(Option<PolicyFilterExpression>, Vec<PolicyAssignment>)> {
+    match policies {
+        None => Ok((None, Vec::new())),
+        Some(CreatePoliciesDocument::Assignments(assignments)) => Ok((
+            None,
+            parse_assignment_policies("create", Some(assignments))?,
+        )),
+        Some(CreatePoliciesDocument::Structured(group)) => {
+            if group.assign.is_none() && group.require.is_none() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "create row policy groups must set at least one of `assign` or `require`",
+                ));
+            }
+            Ok((
+                parse_filter_policies("create.require", group.require)?,
+                parse_assignment_policies("create", group.assign)?,
+            ))
+        }
+    }
 }
 
 fn expand_policy_entries(
@@ -2367,6 +2443,14 @@ fn parse_assignment_policy(
             }
         }
         PolicyEntryDocument::Rule(policy) => {
+            if policy.value.is_none()
+                && policy.equals.is_none()
+                && !policy.is_null
+                && !policy.is_not_null
+                && (policy.field.contains('=') || policy.field.contains(':'))
+            {
+                return parse_assignment_shorthand(&policy.field);
+            }
             let source = policy.value.ok_or_else(|| {
                 syn::Error::new(
                     Span::call_site(),
@@ -2460,7 +2544,7 @@ fn parse_policy_source(value: &str) -> syn::Result<PolicyValueSource> {
     PolicyValueSource::parse(value).ok_or_else(|| {
         syn::Error::new(
             Span::call_site(),
-            "row policy source must be `user.id` or `claim.<name>`",
+            "row policy source must be `user.id`, `claim.<name>`, or `input.<field>`",
         )
     })
 }
@@ -3033,6 +3117,111 @@ mod tests {
             }
             other => panic!("expected exists filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_create_require_policies_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Family"
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "owner_user_id", type: I64 }
+                    ]
+                }
+                {
+                    name: "FamilyMember"
+                    policies: {
+                        create: {
+                            assign: [
+                                "created_by_user_id=user.id"
+                            ]
+                            require: {
+                                exists: {
+                                    resource: "Family"
+                                    where: [
+                                        { field: "id", equals: "input.family_id" }
+                                        "owner_user_id=user.id"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "family_id", type: I64 }
+                        { name: "user_id", type: I64 }
+                        { name: "created_by_user_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
+        let resource = resources
+            .iter()
+            .find(|resource| resource.struct_ident.to_string() == "FamilyMember")
+            .expect("family member resource should exist");
+
+        assert_eq!(resource.policies.create.len(), 1);
+        let create_require = resource
+            .policies
+            .create_require
+            .as_ref()
+            .expect("create.require should be present");
+        match create_require {
+            PolicyFilterExpression::Exists(filter) => match &filter.condition {
+                super::super::model::PolicyExistsCondition::All(conditions) => {
+                    assert_eq!(conditions.len(), 2);
+                    match &conditions[0] {
+                        super::super::model::PolicyExistsCondition::Match(filter) => {
+                            assert_eq!(filter.field, "id");
+                            assert_eq!(
+                                filter.operator,
+                                super::super::model::PolicyFilterOperator::Equals(
+                                    PolicyValueSource::InputField("family_id".to_owned())
+                                )
+                            );
+                        }
+                        other => panic!("expected input match inside exists, got {other:?}"),
+                    }
+                }
+                other => panic!("expected implicit exists all_of group, got {other:?}"),
+            },
+            other => panic!("expected exists create.require filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_input_sources_outside_create_require() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    policies: {
+                        read: { field: "tenant_id", equals: "input.tenant_id" }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "tenant_id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = build_resources(document.db, document.resources)
+            .expect_err("input sources outside create.require should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("read row policy field `tenant_id` cannot use `input.tenant_id`")
+        );
     }
 
     #[test]

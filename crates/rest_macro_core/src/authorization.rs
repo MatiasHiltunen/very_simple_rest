@@ -433,6 +433,7 @@ pub struct AuthorizationAssignment {
 pub enum AuthorizationValueSource {
     UserId,
     Claim { name: String, ty: AuthClaimType },
+    InputField { name: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -849,40 +850,69 @@ impl ResourceAuthorization {
             role_check_passed && admin && self.admin_bypass && action.filter.is_some();
 
         if role_check_passed {
-            if admin_bypass_applied {
-                notes.push("Admin bypass skipped row filter evaluation".to_owned());
-            } else if let Some(filter) = &action.filter {
-                let trace = evaluate_condition_trace(filter, input);
-                if trace.is_indeterminate() && trace.has_missing_field() {
-                    notes.push("Simulation row is missing one or more policy fields".to_owned());
-                    outcome = AuthorizationOutcome::Incomplete;
-                } else if trace.is_indeterminate() && trace.has_missing_related_rows() {
-                    notes.push(
-                        "Simulation is missing related rows required by relation-aware exists policies"
-                            .to_owned(),
-                    );
-                    outcome = AuthorizationOutcome::Incomplete;
-                } else if trace.is_indeterminate() && trace.has_missing_related_fields() {
-                    notes.push(
-                        "Related rows are missing one or more fields required by relation-aware exists policies"
-                            .to_owned(),
-                    );
-                    outcome = AuthorizationOutcome::Incomplete;
-                } else if trace.is_indeterminate() && trace.has_missing_source() {
-                    notes.push("Missing principal values required by the row policy".to_owned());
-                    outcome = AuthorizationOutcome::Denied;
-                } else if !trace.matched() {
-                    notes.push("Row policy conditions did not match".to_owned());
-                    outcome = AuthorizationOutcome::Denied;
-                }
-                filter_trace = Some(trace);
-            }
-
             assignments = action
                 .assignments
                 .iter()
                 .map(|assignment| evaluate_assignment_trace(self, input, admin, assignment))
                 .collect();
+
+            let filter_input = if input.action == AuthorizationAction::Create {
+                create_filter_input(input, &assignments)
+            } else {
+                input.clone()
+            };
+
+            if admin_bypass_applied {
+                notes.push("Admin bypass skipped row filter evaluation".to_owned());
+            } else if let Some(filter) = &action.filter {
+                let trace = evaluate_condition_trace(filter, &filter_input);
+                if trace.is_indeterminate() && trace.has_missing_field() {
+                    notes.push(if input.action == AuthorizationAction::Create {
+                        "Simulation create payload is missing one or more fields required by create.require"
+                            .to_owned()
+                    } else {
+                        "Simulation row is missing one or more policy fields".to_owned()
+                    });
+                    outcome = AuthorizationOutcome::Incomplete;
+                } else if trace.is_indeterminate() && trace.has_missing_related_rows() {
+                    notes.push(
+                        if input.action == AuthorizationAction::Create {
+                            "Simulation is missing related rows required by relation-aware create.require exists policies"
+                                .to_owned()
+                        } else {
+                            "Simulation is missing related rows required by relation-aware exists policies"
+                                .to_owned()
+                        },
+                    );
+                    outcome = AuthorizationOutcome::Incomplete;
+                } else if trace.is_indeterminate() && trace.has_missing_related_fields() {
+                    notes.push(
+                        if input.action == AuthorizationAction::Create {
+                            "Related rows are missing one or more fields required by relation-aware create.require exists policies"
+                                .to_owned()
+                        } else {
+                            "Related rows are missing one or more fields required by relation-aware exists policies"
+                                .to_owned()
+                        },
+                    );
+                    outcome = AuthorizationOutcome::Incomplete;
+                } else if trace.is_indeterminate() && trace.has_missing_source() {
+                    notes.push(if input.action == AuthorizationAction::Create {
+                        "Missing principal or input values required by create.require".to_owned()
+                    } else {
+                        "Missing principal values required by the row policy".to_owned()
+                    });
+                    outcome = AuthorizationOutcome::Denied;
+                } else if !trace.matched() {
+                    notes.push(if input.action == AuthorizationAction::Create {
+                        "Create requirement conditions did not match".to_owned()
+                    } else {
+                        "Row policy conditions did not match".to_owned()
+                    });
+                    outcome = AuthorizationOutcome::Denied;
+                }
+                filter_trace = Some(trace);
+            }
 
             if assignments
                 .iter()
@@ -2673,7 +2703,24 @@ fn resolve_source_value(
     match source {
         AuthorizationValueSource::UserId => input.user_id.map(Value::from),
         AuthorizationValueSource::Claim { name, .. } => input.claims.get(name).cloned(),
+        AuthorizationValueSource::InputField { name } => input.proposed.get(name).cloned(),
     }
+}
+
+fn create_filter_input(
+    input: &AuthorizationSimulationInput,
+    assignments: &[AuthorizationAssignmentTrace],
+) -> AuthorizationSimulationInput {
+    let mut create_row = input.proposed.clone();
+    for assignment in assignments {
+        if let Some(value) = &assignment.effective_value {
+            create_row.insert(assignment.field.clone(), value.clone());
+        }
+    }
+
+    let mut normalized = input.clone();
+    normalized.row = create_row;
+    normalized
 }
 
 fn parse_stored_scoped_assignment_target(
@@ -3413,6 +3460,73 @@ mod tests {
             })
             .expect("action should exist");
         assert_eq!(denied.outcome, AuthorizationOutcome::Denied);
+    }
+
+    #[test]
+    fn simulate_create_action_supports_input_field_exists_requirements() {
+        let resource = ResourceAuthorization {
+            id: "resource.family_member".to_owned(),
+            resource: "FamilyMember".to_owned(),
+            table: "family_member".to_owned(),
+            admin_bypass: false,
+            actions: vec![ActionAuthorization {
+                id: "resource.family_member.action.create".to_owned(),
+                action: AuthorizationAction::Create,
+                role_rule_id: None,
+                required_role: None,
+                filter: Some(AuthorizationCondition::Exists {
+                    id: "resource.family_member.action.create.filter".to_owned(),
+                    resource: "Family".to_owned(),
+                    table: "family".to_owned(),
+                    conditions: vec![
+                        AuthorizationExistsCondition::Match(AuthorizationMatch {
+                            id: "resource.family_member.action.create.filter.1".to_owned(),
+                            field: "id".to_owned(),
+                            operator: AuthorizationOperator::Equals,
+                            source: Some(AuthorizationValueSource::InputField {
+                                name: "family_id".to_owned(),
+                            }),
+                        }),
+                        AuthorizationExistsCondition::Match(AuthorizationMatch {
+                            id: "resource.family_member.action.create.filter.2".to_owned(),
+                            field: "owner_user_id".to_owned(),
+                            operator: AuthorizationOperator::Equals,
+                            source: Some(AuthorizationValueSource::UserId),
+                        }),
+                    ],
+                }),
+                assignments: vec![AuthorizationAssignment {
+                    id: "resource.family_member.action.create.assignment.created_by_user_id"
+                        .to_owned(),
+                    field: "created_by_user_id".to_owned(),
+                    source: AuthorizationValueSource::UserId,
+                }],
+            }],
+        };
+
+        let result = resource
+            .simulate_action(&AuthorizationSimulationInput {
+                action: AuthorizationAction::Create,
+                user_id: Some(7),
+                roles: Vec::new(),
+                claims: BTreeMap::new(),
+                row: BTreeMap::new(),
+                proposed: BTreeMap::from([("family_id".to_owned(), Value::from(42))]),
+                related_rows: BTreeMap::from([(
+                    "Family".to_owned(),
+                    vec![BTreeMap::from([
+                        ("id".to_owned(), Value::from(42)),
+                        ("owner_user_id".to_owned(), Value::from(7)),
+                    ])],
+                )]),
+                scope: None,
+                hybrid_source: None,
+                scoped_assignments: Vec::new(),
+            })
+            .expect("action should exist");
+
+        assert_eq!(result.outcome, AuthorizationOutcome::Allowed);
+        assert_eq!(result.assignments[0].effective_value, Some(Value::from(7)));
     }
 
     #[test]

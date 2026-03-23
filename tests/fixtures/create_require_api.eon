@@ -1,0 +1,61 @@
+module: "create_require_api"
+resources: {
+    Family: {
+        roles: {
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
+        }
+        policies: {
+            read: "owner_user_id=user.id"
+            create: "owner_user_id=user.id"
+            update: "owner_user_id=user.id"
+            delete: "owner_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            owner_user_id: I64
+            name: String
+        }
+    }
+    FamilyMember: {
+        roles: {
+            create: "user"
+            read: "user"
+            update: "user"
+            delete: "user"
+        }
+        policies: {
+            read: "created_by_user_id=user.id"
+            create: {
+                assign: [
+                    "created_by_user_id=user.id"
+                ]
+                require: {
+                    exists: {
+                        resource: "Family"
+                        where: [
+                            { field: "id", equals: "input.family_id" }
+                            "owner_user_id=user.id"
+                        ]
+                    }
+                }
+            }
+            update: "created_by_user_id=user.id"
+            delete: "created_by_user_id=user.id"
+        }
+        fields: {
+            id: { type: I64, id: true }
+            family_id: {
+                type: I64
+                relation: {
+                    references: "family.id"
+                }
+            }
+            user_id: I64
+            created_by_user_id: I64
+            display_name: String
+        }
+    }
+}

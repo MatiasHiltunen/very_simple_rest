@@ -673,6 +673,12 @@ fn value_source_tokens(source: &AuthorizationValueSource, runtime_crate: &Path) 
                 ty: #ty,
             })
         }
+        AuthorizationValueSource::InputField { name } => {
+            let name = Literal::string(name);
+            quote!(#runtime_crate::core::authorization::AuthorizationValueSource::InputField {
+                name: #name.to_owned(),
+            })
+        }
     }
 }
 
@@ -1646,6 +1652,9 @@ fn resource_impl_tokens(
                             q = q.bind(#value);
                         }
                     }
+                    PolicyValueSource::InputField(_) => {
+                        panic!("validated create assignments cannot use input sources")
+                    }
                 }
             } else {
                 quote! {
@@ -1685,6 +1694,8 @@ fn resource_impl_tokens(
     let query_bind_matches = list_bind_match_tokens(resource, "q");
     let policy_plan_enum = policy_plan_enum_tokens(resource);
     let policy_plan_methods = policy_plan_method_tokens(resource, resources, runtime_crate);
+    let create_requirement_methods =
+        create_requirement_method_tokens(resource, resources, authorization, runtime_crate);
     let read_policy_list_conditions = if resource.policies.has_read_filters() {
         let plan_ident = policy_plan_ident(resource);
         quote! {
@@ -1706,6 +1717,34 @@ fn resource_impl_tokens(
     };
     let create_admin_override =
         resource.policies.admin_bypass && resource.policies.create.iter().next().is_some();
+    let create_require_runtime = if hybrid.map(|config| config.create_payload).unwrap_or(false) {
+        quote!(Some(runtime.get_ref()))
+    } else {
+        quote!(None)
+    };
+    let create_require_check = if resource.policies.has_create_require_filters() {
+        quote! {
+            match Self::create_require_matches(
+                &item,
+                &user,
+                db.get_ref(),
+                #create_require_runtime,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return #runtime_crate::core::errors::forbidden(
+                        "forbidden",
+                        "Create requirement conditions did not match",
+                    );
+                }
+                Err(response) => return response,
+            }
+        }
+    } else {
+        quote!()
+    };
     let create_insert_binds = if create_admin_override {
         quote! {
             if #is_admin {
@@ -3249,6 +3288,8 @@ fn resource_impl_tokens(
                 Self::build_list_plan_internal(query, user, parent_filter, false)
             }
 
+            #create_requirement_methods
+
             fn finalize_list_response(
                 plan: #list_plan_ty,
                 total: i64,
@@ -3311,6 +3352,7 @@ fn resource_impl_tokens(
             ) -> impl Responder {
                 #create_check
                 #(#create_validation)*
+                #create_require_check
                 #create_body
             }
 
@@ -3883,6 +3925,9 @@ fn policy_source_value(
                 }
             }
         }
+        PolicyValueSource::InputField(_) => {
+            panic!("validated create assignments cannot use input sources")
+        }
     }
 }
 
@@ -3895,6 +3940,9 @@ fn optional_policy_source_value(
         PolicyValueSource::Claim(name) => {
             let claim_name = Literal::string(name);
             claim_access_value_tokens(&claim_name, field)
+        }
+        PolicyValueSource::InputField(_) => {
+            panic!("validated create assignments cannot use input sources")
         }
     }
 }
@@ -3926,6 +3974,9 @@ fn maybe_policy_source_value(
         PolicyValueSource::Claim(name) => {
             let claim_name = Literal::string(name);
             claim_access_value_tokens(&claim_name, field)
+        }
+        PolicyValueSource::InputField(_) => {
+            panic!("read/update/delete row policies cannot use input sources")
         }
     }
 }
@@ -4096,6 +4147,691 @@ fn single_policy_plan_method_tokens(
             let mut #next_index_ident = start_index;
             #expression_tokens
         }
+    }
+}
+
+fn create_requirement_method_tokens(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    authorization: Option<&AuthorizationContract>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let Some(expression) = resource.policies.create_require.as_ref() else {
+        return quote!();
+    };
+
+    let bind_ident = list_bind_ident(resource);
+    let create_payload_ty = create_payload_type(resource);
+    let next_index_ident = format_ident!("next_index");
+    let bind_matches = list_bind_match_tokens(resource, "q");
+    let expression_tokens = create_requirement_expression_plan_tokens(
+        resource,
+        resources,
+        authorization,
+        expression,
+        &bind_ident,
+        &next_index_ident,
+        runtime_crate,
+        "create_require",
+    );
+
+    quote! {
+        fn combine_all_create_requirement_plans(
+            plans: Vec<(String, Vec<#bind_ident>)>,
+        ) -> (String, Vec<#bind_ident>) {
+            let mut conditions = Vec::new();
+            let mut binds = Vec::new();
+            for (condition, mut plan_binds) in plans {
+                conditions.push(condition);
+                binds.append(&mut plan_binds);
+            }
+            (format!("({})", conditions.join(" AND ")), binds)
+        }
+
+        fn combine_any_create_requirement_plans(
+            plans: Vec<(String, Vec<#bind_ident>)>,
+        ) -> (String, Vec<#bind_ident>) {
+            let mut conditions = Vec::new();
+            let mut binds = Vec::new();
+            for (condition, mut plan_binds) in plans {
+                conditions.push(condition);
+                binds.append(&mut plan_binds);
+            }
+            (format!("({})", conditions.join(" OR ")), binds)
+        }
+
+        fn negate_create_requirement_plan(
+            plan: (String, Vec<#bind_ident>),
+        ) -> (String, Vec<#bind_ident>) {
+            let (condition, binds) = plan;
+            (format!("NOT ({condition})"), binds)
+        }
+
+        async fn create_require_matches(
+            item: &#create_payload_ty,
+            user: &#runtime_crate::core::auth::UserContext,
+            db: &DbPool,
+            runtime: Option<&#runtime_crate::core::authorization::AuthorizationRuntime>,
+        ) -> Result<bool, HttpResponse> {
+            let mut #next_index_ident = 1usize;
+            let (condition, binds) = #expression_tokens;
+            let sql = format!("SELECT 1 WHERE {}", condition);
+            let mut q = #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql);
+            for bind in binds {
+                q = match bind {
+                    #(#bind_matches)*
+                };
+            }
+            match q.fetch_optional(db).await {
+                Ok(result) => Ok(result.is_some()),
+                Err(error) => Err(#runtime_crate::core::errors::internal_error(error.to_string())),
+            }
+        }
+    }
+}
+
+fn create_requirement_expression_plan_tokens(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    authorization: Option<&AuthorizationContract>,
+    expression: &PolicyFilterExpression,
+    bind_ident: &syn::Ident,
+    next_index_ident: &syn::Ident,
+    runtime_crate: &Path,
+    path: &str,
+) -> TokenStream {
+    match expression {
+        PolicyFilterExpression::Match(filter) => {
+            let field = resource_field(resource, &filter.field);
+            let field_value = create_effective_field_value_tokens(
+                resource,
+                authorization,
+                field,
+                true,
+                runtime_crate,
+            );
+            match &filter.operator {
+                super::model::PolicyFilterOperator::Equals(source) => {
+                    let source_value = create_source_value_tokens(
+                        resource,
+                        authorization,
+                        field,
+                        source,
+                        true,
+                        runtime_crate,
+                    );
+                    let left_bind = list_bind_value_tokens(bind_ident, field, quote!(left_value));
+                    let right_bind = list_bind_value_tokens(bind_ident, field, quote!(right_value));
+                    quote! {
+                        {
+                            let left_value = #field_value;
+                            let right_value = #source_value;
+                            let left_placeholder = Self::list_placeholder(#next_index_ident);
+                            #next_index_ident += 1;
+                            let right_placeholder = Self::list_placeholder(#next_index_ident);
+                            #next_index_ident += 1;
+                            (format!("{left_placeholder} = {right_placeholder}"), vec![#left_bind, #right_bind])
+                        }
+                    }
+                }
+                super::model::PolicyFilterOperator::IsNull => {
+                    let value = create_effective_field_value_tokens(
+                        resource,
+                        authorization,
+                        field,
+                        false,
+                        runtime_crate,
+                    );
+                    quote! {
+                        {
+                            let value = #value;
+                            (
+                                if value.is_none() {
+                                    "1 = 1".to_owned()
+                                } else {
+                                    "1 = 0".to_owned()
+                                },
+                                Vec::<#bind_ident>::new(),
+                            )
+                        }
+                    }
+                }
+                super::model::PolicyFilterOperator::IsNotNull => {
+                    let value = create_effective_field_value_tokens(
+                        resource,
+                        authorization,
+                        field,
+                        false,
+                        runtime_crate,
+                    );
+                    quote! {
+                        {
+                            let value = #value;
+                            (
+                                if value.is_some() {
+                                    "1 = 1".to_owned()
+                                } else {
+                                    "1 = 0".to_owned()
+                                },
+                                Vec::<#bind_ident>::new(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        PolicyFilterExpression::All(expressions) => {
+            let expressions = expressions
+                .iter()
+                .enumerate()
+                .map(|(index, expression)| {
+                    create_requirement_expression_plan_tokens(
+                        resource,
+                        resources,
+                        authorization,
+                        expression,
+                        bind_ident,
+                        next_index_ident,
+                        runtime_crate,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_all_create_requirement_plans(
+                vec![#(#expressions),*]
+            ))
+        }
+        PolicyFilterExpression::Any(expressions) => {
+            let expressions = expressions
+                .iter()
+                .enumerate()
+                .map(|(index, expression)| {
+                    create_requirement_expression_plan_tokens(
+                        resource,
+                        resources,
+                        authorization,
+                        expression,
+                        bind_ident,
+                        next_index_ident,
+                        runtime_crate,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_any_create_requirement_plans(
+                vec![#(#expressions),*]
+            ))
+        }
+        PolicyFilterExpression::Not(expression) => {
+            let expression = create_requirement_expression_plan_tokens(
+                resource,
+                resources,
+                authorization,
+                expression,
+                bind_ident,
+                next_index_ident,
+                runtime_crate,
+                &format!("{path}_not"),
+            );
+            quote!(Self::negate_create_requirement_plan(#expression))
+        }
+        PolicyFilterExpression::Exists(filter) => {
+            let alias = Literal::string(&format!("create_require_exists_{path}"));
+            let target_resource = resources
+                .iter()
+                .find(|candidate| {
+                    candidate.struct_ident.to_string() == filter.resource
+                        || candidate.table_name == filter.resource
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "validated resource set is missing create.require exists target `{}`",
+                        filter.resource
+                    )
+                });
+            let target_table = Literal::string(&target_resource.table_name);
+            let exists_condition = create_requirement_exists_condition_tokens(
+                resource,
+                target_resource,
+                authorization,
+                &filter.condition,
+                bind_ident,
+                next_index_ident,
+                &alias,
+                runtime_crate,
+                &format!("{path}_exists"),
+            );
+            quote! {
+                {
+                    let (condition, binds) = #exists_condition;
+                    (
+                        format!(
+                            "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",
+                            #target_table,
+                            #alias,
+                            condition
+                        ),
+                        binds,
+                    )
+                }
+            }
+        }
+    }
+}
+
+fn create_requirement_exists_condition_tokens(
+    resource: &ResourceSpec,
+    target_resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    condition: &super::model::PolicyExistsCondition,
+    bind_ident: &syn::Ident,
+    next_index_ident: &syn::Ident,
+    alias: &Literal,
+    runtime_crate: &Path,
+    path: &str,
+) -> TokenStream {
+    match condition {
+        super::model::PolicyExistsCondition::Match(filter) => {
+            let field = resource_field(target_resource, &filter.field);
+            let field_name = Literal::string(&filter.field);
+            match &filter.operator {
+                super::model::PolicyFilterOperator::Equals(source) => {
+                    let source_value = create_source_value_tokens(
+                        resource,
+                        authorization,
+                        field,
+                        source,
+                        true,
+                        runtime_crate,
+                    );
+                    let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
+                    quote! {
+                        {
+                            let value = #source_value;
+                            let placeholder = Self::list_placeholder(#next_index_ident);
+                            #next_index_ident += 1;
+                            (
+                                format!("{}.{} = {}", #alias, #field_name, placeholder),
+                                vec![#bind_value],
+                            )
+                        }
+                    }
+                }
+                super::model::PolicyFilterOperator::IsNull => {
+                    quote!((format!("{}.{} IS NULL", #alias, #field_name), Vec::<#bind_ident>::new()))
+                }
+                super::model::PolicyFilterOperator::IsNotNull => {
+                    quote!((format!("{}.{} IS NOT NULL", #alias, #field_name), Vec::<#bind_ident>::new()))
+                }
+            }
+        }
+        super::model::PolicyExistsCondition::CurrentRowField { field, row_field } => {
+            let field_name = Literal::string(field);
+            let row_field = resource_field(resource, row_field);
+            let row_value = create_effective_field_value_tokens(
+                resource,
+                authorization,
+                row_field,
+                true,
+                runtime_crate,
+            );
+            let bind_value = list_bind_value_tokens(bind_ident, row_field, quote!(value));
+            quote! {
+                {
+                    let value = #row_value;
+                    let placeholder = Self::list_placeholder(#next_index_ident);
+                    #next_index_ident += 1;
+                    (
+                        format!("{}.{} = {}", #alias, #field_name, placeholder),
+                        vec![#bind_value],
+                    )
+                }
+            }
+        }
+        super::model::PolicyExistsCondition::All(conditions) => {
+            let conditions = conditions
+                .iter()
+                .enumerate()
+                .map(|(index, condition)| {
+                    create_requirement_exists_condition_tokens(
+                        resource,
+                        target_resource,
+                        authorization,
+                        condition,
+                        bind_ident,
+                        next_index_ident,
+                        alias,
+                        runtime_crate,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_all_create_requirement_plans(
+                vec![#(#conditions),*]
+            ))
+        }
+        super::model::PolicyExistsCondition::Any(conditions) => {
+            let conditions = conditions
+                .iter()
+                .enumerate()
+                .map(|(index, condition)| {
+                    create_requirement_exists_condition_tokens(
+                        resource,
+                        target_resource,
+                        authorization,
+                        condition,
+                        bind_ident,
+                        next_index_ident,
+                        alias,
+                        runtime_crate,
+                        &format!("{path}_{}", index + 1),
+                    )
+                })
+                .collect::<Vec<_>>();
+            quote!(Self::combine_any_create_requirement_plans(
+                vec![#(#conditions),*]
+            ))
+        }
+        super::model::PolicyExistsCondition::Not(condition) => {
+            let condition = create_requirement_exists_condition_tokens(
+                resource,
+                target_resource,
+                authorization,
+                condition,
+                bind_ident,
+                next_index_ident,
+                alias,
+                runtime_crate,
+                &format!("{path}_not"),
+            );
+            quote!(Self::negate_create_requirement_plan(#condition))
+        }
+    }
+}
+
+fn create_source_value_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    target_field: &super::model::FieldSpec,
+    source: &PolicyValueSource,
+    required: bool,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match source {
+        PolicyValueSource::UserId => {
+            if required {
+                quote!(user.id)
+            } else {
+                quote!(Some(user.id))
+            }
+        }
+        PolicyValueSource::Claim(_) => {
+            create_claim_source_value_tokens(target_field, source, required, runtime_crate)
+        }
+        PolicyValueSource::InputField(name) => {
+            let field = resource_field(resource, name);
+            create_raw_input_field_value_tokens(
+                resource,
+                authorization,
+                field,
+                required,
+                runtime_crate,
+            )
+        }
+    }
+}
+
+fn create_claim_source_value_tokens(
+    target_field: &super::model::FieldSpec,
+    source: &PolicyValueSource,
+    required: bool,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let value = optional_policy_source_value(source, target_field);
+    if required {
+        let field_name = Literal::string(&target_field.name());
+        if let PolicyValueSource::Claim(name) = source {
+            let claim_name = Literal::string(name);
+            quote! {
+                match #value {
+                    Some(value) => value,
+                    None => {
+                        return Err(#runtime_crate::core::errors::forbidden(
+                            "missing_claim",
+                            format!("Missing required claim `{}` for create requirement field `{}`", #claim_name, #field_name),
+                        ));
+                    }
+                }
+            }
+        } else {
+            quote!(match #value { Some(value) => value, None => unreachable!() })
+        }
+    } else {
+        value
+    }
+}
+
+fn create_effective_field_value_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    field: &super::model::FieldSpec,
+    required: bool,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let field_name = field.name();
+    let field_name_lit = Literal::string(&field_name);
+    let ident = &field.ident;
+    let is_admin = quote!(user.roles.iter().any(|candidate| candidate == "admin"));
+    let hybrid_create_scope_field = hybrid_resource_enforcement(resource, authorization)
+        .filter(|config| config.create_payload)
+        .map(|config| config.scope_field.name());
+
+    if let Some(source) = create_assignment_source(resource, &field_name) {
+        match source {
+            PolicyValueSource::UserId => {
+                if required {
+                    quote!(user.id)
+                } else {
+                    quote!(Some(user.id))
+                }
+            }
+            PolicyValueSource::Claim(_) => {
+                let claim_value = optional_policy_source_value(source, field);
+                let allow_hybrid_runtime =
+                    hybrid_create_scope_field.as_deref() == Some(field_name.as_str());
+                let allow_admin_override = resource.policies.admin_bypass;
+                if required {
+                    if allow_hybrid_runtime {
+                        quote! {
+                            {
+                                if #is_admin && #allow_admin_override {
+                                    match &item.#ident {
+                                        Some(value) => value.clone(),
+                                        None => match #claim_value {
+                                            Some(value) => value,
+                                            None => {
+                                                return Err(#runtime_crate::core::errors::validation_error(
+                                                    #field_name_lit,
+                                                    format!("Missing required create field `{}`", #field_name_lit),
+                                                ));
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    match #claim_value {
+                                        Some(value) => value,
+                                        None => match &item.#ident {
+                                            Some(value) => match runtime {
+                                                Some(runtime) => match Self::hybrid_create_allows_item_scope(item, user, runtime).await {
+                                                    Ok(true) => value.clone(),
+                                                    Ok(false) => {
+                                                        return Err(#runtime_crate::core::errors::forbidden(
+                                                            "forbidden",
+                                                            format!("Insufficient privileges for create scope field `{}`", #field_name_lit),
+                                                        ));
+                                                    }
+                                                    Err(response) => return Err(response),
+                                                },
+                                                None => {
+                                                    return Err(#runtime_crate::core::errors::internal_error(
+                                                        "Hybrid create scope evaluation requested without runtime authorization state".to_owned(),
+                                                    ));
+                                                }
+                                            },
+                                            None => {
+                                                return Err(#runtime_crate::core::errors::validation_error(
+                                                    #field_name_lit,
+                                                    format!("Missing required create field `{}`", #field_name_lit),
+                                                ));
+                                            }
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    } else if allow_admin_override {
+                        quote! {
+                            {
+                                if #is_admin {
+                                    match &item.#ident {
+                                        Some(value) => value.clone(),
+                                        None => match #claim_value {
+                                            Some(value) => value,
+                                            None => {
+                                                return Err(#runtime_crate::core::errors::validation_error(
+                                                    #field_name_lit,
+                                                    format!("Missing required create field `{}`", #field_name_lit),
+                                                ));
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    match #claim_value {
+                                        Some(value) => value,
+                                        None => {
+                                            return Err(#runtime_crate::core::errors::forbidden(
+                                                "missing_claim",
+                                                format!("Missing required claim for create field `{}`", #field_name_lit),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let value = policy_source_value(source, field, runtime_crate);
+                        quote!(#value)
+                    }
+                } else if allow_hybrid_runtime {
+                    quote! {
+                        {
+                            if #is_admin && #allow_admin_override {
+                                match &item.#ident {
+                                    Some(value) => Some(value.clone()),
+                                    None => #claim_value,
+                                }
+                            } else {
+                                match #claim_value {
+                                    Some(value) => Some(value),
+                                    None => match &item.#ident {
+                                        Some(value) => match runtime {
+                                            Some(runtime) => match Self::hybrid_create_allows_item_scope(item, user, runtime).await {
+                                                Ok(true) => Some(value.clone()),
+                                                Ok(false) => {
+                                                    return Err(#runtime_crate::core::errors::forbidden(
+                                                        "forbidden",
+                                                        format!("Insufficient privileges for create scope field `{}`", #field_name_lit),
+                                                    ));
+                                                }
+                                                Err(response) => return Err(response),
+                                            },
+                                            None => {
+                                                return Err(#runtime_crate::core::errors::internal_error(
+                                                    "Hybrid create scope evaluation requested without runtime authorization state".to_owned(),
+                                                ));
+                                            }
+                                        },
+                                        None => None,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if allow_admin_override {
+                    quote! {
+                        {
+                            if #is_admin {
+                                match &item.#ident {
+                                    Some(value) => Some(value.clone()),
+                                    None => #claim_value,
+                                }
+                            } else {
+                                #claim_value
+                            }
+                        }
+                    }
+                } else {
+                    claim_value
+                }
+            }
+            PolicyValueSource::InputField(_) => {
+                unreachable!("create assignments do not support input sources")
+            }
+        }
+    } else {
+        create_raw_input_field_value_tokens(resource, authorization, field, required, runtime_crate)
+    }
+}
+
+fn create_raw_input_field_value_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    field: &super::model::FieldSpec,
+    required: bool,
+    runtime_crate: &Path,
+) -> TokenStream {
+    let field_name = field.name();
+    let field_name_lit = Literal::string(&field_name);
+    let ident = &field.ident;
+    let payload_field = create_payload_fields(resource, authorization)
+        .into_iter()
+        .find(|candidate| candidate.field.name() == field_name);
+
+    let Some(payload_field) = payload_field else {
+        return if required {
+            quote! {
+                {
+                    return Err(#runtime_crate::core::errors::validation_error(
+                        #field_name_lit,
+                        format!("Create field `{}` is not client-settable", #field_name_lit),
+                    ));
+                }
+            }
+        } else {
+            quote!(None)
+        };
+    };
+
+    if required {
+        if create_payload_field_is_optional(&payload_field) {
+            quote! {
+                match &item.#ident {
+                    Some(value) => value.clone(),
+                    None => {
+                        return Err(#runtime_crate::core::errors::validation_error(
+                            #field_name_lit,
+                            format!("Missing required create field `{}`", #field_name_lit),
+                        ));
+                    }
+                }
+            }
+        } else {
+            quote!(item.#ident.clone())
+        }
+    } else if create_payload_field_is_optional(&payload_field) {
+        quote!(item.#ident.clone())
+    } else {
+        quote!(Some(item.#ident.clone()))
     }
 }
 

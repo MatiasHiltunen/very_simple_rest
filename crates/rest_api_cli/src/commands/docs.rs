@@ -608,7 +608,8 @@ object or just a type such as `title: String`.",
         "Row Policies",
         "Row policies support both the newer explicit form and older owner/set-owner shorthands. \
 `read`, `update`, and `delete` accept a single filter, an array that implies `all_of`, or an \
-explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` stays a flat assignment list.",
+explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` supports the \
+legacy flat assignment list and an object form with `assign` plus `require`.",
         &[
             row(
                 "resources[].policies.admin_bypass",
@@ -628,11 +629,11 @@ explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` st
             ),
             row(
                 "resources[].policies.create",
-                "PolicyAssignment, [PolicyAssignment]",
+                "PolicyAssignment, [PolicyAssignment], { assign, require }",
                 "None",
                 "No",
-                "`field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field`",
-                "Assigns values during create operations. Boolean groups are not supported here. `Owner` syntax is rejected here.",
+                "`field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field`, `{ assign: [...], require: PolicyFilter | [PolicyFilter] | PolicyGroup }`",
+                "Assigns values during create operations and can also enforce preconditions before insert. `require` uses the same boolean filter tree as `read` / `update` / `delete`, plus `input.<field>` sources for the proposed create payload. `Owner` syntax is rejected here.",
             ),
             row(
                 "resources[].policies.update",
@@ -684,10 +685,30 @@ explicit boolean group with `all_of`, `any_of`, `not`, and `exists`. `create` st
 }"#,
     );
 
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"create: {
+    assign: [
+        "created_by_user_id=user.id"
+    ]
+    require: {
+        exists: {
+            resource: "Family"
+            where: [
+                { field: "id", equals: "input.family_id" }
+                "owner_user_id=user.id"
+            ]
+        }
+    }
+}"#,
+    );
+
     markdown.push_str(
         "The first relation-aware filter form is `exists`, which targets another declared \
 resource and correlates it with the current row. Leaf `where` entries can be equality checks, \
-current-row field correlations, or nullable `is_null` / `is_not_null` checks:\n\n",
+current-row field correlations, `input.<field>` comparisons for `create.require`, or nullable \
+`is_null` / `is_not_null` checks:\n\n",
     );
 
     push_code_block(
