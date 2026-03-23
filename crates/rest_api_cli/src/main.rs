@@ -844,7 +844,12 @@ async fn main() -> Result<()> {
         Commands::Migrate { command } => match command {
             MigrationCommand::Auth { output, force } => {
                 println!("{}", "Generating auth migration SQL...".green().bold());
-                commands::migrate::generate_auth_migration(&database_url, output, *force)?;
+                commands::migrate::generate_auth_migration(
+                    &database_url,
+                    config_path.as_deref(),
+                    output,
+                    *force,
+                )?;
             }
             MigrationCommand::Authz { output, force } => {
                 println!(

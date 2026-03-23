@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
-use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
+use rest_macro_core::auth::{
+    AuthDbBackend, auth_claim_migration_sql, auth_management_migration_sql, auth_migration_sql,
+};
 use rest_macro_core::authorization::authorization_runtime_migration_sql;
 use rest_macro_core::compiler;
 use rest_macro_core::db::{DbPool, query, query_scalar};
@@ -17,6 +19,7 @@ use crate::commands::schema::{load_filtered_derive_service, load_schema_service}
 const MIGRATIONS_TABLE: &str = "_vsr_migrations";
 const BUILTIN_AUTH_MIGRATION: &str = "0000_builtin_auth.sql";
 const BUILTIN_AUTH_MANAGEMENT_MIGRATION: &str = "0001_builtin_auth_management.sql";
+const BUILTIN_AUTH_CLAIM_MIGRATION: &str = "0002_builtin_auth_claims.sql";
 
 pub fn generate_migration(input: &Path, output: &Path, force: bool) -> Result<()> {
     if output.exists() && !force {
@@ -85,7 +88,12 @@ pub fn generate_derive_migration(
     Ok(())
 }
 
-pub fn generate_auth_migration(database_url: &str, output: &Path, force: bool) -> Result<()> {
+pub fn generate_auth_migration(
+    database_url: &str,
+    config_path: Option<&Path>,
+    output: &Path,
+    force: bool,
+) -> Result<()> {
     if output.exists() && !force {
         bail!(
             "migration file already exists at {} (use --force to overwrite)",
@@ -95,11 +103,20 @@ pub fn generate_auth_migration(database_url: &str, output: &Path, force: bool) -
 
     let backend = AuthDbBackend::from_database_url(database_url)
         .ok_or_else(|| anyhow::anyhow!("unsupported database url: {database_url}"))?;
-    let sql = format!(
-        "{}\n{}",
+    let mut parts = vec![
         auth_migration_sql(backend),
-        auth_management_migration_sql(backend)
-    );
+        auth_management_migration_sql(backend),
+    ];
+    if let Some(path) = config_path {
+        let service = compiler::load_service_from_path(path)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .with_context(|| format!("failed to load service definition from {}", path.display()))?;
+        let claim_sql = auth_claim_migration_sql(backend, &service.security.auth);
+        if !normalize_sql(&claim_sql).is_empty() {
+            parts.push(claim_sql);
+        }
+    }
+    let sql = parts.join("\n");
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
@@ -470,6 +487,27 @@ pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>
             ),
             ApplyResult::Applied => {
                 println!("{} {}", "Applied auth migration".green().bold(), name)
+            }
+        }
+    }
+
+    if let Some(path) = config_path {
+        let service = compiler::load_service_from_path(path)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .with_context(|| format!("failed to load service definition from {}", path.display()))?;
+        let sql = auth_claim_migration_sql(backend, &service.security.auth);
+        if !normalize_sql(&sql).is_empty() {
+            match apply_named_migration(&pool, backend, BUILTIN_AUTH_CLAIM_MIGRATION, &sql).await? {
+                ApplyResult::Skipped => println!(
+                    "{} {}",
+                    "Auth claim migration already applied".yellow().bold(),
+                    BUILTIN_AUTH_CLAIM_MIGRATION
+                ),
+                ApplyResult::Applied => println!(
+                    "{} {}",
+                    "Applied auth claim migration".green().bold(),
+                    BUILTIN_AUTH_CLAIM_MIGRATION
+                ),
             }
         }
     }
@@ -1340,6 +1378,61 @@ resources: [
         .expect("resource table lookup should succeed");
         assert_ne!(user_table_exists, 0);
         assert_ne!(note_table_exists, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_setup_migrations_generates_auth_claim_columns_from_service_config() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var(
+                "TURSO_ENCRYPTION_KEY",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            );
+        }
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_setup_claim_columns_{stamp}"));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let schema = root.join("auth_claims_api.eon");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/auth_claims_api.eon"),
+            &schema,
+        )
+        .expect("fixture should copy");
+
+        let database_url =
+            database_url_from_service_config(&schema).expect("database url should resolve");
+        apply_setup_migrations(&database_url, Some(&schema))
+            .await
+            .expect("setup migrations should apply");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect");
+        let user_columns = query_scalar::<sqlx::Any, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('user') WHERE name IN ('tenant_scope', 'claim_workspace_id', 'is_staff', 'plan')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("claim column lookup should succeed");
+        assert_eq!(user_columns, 4);
+
+        let claim_migration_applied = query_scalar::<sqlx::Any, i64>(
+            "SELECT EXISTS(SELECT 1 FROM _vsr_migrations WHERE name = '0002_builtin_auth_claims.sql')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("claim migration status should be queryable");
+        assert_ne!(claim_migration_applied, 0);
+
+        unsafe {
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

@@ -32,7 +32,7 @@ const ASSIGNMENT_CATALOG = {
     {
       name: "FamilyContribute",
       scopes: ["Family"],
-      summary: "Family-scoped CRUD for shopping items.",
+      summary: "Family-scoped read, update, and delete for shared shopping items.",
     },
     {
       name: "ChildCareRead",
@@ -42,7 +42,7 @@ const ASSIGNMENT_CATALOG = {
     {
       name: "ChildCareManage",
       scopes: ["Family"],
-      summary: "Manage child care plans and guardian notes.",
+      summary: "Read, update, and delete child care plans and guardian notes.",
     },
     {
       name: "HouseholdModerate",
@@ -121,11 +121,6 @@ const refs = {
   reloadAdminUsersBtn: document.getElementById("reloadAdminUsersBtn"),
   adminUserSearch: document.getElementById("adminUserSearch"),
   adminUsersList: document.getElementById("adminUsersList"),
-  managedUserId: document.getElementById("managedUserId"),
-  managedRole: document.getElementById("managedRole"),
-  claimActiveFamilyId: document.getElementById("claimActiveFamilyId"),
-  claimPreferredHousehold: document.getElementById("claimPreferredHousehold"),
-  claimSupportAgent: document.getElementById("claimSupportAgent"),
   assignmentUserId: document.getElementById("assignmentUserId"),
   assignmentKind: document.getElementById("assignmentKind"),
   assignmentName: document.getElementById("assignmentName"),
@@ -150,7 +145,6 @@ document.getElementById("familyMemberForm").addEventListener("submit", handleCre
 document.getElementById("householdForm").addEventListener("submit", handleCreateHousehold);
 document.getElementById("shoppingForm").addEventListener("submit", handleCreateShoppingItem);
 document.getElementById("calendarForm").addEventListener("submit", handleCreateCalendarEvent);
-document.getElementById("claimPatchForm").addEventListener("submit", handlePatchClaims);
 document
   .getElementById("runtimeAssignmentForm")
   .addEventListener("submit", handleCreateRuntimeAssignment);
@@ -303,7 +297,7 @@ function renderSession() {
     refs.selectedHouseholdChip.textContent = "No household selected";
     refs.selectedHouseholdChip.className = "chip muted";
     refs.tokenState.textContent = state.token ? "Stored token will be revalidated on refresh" : "No bearer token loaded";
-    refs.sessionClaims.textContent = "Log in to inspect roles and claims.";
+    refs.sessionClaims.textContent = "Log in to inspect roles and the current session payload.";
     return;
   }
 
@@ -342,9 +336,6 @@ function renderFamilies() {
   refs.familiesList.innerHTML = state.families
     .map((family) => {
       const isSelected = Number(family.id) === Number(state.selectedFamilyId);
-      const currentClaims = getCurrentClaims();
-      const matchesClaim =
-        toNullableInt(currentClaims.active_family_id) === toNullableInt(family.id);
       return `
         <article class="card${isSelected ? " is-selected" : ""}">
           <header>
@@ -356,7 +347,6 @@ function renderFamilies() {
                 <span>${escapeHtml(family.timezone)}</span>
               </div>
             </div>
-            ${matchesClaim ? '<span class="badge success">active_family_id</span>' : ""}
           </header>
           <div class="meta-row">
             <span>slug ${escapeHtml(family.slug)}</span>
@@ -364,9 +354,6 @@ function renderFamilies() {
           <div class="button-row">
             <button class="button ${isSelected ? "subtle" : "primary"}" type="button" data-action="select-family" data-family-id="${escapeHtml(family.id)}">
               ${isSelected ? "Selected" : "Use family"}
-            </button>
-            <button class="button ghost" type="button" data-action="seed-family-claims" data-family-id="${escapeHtml(family.id)}">
-              Seed admin form
             </button>
           </div>
         </article>
@@ -433,15 +420,13 @@ function renderHouseholds() {
   }
   if (state.households.length === 0) {
     refs.householdsList.innerHTML =
-      '<div class="empty-state">No household rows are visible. Claim activation is usually the next step.</div>';
+      '<div class="empty-state">No household rows are visible for the selected family yet.</div>';
     return;
   }
 
-  const currentClaims = getCurrentClaims();
   refs.householdsList.innerHTML = state.households
     .map((household) => {
       const isSelected = Number(household.id) === Number(state.selectedHouseholdId);
-      const preferredMatch = String(currentClaims.preferred_household || "") === String(household.slug);
       return `
         <article class="card${isSelected ? " is-selected" : ""}">
           <header>
@@ -452,7 +437,6 @@ function renderHouseholds() {
                 <span>family ${escapeHtml(household.family_id)}</span>
               </div>
             </div>
-            ${preferredMatch ? '<span class="badge success">preferred_household</span>' : ""}
           </header>
           <div class="meta-row">
             <span>slug ${escapeHtml(household.slug)}</span>
@@ -462,9 +446,6 @@ function renderHouseholds() {
           <div class="button-row">
             <button class="button ${isSelected ? "subtle" : "primary"}" type="button" data-action="select-household" data-household-id="${escapeHtml(household.id)}">
               ${isSelected ? "Selected" : "Use household"}
-            </button>
-            <button class="button ghost" type="button" data-action="seed-household-claim" data-household-slug="${escapeHtml(household.slug)}">
-              Seed claim form
             </button>
           </div>
         </article>
@@ -573,7 +554,7 @@ function renderCalendarEvents() {
 function renderAdminUsers() {
   if (!state.currentUser || !isAdmin()) {
     refs.adminUsersList.innerHTML =
-      '<div class="empty-state">Admin login required to list users and patch claims.</div>';
+      '<div class="empty-state">Admin login required to list users and manage runtime assignments.</div>';
     return;
   }
   if (state.adminUsersError) {
@@ -582,7 +563,7 @@ function renderAdminUsers() {
   }
   if (state.adminUsers.length === 0) {
     refs.adminUsersList.innerHTML =
-      '<div class="empty-state">Load the user directory to target claim updates or runtime grants.</div>';
+      '<div class="empty-state">Load the user directory to target membership and runtime grants.</div>';
     return;
   }
 
@@ -604,9 +585,6 @@ function renderAdminUsers() {
           <div class="button-row">
             <button class="button ghost" type="button" data-action="seed-member-user" data-user-id="${escapeHtml(user.id)}" data-display-name="${escapeHtml(user.email.split("@")[0])}">
               Member target
-            </button>
-            <button class="button ghost" type="button" data-action="seed-managed-user" data-user-id="${escapeHtml(user.id)}">
-              Claim target
             </button>
             <button class="button ghost" type="button" data-action="seed-runtime-user" data-user-id="${escapeHtml(user.id)}">
               Runtime target
@@ -732,12 +710,6 @@ function syncPreviews() {
     ? `#${household.id} ${household.label}`
     : "No household selected";
 
-  if (family && !refs.claimActiveFamilyId.value) {
-    refs.claimActiveFamilyId.value = family.id;
-  }
-  if (household && !refs.claimPreferredHousehold.value) {
-    refs.claimPreferredHousehold.value = household.slug;
-  }
   syncAssignmentScopeDefaults();
   syncEvaluationScopeDefaults();
 }
@@ -855,7 +827,6 @@ async function refreshSession({ silent = false } = {}) {
 
   try {
     state.currentUser = await apiFetch("/auth/me");
-    syncSelectionsFromClaims();
     if (!silent) {
       setBanner("Session refreshed.", "success");
     }
@@ -947,11 +918,6 @@ function pickFamilySelection(families) {
   if (selected) {
     return Number(selected.id);
   }
-  const claimFamilyId = toNullableInt(getCurrentClaims().active_family_id);
-  const claimMatch = families.find((family) => Number(family.id) === Number(claimFamilyId));
-  if (claimMatch) {
-    return Number(claimMatch.id);
-  }
   return Number(families[0].id);
 }
 
@@ -1016,11 +982,6 @@ function pickHouseholdSelection(households) {
   );
   if (selected) {
     return Number(selected.id);
-  }
-  const preferredSlug = String(getCurrentClaims().preferred_household || "");
-  const preferred = households.find((household) => household.slug === preferredSlug);
-  if (preferred) {
-    return Number(preferred.id);
   }
   return Number(households[0].id);
 }
@@ -1108,7 +1069,7 @@ async function loadRuntimeAssignmentWorkspace({ announce = false } = {}) {
   if (!isAdmin()) {
     return;
   }
-  const userId = toNullableInt(refs.assignmentUserId.value || refs.managedUserId.value);
+  const userId = toNullableInt(refs.assignmentUserId.value || refs.evaluateUserId.value);
   if (!userId) {
     setBanner("Choose a user ID before loading runtime assignments.", "error");
     return;
@@ -1174,7 +1135,7 @@ async function handleCreateFamily(event) {
     refs.familyName.value = "";
     state.selectedFamilyId = toNullableInt(created.id);
     persistState();
-    setBanner("Family created. Add members immediately or ask an admin to activate claims next.", "success");
+    setBanner("Family created. Add members immediately, then use runtime templates for elevated access.", "success");
     pushActivity(`Created family ${created.name} (#${created.id}).`, "success");
     await loadFamilies();
     await Promise.all([loadFamilyMembers(), loadHouseholds(), loadShoppingItems()]);
@@ -1234,7 +1195,7 @@ async function handleCreateHousehold(event) {
     refs.householdLabel.value = "";
     state.selectedHouseholdId = toNullableInt(created.id);
     persistState();
-    setBanner("Household created. Re-login if the current claim set still points at an older family scope.", "success");
+    setBanner("Household created for the selected family.", "success");
     pushActivity(`Created household ${created.label} (#${created.id}).`, "success");
     await loadHouseholds();
     await Promise.all([loadShoppingItems(), loadCalendarEvents()]);
@@ -1293,44 +1254,6 @@ async function handleCreateCalendarEvent(event) {
     await loadCalendarEvents();
   } catch (error) {
     handleRequestError("Calendar event creation failed.", error);
-  }
-}
-
-async function handlePatchClaims(event) {
-  event.preventDefault();
-  if (!isAdmin()) {
-    setBanner("Admin login required to patch claims.", "error");
-    return;
-  }
-
-  const targetUserId = Number(refs.managedUserId.value);
-  const claims = {};
-  if (refs.claimActiveFamilyId.value) {
-    claims.active_family_id = Number(refs.claimActiveFamilyId.value);
-  }
-  if (refs.claimPreferredHousehold.value.trim()) {
-    claims.preferred_household = refs.claimPreferredHousehold.value.trim();
-  }
-  if (refs.claimSupportAgent.checked) {
-    claims.support_agent = true;
-  }
-
-  const body = {};
-  if (refs.managedRole.value.trim()) {
-    body.role = refs.managedRole.value.trim();
-  }
-  body.claims = claims;
-
-  try {
-    const updated = await apiFetch(`/auth/admin/users/${targetUserId}`, {
-      method: "PATCH",
-      body,
-    });
-    setBanner("Managed user updated. Ask that user to log in again to refresh claims.", "success");
-    pushActivity(`Patched claims for user ${updated.id}.`, "success");
-    await loadAdminUsers();
-  } catch (error) {
-    handleRequestError(`Claim patch failed for user ${targetUserId}.`, error);
   }
 }
 
@@ -1429,16 +1352,6 @@ async function handleActionClick(event) {
     return;
   }
 
-  if (action === "seed-family-claims") {
-    const family = state.families.find((candidate) => Number(candidate.id) === Number(actionTarget.dataset.familyId));
-    if (family) {
-      refs.claimActiveFamilyId.value = family.id;
-      pushActivity(`Seeded admin claim form with family ${family.id}.`);
-      setBanner(`Seeded active_family_id with family ${family.id}.`, "info");
-    }
-    return;
-  }
-
   if (action === "select-household") {
     state.selectedHouseholdId = Number(actionTarget.dataset.householdId);
     persistState();
@@ -1449,28 +1362,12 @@ async function handleActionClick(event) {
     return;
   }
 
-  if (action === "seed-household-claim") {
-    refs.claimPreferredHousehold.value = actionTarget.dataset.householdSlug || "";
-    setBanner("Seeded preferred_household in the admin claim form.", "info");
-    pushActivity("Seeded preferred_household in the admin claim form.");
-    return;
-  }
-
   if (action === "seed-member-user") {
     refs.memberUserId.value = actionTarget.dataset.userId || "";
     if (!refs.memberDisplayName.value && actionTarget.dataset.displayName) {
       refs.memberDisplayName.value = actionTarget.dataset.displayName;
     }
     setBanner("Copied the selected user ID into the family member form.", "info");
-    return;
-  }
-
-  if (action === "seed-managed-user") {
-    const userId = actionTarget.dataset.userId || "";
-    refs.managedUserId.value = userId;
-    refs.assignmentUserId.value = userId;
-    refs.evaluateUserId.value = userId;
-    setBanner("Copied the selected user ID into the admin and runtime forms.", "info");
     return;
   }
 
@@ -1651,10 +1548,6 @@ function extractErrorMessage(payload, status) {
   return `HTTP ${status}`;
 }
 
-function getCurrentClaims() {
-  return state.currentUser && typeof state.currentUser === "object" ? state.currentUser : {};
-}
-
 function getSelectedFamily() {
   return state.families.find((family) => Number(family.id) === Number(state.selectedFamilyId)) || null;
 }
@@ -1664,13 +1557,6 @@ function getSelectedHousehold() {
     state.households.find((household) => Number(household.id) === Number(state.selectedHouseholdId)) ||
     null
   );
-}
-
-function syncSelectionsFromClaims() {
-  const claimFamilyId = toNullableInt(getCurrentClaims().active_family_id);
-  if (!state.selectedFamilyId && claimFamilyId) {
-    state.selectedFamilyId = claimFamilyId;
-  }
 }
 
 function isAdmin() {

@@ -10,11 +10,6 @@ security: {
         issuer: "family_app_api"
         audience: "family_app_clients"
         require_email_verification: false
-        claims: {
-            active_family_id: { column: "active_family_id", type: I64 }
-            preferred_household: String
-            support_agent: { column: "is_support_agent", type: Bool }
-        }
         session_cookie: {
             secure: false
         }
@@ -54,16 +49,12 @@ authorization: {
                 "FamilyMember"
                 "FamilyDelegate"
                 "ChildProfile"
-                "CarePlan"
-                "GuardianNote"
                 "HouseholdAnnouncement"
-                "ShoppingItem"
-                "CalendarEvent"
             ]
             scopes: ["Family"]
         }
         FamilyContribute: {
-            actions: ["Create", "Read", "Update", "Delete"]
+            actions: ["Read", "Update", "Delete"]
             resources: ["ShoppingItem"]
             scopes: ["Family"]
         }
@@ -73,7 +64,7 @@ authorization: {
             scopes: ["Family"]
         }
         ChildCareManage: {
-            actions: ["Create", "Read", "Update", "Delete"]
+            actions: ["Read", "Update", "Delete"]
             resources: ["CarePlan", "GuardianNote"]
             scopes: ["Family"]
         }
@@ -122,9 +113,8 @@ authorization: {
                     item: true
                     collection_filter: true
                     nested_parent: true
-                    create_payload: true
                 }
-                actions: ["Create", "Read", "Update", "Delete"]
+                actions: ["Read", "Update", "Delete"]
             }
             CalendarEvent: {
                 scope: "Household"
@@ -133,7 +123,26 @@ authorization: {
                     item: true
                     collection_filter: true
                     nested_parent: true
-                    create_payload: false
+                }
+                actions: ["Read", "Update", "Delete"]
+            }
+            CarePlan: {
+                scope: "Family"
+                scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
+                }
+                actions: ["Read", "Update", "Delete"]
+            }
+            GuardianNote: {
+                scope: "Family"
+                scope_field: "family_id"
+                scope_sources: {
+                    item: true
+                    collection_filter: true
+                    nested_parent: true
                 }
                 actions: ["Read", "Update", "Delete"]
             }
@@ -197,11 +206,55 @@ resources: {
             delete: "user"
         }
         policies: {
-            read: { field: "family_id", equals: "claim.active_family_id" }
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "created_by_user_id=user.id"
-            ]
+            read: {
+                any_of: [
+                    {
+                        exists: {
+                            resource: "Family"
+                            where: [
+                                { field: "id", equals_field: "family_id" }
+                                "owner_user_id=user.id"
+                            ]
+                        }
+                    }
+                    {
+                        exists: {
+                            resource: "FamilyMember"
+                            where: [
+                                { field: "family_id", equals_field: "family_id" }
+                                "user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
+            create: {
+                assign: [
+                    "created_by_user_id=user.id"
+                ]
+                require: {
+                    any_of: [
+                        {
+                            exists: {
+                                resource: "Family"
+                                where: [
+                                    { field: "id", equals: "input.family_id" }
+                                    "owner_user_id=user.id"
+                                ]
+                            }
+                        }
+                        {
+                            exists: {
+                                resource: "FamilyMember"
+                                where: [
+                                    { field: "family_id", equals: "input.family_id" }
+                                    "user_id=user.id"
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
             update: "created_by_user_id=user.id"
             delete: "created_by_user_id=user.id"
         }
@@ -232,7 +285,24 @@ resources: {
                 any_of: [
                     "user_id=user.id"
                     "created_by_user_id=user.id"
-                    { field: "family_id", equals: "claim.active_family_id" }
+                    {
+                        exists: {
+                            resource: "Family"
+                            where: [
+                                { field: "id", equals_field: "family_id" }
+                                "owner_user_id=user.id"
+                            ]
+                        }
+                    }
+                    {
+                        exists: {
+                            resource: "FamilyMember"
+                            where: [
+                                { field: "family_id", equals_field: "family_id" }
+                                "user_id=user.id"
+                            ]
+                        }
+                    }
                 ]
             }
             create: {
@@ -249,8 +319,34 @@ resources: {
                     }
                 }
             }
-            update: "created_by_user_id=user.id"
-            delete: "created_by_user_id=user.id"
+            update: {
+                any_of: [
+                    "created_by_user_id=user.id"
+                    {
+                        exists: {
+                            resource: "Family"
+                            where: [
+                                { field: "id", equals_field: "family_id" }
+                                "owner_user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
+            delete: {
+                any_of: [
+                    "created_by_user_id=user.id"
+                    {
+                        exists: {
+                            resource: "Family"
+                            where: [
+                                { field: "id", equals_field: "family_id" }
+                                "owner_user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
         }
         fields: {
             id: { type: I64, id: true }
@@ -282,10 +378,20 @@ resources: {
                     "delegate_user_id=user.id"
                 ]
             }
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "primary_user_id=user.id"
-            ]
+            create: {
+                assign: [
+                    "primary_user_id=user.id"
+                ]
+                require: {
+                    exists: {
+                        resource: "Family"
+                        where: [
+                            { field: "id", equals: "input.family_id" }
+                            "owner_user_id=user.id"
+                        ]
+                    }
+                }
+            }
             update: "primary_user_id=user.id"
             delete: "primary_user_id=user.id"
         }
@@ -312,18 +418,67 @@ resources: {
         }
         policies: {
             read: {
-                exists: {
-                    resource: "FamilyMember"
-                    where: [
-                        { field: "family_id", equals_field: "family_id" }
-                        "user_id=user.id"
+                any_of: [
+                    {
+                        exists: {
+                            resource: "Family"
+                            where: [
+                                { field: "id", equals_field: "family_id" }
+                                "owner_user_id=user.id"
+                            ]
+                        }
+                    }
+                    {
+                        exists: {
+                            resource: "FamilyMember"
+                            where: [
+                                { field: "family_id", equals_field: "family_id" }
+                                "user_id=user.id"
+                            ]
+                        }
+                    }
+                ]
+            }
+            create: {
+                assign: [
+                    "created_by_user_id=user.id"
+                ]
+                require: {
+                    all_of: [
+                        {
+                            any_of: [
+                                {
+                                    exists: {
+                                        resource: "Family"
+                                        where: [
+                                            { field: "id", equals: "input.family_id" }
+                                            "owner_user_id=user.id"
+                                        ]
+                                    }
+                                }
+                                {
+                                    exists: {
+                                        resource: "FamilyMember"
+                                        where: [
+                                            { field: "family_id", equals: "input.family_id" }
+                                            "user_id=user.id"
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                        {
+                            exists: {
+                                resource: "Household"
+                                where: [
+                                    { field: "id", equals: "input.household_id" }
+                                    { field: "family_id", equals: "input.family_id" }
+                                ]
+                            }
+                        }
                     ]
                 }
             }
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "created_by_user_id=user.id"
-            ]
             update: {
                 any_of: [
                     "created_by_user_id=user.id"
@@ -375,21 +530,47 @@ resources: {
             delete: "user"
         }
         policies: {
-            read: {
-                any_of: [
+            read: "author_user_id=user.id"
+            create: {
+                assign: [
                     "author_user_id=user.id"
-                    {
-                        all_of: [
-                            { field: "family_id", equals: "claim.active_family_id" }
-                            { field: "support_visible", equals: "claim.support_agent" }
-                        ]
-                    }
                 ]
+                require: {
+                    all_of: [
+                        {
+                            any_of: [
+                                {
+                                    exists: {
+                                        resource: "Family"
+                                        where: [
+                                            { field: "id", equals: "input.family_id" }
+                                            "owner_user_id=user.id"
+                                        ]
+                                    }
+                                }
+                                {
+                                    exists: {
+                                        resource: "FamilyMember"
+                                        where: [
+                                            { field: "family_id", equals: "input.family_id" }
+                                            "user_id=user.id"
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                        {
+                            exists: {
+                                resource: "ChildProfile"
+                                where: [
+                                    { field: "id", equals: "input.child_profile_id" }
+                                    { field: "family_id", equals: "input.family_id" }
+                                ]
+                            }
+                        }
+                    ]
+                }
             }
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "author_user_id=user.id"
-            ]
             update: "author_user_id=user.id"
             delete: "author_user_id=user.id"
         }
@@ -423,25 +604,47 @@ resources: {
             delete: "user"
         }
         policies: {
-            read: {
-                any_of: [
+            read: "author_user_id=user.id"
+            create: {
+                assign: [
                     "author_user_id=user.id"
-                    {
-                        exists: {
-                            resource: "FamilyDelegate"
-                            where: [
-                                { field: "family_id", equals_field: "family_id" }
-                                { field: "primary_user_id", equals_field: "author_user_id" }
-                                "delegate_user_id=user.id"
+                ]
+                require: {
+                    all_of: [
+                        {
+                            any_of: [
+                                {
+                                    exists: {
+                                        resource: "Family"
+                                        where: [
+                                            { field: "id", equals: "input.family_id" }
+                                            "owner_user_id=user.id"
+                                        ]
+                                    }
+                                }
+                                {
+                                    exists: {
+                                        resource: "FamilyMember"
+                                        where: [
+                                            { field: "family_id", equals: "input.family_id" }
+                                            "user_id=user.id"
+                                        ]
+                                    }
+                                }
                             ]
                         }
-                    }
-                ]
+                        {
+                            exists: {
+                                resource: "ChildProfile"
+                                where: [
+                                    { field: "id", equals: "input.child_profile_id" }
+                                    { field: "family_id", equals: "input.family_id" }
+                                ]
+                            }
+                        }
+                    ]
+                }
             }
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "author_user_id=user.id"
-            ]
             update: "author_user_id=user.id"
             delete: "author_user_id=user.id"
         }
@@ -476,15 +679,79 @@ resources: {
         policies: {
             read: {
                 all_of: [
-                    { field: "family_id", equals: "claim.active_family_id" }
-                    { field: "household_slug", equals: "claim.preferred_household" }
+                    {
+                        any_of: [
+                            {
+                                exists: {
+                                    resource: "Family"
+                                    where: [
+                                        { field: "id", equals_field: "family_id" }
+                                        "owner_user_id=user.id"
+                                    ]
+                                }
+                            }
+                            {
+                                exists: {
+                                    resource: "FamilyMember"
+                                    where: [
+                                        { field: "family_id", equals_field: "family_id" }
+                                        "user_id=user.id"
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                    {
+                        exists: {
+                            resource: "Household"
+                            where: [
+                                { field: "family_id", equals_field: "family_id" }
+                                { field: "slug", equals_field: "household_slug" }
+                            ]
+                        }
+                    }
                 ]
             }
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                { field: "household_slug", value: "claim.preferred_household" }
-                "author_user_id=user.id"
-            ]
+            create: {
+                assign: [
+                    "author_user_id=user.id"
+                ]
+                require: {
+                    all_of: [
+                        {
+                            any_of: [
+                                {
+                                    exists: {
+                                        resource: "Family"
+                                        where: [
+                                            { field: "id", equals: "input.family_id" }
+                                            "owner_user_id=user.id"
+                                        ]
+                                    }
+                                }
+                                {
+                                    exists: {
+                                        resource: "FamilyMember"
+                                        where: [
+                                            { field: "family_id", equals: "input.family_id" }
+                                            "user_id=user.id"
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                        {
+                            exists: {
+                                resource: "Household"
+                                where: [
+                                    { field: "family_id", equals: "input.family_id" }
+                                    { field: "slug", equals: "input.household_slug" }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
             update: "author_user_id=user.id"
             delete: "author_user_id=user.id"
         }
@@ -505,10 +772,46 @@ resources: {
             delete: "user"
         }
         policies: {
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "created_by_user_id=user.id"
-            ]
+            create: {
+                assign: [
+                    "created_by_user_id=user.id"
+                ]
+                require: {
+                    all_of: [
+                        {
+                            any_of: [
+                                {
+                                    exists: {
+                                        resource: "Family"
+                                        where: [
+                                            { field: "id", equals: "input.family_id" }
+                                            "owner_user_id=user.id"
+                                        ]
+                                    }
+                                }
+                                {
+                                    exists: {
+                                        resource: "FamilyMember"
+                                        where: [
+                                            { field: "family_id", equals: "input.family_id" }
+                                            "user_id=user.id"
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                        {
+                            exists: {
+                                resource: "Household"
+                                where: [
+                                    { field: "id", equals: "input.household_id" }
+                                    { field: "family_id", equals: "input.family_id" }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
             read: "created_by_user_id=user.id"
             update: "created_by_user_id=user.id"
             delete: "created_by_user_id=user.id"
@@ -542,10 +845,46 @@ resources: {
             delete: "user"
         }
         policies: {
-            create: [
-                { field: "family_id", value: "claim.active_family_id" }
-                "created_by_user_id=user.id"
-            ]
+            create: {
+                assign: [
+                    "created_by_user_id=user.id"
+                ]
+                require: {
+                    all_of: [
+                        {
+                            any_of: [
+                                {
+                                    exists: {
+                                        resource: "Family"
+                                        where: [
+                                            { field: "id", equals: "input.family_id" }
+                                            "owner_user_id=user.id"
+                                        ]
+                                    }
+                                }
+                                {
+                                    exists: {
+                                        resource: "FamilyMember"
+                                        where: [
+                                            { field: "family_id", equals: "input.family_id" }
+                                            "user_id=user.id"
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                        {
+                            exists: {
+                                resource: "Household"
+                                where: [
+                                    { field: "id", equals: "input.household_id" }
+                                    { field: "family_id", equals: "input.family_id" }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
             read: "created_by_user_id=user.id"
             update: "created_by_user_id=user.id"
             delete: "created_by_user_id=user.id"

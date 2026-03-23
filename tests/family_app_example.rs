@@ -1,10 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use serde_json::Value;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::db::{connect, query, query_scalar};
 use very_simple_rest::prelude::*;
@@ -17,13 +13,6 @@ struct TokenResponse {
     token: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct MeResponse {
-    id: i64,
-    #[serde(flatten)]
-    claims: BTreeMap<String, Value>,
-}
-
 fn unique_sqlite_url(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -34,7 +23,7 @@ fn unique_sqlite_url(prefix: &str) -> String {
 }
 
 #[actix_web::test]
-async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
+async fn family_app_supports_family_bootstrap_and_runtime_scoped_access_through_http_api() {
     unsafe {
         std::env::set_var("JWT_SECRET", "family-app-secret");
     }
@@ -43,7 +32,6 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
     let pool = connect(&database_url)
         .await
         .expect("database should connect");
-
     for statement in very_simple_rest::core::auth::auth_migration_sql(
         very_simple_rest::core::auth::AuthDbBackend::Sqlite,
     )
@@ -67,16 +55,6 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
             .execute(&pool)
             .await
             .expect("auth management migration should apply");
-    }
-    for statement in include_str!("../examples/family_app/auth_extension.sql")
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
-    {
-        query(statement)
-            .execute(&pool)
-            .await
-            .expect("auth extension should apply");
     }
     for statement in very_simple_rest::authorization::authorization_runtime_migration_sql(
         very_simple_rest::core::auth::AuthDbBackend::Sqlite,
@@ -117,6 +95,33 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
     .execute(&pool)
     .await
     .expect("family_member table should create");
+
+    query(
+        "CREATE TABLE household (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            family_id INTEGER NOT NULL,\
+            created_by_user_id INTEGER NOT NULL,\
+            slug TEXT NOT NULL,\
+            label TEXT NOT NULL,\
+            timezone TEXT NOT NULL\
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("household table should create");
+    query(
+        "CREATE TABLE shopping_item (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            family_id INTEGER NOT NULL,\
+            household_id INTEGER NOT NULL,\
+            created_by_user_id INTEGER NOT NULL,\
+            title TEXT NOT NULL,\
+            completed INTEGER NOT NULL\
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("shopping_item table should create");
 
     let security = family_app_api::security();
     let app = test::init_service(App::new().service(scope("/api").configure(|cfg| {
@@ -191,82 +196,9 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
     let family_id = created_family.id.expect("created family should expose id");
     assert_eq!(created_family.owner_user_id, guardian_id);
 
-    let create_member_before_claim = test::TestRequest::post()
-        .uri("/api/family_member")
-        .insert_header(("Authorization", format!("Bearer {}", guardian_token.token)))
-        .set_json(&family_app_api::FamilyMemberCreate {
-            family_id,
-            user_id: guardian_id,
-            role_label: "guardian".to_owned(),
-            display_name: "Guardian".to_owned(),
-            is_child: false,
-        })
-        .to_request();
-    let create_member_before_claim_response =
-        test::call_service(&app, create_member_before_claim).await;
-    assert_eq!(
-        create_member_before_claim_response.status(),
-        StatusCode::CREATED
-    );
-
-    let patch_guardian_claims = test::TestRequest::patch()
-        .uri(&format!("/api/auth/admin/users/{guardian_id}"))
-        .insert_header(("Authorization", format!("Bearer {}", admin_token.token)))
-        .set_json(&auth::UpdateManagedUserInput {
-            role: None,
-            email_verified: None,
-            claims: BTreeMap::from([
-                ("active_family_id".to_owned(), Value::from(family_id)),
-                (
-                    "preferred_household".to_owned(),
-                    Value::from("helsinki-household"),
-                ),
-            ]),
-        })
-        .to_request();
-    let patched_guardian: auth::AccountInfo =
-        test::call_and_read_body_json(&app, patch_guardian_claims).await;
-    assert_eq!(
-        patched_guardian
-            .claims
-            .get("active_family_id")
-            .and_then(Value::as_i64),
-        Some(family_id)
-    );
-
-    let guardian_login_after_claim = test::TestRequest::post()
-        .uri("/api/auth/login")
-        .set_json(&auth::LoginInput {
-            email: "guardian@example.com".to_owned(),
-            password: "password123".to_owned(),
-        })
-        .to_request();
-    let guardian_token_after_claim: TokenResponse =
-        test::call_and_read_body_json(&app, guardian_login_after_claim).await;
-
-    let guardian_me = test::TestRequest::get()
-        .uri("/api/auth/me")
-        .insert_header((
-            "Authorization",
-            format!("Bearer {}", guardian_token_after_claim.token),
-        ))
-        .to_request();
-    let guardian_me_body: MeResponse = test::call_and_read_body_json(&app, guardian_me).await;
-    assert_eq!(guardian_me_body.id, guardian_id);
-    assert_eq!(
-        guardian_me_body
-            .claims
-            .get("active_family_id")
-            .and_then(Value::as_i64),
-        Some(family_id)
-    );
-
     let create_self_membership = test::TestRequest::post()
         .uri("/api/family_member")
-        .insert_header((
-            "Authorization",
-            format!("Bearer {}", guardian_token_after_claim.token),
-        ))
+        .insert_header(("Authorization", format!("Bearer {}", guardian_token.token)))
         .set_json(&family_app_api::FamilyMemberCreate {
             family_id,
             user_id: guardian_id,
@@ -282,10 +214,7 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
 
     let create_spouse_membership = test::TestRequest::post()
         .uri("/api/family_member")
-        .insert_header((
-            "Authorization",
-            format!("Bearer {}", guardian_token_after_claim.token),
-        ))
+        .insert_header(("Authorization", format!("Bearer {}", guardian_token.token)))
         .set_json(&family_app_api::FamilyMemberCreate {
             family_id,
             user_id: spouse_id,
@@ -298,6 +227,34 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
         test::call_and_read_body_json(&app, create_spouse_membership).await;
     assert_eq!(spouse_membership.family_id, family_id);
     assert_eq!(spouse_membership.user_id, spouse_id);
+
+    let create_household = test::TestRequest::post()
+        .uri("/api/household")
+        .insert_header(("Authorization", format!("Bearer {}", guardian_token.token)))
+        .set_json(&family_app_api::HouseholdCreate {
+            family_id,
+            slug: "helsinki-flat".to_owned(),
+            label: "Helsinki Flat".to_owned(),
+            timezone: "Europe/Helsinki".to_owned(),
+        })
+        .to_request();
+    let household: family_app_api::Household =
+        test::call_and_read_body_json(&app, create_household).await;
+    let household_id = household.id.expect("created household should expose id");
+
+    let create_shopping_item = test::TestRequest::post()
+        .uri("/api/shopping_item")
+        .insert_header(("Authorization", format!("Bearer {}", guardian_token.token)))
+        .set_json(&family_app_api::ShoppingItemCreate {
+            family_id,
+            household_id,
+            title: "Buy oat milk".to_owned(),
+            completed: false,
+        })
+        .to_request();
+    let shopping_item: family_app_api::ShoppingItem =
+        test::call_and_read_body_json(&app, create_shopping_item).await;
+    let shopping_item_id = shopping_item.id.expect("shopping item should expose id");
 
     let spouse_login = test::TestRequest::post()
         .uri("/api/auth/login")
@@ -317,6 +274,46 @@ async fn family_app_supports_guardian_family_bootstrap_through_http_api() {
     assert_eq!(spouse_families.total, 1);
     assert_eq!(spouse_families.count, 1);
     assert_eq!(spouse_families.items[0].id, Some(family_id));
+
+    let spouse_households = test::TestRequest::get()
+        .uri(&format!("/api/family/{family_id}/household"))
+        .insert_header(("Authorization", format!("Bearer {}", spouse_token.token)))
+        .to_request();
+    let spouse_household_list: family_app_api::HouseholdListResponse =
+        test::call_and_read_body_json(&app, spouse_households).await;
+    assert_eq!(spouse_household_list.total, 1);
+    assert_eq!(spouse_household_list.items[0].id, Some(household_id));
+
+    let spouse_shopping_before = test::TestRequest::get()
+        .uri(&format!("/api/family/{family_id}/shopping_item"))
+        .insert_header(("Authorization", format!("Bearer {}", spouse_token.token)))
+        .to_request();
+    let spouse_shopping_before_list: family_app_api::ShoppingItemListResponse =
+        test::call_and_read_body_json(&app, spouse_shopping_before).await;
+    assert_eq!(spouse_shopping_before_list.total, 0);
+    assert_eq!(spouse_shopping_before_list.count, 0);
+
+    let runtime_assignment = test::TestRequest::post()
+        .uri("/api/authz/runtime/assignments")
+        .insert_header(("Authorization", format!("Bearer {}", admin_token.token)))
+        .set_json(serde_json::json!({
+            "user_id": spouse_id,
+            "target": { "kind": "template", "name": "Caregiver" },
+            "scope": { "scope": "Family", "value": family_id.to_string() }
+        }))
+        .to_request();
+    let runtime_assignment_response = test::call_service(&app, runtime_assignment).await;
+    assert_eq!(runtime_assignment_response.status(), StatusCode::CREATED);
+
+    let spouse_shopping_after = test::TestRequest::get()
+        .uri(&format!("/api/family/{family_id}/shopping_item"))
+        .insert_header(("Authorization", format!("Bearer {}", spouse_token.token)))
+        .to_request();
+    let spouse_shopping_after_list: family_app_api::ShoppingItemListResponse =
+        test::call_and_read_body_json(&app, spouse_shopping_after).await;
+    assert_eq!(spouse_shopping_after_list.total, 1);
+    assert_eq!(spouse_shopping_after_list.count, 1);
+    assert_eq!(spouse_shopping_after_list.items[0].id, Some(shopping_item_id));
 
     unsafe {
         std::env::remove_var("JWT_SECRET");

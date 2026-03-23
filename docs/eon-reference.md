@@ -443,7 +443,7 @@ security: {
 
 ## Auth Claims
 
-Explicit auth claim mappings let built-in auth expose predictable claim names without relying entirely on implicit `_id` / `claim_<name>` discovery. The keyed map name is the emitted JWT claim name.
+Explicit auth claim mappings let built-in auth expose predictable claim names without relying entirely on implicit `_id` / `claim_<name>` discovery. The keyed map name is the emitted JWT claim name. For `.eon` services, `vsr setup` also extends the built-in `user` table with those mapped columns automatically before admin creation. Use this for stable user/session attributes; use the `authorization` contract and runtime authz tables for permissions or scoped grants.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |

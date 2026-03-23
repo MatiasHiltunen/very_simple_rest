@@ -26,13 +26,13 @@
                 <h1>Family Atlas</h1>
                 <p class="hero-summary">
                     A browser workspace for the policy-heavy <code>family_app.eon</code> example:
-                    registration, family bootstrap, claim activation, runtime grants, and shared household tools.
+                    registration, family bootstrap, runtime grants, and shared household tools.
                 </p>
                 <div class="hero-pills">
                     <span class="pill">Built-in auth</span>
                     <span class="pill">Create.require</span>
                     <span class="pill">Hybrid runtime grants</span>
-                    <span class="pill">Admin claim patching</span>
+                    <span class="pill">Relation-aware policies</span>
                 </div>
             </div>
 
@@ -41,8 +41,8 @@
                 <ol>
                     <li>Register a guardian or caregiver account, then log in.</li>
                     <li>Create a family and add family members immediately.</li>
-                    <li>Log in as admin to set <code>active_family_id</code> and <code>preferred_household</code>.</li>
-                    <li>Create a household, then use shopping and calendar sections.</li>
+                    <li>Create a household inside the selected family.</li>
+                    <li>Log in as admin to grant a runtime template like <code>Caregiver@Family=42</code>.</li>
                     <li>Use runtime assignments to widen access without changing static row policies.</li>
                 </ol>
             </div>
@@ -81,8 +81,8 @@
                         </div>
                     </dl>
                     <div class="claims-wrap">
-                        <h3>Claims and roles</h3>
-                        <pre id="sessionClaims" class="code-block">No claims loaded yet.</pre>
+                        <h3>Session payload</h3>
+                        <pre id="sessionClaims" class="code-block">No session loaded yet.</pre>
                     </div>
                 </section>
 
@@ -129,9 +129,9 @@
                                 returned by <code>/api/auth/login</code>.
                             </p>
                             <p>
-                                Claim updates do not retrofit the current JWT. After an admin patches
-                                <code>active_family_id</code> or <code>preferred_household</code>, log in again to pick
-                                up the new session claims.
+                                This example keeps permissions in runtime authz tables rather than on the built-in
+                                <code>user</code> row. Family selection is local UI state, while elevated access comes
+                                from scoped runtime assignments.
                             </p>
                         </div>
                     </div>
@@ -161,7 +161,7 @@
                                 <button id="reloadFamiliesBtn" class="button subtle" type="button">Reload families</button>
                             </div>
                             <p class="helper">
-                                Family owners can add family members immediately, even before claim activation.
+                                Family owners can add family members immediately without mutating auth claims.
                             </p>
                         </form>
 
@@ -222,7 +222,7 @@
                         <div>
                             <div class="inline-heading">
                                 <h3>Membership rows</h3>
-                                <span class="helper">Visibility changes with row policies and activated claims.</span>
+                                <span class="helper">Visibility changes with relation-aware row policies and family membership.</span>
                             </div>
                             <div id="familyMembersList" class="card-list">
                                 <div class="empty-state">Select a family to load members.</div>
@@ -233,7 +233,7 @@
 
                 <section class="panel">
                     <div class="panel-heading">
-                        <p class="eyebrow">Claim-scoped</p>
+                        <p class="eyebrow">Family-scoped</p>
                         <h2>Households and shared spaces</h2>
                     </div>
                     <div class="form-grid two-up">
@@ -259,15 +259,15 @@
                                 <button id="reloadHouseholdsBtn" class="button subtle" type="button">Reload households</button>
                             </div>
                             <p class="helper">
-                                Household creation requires a fresh session whose claims include
-                                <code>active_family_id</code>.
+                                Household creation is authorized by relation-aware membership checks on the posted
+                                <code>family_id</code>.
                             </p>
                         </form>
 
                         <div>
                             <div class="inline-heading">
                                 <h3>Household rows</h3>
-                                <span class="helper">Preferred household claim helps pick the default workspace.</span>
+                                <span class="helper">Selection stays local to the SPA instead of mutating auth claims.</span>
                             </div>
                             <div id="householdsList" class="card-list">
                                 <div class="empty-state">Select a family to load households.</div>
@@ -346,7 +346,7 @@
                             </div>
                             <p class="helper">
                                 <code>CalendarEvent</code> runtime grants widen read/update/delete. Create still follows
-                                the static family claim path.
+                                the static family membership path.
                             </p>
                         </form>
 
@@ -365,7 +365,7 @@
                 <section class="panel admin-panel">
                     <div class="panel-heading">
                         <p class="eyebrow">Admin</p>
-                        <h2>User directory and claim activation</h2>
+                        <h2>User directory and runtime targeting</h2>
                     </div>
                     <div class="form-grid two-up">
                         <div class="stack">
@@ -380,36 +380,6 @@
                                 <div class="empty-state">Admin users can list built-in accounts here.</div>
                             </div>
                         </div>
-
-                        <form id="claimPatchForm" class="stack">
-                            <label>
-                                <span>Managed user ID</span>
-                                <input id="managedUserId" name="user_id" type="number" min="1" placeholder="2" required>
-                            </label>
-                            <label>
-                                <span>Role override (optional)</span>
-                                <input id="managedRole" name="role" type="text" placeholder="admin">
-                            </label>
-                            <label>
-                                <span>active_family_id</span>
-                                <input id="claimActiveFamilyId" name="active_family_id" type="number" min="1" placeholder="42">
-                            </label>
-                            <label>
-                                <span>preferred_household</span>
-                                <input id="claimPreferredHousehold" name="preferred_household" type="text" placeholder="helsinki-flat">
-                            </label>
-                            <label class="checkbox">
-                                <input id="claimSupportAgent" name="support_agent" type="checkbox">
-                                <span>support_agent = true</span>
-                            </label>
-                            <div class="button-row">
-                                <button class="button primary" type="submit">Patch claims</button>
-                            </div>
-                            <p class="helper">
-                                The API accepts configured auth claims here even though the current OpenAPI schema still
-                                documents only the core auth fields.
-                            </p>
-                        </form>
                     </div>
                 </section>
 

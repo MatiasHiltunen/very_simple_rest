@@ -161,6 +161,14 @@ columns instead, including `String` and `Bool` claim types. Interactive flows pr
 values, and non-interactive flows accept environment variables named `ADMIN_<COLUMN_NAME>`, such
 as `ADMIN_TENANT_ID=1` or `ADMIN_IS_STAFF=true`.
 
+When `security.auth.claims` is configured on a `.eon` service, `vsr setup` now extends the
+built-in auth `user` table with those mapped columns automatically before admin creation. Manual
+claim-column SQL is no longer required for `.eon`-driven services.
+
+Use that for stable user/session attributes. For permissions, delegated access, and scope-bound
+grants, prefer the runtime authorization tables and `authorization` contract instead of adding
+permission state to the built-in auth `user` row.
+
 For services that expose the built-in auth admin routes, `PATCH /api/auth/admin/users/{id}` can
 also update configured `security.auth.claims` values on existing users. That makes it possible to
 bootstrap claim-scoped examples and policy-heavy services through HTTP instead of direct SQL
@@ -797,8 +805,8 @@ For a larger SQLite benchmark fixture with deep relations and a deterministic se
 For a policy-heavy `.eon` example with tenant claims, owner-scoped writes, and self-scoped
 resources, see `examples/fine_grained_policies/`.
 
-For a family-management example that combines explicit auth claims, relation-aware `exists`
-policies, runtime templates/scopes, hybrid enforcement, and a same-origin browser SPA, see
+For a family-management example that combines relation-aware `exists` policies, `create.require`,
+runtime templates/scopes, hybrid enforcement, and a same-origin browser SPA, see
 `examples/family_app/`.
 
 For a minimal `.eon`-only app with built-in auth, owner-scoped todos, admin visibility across all

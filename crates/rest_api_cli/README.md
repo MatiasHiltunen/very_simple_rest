@@ -510,6 +510,14 @@ That includes legacy implicit numeric claim columns such as `tenant_id`, `org_id
 Interactive admin creation prompts for those values, and non-interactive flows accept environment
 variables named `ADMIN_<COLUMN_NAME>`, for example `ADMIN_TENANT_ID=1` or `ADMIN_IS_STAFF=true`.
 
+For `.eon` services with explicit `security.auth.claims`, `vsr setup` also generates those mapped
+`user` columns automatically as part of the built-in auth migration flow. You do not need to ship
+manual SQL just to add auth claim columns.
+
+Use explicit auth claims for stable user/session attributes. For permissions, delegated access,
+and scoped grants, prefer the runtime authorization tables and the `.eon` `authorization`
+contract instead of storing permission state on the built-in auth `user` row.
+
 ### Check Database
 
 Verify database connection and schema:
