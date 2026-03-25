@@ -14,7 +14,10 @@ use crate::{
         AuthorizationContract, AuthorizationExistsCondition, AuthorizationMatch,
         AuthorizationModel, AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
     },
-    database::DatabaseEngine,
+    database::{
+        DatabaseBackupMode, DatabaseBackupTarget, DatabaseEngine, DatabaseReadRoutingMode,
+        DatabaseReplicationMode, DatabaseResilienceProfile,
+    },
     logging::LogTimestampPrecision,
     security::{FrameOptions, ReferrerPolicy},
 };
@@ -709,12 +712,101 @@ fn auth_claim_type_tokens(ty: crate::auth::AuthClaimType, runtime_crate: &Path) 
     }
 }
 
+fn database_resilience_profile_tokens(
+    profile: DatabaseResilienceProfile,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match profile {
+        DatabaseResilienceProfile::SingleNode => {
+            quote!(#runtime_crate::core::database::DatabaseResilienceProfile::SingleNode)
+        }
+        DatabaseResilienceProfile::Pitr => {
+            quote!(#runtime_crate::core::database::DatabaseResilienceProfile::Pitr)
+        }
+        DatabaseResilienceProfile::Ha => {
+            quote!(#runtime_crate::core::database::DatabaseResilienceProfile::Ha)
+        }
+    }
+}
+
+fn database_backup_mode_tokens(mode: DatabaseBackupMode, runtime_crate: &Path) -> TokenStream {
+    match mode {
+        DatabaseBackupMode::Snapshot => {
+            quote!(#runtime_crate::core::database::DatabaseBackupMode::Snapshot)
+        }
+        DatabaseBackupMode::Logical => {
+            quote!(#runtime_crate::core::database::DatabaseBackupMode::Logical)
+        }
+        DatabaseBackupMode::Physical => {
+            quote!(#runtime_crate::core::database::DatabaseBackupMode::Physical)
+        }
+        DatabaseBackupMode::Pitr => {
+            quote!(#runtime_crate::core::database::DatabaseBackupMode::Pitr)
+        }
+    }
+}
+
+fn database_backup_target_tokens(
+    target: DatabaseBackupTarget,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match target {
+        DatabaseBackupTarget::Local => {
+            quote!(#runtime_crate::core::database::DatabaseBackupTarget::Local)
+        }
+        DatabaseBackupTarget::S3 => {
+            quote!(#runtime_crate::core::database::DatabaseBackupTarget::S3)
+        }
+        DatabaseBackupTarget::Gcs => {
+            quote!(#runtime_crate::core::database::DatabaseBackupTarget::Gcs)
+        }
+        DatabaseBackupTarget::AzureBlob => {
+            quote!(#runtime_crate::core::database::DatabaseBackupTarget::AzureBlob)
+        }
+        DatabaseBackupTarget::Custom => {
+            quote!(#runtime_crate::core::database::DatabaseBackupTarget::Custom)
+        }
+    }
+}
+
+fn database_replication_mode_tokens(
+    mode: DatabaseReplicationMode,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match mode {
+        DatabaseReplicationMode::None => {
+            quote!(#runtime_crate::core::database::DatabaseReplicationMode::None)
+        }
+        DatabaseReplicationMode::ReadReplica => {
+            quote!(#runtime_crate::core::database::DatabaseReplicationMode::ReadReplica)
+        }
+        DatabaseReplicationMode::HotStandby => {
+            quote!(#runtime_crate::core::database::DatabaseReplicationMode::HotStandby)
+        }
+        DatabaseReplicationMode::ManagedExternal => {
+            quote!(#runtime_crate::core::database::DatabaseReplicationMode::ManagedExternal)
+        }
+    }
+}
+
+fn database_read_routing_mode_tokens(
+    mode: DatabaseReadRoutingMode,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match mode {
+        DatabaseReadRoutingMode::Off => {
+            quote!(#runtime_crate::core::database::DatabaseReadRoutingMode::Off)
+        }
+        DatabaseReadRoutingMode::Explicit => {
+            quote!(#runtime_crate::core::database::DatabaseReadRoutingMode::Explicit)
+        }
+    }
+}
+
 fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
-    match &service.database.engine {
+    let engine = match &service.database.engine {
         DatabaseEngine::Sqlx => {
-            quote!(#runtime_crate::core::database::DatabaseConfig {
-                engine: #runtime_crate::core::database::DatabaseEngine::Sqlx,
-            })
+            quote!(#runtime_crate::core::database::DatabaseEngine::Sqlx)
         }
         DatabaseEngine::TursoLocal(engine) => {
             let path = Literal::string(&engine.path);
@@ -725,16 +817,120 @@ fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 }
                 None => quote!(None),
             };
-            quote!(#runtime_crate::core::database::DatabaseConfig {
-                engine: #runtime_crate::core::database::DatabaseEngine::TursoLocal(
+            quote!(
+                #runtime_crate::core::database::DatabaseEngine::TursoLocal(
                     #runtime_crate::core::database::TursoLocalConfig {
                         path: #path.to_owned(),
                         encryption_key_env: #encryption_key_env,
                     }
-                ),
-            })
+                )
+            )
         }
-    }
+    };
+    let resilience = match &service.database.resilience {
+        Some(resilience) => {
+            let profile = database_resilience_profile_tokens(resilience.profile, runtime_crate);
+            let backup = match &resilience.backup {
+                Some(backup) => {
+                    let required = backup.required;
+                    let verify_restore = backup.verify_restore;
+                    let mode = database_backup_mode_tokens(backup.mode, runtime_crate);
+                    let target = database_backup_target_tokens(backup.target, runtime_crate);
+                    let max_age = match backup.max_age.as_deref() {
+                        Some(value) => {
+                            let value = Literal::string(value);
+                            quote!(Some(#value.to_owned()))
+                        }
+                        None => quote!(None),
+                    };
+                    let encryption_key_env = match backup.encryption_key_env.as_deref() {
+                        Some(value) => {
+                            let value = Literal::string(value);
+                            quote!(Some(#value.to_owned()))
+                        }
+                        None => quote!(None),
+                    };
+                    let retention = match &backup.retention {
+                        Some(retention) => {
+                            let daily = match retention.daily {
+                                Some(value) => quote!(Some(#value)),
+                                None => quote!(None),
+                            };
+                            let weekly = match retention.weekly {
+                                Some(value) => quote!(Some(#value)),
+                                None => quote!(None),
+                            };
+                            let monthly = match retention.monthly {
+                                Some(value) => quote!(Some(#value)),
+                                None => quote!(None),
+                            };
+                            quote!(Some(#runtime_crate::core::database::DatabaseBackupRetention {
+                                daily: #daily,
+                                weekly: #weekly,
+                                monthly: #monthly,
+                            }))
+                        }
+                        None => quote!(None),
+                    };
+                    quote!(Some(#runtime_crate::core::database::DatabaseBackupConfig {
+                        required: #required,
+                        mode: #mode,
+                        target: #target,
+                        verify_restore: #verify_restore,
+                        max_age: #max_age,
+                        encryption_key_env: #encryption_key_env,
+                        retention: #retention,
+                    }))
+                }
+                None => quote!(None),
+            };
+            let replication = match &resilience.replication {
+                Some(replication) => {
+                    let mode = database_replication_mode_tokens(replication.mode, runtime_crate);
+                    let read_routing =
+                        database_read_routing_mode_tokens(replication.read_routing, runtime_crate);
+                    let read_url_env = match replication.read_url_env.as_deref() {
+                        Some(value) => {
+                            let value = Literal::string(value);
+                            quote!(Some(#value.to_owned()))
+                        }
+                        None => quote!(None),
+                    };
+                    let max_lag = match replication.max_lag.as_deref() {
+                        Some(value) => {
+                            let value = Literal::string(value);
+                            quote!(Some(#value.to_owned()))
+                        }
+                        None => quote!(None),
+                    };
+                    let replicas_expected = match replication.replicas_expected {
+                        Some(value) => quote!(Some(#value)),
+                        None => quote!(None),
+                    };
+                    quote!(Some(#runtime_crate::core::database::DatabaseReplicationConfig {
+                        mode: #mode,
+                        read_routing: #read_routing,
+                        read_url_env: #read_url_env,
+                        max_lag: #max_lag,
+                        replicas_expected: #replicas_expected,
+                    }))
+                }
+                None => quote!(None),
+            };
+
+            quote!(Some(#runtime_crate::core::database::DatabaseResilienceConfig {
+                profile: #profile,
+                backup: #backup,
+                replication: #replication,
+            }))
+        }
+        None => quote!(None),
+    };
+
+    quote!(#runtime_crate::core::database::DatabaseConfig {
+        engine: #engine,
+        resilience: #resilience,
+    })
 }
 
 fn logging_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
@@ -1277,14 +1473,20 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                         })?;
                 }
             }
-        } else if field.sql_type == "BOOLEAN" {
+        } else if super::model::is_bool_type(&field.ty) {
             if super::model::is_optional_type(&field.ty) {
                 quote! {
                     let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<bool>, _>(row, #field_name_lit) {
                         Ok(value) => value,
                         Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
-                            #runtime_crate::sqlx::Row::try_get::<Option<i64>, _>(row, #field_name_lit)?
-                                .map(|value| value != 0)
+                            match #runtime_crate::sqlx::Row::try_get::<Option<i64>, _>(row, #field_name_lit) {
+                                Ok(value) => value.map(|value| value != 0),
+                                Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
+                                    #runtime_crate::sqlx::Row::try_get::<Option<i32>, _>(row, #field_name_lit)?
+                                        .map(|value| value != 0)
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                         Err(error) => return Err(error),
                     };
@@ -1294,7 +1496,13 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                     let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<bool, _>(row, #field_name_lit) {
                         Ok(value) => value,
                         Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
-                            #runtime_crate::sqlx::Row::try_get::<i64, _>(row, #field_name_lit)? != 0
+                            match #runtime_crate::sqlx::Row::try_get::<i64, _>(row, #field_name_lit) {
+                                Ok(value) => value != 0,
+                                Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
+                                    #runtime_crate::sqlx::Row::try_get::<i32, _>(row, #field_name_lit)? != 0
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                         Err(error) => return Err(error),
                     };
@@ -1881,19 +2089,22 @@ fn resource_impl_tokens(
                     #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Text(#text_value)),
                 }
             } else {
-                match field.sql_type.as_str() {
-                    "INTEGER" => quote! {
+                if super::model::is_bool_type(&field.ty) {
+                    quote! {
+                        #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Boolean(item.#ident)),
+                    }
+                } else {
+                    match field.sql_type.as_str() {
+                    sql_type if super::model::is_integer_sql_type(sql_type) => quote! {
                         #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(item.#ident as i64)),
                     },
                     "REAL" => quote! {
                         #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Real(item.#ident as f64)),
                     },
-                    "BOOLEAN" => quote! {
-                        #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Boolean(item.#ident)),
-                    },
                     _ => quote! {
                         #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Text(item.#ident.clone())),
                     },
+                }
                 }
             }
         }
@@ -1934,8 +2145,16 @@ fn resource_impl_tokens(
                 }
             }
         } else {
-            let bind_push = match field.sql_type.as_str() {
-                "INTEGER" => quote! {
+            let bind_push = if super::model::is_bool_type(&field.ty) {
+                quote! {
+                    #cursor_value_ty::Boolean(value) => {
+                        select_only_binds.push(#list_bind_ty::Boolean(*value));
+                        select_only_binds.push(#list_bind_ty::Boolean(*value));
+                    }
+                }
+            } else {
+                match field.sql_type.as_str() {
+                sql_type if super::model::is_integer_sql_type(sql_type) => quote! {
                     #cursor_value_ty::Integer(value) => {
                         select_only_binds.push(#list_bind_ty::Integer(*value));
                         select_only_binds.push(#list_bind_ty::Integer(*value));
@@ -1947,18 +2166,13 @@ fn resource_impl_tokens(
                         select_only_binds.push(#list_bind_ty::Real(*value));
                     }
                 },
-                "BOOLEAN" => quote! {
-                    #cursor_value_ty::Boolean(value) => {
-                        select_only_binds.push(#list_bind_ty::Boolean(*value));
-                        select_only_binds.push(#list_bind_ty::Boolean(*value));
-                    }
-                },
                 _ => quote! {
                     #cursor_value_ty::Text(value) => {
                         select_only_binds.push(#list_bind_ty::Text(value.clone()));
                         select_only_binds.push(#list_bind_ty::Text(value.clone()));
                     }
                 },
+                }
             };
             quote! {
                 #sort_field_ty::#variant_ident => {
@@ -3541,10 +3755,13 @@ fn list_filter_field_ty(field: &super::model::FieldSpec, runtime_crate: &Path) -
         return structured_scalar_type_tokens(kind, runtime_crate);
     }
 
+    if super::model::is_bool_type(&field.ty) {
+        return quote!(bool);
+    }
+
     match field.sql_type.as_str() {
-        "INTEGER" => quote!(i64),
+        sql_type if super::model::is_integer_sql_type(sql_type) => quote!(i64),
         "REAL" => quote!(f64),
-        "BOOLEAN" => quote!(bool),
         _ => quote!(String),
     }
 }
@@ -3636,28 +3853,8 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                     }
                 }
             } else {
-                match field.sql_type.as_str() {
-                    "INTEGER" => quote! {
-                        if let Some(value) = query.#filter_ident {
-                            conditions.push(format!(
-                                "{} = {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Integer(value));
-                        }
-                    },
-                    "REAL" => quote! {
-                        if let Some(value) = query.#filter_ident {
-                            conditions.push(format!(
-                                "{} = {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Real(value));
-                        }
-                    },
-                    "BOOLEAN" => quote! {
+                if super::model::is_bool_type(&field.ty) {
+                    quote! {
                         if let Some(value) = query.#filter_ident {
                             conditions.push(format!(
                                 "{} = {}",
@@ -3666,18 +3863,41 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                             ));
                             filter_binds.push(#bind_ident::Boolean(value));
                         }
-                    },
-                    _ => quote! {
-                        if let Some(value) = &query.#filter_ident {
-                            conditions.push(format!(
-                                "{} = {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(value.clone()));
-                        }
-                        #contains_filter_tokens
-                    },
+                    }
+                } else {
+                    match field.sql_type.as_str() {
+                        sql_type if super::model::is_integer_sql_type(sql_type) => quote! {
+                            if let Some(value) = query.#filter_ident {
+                                conditions.push(format!(
+                                    "{} = {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Integer(value));
+                            }
+                        },
+                        "REAL" => quote! {
+                            if let Some(value) = query.#filter_ident {
+                                conditions.push(format!(
+                                    "{} = {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Real(value));
+                            }
+                        },
+                        _ => quote! {
+                            if let Some(value) = &query.#filter_ident {
+                                conditions.push(format!(
+                                    "{} = {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(value.clone()));
+                            }
+                            #contains_filter_tokens
+                        },
+                    }
                 }
             }
         })
@@ -3795,7 +4015,7 @@ fn validation_checks(
     }
 
     match field.sql_type.as_str() {
-        "INTEGER" => {
+        sql_type if super::model::is_integer_sql_type(sql_type) => {
             if let Some(super::model::NumericBound::Integer(minimum)) = &field.validation.minimum {
                 let minimum = Literal::i64_unsuffixed(*minimum);
                 checks.push(quote! {

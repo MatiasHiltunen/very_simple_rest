@@ -313,7 +313,10 @@ async fn family_app_supports_family_bootstrap_and_runtime_scoped_access_through_
         test::call_and_read_body_json(&app, spouse_shopping_after).await;
     assert_eq!(spouse_shopping_after_list.total, 1);
     assert_eq!(spouse_shopping_after_list.count, 1);
-    assert_eq!(spouse_shopping_after_list.items[0].id, Some(shopping_item_id));
+    assert_eq!(
+        spouse_shopping_after_list.items[0].id,
+        Some(shopping_item_id)
+    );
 
     unsafe {
         std::env::remove_var("JWT_SECRET");

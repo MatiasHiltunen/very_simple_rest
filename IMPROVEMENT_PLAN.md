@@ -6,6 +6,8 @@ answer two questions:
 1. What is already implemented?
 2. What should be built next, in what order, and with what shape?
 
+For backup, restore, and replication planning, see `docs/backup-replication-roadmap.md`.
+
 ## Current Capability Snapshot
 
 ### Compression and static delivery
@@ -87,6 +89,15 @@ Deliverables:
 - Postgres/MySQL drift inspection and runtime coverage
 - OpenAPI error schema completeness
 - compatibility testing for generated server output
+
+### Phase 5: Durability and recovery posture
+
+Deliverables:
+
+- backup and restore contract under `database`
+- backend-aware backup planning and doctor commands
+- SQLite/TursoLocal snapshot + restore verification
+- Postgres/MySQL replication and recovery guidance
 
 ## Compression MVP
 

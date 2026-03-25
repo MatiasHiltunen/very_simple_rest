@@ -1105,21 +1105,24 @@ fn query_parameter_schema(field: &FieldSpec) -> Value {
 }
 
 fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value {
-    let mut schema = match field.sql_type.as_str() {
-        "INTEGER" => json!({
-            "type": "integer",
-            "format": "int64",
-        }),
-        "REAL" => json!({
-            "type": "number",
-            "format": "double",
-        }),
-        "BOOLEAN" => json!({
+    let mut schema = if super::model::is_bool_type(&field.ty) {
+        json!({
             "type": "boolean",
-        }),
-        _ => json!({
-            "type": "string",
-        }),
+        })
+    } else {
+        match field.sql_type.as_str() {
+            sql_type if super::model::is_integer_sql_type(sql_type) => json!({
+                "type": "integer",
+                "format": "int64",
+            }),
+            "REAL" => json!({
+                "type": "number",
+                "format": "double",
+            }),
+            _ => json!({
+                "type": "string",
+            }),
+        }
     };
 
     if let Some(kind) = structured_scalar_kind(&field.ty) {

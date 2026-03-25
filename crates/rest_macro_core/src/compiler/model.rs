@@ -730,12 +730,31 @@ pub fn infer_sql_type(ty: &Type, db: DbBackend) -> String {
     }
 
     match type_leaf_name(ty).as_deref() {
-        Some("i8" | "i16" | "i32" | "i64" | "isize") => "INTEGER".to_owned(),
-        Some("u8" | "u16" | "u32" | "u64" | "usize") => "INTEGER".to_owned(),
+        Some("i64" | "u64" | "isize" | "usize") => match db {
+            DbBackend::Sqlite => "INTEGER".to_owned(),
+            DbBackend::Postgres | DbBackend::Mysql => "BIGINT".to_owned(),
+        },
+        Some("i8" | "i16" | "i32") => "INTEGER".to_owned(),
+        Some("u8" | "u16" | "u32") => "INTEGER".to_owned(),
         Some("f32" | "f64") => "REAL".to_owned(),
-        Some("bool") => "BOOLEAN".to_owned(),
+        Some("bool") => match db {
+            DbBackend::Sqlite | DbBackend::Mysql => "INTEGER".to_owned(),
+            DbBackend::Postgres => "BOOLEAN".to_owned(),
+        },
+        Some("String") => match db {
+            DbBackend::Mysql => "VARCHAR(255)".to_owned(),
+            DbBackend::Sqlite | DbBackend::Postgres => "TEXT".to_owned(),
+        },
         _ => "TEXT".to_owned(),
     }
+}
+
+pub fn is_integer_sql_type(sql_type: &str) -> bool {
+    matches!(sql_type, "INTEGER" | "BIGINT")
+}
+
+pub fn is_bool_type(ty: &Type) -> bool {
+    matches!(type_leaf_name(ty).as_deref(), Some("bool"))
 }
 
 fn type_leaf_name(ty: &Type) -> Option<String> {
@@ -828,7 +847,9 @@ pub fn supports_contains_filters(field: &FieldSpec) -> bool {
         return false;
     }
 
-    !matches!(field.sql_type.as_str(), "INTEGER" | "REAL" | "BOOLEAN")
+    !is_integer_sql_type(field.sql_type.as_str())
+        && !matches!(field.sql_type.as_str(), "REAL")
+        && !is_bool_type(&field.ty)
 }
 
 pub fn read_requires_auth(resource: &ResourceSpec) -> bool {
@@ -1135,7 +1156,7 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
                     ));
                 }
             }
-            "INTEGER" => {
+            sql_type if is_integer_sql_type(sql_type) => {
                 if validation.min_length.is_some() || validation.max_length.is_some() {
                     return Err(syn::Error::new(
                         span,

@@ -5,6 +5,7 @@ use crate::commands::migrate::apply_setup_migrations;
 use crate::error::Result;
 use colored::Colorize;
 use dialoguer::Confirm;
+use rest_macro_core::auth::{AuthDbBackend, auth_user_table_ident};
 use rest_macro_core::db::query_scalar;
 use std::path::Path;
 
@@ -33,10 +34,14 @@ pub async fn run_setup(
 
     // Step 3: Check if admin user already exists
     println!("\n{}", "Step 3: Verifying admin user".cyan().bold());
-    let admin_exists =
-        query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM user WHERE role = 'admin'")
-            .fetch_one(&pool)
-            .await?;
+    let auth_backend =
+        AuthDbBackend::from_database_url(database_url).unwrap_or(AuthDbBackend::Sqlite);
+    let admin_exists = query_scalar::<sqlx::Any, i64>(&format!(
+        "SELECT COUNT(*) FROM {} WHERE role = 'admin'",
+        auth_user_table_ident(auth_backend)
+    ))
+    .fetch_one(&pool)
+    .await?;
 
     if admin_exists > 0 {
         println!("{}", "✓ Admin user already exists".green());

@@ -46,6 +46,7 @@ fn database_config() -> database::DatabaseConfig {
             encryption_key_env: env::var_os("TURSO_ENCRYPTION_KEY")
                 .map(|_| "TURSO_ENCRYPTION_KEY".to_owned()),
         }),
+        resilience: None,
     }
 }
 

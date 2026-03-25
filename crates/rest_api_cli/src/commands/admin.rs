@@ -42,17 +42,17 @@ fn validate_password(password: &str) -> bool {
 /// Checks if a user with the given email already exists
 async fn user_exists(pool: &DbPool, backend: DbBackend, email: &str) -> Result<bool> {
     let sql = format!(
-        "SELECT EXISTS(SELECT 1 FROM {} WHERE {} = {})",
+        "SELECT COUNT(*) FROM {} WHERE {} = {}",
         quote_ident(backend, "user"),
         quote_ident(backend, "email"),
         placeholder_for_backend(backend, 1)
     );
-    let exists = query_scalar::<sqlx::Any, i64>(&sql)
+    let existing_rows = query_scalar::<sqlx::Any, i64>(&sql)
         .bind(email)
         .fetch_one(pool)
         .await?;
 
-    Ok(exists != 0)
+    Ok(existing_rows != 0)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,7 +228,7 @@ async fn create_admin_in_pool(
         };
     }
     query.execute(pool).await?;
-    initialize_admin_management_fields(pool, &email).await?;
+    initialize_admin_management_fields(pool, backend, &email).await?;
 
     println!(
         "{} {}",
@@ -251,15 +251,20 @@ async fn create_admin_in_pool(
     Ok(())
 }
 
-async fn initialize_admin_management_fields(pool: &DbPool, email: &str) -> Result<()> {
+async fn initialize_admin_management_fields(
+    pool: &DbPool,
+    backend: DbBackend,
+    email: &str,
+) -> Result<()> {
     let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, false);
-    match query(
-        "UPDATE user \
+    match query(&format!(
+        "UPDATE {} \
          SET created_at = COALESCE(created_at, ?), \
              email_verified_at = COALESCE(email_verified_at, ?), \
              updated_at = COALESCE(updated_at, ?) \
          WHERE email = ?",
-    )
+        quote_ident(backend, "user"),
+    ))
     .bind(&timestamp)
     .bind(&timestamp)
     .bind(&timestamp)
@@ -298,7 +303,10 @@ async fn discover_admin_claim_columns(
         DbBackend::Sqlite => query("PRAGMA table_info('user')").fetch_all(pool).await?,
         DbBackend::Postgres => {
             query(
-                "SELECT column_name, data_type, is_nullable, column_default \
+                "SELECT column_name::text AS column_name, \
+                        data_type::text AS data_type, \
+                        is_nullable::text AS is_nullable, \
+                        column_default::text AS column_default \
              FROM information_schema.columns \
              WHERE table_schema = current_schema() AND table_name = 'user' \
              ORDER BY ordinal_position",
@@ -308,7 +316,10 @@ async fn discover_admin_claim_columns(
         }
         DbBackend::Mysql => {
             query(
-                "SELECT column_name, data_type, is_nullable, column_default \
+                "SELECT CAST(column_name AS CHAR(255)) AS column_name, \
+                        CAST(data_type AS CHAR(255)) AS data_type, \
+                        CAST(is_nullable AS CHAR(3)) AS is_nullable, \
+                        CAST(column_default AS CHAR(255)) AS column_default \
              FROM information_schema.columns \
              WHERE table_schema = DATABASE() AND table_name = 'user' \
              ORDER BY ordinal_position",
@@ -665,7 +676,7 @@ enum DbBackend {
 
 async fn detect_backend(pool: &DbPool) -> Result<DbBackend> {
     match pool {
-        DbPool::Sqlx(pool) => {
+        DbPool::Sqlx { pool, .. } => {
             let connection = pool.acquire().await?;
             let backend_name = connection.backend_name().to_ascii_lowercase();
             if backend_name.contains("postgres") {

@@ -32,15 +32,29 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone)]
 pub enum DbPool {
-    Sqlx(AnyPool),
+    Sqlx {
+        pool: AnyPool,
+        backend: SqlxBackend,
+    },
     #[cfg(feature = "turso-local")]
     TursoLocal(TursoLocalPool),
 }
 
 impl From<AnyPool> for DbPool {
     fn from(value: AnyPool) -> Self {
-        Self::Sqlx(value)
+        Self::Sqlx {
+            pool: value,
+            backend: SqlxBackend::Unknown,
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqlxBackend {
+    Unknown,
+    Sqlite,
+    Postgres,
+    Mysql,
 }
 
 #[cfg(feature = "turso-local")]
@@ -206,10 +220,11 @@ pub async fn connect(database_url: &str) -> Result<DbPool, sqlx::Error> {
         )),
         None => {
             sqlx::any::install_default_drivers();
+            let backend = sqlx_backend_from_database_url(database_url)?;
             AnyPoolOptions::new()
                 .connect(database_url)
                 .await
-                .map(DbPool::Sqlx)
+                .map(|pool| DbPool::Sqlx { pool, backend })
         }
     }
 }
@@ -250,10 +265,13 @@ impl DbPool {
 
     pub async fn begin(&self) -> Result<DbTransaction, sqlx::Error> {
         match self {
-            Self::Sqlx(pool) => {
+            Self::Sqlx { pool, backend } => {
                 let tx = pool.begin().await?;
                 Ok(DbTransaction {
-                    inner: DbTransactionInner::Sqlx(tokio::sync::Mutex::new(Some(tx))),
+                    inner: DbTransactionInner::Sqlx {
+                        tx: tokio::sync::Mutex::new(Some(tx)),
+                        backend: *backend,
+                    },
                 })
             }
             #[cfg(feature = "turso-local")]
@@ -274,7 +292,7 @@ impl DbPool {
 
     pub async fn execute_batch(&self, sql: &str) -> Result<(), sqlx::Error> {
         match self {
-            Self::Sqlx(pool) => {
+            Self::Sqlx { pool, .. } => {
                 sqlx::raw_sql(sql).execute(pool).await?;
                 Ok(())
             }
@@ -289,7 +307,10 @@ pub struct DbTransaction {
 }
 
 enum DbTransactionInner {
-    Sqlx(tokio::sync::Mutex<Option<sqlx::Transaction<'static, Any>>>),
+    Sqlx {
+        tx: tokio::sync::Mutex<Option<sqlx::Transaction<'static, Any>>>,
+        backend: SqlxBackend,
+    },
     #[cfg(feature = "turso-local")]
     TursoLocal(tokio::sync::Mutex<TursoTransactionState>),
 }
@@ -303,7 +324,7 @@ struct TursoTransactionState {
 impl DbTransaction {
     pub async fn commit(&self) -> Result<(), sqlx::Error> {
         match &self.inner {
-            DbTransactionInner::Sqlx(tx) => {
+            DbTransactionInner::Sqlx { tx, .. } => {
                 let mut guard = tx.lock().await;
                 let tx = guard.take().ok_or_else(|| {
                     sqlx::Error::Protocol("transaction already finished".to_owned())
@@ -331,7 +352,7 @@ impl DbTransaction {
 
     pub async fn rollback(&self) -> Result<(), sqlx::Error> {
         match &self.inner {
-            DbTransactionInner::Sqlx(tx) => {
+            DbTransactionInner::Sqlx { tx, .. } => {
                 let mut guard = tx.lock().await;
                 let tx = guard.take().ok_or_else(|| {
                     sqlx::Error::Protocol("transaction already finished".to_owned())
@@ -359,7 +380,7 @@ impl DbTransaction {
 
     pub async fn execute_batch(&self, sql: &str) -> Result<(), sqlx::Error> {
         match &self.inner {
-            DbTransactionInner::Sqlx(tx) => {
+            DbTransactionInner::Sqlx { tx, .. } => {
                 let mut guard = tx.lock().await;
                 let tx = guard.as_mut().ok_or_else(|| {
                     sqlx::Error::Protocol("transaction already finished".to_owned())
@@ -614,7 +635,7 @@ impl DbExecutor for DbPool {
     ) -> BoxFuture<'a, Result<DbQueryResult, sqlx::Error>> {
         Box::pin(async move {
             match self {
-                Self::Sqlx(pool) => execute_sqlx(pool, query).await,
+                Self::Sqlx { pool, backend } => execute_sqlx(pool, *backend, query).await,
                 #[cfg(feature = "turso-local")]
                 Self::TursoLocal(pool) => pool.execute(query).await,
             }
@@ -627,7 +648,7 @@ impl DbExecutor for DbPool {
     ) -> BoxFuture<'a, Result<Vec<AnyRow>, sqlx::Error>> {
         Box::pin(async move {
             match self {
-                Self::Sqlx(pool) => fetch_all_sqlx(pool, query).await,
+                Self::Sqlx { pool, backend } => fetch_all_sqlx(pool, *backend, query).await,
                 #[cfg(feature = "turso-local")]
                 Self::TursoLocal(pool) => pool.fetch_all(query).await,
             }
@@ -642,12 +663,12 @@ impl DbExecutor for DbTransaction {
     ) -> BoxFuture<'a, Result<DbQueryResult, sqlx::Error>> {
         Box::pin(async move {
             match &self.inner {
-                DbTransactionInner::Sqlx(tx) => {
+                DbTransactionInner::Sqlx { tx, backend } => {
                     let mut guard = tx.lock().await;
                     let tx = guard.as_mut().ok_or_else(|| {
                         sqlx::Error::Protocol("transaction already finished".to_owned())
                     })?;
-                    execute_sqlx_tx(tx, query).await
+                    execute_sqlx_tx(tx, *backend, query).await
                 }
                 #[cfg(feature = "turso-local")]
                 DbTransactionInner::TursoLocal(tx) => {
@@ -669,12 +690,12 @@ impl DbExecutor for DbTransaction {
     ) -> BoxFuture<'a, Result<Vec<AnyRow>, sqlx::Error>> {
         Box::pin(async move {
             match &self.inner {
-                DbTransactionInner::Sqlx(tx) => {
+                DbTransactionInner::Sqlx { tx, backend } => {
                     let mut guard = tx.lock().await;
                     let tx = guard.as_mut().ok_or_else(|| {
                         sqlx::Error::Protocol("transaction already finished".to_owned())
                     })?;
-                    fetch_all_sqlx_tx(tx, query).await
+                    fetch_all_sqlx_tx(tx, *backend, query).await
                 }
                 #[cfg(feature = "turso-local")]
                 DbTransactionInner::TursoLocal(tx) => {
@@ -691,11 +712,16 @@ impl DbExecutor for DbTransaction {
     }
 }
 
-async fn execute_sqlx<E>(executor: E, query: BoundQuery<'_>) -> Result<DbQueryResult, sqlx::Error>
+async fn execute_sqlx<E>(
+    executor: E,
+    backend: SqlxBackend,
+    query: BoundQuery<'_>,
+) -> Result<DbQueryResult, sqlx::Error>
 where
     E: sqlx::Executor<'static, Database = Any>,
 {
-    let result = apply_sqlx_binds(sqlx::query(query.sql), query.binds)
+    let sql = rewrite_sql_placeholders(query.sql, backend);
+    let result = apply_sqlx_binds(sqlx::query(&sql), query.binds)
         .execute(executor)
         .await?;
     Ok(DbQueryResult {
@@ -704,20 +730,27 @@ where
     })
 }
 
-async fn fetch_all_sqlx<E>(executor: E, query: BoundQuery<'_>) -> Result<Vec<AnyRow>, sqlx::Error>
+async fn fetch_all_sqlx<E>(
+    executor: E,
+    backend: SqlxBackend,
+    query: BoundQuery<'_>,
+) -> Result<Vec<AnyRow>, sqlx::Error>
 where
     E: sqlx::Executor<'static, Database = Any>,
 {
-    apply_sqlx_binds(sqlx::query(query.sql), query.binds)
+    let sql = rewrite_sql_placeholders(query.sql, backend);
+    apply_sqlx_binds(sqlx::query(&sql), query.binds)
         .fetch_all(executor)
         .await
 }
 
 async fn execute_sqlx_tx(
     tx: &mut sqlx::Transaction<'static, Any>,
+    backend: SqlxBackend,
     query: BoundQuery<'_>,
 ) -> Result<DbQueryResult, sqlx::Error> {
-    let result = apply_sqlx_binds(sqlx::query(query.sql), query.binds)
+    let sql = rewrite_sql_placeholders(query.sql, backend);
+    let result = apply_sqlx_binds(sqlx::query(&sql), query.binds)
         .execute(tx.as_mut())
         .await?;
     Ok(DbQueryResult {
@@ -728,11 +761,68 @@ async fn execute_sqlx_tx(
 
 async fn fetch_all_sqlx_tx(
     tx: &mut sqlx::Transaction<'static, Any>,
+    backend: SqlxBackend,
     query: BoundQuery<'_>,
 ) -> Result<Vec<AnyRow>, sqlx::Error> {
-    apply_sqlx_binds(sqlx::query(query.sql), query.binds)
+    let sql = rewrite_sql_placeholders(query.sql, backend);
+    apply_sqlx_binds(sqlx::query(&sql), query.binds)
         .fetch_all(tx.as_mut())
         .await
+}
+
+fn sqlx_backend_from_database_url(database_url: &str) -> Result<SqlxBackend, sqlx::Error> {
+    if database_url.starts_with("postgres:") || database_url.starts_with("postgresql:") {
+        Ok(SqlxBackend::Postgres)
+    } else if database_url.starts_with("mysql:") || database_url.starts_with("mariadb:") {
+        Ok(SqlxBackend::Mysql)
+    } else if database_url.starts_with("sqlite:") {
+        Ok(SqlxBackend::Sqlite)
+    } else {
+        Err(sqlx::Error::Configuration(
+            format!("unsupported database URL scheme in `{database_url}`").into(),
+        ))
+    }
+}
+
+fn rewrite_sql_placeholders(sql: &str, backend: SqlxBackend) -> String {
+    if backend != SqlxBackend::Postgres || !sql.contains('?') {
+        return sql.to_owned();
+    }
+
+    let mut rewritten = String::with_capacity(sql.len() + 8);
+    let mut placeholder_index = 1usize;
+    let mut chars = sql.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => {
+                rewritten.push(ch);
+                if in_single_quote && chars.peek() == Some(&'\'') {
+                    rewritten.push(chars.next().expect("peeked quote should exist"));
+                } else {
+                    in_single_quote = !in_single_quote;
+                }
+            }
+            '"' if !in_single_quote => {
+                rewritten.push(ch);
+                if in_double_quote && chars.peek() == Some(&'"') {
+                    rewritten.push(chars.next().expect("peeked quote should exist"));
+                } else {
+                    in_double_quote = !in_double_quote;
+                }
+            }
+            '?' if !in_single_quote && !in_double_quote => {
+                rewritten.push('$');
+                rewritten.push_str(&placeholder_index.to_string());
+                placeholder_index += 1;
+            }
+            _ => rewritten.push(ch),
+        }
+    }
+
+    rewritten
 }
 
 fn apply_sqlx_binds<'q>(
@@ -1119,6 +1209,7 @@ fn parse_turso_local_url(
 mod tests {
     #[cfg(feature = "turso-local")]
     use super::{DbPool, connect_with_config, query, query_scalar};
+    use super::{SqlxBackend, rewrite_sql_placeholders};
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     #[cfg(feature = "turso-local")]
@@ -1130,6 +1221,17 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn rewrite_sql_placeholders_translates_question_marks_for_postgres_only() {
+        let sql = "SELECT * FROM \"user\" WHERE email = ? AND note = '?' AND id = ?";
+        assert_eq!(
+            rewrite_sql_placeholders(sql, SqlxBackend::Postgres),
+            "SELECT * FROM \"user\" WHERE email = $1 AND note = '?' AND id = $2"
+        );
+        assert_eq!(rewrite_sql_placeholders(sql, SqlxBackend::Mysql), sql);
+        assert_eq!(rewrite_sql_placeholders(sql, SqlxBackend::Sqlite), sql);
     }
 
     #[cfg(feature = "turso-local")]
@@ -1188,6 +1290,7 @@ mod tests {
                 path: path.to_string_lossy().into_owned(),
                 encryption_key_env: None,
             }),
+            resilience: None,
         };
 
         let pool = connect_with_config("sqlite:ignored.db?mode=rwc", &config)
@@ -1238,6 +1341,7 @@ mod tests {
                 path: path.to_string_lossy().into_owned(),
                 encryption_key_env: Some(env_var.clone()),
             }),
+            resilience: None,
         };
 
         let pool = connect_with_config("sqlite:ignored.db?mode=rwc", &config)

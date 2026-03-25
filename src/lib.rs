@@ -224,8 +224,10 @@ pub mod authorization {
 
 pub mod database {
     pub use rest_macro_core::database::{
-        DatabaseConfig, DatabaseEngine, TursoLocalConfig, prepare_database_engine,
-        sqlite_url_for_path,
+        DatabaseBackupConfig, DatabaseBackupMode, DatabaseBackupRetention, DatabaseBackupTarget,
+        DatabaseConfig, DatabaseEngine, DatabaseReadRoutingMode, DatabaseReplicationConfig,
+        DatabaseReplicationMode, DatabaseResilienceConfig, DatabaseResilienceProfile,
+        TursoLocalConfig, prepare_database_engine, sqlite_url_for_path,
     };
 }
 

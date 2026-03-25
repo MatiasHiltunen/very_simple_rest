@@ -42,7 +42,7 @@ These keys are read from the service root.
 | --- | --- | --- | --- | --- | --- |
 | module | String | The `.eon` file stem, sanitized to a Rust module identifier | No | Any non-empty string | Controls the generated Rust module name. |
 | db | Enum | Sqlite | No | Sqlite, Postgres, Mysql | Selects the SQL dialect and resource backend used for generated SQL and handlers. |
-| database | Map | Backend-dependent runtime engine defaults | No | See Database Engine | Overrides the runtime database engine without changing the resource SQL dialect. |
+| database | Map | Backend-dependent runtime engine defaults | No | See Database Engine and Resilience | Overrides the runtime database engine and can declare backup/replication posture without changing the resource SQL dialect. |
 | logging | Map | Enabled with built-in defaults | No | See Logging | Controls the emitted server logger configuration. |
 | runtime | Map | Compression disabled | No | See Runtime | Controls runtime-only behavior such as HTTP compression. |
 | authorization | Map | No static authorization contract | No | See Authorization Contract | Declares optional static scopes, permissions, and templates for the compiled authorization model. |
@@ -319,6 +319,44 @@ The top-level `db` controls SQL generation. `database.engine` controls the runti
 | database.engine.path | String | For the implicit SQLite runtime engine: `var/data/<module>.db` | Required for explicit `kind = TursoLocal` | Relative path, absolute path, or `:memory:` | The `vsr` runtime resolves relative paths against the service or bundle base directory. |
 | database.engine.encryption_key_env | String | For the implicit SQLite runtime engine: `TURSO_ENCRYPTION_KEY` | No | Environment variable name | Used only by `TursoLocal`. When set, the runtime loads the key from `<VAR>` or `<VAR>_FILE`. |
 
+## Database Resilience
+
+The optional `database.resilience` block declares backup, restore-verification, and replication intent. `vsr` can already render plans, run doctor checks, and move local backup artifacts to S3-compatible storage from this contract, but generated servers do not yet enforce replica-aware runtime behavior automatically.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| database.resilience.profile | Enum | SingleNode when the block exists and `profile` is omitted | No | SingleNode, Pitr, Ha | Use this to describe the intended recovery posture without embedding deployment-specific schedules. |
+| database.resilience.backup | Map | None | No | See Database Backup | Declares the intended backup mode, target, restore-verification, and retention posture. |
+| database.resilience.replication | Map | None | No | See Database Replication | Declares the intended replica topology and explicit read-routing posture. |
+
+## Database Backup
+
+Backup settings describe the intended durability posture. They do not schedule jobs directly.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| database.resilience.backup.required | Bool | true when the backup block exists | No | true, false | Use `false` only when you are documenting a non-critical or externally-managed case explicitly. |
+| database.resilience.backup.mode | Enum | By profile/backend: `Pitr` for `profile = Pitr`; otherwise `Snapshot` for SQLite and `Logical` for Postgres/MySQL | No | Snapshot, Logical, Physical, Pitr | SQLite/TursoLocal services can already create local snapshot artifacts from this contract. Postgres/MySQL execution is still planning-oriented. |
+| database.resilience.backup.target | Enum | Local | No | Local, S3, Gcs, AzureBlob, Custom | Describes the expected backup destination family. Credentials remain environment-specific. |
+| database.resilience.backup.verify_restore | Bool | false | No | true, false | Marks restore verification as part of the required operational posture. |
+| database.resilience.backup.max_age | String | None | No | Any non-empty duration-like string such as `24h` | Currently stored as text for planning/doctor output; strict duration parsing is follow-up work. |
+| database.resilience.backup.encryption_key_env | String | None | No | Environment variable name | Documents the expected backup encryption or key-unwrapping env var. |
+| database.resilience.backup.retention.daily | u32 | None | No | Positive integer | Optional daily retention target. |
+| database.resilience.backup.retention.weekly | u32 | None | No | Positive integer | Optional weekly retention target. |
+| database.resilience.backup.retention.monthly | u32 | None | No | Positive integer | Optional monthly retention target. |
+
+## Database Replication
+
+Replication settings declare explicit primary/read topology intent. Generated servers do not yet auto-route reads based on this block.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| database.resilience.replication.mode | Enum | Required when the replication block exists | Yes when the block exists | None, ReadReplica, HotStandby, ManagedExternal | TursoLocal currently rejects replication contracts. `ManagedExternal` is meant for provider-managed replica setups. |
+| database.resilience.replication.read_routing | Enum | Off | No | Off, Explicit | Only `Explicit` is planned for the first runtime read-routing phase. |
+| database.resilience.replication.read_url_env | String | None | Required when `read_routing = Explicit` | Environment variable name | Documents the expected read-replica connection string env var. |
+| database.resilience.replication.max_lag | String | None | No | Any non-empty duration-like string such as `30s` | Currently stored as text for planning/doctor output. |
+| database.resilience.replication.replicas_expected | u32 | None | No | Positive integer | Documents the expected minimum replica count for validation tooling. |
+
 ## Logging
 
 Logging settings are carried into emitted servers and generated projects.
@@ -513,7 +551,7 @@ These are the canonical field type keywords accepted by `.eon`. Raw Rust type st
 | I64 | Rust field type | n/a | n/a | i64 | Stored as `INTEGER`. Supports equality filters and sort. |
 | F32 | Rust field type | n/a | n/a | f32 | Stored as `REAL`. Supports equality filters and sort. |
 | F64 | Rust field type | n/a | n/a | f64 | Stored as `REAL`. Supports equality filters and sort. |
-| Bool | Rust field type | n/a | n/a | bool | Stored as `BOOLEAN`. Supports equality filters and sort. |
+| Bool | Rust field type | n/a | n/a | bool | Stored as `INTEGER` on SQLite/MySQL and `BOOLEAN` on Postgres. Supports equality filters and sort. |
 | DateTime | Rust field type | n/a | n/a | chrono::DateTime<Utc> | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Date | Rust field type | n/a | n/a | chrono::NaiveDate | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Time | Rust field type | n/a | n/a | chrono::NaiveTime | Stored as text-compatible values. Supports equality filters, range filters, and sort. |

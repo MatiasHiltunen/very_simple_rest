@@ -249,6 +249,9 @@ vsr check-db
 
 # Generate a .env template file
 vsr gen-env
+
+# Render a backend-aware backup/replication plan from a `.eon` service
+vsr backup plan --input api.eon
 ```
 
 The CLI tool provides a secure way to set up admin users with password confirmation and validation.
@@ -613,6 +616,74 @@ Current support:
 Current limitation:
 
 - This is still a project-local runtime adapter, not a true upstream SQLx `Any` driver.
+
+### Backup And Replication Planning
+
+`.eon` can now also declare an optional resilience contract under `database.resilience`. This is a
+planning/documentation surface first: it lets `vsr` explain the intended backup and replication
+posture without embedding deployment-specific schedules into the schema.
+
+```eon
+database: {
+    engine: {
+        kind: Sqlx
+    }
+    resilience: {
+        profile: Pitr
+        backup: {
+            mode: Pitr
+            target: S3
+            verify_restore: true
+            max_age: "24h"
+        }
+        replication: {
+            mode: ReadReplica
+            read_routing: Explicit
+            read_url_env: "DATABASE_READ_URL"
+            max_lag: "30s"
+        }
+    }
+}
+```
+
+Use:
+
+```bash
+vsr backup plan --input api.eon
+vsr backup plan --input api.eon --format json
+vsr backup doctor --input api.eon
+vsr replication doctor --input api.eon --read-database-url postgres://reader@127.0.0.1/app
+vsr backup snapshot --input api.eon --output backups/run1
+vsr backup export --input api.eon --output backups/run1
+vsr backup verify-restore --artifact backups/run1 --format json
+vsr backup push --artifact backups/run1 --remote s3://my-bucket/backups/run1
+vsr backup pull --remote s3://my-bucket/backups/run1 --output restored/run1
+```
+
+The first implementation is intentionally conservative:
+
+- it renders backend-aware backup and replication guidance
+- it can validate obvious env and connectivity gaps with the doctor commands
+- `vsr replication doctor` can inspect live Postgres/MySQL role signals (`pg_is_in_recovery()`, `read_only`) for declared primary/read URLs
+- it can create and verify snapshot artifacts for SQLite/TursoLocal services
+- it can create Postgres/MySQL logical dump artifacts with `pg_dump` / `mysqldump`, falling back to official Docker client images when those tools are not installed locally
+- `vsr backup verify-restore` can now restore those Postgres/MySQL dump artifacts into disposable local Docker databases and validate the restored schema
+- it can push and pull backup artifact directories to S3-compatible storage
+- it does not schedule jobs or orchestrate failover
+- runtime read-routing is still future work
+
+For S3-compatible providers such as MinIO, pass an endpoint override and path-style requests:
+
+```bash
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+export AWS_REGION=us-east-1
+vsr backup push \
+  --artifact backups/run1 \
+  --remote s3://my-bucket/backups/run1 \
+  --endpoint-url http://127.0.0.1:9000 \
+  --path-style
+```
 
 ## TLS In `.eon`
 

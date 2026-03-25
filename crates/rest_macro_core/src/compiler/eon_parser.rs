@@ -34,7 +34,10 @@ use crate::{
         AuthorizationTemplate, DEFAULT_AUTHORIZATION_MANAGEMENT_MOUNT,
     },
     database::{
-        DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseConfig, DatabaseEngine, TursoLocalConfig,
+        DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseBackupConfig, DatabaseBackupMode,
+        DatabaseBackupRetention, DatabaseBackupTarget, DatabaseConfig, DatabaseEngine,
+        DatabaseReadRoutingMode, DatabaseReplicationConfig, DatabaseReplicationMode,
+        DatabaseResilienceConfig, DatabaseResilienceProfile, TursoLocalConfig,
     },
     logging::{LogTimestampPrecision, LoggingConfig},
     runtime::{CompressionConfig, RuntimeConfig},
@@ -81,6 +84,8 @@ struct ServiceDocument {
 struct DatabaseDocument {
     #[serde(default)]
     engine: Option<DatabaseEngineDocument>,
+    #[serde(default)]
+    resilience: Option<DatabaseResilienceDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -90,6 +95,58 @@ struct DatabaseEngineDocument {
     path: Option<String>,
     #[serde(default)]
     encryption_key_env: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct DatabaseResilienceDocument {
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    backup: Option<DatabaseBackupDocument>,
+    #[serde(default)]
+    replication: Option<DatabaseReplicationDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct DatabaseBackupDocument {
+    #[serde(default)]
+    required: Option<bool>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    verify_restore: Option<bool>,
+    #[serde(default)]
+    max_age: Option<String>,
+    #[serde(default)]
+    encryption_key_env: Option<String>,
+    #[serde(default)]
+    retention: Option<DatabaseBackupRetentionDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct DatabaseBackupRetentionDocument {
+    #[serde(default)]
+    daily: Option<u32>,
+    #[serde(default)]
+    weekly: Option<u32>,
+    #[serde(default)]
+    monthly: Option<u32>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct DatabaseReplicationDocument {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    read_routing: Option<String>,
+    #[serde(default)]
+    read_url_env: Option<String>,
+    #[serde(default)]
+    max_lag: Option<String>,
+    #[serde(default)]
+    replicas_expected: Option<u32>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -1562,7 +1619,11 @@ fn parse_database_document(
     module_name: &str,
     span: Span,
 ) -> syn::Result<DatabaseConfig> {
-    let engine = match document.and_then(|database| database.engine) {
+    let (engine_document, resilience_document) = match document {
+        Some(document) => (document.engine, document.resilience),
+        None => (None, None),
+    };
+    let engine = match engine_document {
         None => match db {
             DbBackend::Sqlite => DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: format!("var/data/{module_name}.db"),
@@ -1572,8 +1633,11 @@ fn parse_database_document(
         },
         Some(engine) => parse_database_engine_document(db, engine, span)?,
     };
+    let resilience = resilience_document
+        .map(|document| parse_database_resilience_document(db, &engine, document, span))
+        .transpose()?;
 
-    Ok(DatabaseConfig { engine })
+    Ok(DatabaseConfig { engine, resilience })
 }
 
 fn parse_database_engine_document(
@@ -1614,6 +1678,235 @@ fn parse_database_engine_document(
             format!("unsupported `database.engine.kind` value `{other}`"),
         )),
     }
+}
+
+fn parse_database_resilience_document(
+    db: DbBackend,
+    engine: &DatabaseEngine,
+    document: DatabaseResilienceDocument,
+    span: Span,
+) -> syn::Result<DatabaseResilienceConfig> {
+    let profile = match document.profile.as_deref() {
+        None => DatabaseResilienceProfile::SingleNode,
+        Some(value) => parse_database_resilience_profile(value, span)?,
+    };
+    let backup = document
+        .backup
+        .map(|document| parse_database_backup_document(db, engine, profile, document, span))
+        .transpose()?;
+    let replication = document
+        .replication
+        .map(|document| parse_database_replication_document(document, span))
+        .transpose()?;
+
+    if let Some(replication) = &replication {
+        if replication.read_routing == DatabaseReadRoutingMode::Explicit
+            && replication.read_url_env.is_none()
+        {
+            return Err(syn::Error::new(
+                span,
+                "database.resilience.replication.read_url_env is required when `read_routing = Explicit`",
+            ));
+        }
+        if replication.mode == DatabaseReplicationMode::None
+            && (replication.read_url_env.is_some()
+                || replication.max_lag.is_some()
+                || replication.replicas_expected.is_some()
+                || replication.read_routing != DatabaseReadRoutingMode::Off)
+        {
+            return Err(syn::Error::new(
+                span,
+                "database.resilience.replication.mode = None cannot be combined with replica settings",
+            ));
+        }
+    }
+
+    if db == DbBackend::Sqlite
+        && matches!(engine, DatabaseEngine::TursoLocal(_))
+        && matches!(replication.as_ref().map(|config| config.mode), Some(mode) if mode != DatabaseReplicationMode::None)
+    {
+        return Err(syn::Error::new(
+            span,
+            "database.resilience.replication is not supported for `database.engine = TursoLocal`",
+        ));
+    }
+
+    Ok(DatabaseResilienceConfig {
+        profile,
+        backup,
+        replication,
+    })
+}
+
+fn parse_database_resilience_profile(
+    value: &str,
+    span: Span,
+) -> syn::Result<DatabaseResilienceProfile> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "singlenode" | "single_node" | "single-node" => Ok(DatabaseResilienceProfile::SingleNode),
+        "pitr" => Ok(DatabaseResilienceProfile::Pitr),
+        "ha" => Ok(DatabaseResilienceProfile::Ha),
+        other => Err(syn::Error::new(
+            span,
+            format!("unsupported `database.resilience.profile` value `{other}`"),
+        )),
+    }
+}
+
+fn parse_database_backup_document(
+    db: DbBackend,
+    _engine: &DatabaseEngine,
+    profile: DatabaseResilienceProfile,
+    document: DatabaseBackupDocument,
+    span: Span,
+) -> syn::Result<DatabaseBackupConfig> {
+    let mode = match document.mode.as_deref() {
+        Some(value) => parse_database_backup_mode(value, span)?,
+        None => default_database_backup_mode(db, profile),
+    };
+    let target = match document.target.as_deref() {
+        Some(value) => parse_database_backup_target(value, span)?,
+        None => DatabaseBackupTarget::Local,
+    };
+    validate_non_empty_optional(
+        "database.resilience.backup.max_age",
+        document.max_age.as_deref(),
+        span,
+    )?;
+    validate_non_empty_optional(
+        "database.resilience.backup.encryption_key_env",
+        document.encryption_key_env.as_deref(),
+        span,
+    )?;
+    let retention = document.retention.map(|retention| DatabaseBackupRetention {
+        daily: retention.daily,
+        weekly: retention.weekly,
+        monthly: retention.monthly,
+    });
+
+    Ok(DatabaseBackupConfig {
+        required: document.required.unwrap_or(true),
+        mode,
+        target,
+        verify_restore: document.verify_restore.unwrap_or(false),
+        max_age: document.max_age,
+        encryption_key_env: document.encryption_key_env,
+        retention,
+    })
+}
+
+fn default_database_backup_mode(
+    db: DbBackend,
+    profile: DatabaseResilienceProfile,
+) -> DatabaseBackupMode {
+    match profile {
+        DatabaseResilienceProfile::Pitr => DatabaseBackupMode::Pitr,
+        DatabaseResilienceProfile::SingleNode | DatabaseResilienceProfile::Ha => match db {
+            DbBackend::Sqlite => DatabaseBackupMode::Snapshot,
+            DbBackend::Postgres | DbBackend::Mysql => DatabaseBackupMode::Logical,
+        },
+    }
+}
+
+fn parse_database_backup_mode(value: &str, span: Span) -> syn::Result<DatabaseBackupMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "snapshot" => Ok(DatabaseBackupMode::Snapshot),
+        "logical" => Ok(DatabaseBackupMode::Logical),
+        "physical" => Ok(DatabaseBackupMode::Physical),
+        "pitr" => Ok(DatabaseBackupMode::Pitr),
+        other => Err(syn::Error::new(
+            span,
+            format!("unsupported `database.resilience.backup.mode` value `{other}`"),
+        )),
+    }
+}
+
+fn parse_database_backup_target(value: &str, span: Span) -> syn::Result<DatabaseBackupTarget> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "local" => Ok(DatabaseBackupTarget::Local),
+        "s3" => Ok(DatabaseBackupTarget::S3),
+        "gcs" => Ok(DatabaseBackupTarget::Gcs),
+        "azureblob" | "azure_blob" | "azure-blob" => Ok(DatabaseBackupTarget::AzureBlob),
+        "custom" => Ok(DatabaseBackupTarget::Custom),
+        other => Err(syn::Error::new(
+            span,
+            format!("unsupported `database.resilience.backup.target` value `{other}`"),
+        )),
+    }
+}
+
+fn parse_database_replication_document(
+    document: DatabaseReplicationDocument,
+    span: Span,
+) -> syn::Result<DatabaseReplicationConfig> {
+    let mode = document.mode.as_deref().ok_or_else(|| {
+        syn::Error::new(
+            span,
+            "database.resilience.replication.mode is required when the replication block exists",
+        )
+    })?;
+    let mode = parse_database_replication_mode(mode, span)?;
+    let read_routing = match document.read_routing.as_deref() {
+        Some(value) => parse_database_read_routing_mode(value, span)?,
+        None => DatabaseReadRoutingMode::Off,
+    };
+    validate_non_empty_optional(
+        "database.resilience.replication.read_url_env",
+        document.read_url_env.as_deref(),
+        span,
+    )?;
+    validate_non_empty_optional(
+        "database.resilience.replication.max_lag",
+        document.max_lag.as_deref(),
+        span,
+    )?;
+
+    Ok(DatabaseReplicationConfig {
+        mode,
+        read_routing,
+        read_url_env: document.read_url_env,
+        max_lag: document.max_lag,
+        replicas_expected: document.replicas_expected,
+    })
+}
+
+fn parse_database_replication_mode(
+    value: &str,
+    span: Span,
+) -> syn::Result<DatabaseReplicationMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(DatabaseReplicationMode::None),
+        "readreplica" | "read_replica" | "read-replica" => Ok(DatabaseReplicationMode::ReadReplica),
+        "hotstandby" | "hot_standby" | "hot-standby" => Ok(DatabaseReplicationMode::HotStandby),
+        "managedexternal" | "managed_external" | "managed-external" => {
+            Ok(DatabaseReplicationMode::ManagedExternal)
+        }
+        other => Err(syn::Error::new(
+            span,
+            format!("unsupported `database.resilience.replication.mode` value `{other}`"),
+        )),
+    }
+}
+
+fn parse_database_read_routing_mode(
+    value: &str,
+    span: Span,
+) -> syn::Result<DatabaseReadRoutingMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(DatabaseReadRoutingMode::Off),
+        "explicit" => Ok(DatabaseReadRoutingMode::Explicit),
+        other => Err(syn::Error::new(
+            span,
+            format!("unsupported `database.resilience.replication.read_routing` value `{other}`"),
+        )),
+    }
+}
+
+fn validate_non_empty_optional(path: &str, value: Option<&str>, span: Span) -> syn::Result<()> {
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        return Err(syn::Error::new(span, format!("{path} cannot be empty")));
+    }
+    Ok(())
 }
 
 fn parse_rate_limit_rule_document(document: RateLimitRuleDocument) -> RateLimitRule {
@@ -2581,6 +2874,7 @@ mod tests {
                     path: Some("var/data/app.db".to_owned()),
                     encryption_key_env: None,
                 }),
+                resilience: None,
             }),
             "app_api",
             Span::call_site(),
@@ -2593,6 +2887,7 @@ mod tests {
                 encryption_key_env: None,
             })
         );
+        assert!(database.resilience.is_none());
     }
 
     #[test]
@@ -2605,6 +2900,7 @@ mod tests {
                     path: Some("var/data/app.db".to_owned()),
                     encryption_key_env: None,
                 }),
+                resilience: None,
             }),
             "app_api",
             Span::call_site(),
@@ -2629,6 +2925,132 @@ mod tests {
                 path: "var/data/blog_api.db".to_owned(),
                 encryption_key_env: Some(DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV.to_owned()),
             })
+        );
+        assert!(database.resilience.is_none());
+    }
+
+    #[test]
+    fn parses_database_resilience_contract_from_eon() {
+        let database = parse_database_document(
+            DbBackend::Postgres,
+            Some(DatabaseDocument {
+                engine: Some(DatabaseEngineDocument {
+                    kind: "Sqlx".to_owned(),
+                    path: None,
+                    encryption_key_env: None,
+                }),
+                resilience: Some(DatabaseResilienceDocument {
+                    profile: Some("Pitr".to_owned()),
+                    backup: Some(DatabaseBackupDocument {
+                        required: Some(true),
+                        mode: Some("Pitr".to_owned()),
+                        target: Some("S3".to_owned()),
+                        verify_restore: Some(true),
+                        max_age: Some("24h".to_owned()),
+                        encryption_key_env: Some("BACKUP_ENCRYPTION_KEY".to_owned()),
+                        retention: Some(DatabaseBackupRetentionDocument {
+                            daily: Some(7),
+                            weekly: Some(4),
+                            monthly: Some(12),
+                        }),
+                    }),
+                    replication: Some(DatabaseReplicationDocument {
+                        mode: Some("ReadReplica".to_owned()),
+                        read_routing: Some("Explicit".to_owned()),
+                        read_url_env: Some("DATABASE_READ_URL".to_owned()),
+                        max_lag: Some("30s".to_owned()),
+                        replicas_expected: Some(1),
+                    }),
+                }),
+            }),
+            "app_api",
+            Span::call_site(),
+        )
+        .expect("database resilience should parse");
+
+        let resilience = database.resilience.expect("resilience should exist");
+        assert_eq!(resilience.profile, DatabaseResilienceProfile::Pitr);
+        let backup = resilience.backup.expect("backup should exist");
+        assert_eq!(backup.mode, DatabaseBackupMode::Pitr);
+        assert_eq!(backup.target, DatabaseBackupTarget::S3);
+        assert!(backup.verify_restore);
+        assert_eq!(backup.max_age.as_deref(), Some("24h"));
+        let replication = resilience.replication.expect("replication should exist");
+        assert_eq!(replication.mode, DatabaseReplicationMode::ReadReplica);
+        assert_eq!(replication.read_routing, DatabaseReadRoutingMode::Explicit);
+        assert_eq!(
+            replication.read_url_env.as_deref(),
+            Some("DATABASE_READ_URL")
+        );
+    }
+
+    #[test]
+    fn rejects_replication_read_routing_without_read_url_env() {
+        let error = parse_database_document(
+            DbBackend::Postgres,
+            Some(DatabaseDocument {
+                engine: Some(DatabaseEngineDocument {
+                    kind: "Sqlx".to_owned(),
+                    path: None,
+                    encryption_key_env: None,
+                }),
+                resilience: Some(DatabaseResilienceDocument {
+                    profile: None,
+                    backup: None,
+                    replication: Some(DatabaseReplicationDocument {
+                        mode: Some("ReadReplica".to_owned()),
+                        read_routing: Some("Explicit".to_owned()),
+                        read_url_env: None,
+                        max_lag: None,
+                        replicas_expected: None,
+                    }),
+                }),
+            }),
+            "app_api",
+            Span::call_site(),
+        )
+        .expect_err("missing read url should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("database.resilience.replication.read_url_env is required"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_turso_local_replication_contract() {
+        let error = parse_database_document(
+            DbBackend::Sqlite,
+            Some(DatabaseDocument {
+                engine: Some(DatabaseEngineDocument {
+                    kind: "TursoLocal".to_owned(),
+                    path: Some("var/data/app.db".to_owned()),
+                    encryption_key_env: None,
+                }),
+                resilience: Some(DatabaseResilienceDocument {
+                    profile: Some("Ha".to_owned()),
+                    backup: None,
+                    replication: Some(DatabaseReplicationDocument {
+                        mode: Some("ReadReplica".to_owned()),
+                        read_routing: Some("Off".to_owned()),
+                        read_url_env: None,
+                        max_lag: None,
+                        replicas_expected: None,
+                    }),
+                }),
+            }),
+            "app_api",
+            Span::call_site(),
+        )
+        .expect_err("turso local replication should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("database.resilience.replication is not supported for `database.engine = TursoLocal`"),
+            "unexpected error: {error}"
         );
     }
 

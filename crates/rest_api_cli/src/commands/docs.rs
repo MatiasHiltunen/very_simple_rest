@@ -134,8 +134,8 @@ object or just a type such as `title: String`.",
                 "Map",
                 "Backend-dependent runtime engine defaults",
                 "No",
-                "See Database Engine",
-                "Overrides the runtime database engine without changing the resource SQL dialect.",
+                "See Database Engine and Resilience",
+                "Overrides the runtime database engine and can declare backup/replication posture without changing the resource SQL dialect.",
             ),
             row(
                 "logging",
@@ -973,6 +973,166 @@ referenced by `exists` conditions.\n\n",
 
     push_section(
         &mut markdown,
+        "Database Resilience",
+        "The optional `database.resilience` block declares backup, restore-verification, and replication intent. `vsr` can already render plans, run doctor checks, and move local backup artifacts to S3-compatible storage from this contract, but generated servers do not yet enforce replica-aware runtime behavior automatically.",
+        &[
+            row(
+                "database.resilience.profile",
+                "Enum",
+                "SingleNode when the block exists and `profile` is omitted",
+                "No",
+                "SingleNode, Pitr, Ha",
+                "Use this to describe the intended recovery posture without embedding deployment-specific schedules.",
+            ),
+            row(
+                "database.resilience.backup",
+                "Map",
+                "None",
+                "No",
+                "See Database Backup",
+                "Declares the intended backup mode, target, restore-verification, and retention posture.",
+            ),
+            row(
+                "database.resilience.replication",
+                "Map",
+                "None",
+                "No",
+                "See Database Replication",
+                "Declares the intended replica topology and explicit read-routing posture.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Database Backup",
+        "Backup settings describe the intended durability posture. They do not schedule jobs directly.",
+        &[
+            row(
+                "database.resilience.backup.required",
+                "Bool",
+                "true when the backup block exists",
+                "No",
+                "true, false",
+                "Use `false` only when you are documenting a non-critical or externally-managed case explicitly.",
+            ),
+            row(
+                "database.resilience.backup.mode",
+                "Enum",
+                "By profile/backend: `Pitr` for `profile = Pitr`; otherwise `Snapshot` for SQLite and `Logical` for Postgres/MySQL",
+                "No",
+                "Snapshot, Logical, Physical, Pitr",
+                "SQLite/TursoLocal services can already create local snapshot artifacts from this contract. Postgres/MySQL execution is still planning-oriented.",
+            ),
+            row(
+                "database.resilience.backup.target",
+                "Enum",
+                "Local",
+                "No",
+                "Local, S3, Gcs, AzureBlob, Custom",
+                "Describes the expected backup destination family. Credentials remain environment-specific.",
+            ),
+            row(
+                "database.resilience.backup.verify_restore",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Marks restore verification as part of the required operational posture.",
+            ),
+            row(
+                "database.resilience.backup.max_age",
+                "String",
+                "None",
+                "No",
+                "Any non-empty duration-like string such as `24h`",
+                "Currently stored as text for planning/doctor output; strict duration parsing is follow-up work.",
+            ),
+            row(
+                "database.resilience.backup.encryption_key_env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "Documents the expected backup encryption or key-unwrapping env var.",
+            ),
+            row(
+                "database.resilience.backup.retention.daily",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Optional daily retention target.",
+            ),
+            row(
+                "database.resilience.backup.retention.weekly",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Optional weekly retention target.",
+            ),
+            row(
+                "database.resilience.backup.retention.monthly",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Optional monthly retention target.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Database Replication",
+        "Replication settings declare explicit primary/read topology intent. Generated servers do not yet auto-route reads based on this block.",
+        &[
+            row(
+                "database.resilience.replication.mode",
+                "Enum",
+                "Required when the replication block exists",
+                "Yes when the block exists",
+                "None, ReadReplica, HotStandby, ManagedExternal",
+                "TursoLocal currently rejects replication contracts. `ManagedExternal` is meant for provider-managed replica setups.",
+            ),
+            row(
+                "database.resilience.replication.read_routing",
+                "Enum",
+                "Off",
+                "No",
+                "Off, Explicit",
+                "Only `Explicit` is planned for the first runtime read-routing phase.",
+            ),
+            row(
+                "database.resilience.replication.read_url_env",
+                "String",
+                "None",
+                "Required when `read_routing = Explicit`",
+                "Environment variable name",
+                "Documents the expected read-replica connection string env var.",
+            ),
+            row(
+                "database.resilience.replication.max_lag",
+                "String",
+                "None",
+                "No",
+                "Any non-empty duration-like string such as `30s`",
+                "Currently stored as text for planning/doctor output.",
+            ),
+            row(
+                "database.resilience.replication.replicas_expected",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Documents the expected minimum replica count for validation tooling.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
         "Logging",
         "Logging settings are carried into emitted servers and generated projects.",
         &[
@@ -1697,7 +1857,7 @@ referenced by `exists` conditions.\n\n",
                 "n/a",
                 "n/a",
                 "bool",
-                "Stored as `BOOLEAN`. Supports equality filters and sort.",
+                "Stored as `INTEGER` on SQLite/MySQL and `BOOLEAN` on Postgres. Supports equality filters and sort.",
             ),
             row(
                 "DateTime",
@@ -1983,11 +2143,13 @@ mod tests {
 
         assert!(markdown.contains("# `.eon` Configuration Reference"));
         assert!(markdown.contains("## Top-Level Keys"));
+        assert!(markdown.contains("## Database Resilience"));
         assert!(markdown.contains("## Authorization Contract"));
         assert!(markdown.contains("## Resource Keys"));
         assert!(markdown.contains("## Security Overview"));
         assert!(markdown.contains("## Auth Claims"));
         assert!(markdown.contains("authorization.permissions.<permission_name>.actions"));
+        assert!(markdown.contains("database.resilience.backup.mode"));
         assert!(markdown.contains("runtime.compression.static_precompressed"));
         assert!(markdown.contains("security.auth.claims.<claim_name>"));
         assert!(markdown.contains("fields: {"));

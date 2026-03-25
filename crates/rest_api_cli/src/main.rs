@@ -184,6 +184,18 @@ enum Commands {
         force: bool,
     },
 
+    /// Plan backup and replication posture from a `.eon` service
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+
+    /// Validate live replication topology against a `.eon` resilience contract
+    Replication {
+        #[command(subcommand)]
+        command: ReplicationCommand,
+    },
+
     /// Explain the compiled authorization model for a `.eon` service
     Authz {
         #[command(subcommand)]
@@ -320,6 +332,180 @@ enum MigrationCommand {
         /// Directory containing `.sql` migration files
         #[arg(short, long, value_name = "DIR", default_value = "migrations")]
         dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Render a backend-aware backup and replication plan from a `.eon` service
+    Plan {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Optional output file
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Validate backup posture and obvious environment/connectivity gaps
+    Doctor {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Optional output file
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Create a SQLite/TursoLocal snapshot artifact with a manifest
+    Snapshot {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Output artifact directory
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+
+        /// Overwrite the output directory if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Create a Postgres/MySQL logical dump artifact with a manifest
+    Export {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Output artifact directory
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+
+        /// Overwrite the output directory if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Restore a snapshot artifact into a disposable target and verify it
+    VerifyRestore {
+        /// Backup artifact directory or manifest.json path
+        #[arg(short, long, value_name = "PATH")]
+        artifact: PathBuf,
+
+        /// Optional output file
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Upload a local backup artifact directory to an S3-compatible remote prefix
+    Push {
+        /// Backup artifact directory or manifest.json path
+        #[arg(short, long, value_name = "PATH")]
+        artifact: PathBuf,
+
+        /// Remote artifact prefix in the form s3://bucket/prefix
+        #[arg(long, value_name = "S3_URI")]
+        remote: String,
+
+        /// Optional S3-compatible endpoint override, for example http://127.0.0.1:9000 for MinIO
+        #[arg(long, value_name = "URL")]
+        endpoint_url: Option<String>,
+
+        /// Optional S3 region override
+        #[arg(long, value_name = "REGION")]
+        region: Option<String>,
+
+        /// Force path-style S3 requests for compatible providers such as MinIO
+        #[arg(long)]
+        path_style: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+    },
+
+    /// Download a backup artifact directory from an S3-compatible remote prefix
+    Pull {
+        /// Remote artifact prefix in the form s3://bucket/prefix
+        #[arg(long, value_name = "S3_URI")]
+        remote: String,
+
+        /// Local output artifact directory
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+
+        /// Optional S3-compatible endpoint override, for example http://127.0.0.1:9000 for MinIO
+        #[arg(long, value_name = "URL")]
+        endpoint_url: Option<String>,
+
+        /// Optional S3 region override
+        #[arg(long, value_name = "REGION")]
+        region: Option<String>,
+
+        /// Force path-style S3 requests for compatible providers such as MinIO
+        #[arg(long)]
+        path_style: bool,
+
+        /// Overwrite the output directory if it already exists
+        #[arg(long)]
+        force: bool,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplicationCommand {
+    /// Validate primary/read topology and obvious replication config gaps
+    Doctor {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Explicit read database URL override
+        #[arg(long, value_name = "URL")]
+        read_database_url: Option<String>,
+
+        /// Optional output file
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -727,6 +913,13 @@ enum AuthzActionArg {
     Delete,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Default)]
+enum BackupPlanFormatArg {
+    #[default]
+    Text,
+    Json,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum AuthzHybridSourceArg {
     Item,
@@ -742,11 +935,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config_path = resolve_config_path(cli.config.as_deref())?;
+    let cli_database_url = cli.database_url.clone();
+    let env_database_url = std::env::var("DATABASE_URL").ok();
 
     // Determine database URL from CLI args, environment, or an `.eon` service config.
-    let database_url = if let Some(url) = cli.database_url {
+    let database_url = if let Some(url) = cli_database_url.clone() {
         url
-    } else if let Ok(url) = std::env::var("DATABASE_URL") {
+    } else if let Some(url) = env_database_url.clone() {
         url
     } else if let Some(config) = config_path.as_deref() {
         commands::db::database_url_from_service_config(config)?
@@ -1038,6 +1233,207 @@ async fn main() -> Result<()> {
             println!("{}", "Generating `.eon` reference docs...".green().bold());
             commands::docs::generate_eon_reference(output, *force)?;
         }
+
+        Commands::Backup { command } => match command {
+            BackupCommand::Plan {
+                input,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Generating backup plan...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("backup plan requires --input or --config"))?;
+                commands::backup::generate_backup_plan(
+                    &input,
+                    output.as_deref(),
+                    match format {
+                        BackupPlanFormatArg::Text => commands::backup::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::backup::OutputFormat::Json,
+                    },
+                    *force,
+                )?;
+            }
+            BackupCommand::Doctor {
+                input,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Running backup doctor...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("backup doctor requires --input or --config"))?;
+                let command_database_url = database_url_for_service_input(
+                    cli_database_url.as_ref(),
+                    env_database_url.as_ref(),
+                    config_path.as_deref(),
+                    Some(&input),
+                    &database_url,
+                )?;
+                commands::backup::run_backup_doctor(
+                    &input,
+                    &command_database_url,
+                    config_path.as_deref(),
+                    output.as_deref(),
+                    match format {
+                        BackupPlanFormatArg::Text => commands::backup::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::backup::OutputFormat::Json,
+                    },
+                    *force,
+                )
+                .await?;
+            }
+            BackupCommand::Snapshot {
+                input,
+                output,
+                force,
+            } => {
+                println!("{}", "Creating backup snapshot...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("backup snapshot requires --input or --config"))?;
+                let command_database_url = database_url_for_service_input(
+                    cli_database_url.as_ref(),
+                    env_database_url.as_ref(),
+                    config_path.as_deref(),
+                    Some(&input),
+                    &database_url,
+                )?;
+                commands::backup::run_backup_snapshot(
+                    &input,
+                    &command_database_url,
+                    config_path.as_deref(),
+                    output,
+                    *force,
+                )
+                .await?;
+            }
+            BackupCommand::Export {
+                input,
+                output,
+                force,
+            } => {
+                println!("{}", "Creating logical backup export...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("backup export requires --input or --config"))?;
+                let command_database_url = database_url_for_service_input(
+                    cli_database_url.as_ref(),
+                    env_database_url.as_ref(),
+                    config_path.as_deref(),
+                    Some(&input),
+                    &database_url,
+                )?;
+                commands::backup::run_backup_export(&input, &command_database_url, output, *force)
+                    .await?;
+            }
+            BackupCommand::VerifyRestore {
+                artifact,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Verifying backup restore...".green().bold());
+                commands::backup::run_backup_verify_restore(
+                    artifact,
+                    output.as_deref(),
+                    match format {
+                        BackupPlanFormatArg::Text => commands::backup::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::backup::OutputFormat::Json,
+                    },
+                    *force,
+                )
+                .await?;
+            }
+            BackupCommand::Push {
+                artifact,
+                remote,
+                endpoint_url,
+                region,
+                path_style,
+                format,
+            } => {
+                println!("{}", "Uploading backup artifact...".green().bold());
+                commands::backup::run_backup_push(
+                    artifact,
+                    remote,
+                    endpoint_url.as_deref(),
+                    region.as_deref(),
+                    *path_style,
+                    match format {
+                        BackupPlanFormatArg::Text => commands::backup::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::backup::OutputFormat::Json,
+                    },
+                )
+                .await?;
+            }
+            BackupCommand::Pull {
+                remote,
+                output,
+                endpoint_url,
+                region,
+                path_style,
+                force,
+                format,
+            } => {
+                println!("{}", "Downloading backup artifact...".green().bold());
+                commands::backup::run_backup_pull(
+                    remote,
+                    output,
+                    endpoint_url.as_deref(),
+                    region.as_deref(),
+                    *path_style,
+                    *force,
+                    match format {
+                        BackupPlanFormatArg::Text => commands::backup::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::backup::OutputFormat::Json,
+                    },
+                )
+                .await?;
+            }
+        },
+
+        Commands::Replication { command } => match command {
+            ReplicationCommand::Doctor {
+                input,
+                read_database_url,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Running replication doctor...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("replication doctor requires --input or --config"))?;
+                let command_database_url = database_url_for_service_input(
+                    cli_database_url.as_ref(),
+                    env_database_url.as_ref(),
+                    config_path.as_deref(),
+                    Some(&input),
+                    &database_url,
+                )?;
+                commands::backup::run_replication_doctor(
+                    &input,
+                    &command_database_url,
+                    read_database_url.as_deref(),
+                    config_path.as_deref(),
+                    output.as_deref(),
+                    match format {
+                        BackupPlanFormatArg::Text => commands::backup::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::backup::OutputFormat::Json,
+                    },
+                    *force,
+                )
+                .await?;
+            }
+        },
 
         Commands::Authz { command } => match command {
             AuthzCommand::Explain {
@@ -1393,6 +1789,25 @@ fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {
     true
 }
 
+fn database_url_for_service_input(
+    cli_database_url: Option<&String>,
+    env_database_url: Option<&String>,
+    config_path: Option<&std::path::Path>,
+    input: Option<&PathBuf>,
+    fallback_database_url: &str,
+) -> Result<String> {
+    if let Some(url) = cli_database_url {
+        return Ok(url.clone());
+    }
+    if let Some(url) = env_database_url {
+        return Ok(url.clone());
+    }
+    if let Some(path) = config_path.or(input.map(PathBuf::as_path)) {
+        return commands::db::database_url_from_service_config(path).map_err(Into::into);
+    }
+    Ok(fallback_database_url.to_owned())
+}
+
 fn resolve_config_path(explicit: Option<&str>) -> Result<Option<PathBuf>> {
     if let Some(path) = explicit {
         return Ok(Some(PathBuf::from(path)));
@@ -1453,6 +1868,123 @@ mod tests {
     #[test]
     fn docs_command_accepts_output_file() {
         assert!(Cli::try_parse_from(["vsr", "docs", "--output", "docs/eon-reference.md"]).is_ok());
+    }
+
+    #[test]
+    fn backup_plan_accepts_input_and_json_format() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr", "backup", "plan", "--input", "api.eon", "--format", "json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_doctor_accepts_input() {
+        assert!(Cli::try_parse_from(["vsr", "backup", "doctor", "--input", "api.eon"]).is_ok());
+    }
+
+    #[test]
+    fn backup_snapshot_accepts_output_directory() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "backup",
+                "snapshot",
+                "--input",
+                "api.eon",
+                "--output",
+                "backups/run1",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_export_accepts_output_directory() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "backup",
+                "export",
+                "--input",
+                "api.eon",
+                "--output",
+                "backups/run1",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_verify_restore_accepts_artifact_path() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "backup",
+                "verify-restore",
+                "--artifact",
+                "backups/run1",
+                "--format",
+                "json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_push_accepts_remote_s3_options() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "backup",
+                "push",
+                "--artifact",
+                "backups/run1",
+                "--remote",
+                "s3://bucket/prefix",
+                "--endpoint-url",
+                "http://127.0.0.1:9000",
+                "--path-style",
+                "--format",
+                "json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_pull_accepts_remote_s3_options() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "backup",
+                "pull",
+                "--remote",
+                "s3://bucket/prefix",
+                "--output",
+                "backups/run1",
+                "--force",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn replication_doctor_accepts_read_database_url() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "replication",
+                "doctor",
+                "--input",
+                "api.eon",
+                "--read-database-url",
+                "postgres://reader@127.0.0.1/app",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

@@ -1,0 +1,32 @@
+module: "backup_doctor_sqlite_api"
+db: "Sqlite"
+database: {
+    engine: {
+        kind: "Sqlx"
+    }
+    resilience: {
+        profile: "SingleNode"
+        backup: {
+            mode: "Snapshot"
+            target: "Local"
+            verify_restore: true
+            encryption_key_env: "BACKUP_ENCRYPTION_KEY"
+        }
+        replication: {
+            mode: "ReadReplica"
+            read_routing: "Explicit"
+            read_url_env: "DATABASE_READ_URL"
+            max_lag: "30s"
+            replicas_expected: 1
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

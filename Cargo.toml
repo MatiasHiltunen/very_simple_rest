@@ -87,8 +87,8 @@ dotenv.workspace = true
 [features]
 default = ["sqlite"]
 sqlite = ["sqlx/sqlite"]
-postgres = ["sqlx/postgres"]
-mysql = ["sqlx/mysql"]
+postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
+mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
 turso-local = ["rest_macro_core/turso-local"]
 
 [dev-dependencies]

@@ -14,6 +14,8 @@ readme = "../../README.md"
 default = []
 codegen = ["dep:eon", "dep:heck", "dep:proc-macro2", "dep:quote", "dep:syn"]
 turso-local = ["dep:turso"]
+postgres = ["sqlx/postgres"]
+mysql = ["sqlx/mysql"]
 
 [dependencies]
 actix-cors.workspace = true

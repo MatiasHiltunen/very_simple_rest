@@ -1520,6 +1520,10 @@ pub fn authorization_runtime_migration_sql(backend: AuthDbBackend) -> String {
         AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "event_kind TEXT NOT NULL",
         AuthDbBackend::Mysql => "event_kind VARCHAR(32) NOT NULL",
     };
+    let assignment_id_column = match backend {
+        AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "assignment_id TEXT NOT NULL",
+        AuthDbBackend::Mysql => "assignment_id VARCHAR(191) NOT NULL",
+    };
     let reason_column = match backend {
         AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "reason TEXT",
         AuthDbBackend::Mysql => "reason TEXT",
@@ -1542,7 +1546,7 @@ pub fn authorization_runtime_migration_sql(backend: AuthDbBackend) -> String {
          CREATE INDEX idx_{table}_scope ON {table} (scope_name, scope_value);\n\n\
          CREATE TABLE {event_table} (\n\
              {id_column},\n\
-             assignment_id TEXT NOT NULL,\n\
+             {assignment_id_column},\n\
              {user_id_column},\n\
              {created_by_user_id_column},\n\
              {created_at_column},\n\
@@ -1558,6 +1562,7 @@ pub fn authorization_runtime_migration_sql(backend: AuthDbBackend) -> String {
          CREATE INDEX idx_{event_table}_assignment ON {event_table} (assignment_id, created_at);\n",
         table = AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
         event_table = AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE,
+        assignment_id_column = assignment_id_column,
     )
 }
 
@@ -3841,6 +3846,16 @@ mod tests {
         assert!(sql.contains("event_kind"));
         assert!(sql.contains("reason"));
         assert!(sql.contains("scope_name"));
+    }
+
+    #[test]
+    fn authorization_runtime_migration_sql_uses_mysql_safe_indexed_assignment_id() {
+        let sql = authorization_runtime_migration_sql(AuthDbBackend::Mysql);
+        assert!(sql.contains("assignment_id VARCHAR(191) NOT NULL"));
+        assert!(!sql.contains("assignment_id TEXT NOT NULL"));
+        assert!(sql.contains(&format!(
+            "CREATE INDEX idx_{AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE}_assignment ON {AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE} (assignment_id, created_at);"
+        )));
     }
 
     fn scoped_doc_runtime_model() -> AuthorizationModel {

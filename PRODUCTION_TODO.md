@@ -4,6 +4,7 @@ This checklist tracks the remaining work needed before `very_simple_rest` should
 production-grade for public multi-tenant deployments.
 
 For a phased roadmap and a concrete compression MVP design, see `IMPROVEMENT_PLAN.md`.
+For backup, restore, and replication planning, see `docs/backup-replication-roadmap.md`.
 
 ## Security
 
@@ -87,6 +88,12 @@ For a phased roadmap and a concrete compression MVP design, see `IMPROVEMENT_PLA
 
 ## Operations And Documentation
 
+- [ ] Add first-class backup and restore planning support.
+  Define a `.eon` resilience contract, CLI planning/doctor commands, and restore verification
+  strategy for SQLite/TursoLocal, Postgres, and MySQL.
+- [ ] Add replication topology validation and replica-aware runtime design.
+  Start with explicit primary/read connection validation and emitted ops guidance before any
+  generated read-routing behavior.
 - [ ] Add deployment guides for single-node SQLite and multi-node Postgres setups.
 - [ ] Add production example apps with migrations, auth, security config, and static assets.
 - [ ] Add explicit support policy and semver guarantees for macros, `.eon`, CLI, and generated API

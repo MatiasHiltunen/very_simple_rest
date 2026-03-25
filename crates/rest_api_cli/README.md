@@ -407,6 +407,73 @@ Current limitation:
 
 - This is still a project-local runtime adapter, not a true upstream SQLx `Any` driver.
 
+### Backup And Replication Planning
+
+`.eon` services can now declare an optional `database.resilience` contract for backup and
+replication intent. This is a planning surface first, not a job scheduler.
+
+```eon
+database: {
+    engine: {
+        kind: Sqlx
+    }
+    resilience: {
+        profile: Pitr
+        backup: {
+            mode: Pitr
+            target: S3
+            verify_restore: true
+            max_age: "24h"
+        }
+        replication: {
+            mode: ReadReplica
+            read_routing: Explicit
+            read_url_env: "DATABASE_READ_URL"
+            max_lag: "30s"
+        }
+    }
+}
+```
+
+Use:
+
+```bash
+vsr backup plan --input api.eon
+vsr backup plan --input api.eon --format json
+vsr backup doctor --input api.eon
+vsr replication doctor --input api.eon --read-database-url postgres://reader@127.0.0.1/app
+vsr backup snapshot --input api.eon --output backups/run1
+vsr backup export --input api.eon --output backups/run1
+vsr backup verify-restore --artifact backups/run1 --format json
+vsr backup push --artifact backups/run1 --remote s3://my-bucket/backups/run1
+vsr backup pull --remote s3://my-bucket/backups/run1 --output restored/run1
+```
+
+Current scope:
+
+- backend-aware backup and replication guidance
+- doctor commands for obvious env and topology validation
+- live Postgres/MySQL role-state checks in `vsr replication doctor`
+- snapshot artifact creation and restore verification for SQLite/TursoLocal services
+- Postgres/MySQL logical dump artifact creation with native tools or Docker client fallbacks
+- Postgres/MySQL logical dump restore verification in disposable local Docker databases
+- S3-compatible artifact push/pull around the local snapshot format
+- checked `.eon` resilience vocabulary
+- no scheduling, failover orchestration, or automatic read routing yet
+
+For MinIO or another S3-compatible endpoint:
+
+```bash
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+export AWS_REGION=us-east-1
+vsr backup push \
+  --artifact backups/run1 \
+  --remote s3://my-bucket/backups/run1 \
+  --endpoint-url http://127.0.0.1:9000 \
+  --path-style
+```
+
 ### Security In `.eon`
 
 Bare `.eon` services can also define service-level security defaults:

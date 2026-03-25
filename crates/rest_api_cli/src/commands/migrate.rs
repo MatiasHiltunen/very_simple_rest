@@ -3,7 +3,10 @@ use colored::Colorize;
 use rest_macro_core::auth::{
     AuthDbBackend, auth_claim_migration_sql, auth_management_migration_sql, auth_migration_sql,
 };
-use rest_macro_core::authorization::authorization_runtime_migration_sql;
+use rest_macro_core::authorization::{
+    AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE, AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
+    authorization_runtime_migration_sql,
+};
 use rest_macro_core::compiler;
 use rest_macro_core::db::{DbPool, query, query_scalar};
 use sqlx::Row;
@@ -20,6 +23,7 @@ const MIGRATIONS_TABLE: &str = "_vsr_migrations";
 const BUILTIN_AUTH_MIGRATION: &str = "0000_builtin_auth.sql";
 const BUILTIN_AUTH_MANAGEMENT_MIGRATION: &str = "0001_builtin_auth_management.sql";
 const BUILTIN_AUTH_CLAIM_MIGRATION: &str = "0002_builtin_auth_claims.sql";
+const BUILTIN_AUTHZ_RUNTIME_MIGRATION: &str = "0003_builtin_authz_runtime.sql";
 
 pub fn generate_migration(input: &Path, output: &Path, force: bool) -> Result<()> {
     if output.exists() && !force {
@@ -110,7 +114,9 @@ pub fn generate_auth_migration(
     if let Some(path) = config_path {
         let service = compiler::load_service_from_path(path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .with_context(|| format!("failed to load service definition from {}", path.display()))?;
+            .with_context(|| {
+                format!("failed to load service definition from {}", path.display())
+            })?;
         let claim_sql = auth_claim_migration_sql(backend, &service.security.auth);
         if !normalize_sql(&claim_sql).is_empty() {
             parts.push(claim_sql);
@@ -286,7 +292,10 @@ pub async fn inspect_live_schema(
             };
 
             let expected_type = if field.is_id {
-                "INTEGER".to_owned()
+                match backend {
+                    AuthDbBackend::Sqlite => "INTEGER".to_owned(),
+                    AuthDbBackend::Postgres | AuthDbBackend::Mysql => "BIGINT".to_owned(),
+                }
             } else {
                 field.sql_type.clone()
             };
@@ -444,6 +453,15 @@ pub async fn apply_setup_migrations(database_url: &str, config_path: Option<&Pat
     let Some(config_path) = config_path else {
         return apply_auth_migration(database_url, None).await;
     };
+    let service = compiler::load_service_from_path(config_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .with_context(|| {
+            format!(
+                "failed to load service definition from {}",
+                config_path.display()
+            )
+        })?;
+    let needs_authz_runtime = !service.authorization.is_empty();
 
     let migrations_dir = config_path.parent().map(|parent| parent.join("migrations"));
 
@@ -461,11 +479,17 @@ pub async fn apply_setup_migrations(database_url: &str, config_path: Option<&Pat
             if !has_bundled_auth {
                 apply_auth_migration(database_url, Some(config_path)).await?;
             }
+            if needs_authz_runtime && !migrations_include_authz_runtime(&files)? {
+                apply_authz_runtime_migration(database_url, Some(config_path)).await?;
+            }
             return apply_migrations(database_url, Some(config_path), dir).await;
         }
     }
 
     apply_auth_migration(database_url, Some(config_path)).await?;
+    if needs_authz_runtime {
+        apply_authz_runtime_migration(database_url, Some(config_path)).await?;
+    }
     apply_rendered_service_migration(database_url, config_path).await
 }
 
@@ -494,7 +518,9 @@ pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>
     if let Some(path) = config_path {
         let service = compiler::load_service_from_path(path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .with_context(|| format!("failed to load service definition from {}", path.display()))?;
+            .with_context(|| {
+                format!("failed to load service definition from {}", path.display())
+            })?;
         let sql = auth_claim_migration_sql(backend, &service.security.auth);
         if !normalize_sql(&sql).is_empty() {
             match apply_named_migration(&pool, backend, BUILTIN_AUTH_CLAIM_MIGRATION, &sql).await? {
@@ -513,6 +539,47 @@ pub async fn apply_auth_migration(database_url: &str, config_path: Option<&Path>
     }
 
     Ok(())
+}
+
+pub async fn apply_authz_runtime_migration(
+    database_url: &str,
+    config_path: Option<&Path>,
+) -> Result<()> {
+    let pool = connect_pool(database_url, config_path).await?;
+    let backend = detect_runtime_backend(&pool).await?;
+    let sql = authorization_runtime_migration_sql(backend);
+
+    match apply_named_migration(&pool, backend, BUILTIN_AUTHZ_RUNTIME_MIGRATION, &sql).await? {
+        ApplyResult::Skipped => println!(
+            "{} {}",
+            "Authz runtime migration already applied".yellow().bold(),
+            BUILTIN_AUTHZ_RUNTIME_MIGRATION
+        ),
+        ApplyResult::Applied => println!(
+            "{} {}",
+            "Applied authz runtime migration".green().bold(),
+            BUILTIN_AUTHZ_RUNTIME_MIGRATION
+        ),
+    }
+
+    Ok(())
+}
+
+fn migrations_include_authz_runtime(files: &[PathBuf]) -> Result<bool> {
+    for path in files {
+        let sql = fs::read_to_string(path)
+            .with_context(|| format!("failed to read migration file {}", path.display()))?;
+        let normalized = normalize_sql(&sql);
+        if normalized.contains(&normalize_sql(&format!(
+            "CREATE TABLE {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}"
+        ))) || normalized.contains(&normalize_sql(&format!(
+            "CREATE TABLE {AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE}"
+        ))) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 async fn apply_rendered_service_migration(database_url: &str, config_path: &Path) -> Result<()> {
@@ -585,7 +652,9 @@ fn sanitize_migration_stem(value: &str) -> String {
 
 fn normalize_sql_type(raw: &str) -> String {
     let value = raw.trim().to_ascii_lowercase();
-    if value.contains("int") {
+    if value.contains("bigint") || value.contains("int8") {
+        "BIGINT".to_owned()
+    } else if value.contains("int") {
         "INTEGER".to_owned()
     } else if value.contains("char")
         || value.contains("text")
@@ -1059,13 +1128,22 @@ fn migration_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-async fn ensure_migrations_table(pool: &DbPool) -> Result<()> {
+async fn ensure_migrations_table(pool: &DbPool, backend: AuthDbBackend) -> Result<()> {
+    let name_column = match backend {
+        AuthDbBackend::Sqlite | AuthDbBackend::Postgres => "TEXT PRIMARY KEY",
+        AuthDbBackend::Mysql => "VARCHAR(191) PRIMARY KEY",
+    };
+    let applied_at_column = match backend {
+        AuthDbBackend::Sqlite => "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        AuthDbBackend::Postgres => "TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        AuthDbBackend::Mysql => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+    };
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} (
-            name TEXT PRIMARY KEY,
-            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            name {},
+            applied_at {}
         )",
-        MIGRATIONS_TABLE
+        MIGRATIONS_TABLE, name_column, applied_at_column
     );
     query(&sql)
         .execute(pool)
@@ -1076,29 +1154,30 @@ async fn ensure_migrations_table(pool: &DbPool) -> Result<()> {
 
 async fn migration_applied(pool: &DbPool, backend: AuthDbBackend, name: &str) -> Result<bool> {
     let sql = format!(
-        "SELECT EXISTS(SELECT 1 FROM {} WHERE name = {})",
+        "SELECT COUNT(*) FROM {} WHERE name = {}",
         MIGRATIONS_TABLE,
         placeholder_for_backend(backend, 1)
     );
-    let exists = query_scalar::<sqlx::Any, i64>(&sql)
+    let existing_rows = query_scalar::<sqlx::Any, i64>(&sql)
         .bind(name)
         .fetch_one(pool)
         .await
         .context("failed to check migration status")?;
-    Ok(exists != 0)
+    Ok(existing_rows != 0)
 }
 
 async fn connect_pool(database_url: &str, config_path: Option<&Path>) -> Result<DbPool> {
     let pool = connect_database(database_url, config_path)
         .await
         .with_context(|| format!("failed to connect to database at {database_url}"))?;
-    ensure_migrations_table(&pool).await?;
+    let backend = detect_runtime_backend(&pool).await?;
+    ensure_migrations_table(&pool, backend).await?;
     Ok(pool)
 }
 
 async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
     match pool {
-        DbPool::Sqlx(pool) => {
+        DbPool::Sqlx { pool, .. } => {
             let connection = pool.acquire().await?;
             let backend_name = connection.backend_name().to_ascii_lowercase();
             if backend_name.contains("postgres") {
@@ -1168,15 +1247,19 @@ enum ApplyResult {
 mod tests {
     use crate::commands::db::{connect_database, database_url_from_service_config};
     use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
-    use rest_macro_core::authorization::AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE;
+    use rest_macro_core::authorization::{
+        AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE, AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
+        authorization_runtime_migration_sql,
+    };
     use rest_macro_core::db::query_scalar;
     use sqlx::Row;
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, apply_auth_migration,
-        apply_migrations, apply_setup_migrations, check_derive_migration, generate_authz_migration,
-        generate_derive_migration, generate_diff_migration, inspect_live_schema, migration_files,
+        BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, BUILTIN_AUTHZ_RUNTIME_MIGRATION,
+        apply_auth_migration, apply_migrations, apply_setup_migrations, check_derive_migration,
+        generate_authz_migration, generate_derive_migration, generate_diff_migration,
+        inspect_live_schema, migration_files,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1436,6 +1519,69 @@ resources: [
     }
 
     #[tokio::test]
+    async fn apply_setup_migrations_generates_runtime_authz_tables_from_service_config() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var(
+                "TURSO_ENCRYPTION_KEY",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            );
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_setup_authz_runtime_{stamp}"));
+        std::fs::create_dir_all(&root).expect("temp root should exist");
+        let schema = root.join("authz_management_api.eon");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/authz_management_api.eon"),
+            &schema,
+        )
+        .expect("fixture should copy");
+        let database_url = format!(
+            "sqlite:{}?mode=rwc",
+            root.join("authz_runtime.db").display()
+        );
+
+        apply_setup_migrations(&database_url, Some(&schema))
+            .await
+            .expect("setup migrations should apply");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect");
+        let authz_table_exists = query_scalar::<sqlx::Any, i64>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}')"
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("authz runtime table lookup should succeed");
+        let authz_event_table_exists = query_scalar::<sqlx::Any, i64>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE}')"
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("authz runtime event table lookup should succeed");
+        let authz_migration_applied = query_scalar::<sqlx::Any, i64>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM _vsr_migrations WHERE name = '{BUILTIN_AUTHZ_RUNTIME_MIGRATION}')"
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("authz runtime migration status should be queryable");
+
+        assert_ne!(authz_table_exists, 0);
+        assert_ne!(authz_event_table_exists, 0);
+        assert_ne!(authz_migration_applied, 0);
+
+        unsafe {
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn apply_setup_migrations_uses_bundled_migrations_when_present() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1509,6 +1655,105 @@ resources: [
         .expect("resource table lookup should succeed");
         assert_ne!(user_table_exists, 0);
         assert_ne!(opportunity_table_exists, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_setup_migrations_skips_built_in_authz_when_bundled_authz_migration_exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_setup_bundled_authz_{stamp}"));
+        let schema = root.join("bundle_authz_service.eon");
+        let migrations = root.join("migrations");
+        let database_path = root.join("var/data/bundle_authz_service.db");
+        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+
+        std::fs::create_dir_all(&migrations).expect("migrations dir should exist");
+        if let Some(parent) = database_path.parent() {
+            std::fs::create_dir_all(parent).expect("database dir should exist");
+        }
+        std::fs::write(
+            &schema,
+            format!(
+                r#"module: "bundle_authz_service"
+authorization: {{
+    management_api: {{
+        mount: "/authz/runtime"
+    }}
+    scopes: {{
+        Family: {{
+            description: "Family scope"
+        }}
+    }}
+    permissions: {{
+        FamilyRead: {{
+            actions: ["Read"]
+            resources: ["Opportunity"]
+            scopes: ["Family"]
+        }}
+    }}
+}}
+database: {{
+    engine: {{
+        kind: TursoLocal
+        path: "{}"
+    }}
+}}
+resources: [
+    {{
+        name: "Opportunity"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "family_id", type: I64 }}
+            {{ name: "title", type: String }}
+        ]
+    }}
+]
+"#,
+                database_path.display(),
+            ),
+        )
+        .expect("schema should be written");
+        std::fs::write(
+            migrations.join("0000_auth.sql"),
+            auth_migration_sql(AuthDbBackend::Sqlite),
+        )
+        .expect("auth migration should be written");
+        std::fs::write(
+            migrations.join("0001_auth_management.sql"),
+            auth_management_migration_sql(AuthDbBackend::Sqlite),
+        )
+        .expect("auth management migration should be written");
+        std::fs::write(
+            migrations.join("0002_runtime_authz.sql"),
+            authorization_runtime_migration_sql(AuthDbBackend::Sqlite),
+        )
+        .expect("authz migration should be written");
+        super::generate_migration(&schema, &migrations.join("0003_service.sql"), false)
+            .expect("service migration should generate");
+
+        apply_setup_migrations(&database_url, Some(&schema))
+            .await
+            .expect("setup migrations should apply");
+
+        let pool = connect_database(&database_url, Some(&schema))
+            .await
+            .expect("database should connect");
+        let bundled_authz_applied = query_scalar::<sqlx::Any, i64>(
+            "SELECT COUNT(*) FROM _vsr_migrations WHERE name = '0002_runtime_authz.sql'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("bundled authz migration status should be queryable");
+        let builtin_authz_applied = query_scalar::<sqlx::Any, i64>(&format!(
+            "SELECT COUNT(*) FROM _vsr_migrations WHERE name = '{BUILTIN_AUTHZ_RUNTIME_MIGRATION}'"
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("builtin authz migration status should be queryable");
+        assert_eq!(bundled_authz_applied, 1);
+        assert_eq!(builtin_authz_applied, 0);
     }
 
     #[test]

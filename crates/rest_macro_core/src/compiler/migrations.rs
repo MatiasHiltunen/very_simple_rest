@@ -430,7 +430,11 @@ fn validate_compatible_field(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::{render_service_diff_migration_sql, render_service_migration_sql};
     use crate::compiler::eon_parser::load_service_from_path;
@@ -451,6 +455,14 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/fine_grained_policies")
             .join(name)
+    }
+
+    fn temp_schema_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}_{stamp}.eon"))
     }
 
     #[test]
@@ -523,6 +535,48 @@ mod tests {
         assert!(sql.contains(
             "updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))"
         ));
+    }
+
+    #[test]
+    fn mysql_migration_sql_uses_bigint_foreign_keys_and_varchar_strings() {
+        let schema_path = temp_schema_path("mysql_family_migration");
+        fs::write(
+            &schema_path,
+            r#"module: "mysql_family"
+db: "Mysql"
+resources: [
+    {
+        name: "Family"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "slug", type: String }
+        ]
+    }
+    {
+        name: "FamilyMember"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "family_id"
+                type: I64
+                relation: { references: "family.id" }
+            }
+            { name: "display_name", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("schema should be written");
+
+        let loaded = load_service_from_path(&schema_path).expect("schema should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("slug VARCHAR(255) NOT NULL"));
+        assert!(sql.contains("family_id BIGINT NOT NULL"));
+
+        let _ = fs::remove_file(schema_path);
     }
 
     #[test]

@@ -1,0 +1,39 @@
+module: "backup_resilience_api"
+db: "Postgres"
+database: {
+    engine: {
+        kind: "Sqlx"
+    }
+    resilience: {
+        profile: "Pitr"
+        backup: {
+            required: true
+            mode: "Pitr"
+            target: "S3"
+            verify_restore: true
+            max_age: "24h"
+            encryption_key_env: "BACKUP_ENCRYPTION_KEY"
+            retention: {
+                daily: 7
+                weekly: 4
+                monthly: 12
+            }
+        }
+        replication: {
+            mode: "ReadReplica"
+            read_routing: "Explicit"
+            read_url_env: "DATABASE_READ_URL"
+            max_lag: "30s"
+            replicas_expected: 1
+        }
+    }
+}
+resources: [
+    {
+        name: "ArchiveJob"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

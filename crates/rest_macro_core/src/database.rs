@@ -10,6 +10,8 @@ use crate::secret::load_secret_from_env_or_file;
 pub struct DatabaseConfig {
     #[serde(default)]
     pub engine: DatabaseEngine,
+    #[serde(default)]
+    pub resilience: Option<DatabaseResilienceConfig>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -26,7 +28,109 @@ pub struct TursoLocalConfig {
     pub encryption_key_env: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseResilienceConfig {
+    #[serde(default)]
+    pub profile: DatabaseResilienceProfile,
+    #[serde(default)]
+    pub backup: Option<DatabaseBackupConfig>,
+    #[serde(default)]
+    pub replication: Option<DatabaseReplicationConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DatabaseResilienceProfile {
+    #[default]
+    SingleNode,
+    Pitr,
+    Ha,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseBackupConfig {
+    #[serde(default = "default_true")]
+    pub required: bool,
+    pub mode: DatabaseBackupMode,
+    #[serde(default)]
+    pub target: DatabaseBackupTarget,
+    #[serde(default)]
+    pub verify_restore: bool,
+    #[serde(default)]
+    pub max_age: Option<String>,
+    #[serde(default)]
+    pub encryption_key_env: Option<String>,
+    #[serde(default)]
+    pub retention: Option<DatabaseBackupRetention>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DatabaseBackupMode {
+    #[default]
+    Snapshot,
+    Logical,
+    Physical,
+    Pitr,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DatabaseBackupTarget {
+    #[default]
+    Local,
+    S3,
+    Gcs,
+    AzureBlob,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseBackupRetention {
+    #[serde(default)]
+    pub daily: Option<u32>,
+    #[serde(default)]
+    pub weekly: Option<u32>,
+    #[serde(default)]
+    pub monthly: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseReplicationConfig {
+    pub mode: DatabaseReplicationMode,
+    #[serde(default)]
+    pub read_routing: DatabaseReadRoutingMode,
+    #[serde(default)]
+    pub read_url_env: Option<String>,
+    #[serde(default)]
+    pub max_lag: Option<String>,
+    #[serde(default)]
+    pub replicas_expected: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DatabaseReplicationMode {
+    #[default]
+    None,
+    ReadReplica,
+    HotStandby,
+    ManagedExternal,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum DatabaseReadRoutingMode {
+    #[default]
+    Off,
+    Explicit,
+}
+
 pub const DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV: &str = "TURSO_ENCRYPTION_KEY";
+
+const fn default_true() -> bool {
+    true
+}
 
 pub fn sqlite_url_for_path(path: &str) -> String {
     if path == ":memory:" {
@@ -92,6 +196,7 @@ pub fn resolve_database_config(config: &DatabaseConfig, base_dir: &Path) -> Data
                 path: resolve_relative_database_path(base_dir, &engine.path),
                 encryption_key_env: engine.encryption_key_env.clone(),
             }),
+            resilience: config.resilience.clone(),
         },
     }
 }
@@ -177,8 +282,11 @@ pub async fn open_turso_local_database(_engine: &TursoLocalConfig) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::{
-        DatabaseConfig, DatabaseEngine, TursoLocalConfig, resolve_database_config,
-        resolve_database_url, service_base_dir_from_config_path, sqlite_url_for_path,
+        DatabaseBackupConfig, DatabaseBackupMode, DatabaseBackupTarget, DatabaseConfig,
+        DatabaseEngine, DatabaseReadRoutingMode, DatabaseReplicationConfig,
+        DatabaseReplicationMode, DatabaseResilienceConfig, DatabaseResilienceProfile,
+        TursoLocalConfig, resolve_database_config, resolve_database_url,
+        service_base_dir_from_config_path, sqlite_url_for_path,
     };
 
     #[test]
@@ -240,6 +348,7 @@ mod tests {
                     path: "var/data/app.db".to_owned(),
                     encryption_key_env: Some("TURSO_KEY".to_owned()),
                 }),
+                resilience: None,
             },
             &base_dir,
         );
@@ -251,7 +360,54 @@ mod tests {
                     path: base_dir.join("var/data/app.db").display().to_string(),
                     encryption_key_env: Some("TURSO_KEY".to_owned()),
                 }),
+                resilience: None,
             }
+        );
+    }
+
+    #[test]
+    fn resolve_database_config_preserves_resilience_contract() {
+        let base_dir = std::env::temp_dir().join("vsr-database-resilience");
+        let resolved = resolve_database_config(
+            &DatabaseConfig {
+                engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                    path: "var/data/app.db".to_owned(),
+                    encryption_key_env: None,
+                }),
+                resilience: Some(DatabaseResilienceConfig {
+                    profile: DatabaseResilienceProfile::Pitr,
+                    backup: Some(DatabaseBackupConfig {
+                        required: true,
+                        mode: DatabaseBackupMode::Pitr,
+                        target: DatabaseBackupTarget::S3,
+                        verify_restore: true,
+                        max_age: Some("24h".to_owned()),
+                        encryption_key_env: Some("BACKUP_ENCRYPTION_KEY".to_owned()),
+                        retention: None,
+                    }),
+                    replication: Some(DatabaseReplicationConfig {
+                        mode: DatabaseReplicationMode::ReadReplica,
+                        read_routing: DatabaseReadRoutingMode::Explicit,
+                        read_url_env: Some("DATABASE_READ_URL".to_owned()),
+                        max_lag: Some("30s".to_owned()),
+                        replicas_expected: Some(1),
+                    }),
+                }),
+            },
+            &base_dir,
+        );
+
+        assert_eq!(
+            resolved.resilience.as_ref().map(|config| config.profile),
+            Some(DatabaseResilienceProfile::Pitr)
+        );
+        assert_eq!(
+            resolved
+                .resilience
+                .as_ref()
+                .and_then(|config| config.replication.as_ref())
+                .and_then(|config| config.read_url_env.as_deref()),
+            Some("DATABASE_READ_URL")
         );
     }
 
