@@ -1,10 +1,27 @@
-# REST API CLI Tool
+# vsr CLI
 
 A command-line interface for managing `very_simple_rest` API deployments.
 
 ## Overview
 
-This CLI tool simplifies the setup and management of `very_simple_rest` API applications, with a focus on secure user management and configuration.
+`vsr` is the main entry point for `.eon`-driven VSR services. It can scaffold a project, serve a
+service directly at runtime, emit a Rust server project, build a standalone binary, generate
+OpenAPI and `.eon` reference docs, and manage setup/auth flows.
+
+The published crate is `vsra`; the installed binary is `vsr`.
+
+## Quick Start
+
+```bash
+cargo install vsra --locked
+
+vsr init my-api
+vsr serve api.eon
+vsr server emit --input api.eon --output-dir generated-api
+vsr build api.eon --release
+vsr openapi --input api.eon --output openapi.json
+vsr docs --output docs/eon-reference.md
+```
 
 ## Installation
 
@@ -29,7 +46,7 @@ repository root target `vsr`. Use `cargo build --workspace` when you want the fu
 ### Cargo Install
 
 ```bash
-cargo install vsra
+cargo install vsra --locked
 ```
 
 For an unpublished local checkout:
@@ -104,9 +121,27 @@ database URL plus the required/default Turso and security env vars such as
 `TURSO_ENCRYPTION_KEY`, `CORS_ORIGINS`, `TRUSTED_PROXIES`, and the configured logging filter env
 var when those are referenced by the service.
 
-### Server Generation
+### Serve, Emit, and Build
 
-Generate a runnable Rust server project from a bare `.eon` service:
+Serve a bare `.eon` service directly through the native runtime:
+
+```bash
+vsr serve api.eon
+vsr server serve --input api.eon
+```
+
+This is the fastest local development loop. The runtime serves the compiled API surface directly
+from the `.eon` file, including `/openapi.json`, `/docs`, static mounts, built-in auth, runtime
+authorization management routes, compiled database engine settings, and TLS when configured.
+
+Built-in auth is enabled by default. If the `.eon` service already defines a `user` table, re-run
+with `--without-auth` because the built-in auth migration owns that table name:
+
+```bash
+vsr serve api.eon --without-auth
+```
+
+If you want a runnable Rust project you can inspect or modify, emit one instead:
 
 ```bash
 vsr server emit --input api.eon --output-dir generated-api
@@ -122,7 +157,7 @@ This emits:
 - `migrations/0000_auth.sql` with built-in auth enabled by default
 - `migrations/0001_service.sql`
 
-You can also build a server binary directly:
+If you want a standalone binary directly from the same contract, build it:
 
 ```bash
 vsr build api.eon --release
@@ -136,9 +171,6 @@ Useful options:
 - `--keep-build-dir` preserves the generated build project after compilation
 - `--output dist` writes the binary into an existing directory; otherwise it defaults to the
   current directory and names the binary after the `.eon` file stem
-
-Built-in auth is enabled by default. If the `.eon` service already defines a `user` table, re-run
-with `--without-auth` because the built-in auth migration owns that table name.
 
 `vsr build` also exports the generated runtime artifacts next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file, `README.md`,

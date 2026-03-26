@@ -2,12 +2,37 @@
 
 > **Note**: This project is currently very much in progress and under active development. APIs will change, and features are incomplete.
 
-A Rust library providing an opinionated higher-level macro wrapper for Actix Web and SQLx, designed for rapid API prototyping.
+A Rust toolkit for declaring REST APIs in Rust or `.eon` and running them through a CLI-first workflow on top of Actix Web and SQLx.
 
-> VSR was originally intented to be an easy way to introduce end-to-end route handlers for prototyping using only RestApi macros with rust structs. The focus has now shifted to the be able to produce complete working API and data layer with built-in auth and user management using only the declared configuration. The config format might raise some questions and it could be changed easily to more common such as yaml/json etc. but personally I really like the .eon format and I see great potential in using it (https://github.com/emilk/eon)
+> VSR started as a derive-macro shortcut for rapid API prototypes. The project is now centered on full `.eon` service definitions, built-in auth and admin flows, explicit migrations, and a native `vsr` runtime that can serve, emit, and build APIs from the same contract.
+
+## VSR CLI
+
+The main entry point is the `vsr` command-line tool. The published crate is `vsra`; the installed binary is `vsr`.
+
+```bash
+cargo install vsra --locked
+
+vsr init my-api
+vsr serve api.eon
+vsr server emit --input api.eon --output-dir generated-api
+vsr build api.eon --release
+vsr docs --output docs/eon-reference.md
+```
+
+Core CLI workflows:
+
+- `vsr serve api.eon` runs a native server directly from `.eon` for the fastest local development loop
+- `vsr server emit ...` exports an inspectable Rust server project
+- `vsr build ...` produces a standalone binary plus a `<binary>.bundle/` runtime bundle
+- `vsr openapi ...`, `vsr docs ...`, `vsr authz ...`, and `vsr backup ...` generate docs, diagnostics, and deployment guidance from the same service contract
+
+See the full command reference in [crates/rest_api_cli/README.md](crates/rest_api_cli/README.md).
 
 ## Features
 
+- **CLI-first workflow**: Scaffold, serve, emit, build, inspect, and document services with `vsr`
+- **Native `.eon` runtime**: `vsr serve <service.eon>` serves the same API shape directly without generating or compiling a Rust project first
 - **Zero-boilerplate REST APIs**: Create complete CRUD endpoints with a single derive macro
 - **Typed write DTOs**: The derive macro and `.eon` macro both generate `Create` and `Update` payload types
 - **Compile-time `.eon` services**: Generate strongly typed resources and DTOs from a minimal `.eon` service file
@@ -28,7 +53,7 @@ A Rust library providing an opinionated higher-level macro wrapper for Actix Web
 Install the `vsr` command-line tool from crates.io:
 
 ```bash
-cargo install vsra
+cargo install vsra --locked
 ```
 
 If you are working from a checkout of this repository, the workspace defaults to the CLI package,
@@ -59,6 +84,13 @@ actix-web = "4"
 env_logger = "0.10"
 log = "0.4"
 ```
+
+## Documentation
+
+- [CLI tool guide](crates/rest_api_cli/README.md)
+- [.eon reference](docs/eon-reference.md)
+- [Authorization roadmap](docs/authorization-roadmap.md)
+- [Backup and replication roadmap](docs/backup-replication-roadmap.md)
 
 ## Examples
 
@@ -264,16 +296,23 @@ For detailed instructions on using the CLI tool, see the [CLI Tool Documentation
 
 ## Server Generation
 
-The CLI can also turn a bare `.eon` service definition into a runnable Actix server project or a
-compiled binary:
+The CLI can serve a bare `.eon` service directly, emit an inspectable Actix server project, or
+build a compiled binary from the same contract:
 
 ```bash
+# Run the API directly from the .eon service for fast local iteration
+vsr serve tests/fixtures/blog_api.eon
+
 # Generate a local Rust project you can inspect and edit
 vsr server emit --input tests/fixtures/blog_api.eon --output-dir generated-api
 
 # Build a binary directly from the same .eon file
 vsr build tests/fixtures/blog_api.eon --release
 ```
+
+`vsr serve` is the fastest development loop. It serves the compiled API surface directly from the
+`.eon` file, including `/openapi.json`, `/docs`, static mounts, built-in auth, runtime authz
+management routes, compiled database settings, and TLS when configured.
 
 The emitted project includes:
 
