@@ -11,7 +11,7 @@ use rest_macro_core::db::query;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use vsra::commands::db::{connect_database, database_url_from_service_config};
-use vsra::commands::migrate::apply_setup_migrations;
+use vsra::commands::migrate::{apply_migrations, apply_setup_migrations, generate_migration};
 use vsra::commands::setup::run_setup;
 use vsra::commands::tls::generate_self_signed_certificate;
 
@@ -235,10 +235,14 @@ fn vsr_serve_starts_native_runtime_from_eon() {
 
     let database_url =
         database_url_from_service_config(&config).expect("database url should resolve");
+    let migrations_dir = root.join("migrations");
+    fs::create_dir_all(&migrations_dir).expect("migrations directory should exist");
+    generate_migration(&config, &migrations_dir.join("0001_service.sql"), false)
+        .expect("service migration should generate");
     tokio::runtime::Runtime::new()
         .expect("tokio runtime should initialize")
         .block_on(async {
-            apply_setup_migrations(&database_url, Some(&config))
+            apply_migrations(&database_url, Some(&config), &migrations_dir)
                 .await
                 .expect("setup migrations should apply");
 
@@ -867,4 +871,114 @@ fn vsr_serve_bridgeboard_example_supports_clean_room_e2e() {
         .send()
         .expect("admin dashboard should load");
     assert_eq!(dashboard_response.status(), reqwest::StatusCode::OK);
+}
+
+#[test]
+fn vsr_serve_rejects_service_owned_user_table_with_builtin_auth() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+    let config = root.join("user_table_api.eon");
+    fs::copy(fixture_path("user_table_api.eon"), &config).expect("fixture should copy");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .output()
+        .expect("vsr serve should return an error");
+
+    assert!(
+        !output.status.success(),
+        "serve should reject built-in auth"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("re-run with `--without-auth`"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn vsr_serve_supports_service_owned_user_table_without_builtin_auth() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+    let config = root.join("user_table_api.eon");
+    fs::copy(fixture_path("user_table_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    let migrations_dir = root.join("migrations");
+    fs::create_dir_all(&migrations_dir).expect("migrations directory should exist");
+    generate_migration(&config, &migrations_dir.join("0001_service.sql"), false)
+        .expect("service migration should generate");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            apply_migrations(&database_url, Some(&config), &migrations_dir)
+                .await
+                .expect("setup migrations should apply");
+
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query("INSERT INTO user (email) VALUES ('owner@example.com')")
+                .execute(&pool)
+                .await
+                .expect("user seed should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("user-table.stdout.log");
+    let stderr_log = root.join("user-table.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "user-table native serve never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/user").is_some());
+    assert!(openapi["paths"].get("/auth/login").is_none());
+
+    let user_list_response = client
+        .get(format!("{base_url}/api/user"))
+        .send()
+        .expect("user list should load");
+    assert!(user_list_response.status().is_success());
+    let users: Value = user_list_response.json().expect("user list should decode");
+    assert_eq!(users["total"], 1);
+    assert_eq!(users["items"][0]["email"], "owner@example.com");
 }
