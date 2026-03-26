@@ -8,17 +8,24 @@ use std::time::{Duration, Instant};
 use chrono::{Duration as ChronoDuration, Utc};
 use reqwest::blocking::Client;
 use rest_macro_core::db::query;
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 use vsra::commands::db::{connect_database, database_url_from_service_config};
 use vsra::commands::migrate::apply_setup_migrations;
 use vsra::commands::setup::run_setup;
+use vsra::commands::tls::generate_self_signed_certificate;
 
 const TEST_TURSO_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
+        .join(name)
+}
+
+fn example_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
         .join(name)
 }
 
@@ -77,11 +84,106 @@ fn wait_for_http_ready(client: &Client, url: &str, timeout: Duration) -> Result<
 }
 
 fn http_client() -> Client {
-    Client::builder()
+    client(false)
+}
+
+fn https_client() -> Client {
+    client(true)
+}
+
+fn client(accept_invalid_certs: bool) -> Client {
+    let mut builder = Client::builder()
         .timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(0)
-        .build()
-        .expect("http client should build")
+        .pool_max_idle_per_host(0);
+    if accept_invalid_certs {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().expect("http client should build")
+}
+
+fn read_to_string(path: &Path) -> String {
+    fs::read_to_string(path).expect("capture file should be readable")
+}
+
+fn capture_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(dir)
+        .expect("capture directory should exist")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn extract_token_from_text(text: &str) -> String {
+    let start = text
+        .find("token=")
+        .expect("email should contain a token parameter")
+        + "token=".len();
+    text[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect()
+}
+
+fn extract_url_from_text(text: &str) -> String {
+    let start = text
+        .find("http://")
+        .or_else(|| text.find("https://"))
+        .expect("email should contain an absolute URL");
+    text[start..]
+        .lines()
+        .next()
+        .expect("email URL line should exist")
+        .trim()
+        .to_owned()
+}
+
+fn path_and_query_from_url(url: &str) -> String {
+    let authority_start = url.find("://").map(|index| index + 3).unwrap_or(0);
+    let path_start = url[authority_start..]
+        .find('/')
+        .map(|index| authority_start + index);
+    match path_start {
+        Some(index) => url[index..].to_owned(),
+        None => "/".to_owned(),
+    }
+}
+
+fn token_from_capture(path: &Path) -> String {
+    let body = read_to_string(path);
+    let payload: Value = serde_json::from_str(&body).expect("capture file should decode");
+    let text_body = payload
+        .get("text_body")
+        .and_then(Value::as_str)
+        .expect("capture payload should contain text_body");
+    extract_token_from_text(text_body)
+}
+
+fn url_from_capture(path: &Path) -> String {
+    let body = read_to_string(path);
+    let payload: Value = serde_json::from_str(&body).expect("capture file should decode");
+    let text_body = payload
+        .get("text_body")
+        .and_then(Value::as_str)
+        .expect("capture payload should contain text_body");
+    extract_url_from_text(text_body)
+}
+
+fn wait_for_capture_count(dir: &Path, expected: usize, timeout: Duration) -> Vec<PathBuf> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let files = capture_files(dir);
+        if files.len() >= expected {
+            return files;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    panic!(
+        "expected at least {expected} captured emails in {}, found {}",
+        dir.display(),
+        capture_files(dir).len()
+    );
 }
 
 struct SpawnedBinary {
@@ -441,4 +543,328 @@ fn vsr_server_serve_subcommand_starts_native_runtime() {
     let api_body: Value = api_response.json().expect("page list should decode");
     assert_eq!(api_body["total"], 1);
     assert_eq!(api_body["items"][0]["title"], "Alias page copy");
+}
+
+#[test]
+fn vsr_serve_bridgeboard_example_supports_clean_room_e2e() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+    let root = test_root();
+    let capture_dir = root.join("capture");
+    fs::create_dir_all(&capture_dir).expect("capture directory should exist");
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "bridgeboard-serve-secret");
+        std::env::set_var("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir);
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("bridgeboard.eon");
+    fs::copy(example_path("bridgeboard/bridgeboard.eon"), &config).expect("example should copy");
+    copy_dir_all(&example_path("bridgeboard/public"), &root.join("public"));
+    generate_self_signed_certificate(Some(&config), None, None, &[], false)
+        .expect("self-signed bridgeboard certs should generate");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true)
+                .await
+                .expect("setup should initialize the bridgeboard database");
+        });
+
+    assert!(
+        root.join("var/data/bridgeboard.db").exists(),
+        "setup should create the config-relative bridgeboard database"
+    );
+    assert!(
+        !root.join("app.db").exists(),
+        "setup should not create a stray app.db alongside native serve fixtures"
+    );
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("https://{bind_addr}");
+    let stdout_log = root.join("bridgeboard-serve.stdout.log");
+    let stderr_log = root.join("bridgeboard-serve.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "bridgeboard-serve-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .env("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = https_client();
+    if let Err(error) =
+        wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+    {
+        panic!(
+            "bridgeboard native serve never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let root_response = client
+        .get(format!("{base_url}/"))
+        .send()
+        .expect("root page should load");
+    assert!(root_response.status().is_success());
+    let root_body = root_response.text().expect("root page body should read");
+    assert!(root_body.contains("Bridgeboard"));
+
+    let app_js_response = client
+        .get(format!("{base_url}/app.js"))
+        .send()
+        .expect("app.js should load");
+    assert!(app_js_response.status().is_success());
+
+    let public_catalog_response = client
+        .get(format!("{base_url}/api/organization"))
+        .send()
+        .expect("organization list should load");
+    assert!(public_catalog_response.status().is_success());
+    let public_catalog: Value = public_catalog_response
+        .json()
+        .expect("organization list should decode");
+    assert_eq!(public_catalog.get("total").and_then(Value::as_i64), Some(0));
+
+    let admin_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "password123",
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(admin_login_response.status(), reqwest::StatusCode::OK);
+    let admin_login: Value = admin_login_response
+        .json()
+        .expect("admin login response should decode");
+    let admin_token = admin_login
+        .get("token")
+        .and_then(Value::as_str)
+        .expect("admin login should return a token")
+        .to_owned();
+
+    let create_org_response = client
+        .post(format!("{base_url}/api/organization"))
+        .bearer_auth(&admin_token)
+        .json(&json!({
+            "slug": "nordic-bridge",
+            "name": "Nordic Bridge Institute",
+            "country": "Finland",
+            "city": "Oulu",
+            "website_url": "https://bridge.example",
+            "contact_email": "hello@bridge.example",
+            "collaboration_stage": "Open call",
+            "summary": "Coordinates cross-border thesis work between applied research labs and regional industry partners."
+        }))
+        .send()
+        .expect("organization create should succeed");
+    assert_eq!(create_org_response.status(), reqwest::StatusCode::CREATED);
+    let organization_location = create_org_response
+        .headers()
+        .get("Location")
+        .and_then(|value| value.to_str().ok())
+        .expect("organization create should expose a location")
+        .to_owned();
+    let organization: Value = create_org_response
+        .json()
+        .expect("organization create response should decode");
+    let organization_id = organization
+        .get("id")
+        .and_then(Value::as_i64)
+        .expect("organization create should return an id");
+    assert_eq!(
+        organization_location,
+        format!("/api/organization/{organization_id}")
+    );
+
+    let register_response = client
+        .post(format!("{base_url}/api/auth/register"))
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "password123",
+        }))
+        .send()
+        .expect("user registration should succeed");
+    assert_eq!(register_response.status(), reqwest::StatusCode::CREATED);
+
+    let captured = wait_for_capture_count(&capture_dir, 1, Duration::from_secs(10));
+    let verification_token = token_from_capture(&captured[0]);
+
+    let verify_response = client
+        .post(format!("{base_url}/api/auth/verify-email"))
+        .json(&json!({ "token": verification_token }))
+        .send()
+        .expect("email verification should succeed");
+    assert_eq!(verify_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let user_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "password123",
+        }))
+        .send()
+        .expect("verified user login should succeed");
+    assert_eq!(user_login_response.status(), reqwest::StatusCode::OK);
+
+    let password_reset_response = client
+        .post(format!("{base_url}/api/auth/password-reset/request"))
+        .json(&json!({
+            "email": "alice@example.com",
+        }))
+        .send()
+        .expect("password reset request should succeed");
+    assert_eq!(
+        password_reset_response.status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+
+    let captured = wait_for_capture_count(&capture_dir, 2, Duration::from_secs(10));
+    let reset_capture = captured
+        .iter()
+        .find(|path| url_from_capture(path).contains("/password-reset?token="))
+        .expect("reset email should be captured");
+    let reset_token = token_from_capture(reset_capture);
+    let reset_url = url_from_capture(reset_capture);
+    let reset_path_and_query = path_and_query_from_url(&reset_url);
+    assert!(
+        reset_path_and_query.starts_with("/api/auth/password-reset?token="),
+        "unexpected reset link path: {reset_path_and_query}"
+    );
+
+    let reset_page_response = client
+        .get(format!("{base_url}{reset_path_and_query}"))
+        .send()
+        .expect("password reset page should load");
+    assert_eq!(reset_page_response.status(), reqwest::StatusCode::OK);
+    let reset_page_body = reset_page_response
+        .text()
+        .expect("password reset page body should read");
+    assert!(reset_page_body.contains("Choose A New Password"));
+
+    let confirm_reset_response = client
+        .post(format!("{base_url}/api/auth/password-reset/confirm"))
+        .json(&json!({
+            "token": reset_token,
+            "new_password": "password456",
+        }))
+        .send()
+        .expect("password reset confirmation should succeed");
+    assert_eq!(
+        confirm_reset_response.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    let old_password_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "password123",
+        }))
+        .send()
+        .expect("old password login response should return");
+    assert_eq!(
+        old_password_login_response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let user_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "alice@example.com",
+            "password": "password456",
+        }))
+        .send()
+        .expect("login with reset password should succeed");
+    assert_eq!(user_login_response.status(), reqwest::StatusCode::OK);
+    let user_login: Value = user_login_response
+        .json()
+        .expect("user login response should decode");
+    let user_token = user_login
+        .get("token")
+        .and_then(Value::as_str)
+        .expect("reset-password login should return a token")
+        .to_owned();
+
+    let create_request_response = client
+        .post(format!("{base_url}/api/collaboration_request"))
+        .bearer_auth(&user_token)
+        .json(&json!({
+            "organization_id": organization_id,
+            "title": "Applied AI thesis partnership",
+            "message": "We want to connect a student team with the organization to shape a shared supervision track around applied AI validation.",
+            "status": "submitted",
+            "preferred_start_on": "2026-09-15"
+        }))
+        .send()
+        .expect("collaboration request create should succeed");
+    assert_eq!(
+        create_request_response.status(),
+        reqwest::StatusCode::CREATED
+    );
+    let request_location = create_request_response
+        .headers()
+        .get("Location")
+        .and_then(|value| value.to_str().ok())
+        .expect("collaboration request create should expose a location")
+        .to_owned();
+    let collaboration_request: Value = create_request_response
+        .json()
+        .expect("collaboration request response should decode");
+    let request_id = collaboration_request
+        .get("id")
+        .and_then(Value::as_i64)
+        .expect("collaboration request should include an id");
+    assert_eq!(
+        collaboration_request
+            .get("requester_user_id")
+            .and_then(Value::as_i64),
+        Some(2)
+    );
+    assert_eq!(
+        request_location,
+        format!("/api/collaboration_request/{request_id}")
+    );
+
+    let admin_requests_response = client
+        .get(format!("{base_url}/api/collaboration_request"))
+        .bearer_auth(&admin_token)
+        .send()
+        .expect("admin should be able to list collaboration requests");
+    assert_eq!(admin_requests_response.status(), reqwest::StatusCode::OK);
+    let admin_requests: Value = admin_requests_response
+        .json()
+        .expect("admin collaboration list should decode");
+    assert_eq!(admin_requests.get("total").and_then(Value::as_i64), Some(1));
+
+    let portal_response = client
+        .get(format!("{base_url}/api/auth/portal"))
+        .send()
+        .expect("account portal should load");
+    assert_eq!(portal_response.status(), reqwest::StatusCode::OK);
+    let portal_body = portal_response.text().expect("portal body should read");
+    assert!(portal_body.contains("Bridgeboard Account"));
+
+    let dashboard_response = client
+        .get(format!("{base_url}/api/auth/admin"))
+        .bearer_auth(&admin_token)
+        .send()
+        .expect("admin dashboard should load");
+    assert_eq!(dashboard_response.status(), reqwest::StatusCode::OK);
 }
