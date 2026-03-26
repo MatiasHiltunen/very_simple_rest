@@ -363,3 +363,82 @@ fn vsr_serve_supports_builtin_auth_and_authz_management() {
     assert_eq!(listed_items.len(), 1);
     assert_eq!(listed_items[0]["id"], created["id"]);
 }
+
+#[test]
+fn vsr_server_serve_subcommand_starts_native_runtime() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("static_site_api.eon");
+    fs::copy(fixture_path("static_site_api.eon"), &config).expect("fixture should copy");
+    copy_dir_all(&fixture_path("static_site"), &root.join("static_site"));
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            apply_setup_migrations(&database_url, Some(&config))
+                .await
+                .expect("setup migrations should apply");
+
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query("INSERT INTO page (title) VALUES ('Alias page copy')")
+                .execute(&pool)
+                .await
+                .expect("page seed should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("server-serve.stdout.log");
+    let stderr_log = root.join("server-serve.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("server")
+        .arg("serve")
+        .arg("--input")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr server serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) =
+        wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+    {
+        panic!(
+            "vsr server serve never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let root_response = client
+        .get(format!("{base_url}/"))
+        .send()
+        .expect("root page should load");
+    assert!(root_response.status().is_success());
+
+    let api_response = client
+        .get(format!("{base_url}/api/page"))
+        .send()
+        .expect("page list should load");
+    assert!(api_response.status().is_success());
+    let api_body: Value = api_response.json().expect("page list should decode");
+    assert_eq!(api_body["total"], 1);
+    assert_eq!(api_body["items"][0]["title"], "Alias page copy");
+}
