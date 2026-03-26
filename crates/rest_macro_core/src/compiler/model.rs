@@ -24,6 +24,9 @@ pub const GENERATED_DATE_ALIAS: &str = "__VsrNaiveDate";
 pub const GENERATED_TIME_ALIAS: &str = "__VsrNaiveTime";
 pub const GENERATED_UUID_ALIAS: &str = "__VsrUuid";
 pub const GENERATED_DECIMAL_ALIAS: &str = "__VsrDecimal";
+pub const GENERATED_JSON_ALIAS: &str = "__VsrJson";
+pub const GENERATED_JSON_OBJECT_ALIAS: &str = "__VsrJsonObject";
+pub const GENERATED_JSON_ARRAY_ALIAS: &str = "__VsrJsonArray";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StructuredScalarKind {
@@ -32,6 +35,9 @@ pub enum StructuredScalarKind {
     Time,
     Uuid,
     Decimal,
+    Json,
+    JsonObject,
+    JsonArray,
 }
 
 impl StructuredScalarKind {
@@ -43,16 +49,18 @@ impl StructuredScalarKind {
             (Self::Time, DbBackend::Mysql) => "VARCHAR(15)",
             (Self::Uuid, DbBackend::Mysql) => "CHAR(36)",
             (Self::Decimal, DbBackend::Mysql) => "VARCHAR(80)",
+            (Self::Json | Self::JsonObject | Self::JsonArray, DbBackend::Mysql) => "TEXT",
         }
     }
 
-    pub fn openapi_format(self) -> &'static str {
+    pub fn openapi_format(self) -> Option<&'static str> {
         match self {
-            Self::DateTime => "date-time",
-            Self::Date => "date",
-            Self::Time => "time",
-            Self::Uuid => "uuid",
-            Self::Decimal => "decimal",
+            Self::DateTime => Some("date-time"),
+            Self::Date => Some("date"),
+            Self::Time => Some("time"),
+            Self::Uuid => Some("uuid"),
+            Self::Decimal => Some("decimal"),
+            Self::Json | Self::JsonObject | Self::JsonArray => None,
         }
     }
 
@@ -61,7 +69,14 @@ impl StructuredScalarKind {
     }
 
     pub fn supports_sort(self) -> bool {
-        !matches!(self, Self::Decimal)
+        !matches!(
+            self,
+            Self::Decimal | Self::Json | Self::JsonObject | Self::JsonArray
+        )
+    }
+
+    pub fn supports_exact_filters(self) -> bool {
+        !matches!(self, Self::Json | Self::JsonObject | Self::JsonArray)
     }
 
     pub fn generated_temporal_kind(self) -> Option<GeneratedTemporalKind> {
@@ -69,7 +84,11 @@ impl StructuredScalarKind {
             Self::DateTime => Some(GeneratedTemporalKind::DateTime),
             Self::Date => Some(GeneratedTemporalKind::Date),
             Self::Time => Some(GeneratedTemporalKind::Time),
-            Self::Uuid | Self::Decimal => None,
+            Self::Uuid
+            | Self::Decimal
+            | Self::Json
+            | Self::JsonObject
+            | Self::JsonArray => None,
         }
     }
 }
@@ -591,6 +610,8 @@ pub enum WriteModelStyle {
 pub struct FieldSpec {
     pub ident: Ident,
     pub ty: Type,
+    pub list_item_ty: Option<Type>,
+    pub object_fields: Option<Vec<FieldSpec>>,
     pub sql_type: String,
     pub is_id: bool,
     pub generated: GeneratedValue,
@@ -667,6 +688,14 @@ impl std::fmt::Debug for FieldSpec {
             .field("ident", &self.ident)
             .field("name", &self.name())
             .field("ty", &self.ty.to_token_stream().to_string())
+            .field(
+                "list_item_ty",
+                &self
+                    .list_item_ty
+                    .as_ref()
+                    .map(|ty| ty.to_token_stream().to_string()),
+            )
+            .field("object_fields", &self.object_fields)
             .field("sql_type", &self.sql_type)
             .field("is_id", &self.is_id)
             .field("generated", &self.generated)
@@ -828,6 +857,9 @@ pub fn structured_scalar_kind(ty: &Type) -> Option<StructuredScalarKind> {
         Some("NaiveTime" | GENERATED_TIME_ALIAS) => Some(StructuredScalarKind::Time),
         Some("Uuid" | GENERATED_UUID_ALIAS) => Some(StructuredScalarKind::Uuid),
         Some("Decimal" | GENERATED_DECIMAL_ALIAS) => Some(StructuredScalarKind::Decimal),
+        Some(GENERATED_JSON_ALIAS) => Some(StructuredScalarKind::Json),
+        Some(GENERATED_JSON_OBJECT_ALIAS) => Some(StructuredScalarKind::JsonObject),
+        Some(GENERATED_JSON_ARRAY_ALIAS) => Some(StructuredScalarKind::JsonArray),
         _ => None,
     }
 }
@@ -842,8 +874,17 @@ pub fn supports_range_filters(ty: &Type) -> bool {
         .unwrap_or(false)
 }
 
+pub fn supports_exact_filters(field: &FieldSpec) -> bool {
+    if field.list_item_ty.is_some() {
+        return false;
+    }
+    structured_scalar_kind(&field.ty)
+        .map(|kind| kind.supports_exact_filters())
+        .unwrap_or(true)
+}
+
 pub fn supports_contains_filters(field: &FieldSpec) -> bool {
-    if is_structured_scalar_type(&field.ty) {
+    if field.list_item_ty.is_some() || is_structured_scalar_type(&field.ty) {
         return false;
     }
 
@@ -860,6 +901,29 @@ pub fn supports_sort(ty: &Type) -> bool {
     structured_scalar_kind(ty)
         .map(|kind| kind.supports_sort())
         .unwrap_or(true)
+}
+
+pub fn supports_field_sort(field: &FieldSpec) -> bool {
+    if field.list_item_ty.is_some() {
+        return false;
+    }
+    supports_sort(&field.ty)
+}
+
+pub fn is_list_field(field: &FieldSpec) -> bool {
+    field.list_item_ty.is_some()
+}
+
+pub fn list_item_type(field: &FieldSpec) -> Option<&Type> {
+    field.list_item_ty.as_ref()
+}
+
+pub fn object_fields(field: &FieldSpec) -> Option<&[FieldSpec]> {
+    field.object_fields.as_deref()
+}
+
+pub fn is_typed_object_field(field: &FieldSpec) -> bool {
+    field.object_fields.is_some()
 }
 
 pub fn is_structured_scalar_type(ty: &Type) -> bool {
@@ -884,6 +948,18 @@ pub fn is_uuid_type(ty: &Type) -> bool {
 
 pub fn is_decimal_type(ty: &Type) -> bool {
     structured_scalar_kind(ty) == Some(StructuredScalarKind::Decimal)
+}
+
+pub fn is_json_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::Json)
+}
+
+pub fn is_json_object_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::JsonObject)
+}
+
+pub fn is_json_array_type(ty: &Type) -> bool {
+    structured_scalar_kind(ty) == Some(StructuredScalarKind::JsonArray)
 }
 
 pub fn infer_generated_value(field_name: &str, is_id: bool) -> GeneratedValue {
@@ -1117,6 +1193,10 @@ pub fn validate_relations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
 
 pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
     for field in fields {
+        if let Some(nested_fields) = field.object_fields.as_deref() {
+            validate_field_validations(nested_fields, span)?;
+        }
+
         let validation = &field.validation;
         if validation.is_empty() {
             continue;

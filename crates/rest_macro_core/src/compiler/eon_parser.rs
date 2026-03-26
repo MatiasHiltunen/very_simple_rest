@@ -6,12 +6,14 @@ use std::{
 
 use heck::ToSnakeCase;
 use proc_macro2::Span;
+use quote::ToTokens;
 use serde::de::{self, Deserializer, Error as _, MapAccess, Visitor};
 use syn::{LitStr, Type};
 
 use super::model::{
     DbBackend, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
-    GENERATED_DECIMAL_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
+    GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS, GENERATED_JSON_ARRAY_ALIAS,
+    GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
     ListConfig, NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter,
     PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
     ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
@@ -638,6 +640,10 @@ struct FieldDocument {
     #[serde(rename = "type")]
     ty: FieldTypeDocument,
     #[serde(default)]
+    items: Option<FieldTypeDocument>,
+    #[serde(default, deserialize_with = "deserialize_field_documents")]
+    fields: Vec<FieldDocument>,
+    #[serde(default)]
     nullable: bool,
     #[serde(default)]
     id: bool,
@@ -697,6 +703,11 @@ enum ScalarType {
     Time,
     Uuid,
     Decimal,
+    Json,
+    JsonObject,
+    JsonArray,
+    List,
+    Object,
 }
 
 #[derive(serde::Deserialize)]
@@ -730,6 +741,10 @@ struct FieldMapConfigDocument {
     name: Option<String>,
     #[serde(rename = "type")]
     ty: FieldTypeDocument,
+    #[serde(default)]
+    items: Option<FieldTypeDocument>,
+    #[serde(default, deserialize_with = "deserialize_field_documents")]
+    fields: Vec<FieldDocument>,
     #[serde(default)]
     nullable: bool,
     #[serde(default)]
@@ -792,6 +807,8 @@ impl FieldMapValueDocument {
             Self::Type(ty) => Ok(FieldDocument {
                 name: key,
                 ty,
+                items: None,
+                fields: Vec::new(),
                 nullable: false,
                 id: false,
                 generated: GeneratedValue::None,
@@ -819,6 +836,8 @@ impl FieldMapConfigDocument {
         Ok(FieldDocument {
             name: key,
             ty: self.ty,
+            items: self.items,
+            fields: self.fields,
             nullable: self.nullable,
             id: self.id,
             generated: self.generated,
@@ -1035,11 +1054,90 @@ fn build_resources(
                 other => other,
             };
 
-            let ty = parse_field_type(
+            let parsed_ty = parse_field_type(
                 &field.ty,
+                field.items.as_ref(),
                 field.nullable || generated != GeneratedValue::None,
             )?;
-            let sql_type = infer_sql_type(&ty, db);
+            let sql_type = infer_sql_type(&parsed_ty.ty, db);
+            let object_fields = match &field.ty {
+                FieldTypeDocument::Scalar(ScalarType::Object) => {
+                    if field.fields.is_empty() {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "field `{}` on resource `{struct_name}` must set nested `fields` when `type = Object`",
+                                field.name
+                            ),
+                        ));
+                    }
+                    if is_id {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "field `{}` on resource `{struct_name}` cannot be an object ID field",
+                                field.name
+                            ),
+                        ));
+                    }
+                    if field.relation.is_some() {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "field `{}` on resource `{struct_name}` cannot combine `type = Object` with `relation`",
+                                field.name
+                            ),
+                        ));
+                    }
+                    if field.validate.is_some() {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "field `{}` on resource `{struct_name}` cannot combine `type = Object` with `validate` yet",
+                                field.name
+                            ),
+                        ));
+                    }
+                    Some(build_object_fields(
+                        db,
+                        field.fields,
+                        format!("resource `{struct_name}` field `{}`", field.name).as_str(),
+                    )?)
+                }
+                _ => {
+                    if !field.fields.is_empty() {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "field `{}` on resource `{struct_name}` can only set nested `fields` when `type = Object`",
+                                field.name
+                            ),
+                        ));
+                    }
+                    None
+                }
+            };
+
+            if parsed_ty.list_item_ty.is_some() {
+                if is_id {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("field `{}` on resource `{struct_name}` cannot be a list ID field", field.name),
+                    ));
+                }
+                if field.relation.is_some() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("field `{}` on resource `{struct_name}` cannot combine `type = List` with `relation`", field.name),
+                    ));
+                }
+                if field.validate.is_some() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("field `{}` on resource `{struct_name}` cannot combine `type = List` with `validate` yet", field.name),
+                    ));
+                }
+            }
 
             let relation = match field.relation {
                 Some(relation) => Some(parse_relation_document(relation)?),
@@ -1054,7 +1152,9 @@ fn build_resources(
                         format!("field name `{}` is not a valid Rust identifier", field.name),
                     )
                 })?,
-                ty,
+                ty: parsed_ty.ty,
+                list_item_ty: parsed_ty.list_item_ty,
+                object_fields,
                 sql_type,
                 is_id,
                 generated,
@@ -1096,6 +1196,117 @@ fn build_resources(
         validate_relations(&resource.fields, Span::call_site())?;
         validate_field_validations(&resource.fields, Span::call_site())?;
         validate_list_config(&resource.list, Span::call_site())?;
+    }
+
+    Ok(result)
+}
+
+fn build_object_fields(
+    db: DbBackend,
+    fields: Vec<FieldDocument>,
+    context: &str,
+) -> syn::Result<Vec<FieldSpec>> {
+    let mut seen_fields = HashSet::new();
+    let mut result = Vec::with_capacity(fields.len());
+
+    for field in fields {
+        if !seen_fields.insert(field.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate nested field `{}` in {context}", field.name),
+            ));
+        }
+
+        if field.id {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("nested field `{}` in {context} cannot set `id = true`", field.name),
+            ));
+        }
+        if field.generated != GeneratedValue::None {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "nested field `{}` in {context} cannot set `generated`",
+                    field.name
+                ),
+            ));
+        }
+        if field.relation.is_some() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "nested field `{}` in {context} cannot set `relation`",
+                    field.name
+                ),
+            ));
+        }
+
+        let parsed_ty = parse_field_type(&field.ty, field.items.as_ref(), field.nullable)?;
+        let sql_type = infer_sql_type(&parsed_ty.ty, db);
+        let nested_context = format!("{context}.{}", field.name);
+        let object_fields = match &field.ty {
+            FieldTypeDocument::Scalar(ScalarType::Object) => {
+                if field.fields.is_empty() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "nested field `{}` in {context} must set nested `fields` when `type = Object`",
+                            field.name
+                        ),
+                    ));
+                }
+                if field.validate.is_some() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "nested field `{}` in {context} cannot combine `type = Object` with `validate` yet",
+                            field.name
+                        ),
+                    ));
+                }
+                Some(build_object_fields(db, field.fields, nested_context.as_str())?)
+            }
+            _ => {
+                if !field.fields.is_empty() {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "nested field `{}` in {context} can only set nested `fields` when `type = Object`",
+                            field.name
+                        ),
+                    ));
+                }
+                None
+            }
+        };
+
+        if parsed_ty.list_item_ty.is_some() && field.validate.is_some() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "nested field `{}` in {context} cannot combine `type = List` with `validate` yet",
+                    field.name
+                ),
+            ));
+        }
+
+        result.push(FieldSpec {
+            ident: syn::parse_str(&field.name).map_err(|_| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!("nested field name `{}` in {context} is not a valid Rust identifier", field.name),
+                )
+            })?,
+            ty: parsed_ty.ty,
+            list_item_ty: parsed_ty.list_item_ty,
+            object_fields,
+            sql_type,
+            is_id: false,
+            generated: GeneratedValue::None,
+            validation: parse_field_validation_document(field.validate),
+            relation: None,
+        });
     }
 
     Ok(result)
@@ -2156,10 +2367,73 @@ fn parse_static_cache_profile(value: &str) -> syn::Result<StaticCacheProfile> {
     }
 }
 
-fn parse_field_type(field_ty: &FieldTypeDocument, nullable: bool) -> syn::Result<Type> {
-    let base = match field_ty {
+struct ParsedFieldType {
+    ty: Type,
+    list_item_ty: Option<Type>,
+}
+
+fn parse_list_item_type(item_ty: &FieldTypeDocument) -> syn::Result<Type> {
+    let base = match item_ty {
+        FieldTypeDocument::Scalar(ScalarType::List | ScalarType::Object) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "list field items cannot use `List` or `Object`; nested structured list items are not supported yet",
+            ));
+        }
         FieldTypeDocument::Scalar(scalar) => scalar.rust_type().to_owned(),
-        FieldTypeDocument::Rust(raw) => raw.clone(),
+        FieldTypeDocument::Rust(_) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "list field items must use built-in scalar type keywords",
+            ));
+        }
+    };
+
+    syn::parse_str::<Type>(&base).map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("failed to parse list item Rust type `{base}`: {error}"),
+        )
+    })
+}
+
+fn parse_field_type(
+    field_ty: &FieldTypeDocument,
+    item_ty: Option<&FieldTypeDocument>,
+    nullable: bool,
+) -> syn::Result<ParsedFieldType> {
+    let (base, list_item_ty) = match field_ty {
+        FieldTypeDocument::Scalar(ScalarType::List) => {
+            let item_ty = item_ty.ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    "list fields must set `items` to a built-in scalar type keyword",
+                )
+            })?;
+            let parsed_item_ty = parse_list_item_type(item_ty)?;
+            (
+                format!("Vec<{}>", parsed_item_ty.to_token_stream()),
+                Some(parsed_item_ty),
+            )
+        }
+        FieldTypeDocument::Scalar(scalar) => {
+            if item_ty.is_some() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "`items` is only supported when `type = List`",
+                ));
+            }
+            (scalar.rust_type().to_owned(), None)
+        }
+        FieldTypeDocument::Rust(raw) => {
+            if item_ty.is_some() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "`items` is only supported when `type = List`",
+                ));
+            }
+            (raw.clone(), None)
+        }
     };
 
     let rust_type = if nullable {
@@ -2168,12 +2442,14 @@ fn parse_field_type(field_ty: &FieldTypeDocument, nullable: bool) -> syn::Result
         base
     };
 
-    syn::parse_str::<Type>(&rust_type).map_err(|error| {
+    let ty = syn::parse_str::<Type>(&rust_type).map_err(|error| {
         syn::Error::new(
             Span::call_site(),
             format!("failed to parse Rust type `{rust_type}`: {error}"),
         )
-    })
+    })?;
+
+    Ok(ParsedFieldType { ty, list_item_ty })
 }
 
 impl ScalarType {
@@ -2190,6 +2466,11 @@ impl ScalarType {
             Self::Time => GENERATED_TIME_ALIAS,
             Self::Uuid => GENERATED_UUID_ALIAS,
             Self::Decimal => GENERATED_DECIMAL_ALIAS,
+            Self::Json => GENERATED_JSON_ALIAS,
+            Self::JsonObject => GENERATED_JSON_OBJECT_ALIAS,
+            Self::JsonArray => GENERATED_JSON_ARRAY_ALIAS,
+            Self::List => "Vec<String>",
+            Self::Object => GENERATED_JSON_OBJECT_ALIAS,
         }
     }
 }
@@ -3069,6 +3350,8 @@ mod tests {
                     FieldDocument {
                         name: "id".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
@@ -3078,6 +3361,8 @@ mod tests {
                     FieldDocument {
                         name: "starts_at".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::DateTime),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
@@ -3111,6 +3396,8 @@ mod tests {
                     FieldDocument {
                         name: "id".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
@@ -3120,6 +3407,8 @@ mod tests {
                     FieldDocument {
                         name: "run_on".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::Date),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
@@ -3129,6 +3418,8 @@ mod tests {
                     FieldDocument {
                         name: "run_at".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::Time),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
@@ -3138,6 +3429,8 @@ mod tests {
                     FieldDocument {
                         name: "external_id".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::Uuid),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
@@ -3147,6 +3440,8 @@ mod tests {
                     FieldDocument {
                         name: "amount".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::Decimal),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
@@ -3182,6 +3477,289 @@ mod tests {
     }
 
     #[test]
+    fn parses_json_scalar_types_as_typed_fields() {
+        let resources = build_resources(
+            DbBackend::Sqlite,
+            vec![ResourceDocument {
+                name: "BlockDocument".to_owned(),
+                table: None,
+                id_field: None,
+                roles: RoleRequirements::default(),
+                policies: RowPoliciesDocument::default(),
+                list: ListConfigDocument::default(),
+                fields: vec![
+                    FieldDocument {
+                        name: "id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        items: None,
+                        fields: vec![],
+                        nullable: false,
+                        id: true,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "payload".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Json),
+                        items: None,
+                        fields: vec![],
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "attributes".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::JsonObject),
+                        items: None,
+                        fields: vec![],
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "blocks".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::JsonArray),
+                        items: None,
+                        fields: vec![],
+                        nullable: true,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                ],
+            }],
+        )
+        .expect("resources should build");
+
+        let payload = resources[0]
+            .find_field("payload")
+            .expect("payload field should exist");
+        let attributes = resources[0]
+            .find_field("attributes")
+            .expect("attributes field should exist");
+        let blocks = resources[0]
+            .find_field("blocks")
+            .expect("blocks field should exist");
+
+        assert_eq!(payload.sql_type, "TEXT");
+        assert_eq!(attributes.sql_type, "TEXT");
+        assert_eq!(blocks.sql_type, "TEXT");
+        assert!(super::super::model::is_json_type(&payload.ty));
+        assert!(super::super::model::is_json_object_type(&attributes.ty));
+        assert!(super::super::model::is_json_array_type(&blocks.ty));
+    }
+
+    #[test]
+    fn parses_list_fields_with_scalar_item_types() {
+        let resources = build_resources(
+            DbBackend::Sqlite,
+            vec![ResourceDocument {
+                name: "Entry".to_owned(),
+                table: None,
+                id_field: None,
+                roles: RoleRequirements::default(),
+                policies: RowPoliciesDocument::default(),
+                list: ListConfigDocument::default(),
+                fields: vec![
+                    FieldDocument {
+                        name: "id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        items: None,
+                        fields: vec![],
+                        nullable: false,
+                        id: true,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "categories".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::List),
+                        items: Some(FieldTypeDocument::Scalar(ScalarType::I64)),
+                        fields: vec![],
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "blocks".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::List),
+                        items: Some(FieldTypeDocument::Scalar(ScalarType::JsonObject)),
+                        fields: vec![],
+                        nullable: true,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                ],
+            }],
+        )
+        .expect("resources should build");
+
+        let categories = resources[0]
+            .find_field("categories")
+            .expect("categories field should exist");
+        let blocks = resources[0]
+            .find_field("blocks")
+            .expect("blocks field should exist");
+
+        assert_eq!(categories.sql_type, "TEXT");
+        assert_eq!(blocks.sql_type, "TEXT");
+        assert!(super::super::model::is_list_field(categories));
+        assert!(super::super::model::is_list_field(blocks));
+        assert_eq!(
+            super::super::model::list_item_type(categories)
+                .expect("list item type should exist")
+                .to_token_stream()
+                .to_string(),
+            "i64"
+        );
+        assert_eq!(
+            super::super::model::list_item_type(blocks)
+                .expect("list item type should exist")
+                .to_token_stream()
+                .to_string(),
+            super::super::model::GENERATED_JSON_OBJECT_ALIAS
+        );
+    }
+
+    #[test]
+    fn parses_typed_object_fields_with_nested_shapes() {
+        let resources = build_resources(
+            DbBackend::Sqlite,
+            vec![ResourceDocument {
+                name: "Entry".to_owned(),
+                table: None,
+                id_field: None,
+                roles: RoleRequirements::default(),
+                policies: RowPoliciesDocument::default(),
+                list: ListConfigDocument::default(),
+                fields: vec![
+                    FieldDocument {
+                        name: "id".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        items: None,
+                        fields: vec![],
+                        nullable: false,
+                        id: true,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "title".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Object),
+                        items: None,
+                        fields: vec![
+                            FieldDocument {
+                                name: "raw".to_owned(),
+                                ty: FieldTypeDocument::Scalar(ScalarType::String),
+                                items: None,
+                                fields: vec![],
+                                nullable: false,
+                                id: false,
+                                generated: GeneratedValue::None,
+                                relation: None,
+                                validate: Some(FieldValidationDocument {
+                                    min_length: Some(3),
+                                    max_length: None,
+                                    minimum: None,
+                                    maximum: None,
+                                }),
+                            },
+                            FieldDocument {
+                                name: "rendered".to_owned(),
+                                ty: FieldTypeDocument::Scalar(ScalarType::String),
+                                items: None,
+                                fields: vec![],
+                                nullable: true,
+                                id: false,
+                                generated: GeneratedValue::None,
+                                relation: None,
+                                validate: None,
+                            },
+                        ],
+                        nullable: false,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                    FieldDocument {
+                        name: "settings".to_owned(),
+                        ty: FieldTypeDocument::Scalar(ScalarType::Object),
+                        items: None,
+                        fields: vec![
+                            FieldDocument {
+                                name: "featured".to_owned(),
+                                ty: FieldTypeDocument::Scalar(ScalarType::Bool),
+                                items: None,
+                                fields: vec![],
+                                nullable: false,
+                                id: false,
+                                generated: GeneratedValue::None,
+                                relation: None,
+                                validate: None,
+                            },
+                            FieldDocument {
+                                name: "categories".to_owned(),
+                                ty: FieldTypeDocument::Scalar(ScalarType::List),
+                                items: Some(FieldTypeDocument::Scalar(ScalarType::I64)),
+                                fields: vec![],
+                                nullable: true,
+                                id: false,
+                                generated: GeneratedValue::None,
+                                relation: None,
+                                validate: None,
+                            },
+                        ],
+                        nullable: true,
+                        id: false,
+                        generated: GeneratedValue::None,
+                        relation: None,
+                        validate: None,
+                    },
+                ],
+            }],
+        )
+        .expect("resources should build");
+
+        let title = resources[0]
+            .find_field("title")
+            .expect("title field should exist");
+        let settings = resources[0]
+            .find_field("settings")
+            .expect("settings field should exist");
+        let title_fields = super::super::model::object_fields(title)
+            .expect("title should define object fields");
+        let settings_fields = super::super::model::object_fields(settings)
+            .expect("settings should define object fields");
+
+        assert_eq!(title.sql_type, "TEXT");
+        assert!(super::super::model::is_typed_object_field(title));
+        assert_eq!(title_fields.len(), 2);
+        assert_eq!(title_fields[0].name(), "raw");
+        assert_eq!(title_fields[0].validation.min_length, Some(3));
+        assert!(super::super::model::is_list_field(&settings_fields[1]));
+        assert_eq!(
+            super::super::model::list_item_type(&settings_fields[1])
+                .expect("list item type should exist")
+                .to_token_stream()
+                .to_string(),
+            "i64"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_table_identifier_from_eon() {
         let error = build_resources(
             DbBackend::Sqlite,
@@ -3196,6 +3774,8 @@ mod tests {
                     FieldDocument {
                         name: "id".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
@@ -3205,6 +3785,8 @@ mod tests {
                     FieldDocument {
                         name: "title".to_owned(),
                         ty: FieldTypeDocument::Scalar(ScalarType::String),
+                        items: None,
+                        fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,

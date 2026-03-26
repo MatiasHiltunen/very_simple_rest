@@ -47,6 +47,9 @@ log.workspace = true
 syn.workspace = true
 url = "2"
 
+[dev-dependencies]
+jsonwebtoken.workspace = true
+
 [lib]
 name = "vsra"
 path = "src/lib.rs"

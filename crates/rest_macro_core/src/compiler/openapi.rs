@@ -4,9 +4,11 @@ use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
 use super::model::{
-    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_optional_type,
-    read_requires_auth, structured_scalar_kind, supports_contains_filters, supports_range_filters,
-    supports_sort,
+    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_list_field,
+    is_optional_type, is_typed_object_field, list_item_type, object_fields, read_requires_auth,
+    structured_scalar_kind,
+    supports_contains_filters, supports_exact_filters, supports_field_sort,
+    supports_range_filters,
 };
 
 #[derive(Clone, Debug)]
@@ -876,7 +878,7 @@ fn list_query_parameters(
     let sortable_fields = resource
         .fields
         .iter()
-        .filter(|field| supports_sort(&field.ty))
+        .filter(|field| supports_field_sort(field))
         .map(|field| field.name())
         .collect::<Vec<_>>();
     let mut limit_schema = json!({
@@ -943,20 +945,22 @@ fn list_query_parameters(
 
     for field in &resource.fields {
         let field_name = field.name();
-        let description = if parent_relation_field == Some(field_name.as_str()) {
-            format!(
-                "Exact-match filter for `{field_name}`. Nested route parent filtering is applied automatically."
-            )
-        } else {
-            format!("Exact-match filter for `{field_name}`")
-        };
-        parameters.push(json!({
-            "name": format!("filter_{field_name}"),
-            "in": "query",
-            "required": false,
-            "description": description,
-            "schema": query_parameter_schema(field),
-        }));
+        if supports_exact_filters(field) {
+            let description = if parent_relation_field == Some(field_name.as_str()) {
+                format!(
+                    "Exact-match filter for `{field_name}`. Nested route parent filtering is applied automatically."
+                )
+            } else {
+                format!("Exact-match filter for `{field_name}`")
+            };
+            parameters.push(json!({
+                "name": format!("filter_{field_name}"),
+                "in": "query",
+                "required": false,
+                "description": description,
+                "schema": query_parameter_schema(field),
+            }));
+        }
 
         if supports_contains_filters(field) {
             parameters.push(json!({
@@ -972,7 +976,7 @@ fn list_query_parameters(
             }));
         }
 
-        if supports_range_filters(&field.ty) {
+        if supports_exact_filters(field) && supports_range_filters(&field.ty) {
             let kind_label = match structured_scalar_kind(&field.ty) {
                 Some(super::model::StructuredScalarKind::DateTime) => "timestamp",
                 Some(super::model::StructuredScalarKind::Date) => "date",
@@ -1021,6 +1025,12 @@ fn object_schema(fields: &[&FieldSpec]) -> Value {
     if !required.is_empty() {
         schema["required"] = json!(required);
     }
+    schema
+}
+
+fn typed_object_schema(fields: &[FieldSpec]) -> Value {
+    let mut schema = object_schema(&fields.iter().collect::<Vec<_>>());
+    schema["additionalProperties"] = json!(false);
     schema
 }
 
@@ -1105,32 +1115,24 @@ fn query_parameter_schema(field: &FieldSpec) -> Value {
 }
 
 fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value {
-    let mut schema = if super::model::is_bool_type(&field.ty) {
+    let mut schema = if is_typed_object_field(field) {
+        typed_object_schema(object_fields(field).expect("typed object field should define fields"))
+    } else if is_list_field(field) {
         json!({
-            "type": "boolean",
+            "type": "array",
+            "items": schema_for_type(
+                list_item_type(field).expect("list field should define list item type")
+            ),
         })
     } else {
-        match field.sql_type.as_str() {
-            sql_type if super::model::is_integer_sql_type(sql_type) => json!({
-                "type": "integer",
-                "format": "int64",
-            }),
-            "REAL" => json!({
-                "type": "number",
-                "format": "double",
-            }),
-            _ => json!({
-                "type": "string",
-            }),
-        }
+        schema_for_type(&field.ty)
     };
 
-    if let Some(kind) = structured_scalar_kind(&field.ty) {
-        schema["format"] = json!(kind.openapi_format());
-    } else if matches!(
-        field.generated,
-        GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
-    ) || field.name().ends_with("_at")
+    if !is_list_field(field)
+        && (matches!(
+            field.generated,
+            GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
+        ) || field.name().ends_with("_at"))
     {
         schema["format"] = json!("date-time");
     }
@@ -1140,6 +1142,49 @@ fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value 
     }
 
     apply_field_validation_schema(field, &mut schema);
+
+    schema
+}
+
+fn schema_for_type(ty: &syn::Type) -> Value {
+    let mut schema = match structured_scalar_kind(ty) {
+        Some(super::model::StructuredScalarKind::Json) => json!({}),
+        Some(super::model::StructuredScalarKind::JsonObject) => json!({
+            "type": "object",
+            "additionalProperties": true,
+        }),
+        Some(super::model::StructuredScalarKind::JsonArray) => json!({
+            "type": "array",
+            "items": {},
+        }),
+        _ => {
+            if super::model::is_bool_type(ty) {
+                json!({
+                    "type": "boolean",
+                })
+            } else {
+                match super::model::infer_sql_type(ty, super::model::DbBackend::Sqlite).as_str() {
+                    sql_type if super::model::is_integer_sql_type(sql_type) => json!({
+                        "type": "integer",
+                        "format": "int64",
+                    }),
+                    "REAL" => json!({
+                        "type": "number",
+                        "format": "double",
+                    }),
+                    _ => json!({
+                        "type": "string",
+                    }),
+                }
+            }
+        }
+    };
+
+    if let Some(kind) = structured_scalar_kind(ty) {
+        if let Some(format) = kind.openapi_format() {
+            schema["format"] = json!(format);
+        }
+    }
 
     schema
 }
@@ -1511,6 +1556,147 @@ mod tests {
         assert!(
             !sort_values.iter().any(|value| value == &json!("amount")),
             "decimal fields should not be listed as sortable"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_json_field_shapes_without_list_filters() {
+        let service = load_service_from_path(&fixture_path("json_fields_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("JSON Fields API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/block_document"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+        let sort = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "sort")
+            .expect("sort parameter should exist");
+        let sort_values = sort["schema"]["enum"]
+            .as_array()
+            .expect("sort enum should be present");
+
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_payload"),
+            "generic JSON fields should not advertise exact-match filters"
+        );
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_attributes"),
+            "JSON object fields should not advertise exact-match filters"
+        );
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_blocks"),
+            "JSON array fields should not advertise exact-match filters"
+        );
+        assert!(
+            !sort_values.iter().any(|value| value == &json!("payload")),
+            "generic JSON fields should not be listed as sortable"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["BlockDocument"]["properties"]["attributes"]["type"],
+            json!("object")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["BlockDocument"]["properties"]["blocks"]["type"],
+            json!("array")
+        );
+        assert!(
+            document["components"]["schemas"]["BlockDocument"]["properties"]["payload"]
+                .as_object()
+                .expect("payload schema should be an object")
+                .get("type")
+                .is_none(),
+            "generic JSON fields should stay schema-open"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_typed_list_field_schemas_without_list_filters() {
+        let service = load_service_from_path(&fixture_path("list_fields_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("List Fields API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/entry"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_categories"),
+            "list fields should not advertise exact-match filters"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["categories"]["type"],
+            json!("array")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["categories"]["items"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["tags"]["items"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["blocks"]["items"]["type"],
+            json!("object")
+        );
+    }
+
+    #[test]
+    fn renders_openapi_typed_object_field_schemas_without_object_filters() {
+        let service = load_service_from_path(&fixture_path("object_fields_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Object Fields API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/entry"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_title"),
+            "typed object fields should not advertise exact-match filters"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["title"]["type"],
+            json!("object")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["title"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["title"]["properties"]["raw"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["categories"]["items"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["seo"]["additionalProperties"],
+            json!(false)
         );
     }
 

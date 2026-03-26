@@ -1,0 +1,16 @@
+module: "json_fields_api"
+resources: [
+    {
+        name: "BlockDocument"
+        list: {
+            default_limit: 10
+            max_limit: 50
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "payload", type: Json }
+            { name: "attributes", type: JsonObject }
+            { name: "blocks", type: JsonArray, nullable: true }
+        ]
+    }
+]

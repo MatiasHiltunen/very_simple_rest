@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
+use heck::ToUpperCamelCase;
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
-use syn::Path;
+use syn::{Path, Type};
 
 use super::model::{
     GeneratedValue, PolicyFilterExpression, PolicyValueSource, ResourceSpec, ServiceSpec,
@@ -101,6 +102,10 @@ pub fn expand_service_module(
     let time_alias_ident = format_ident!("{}", super::model::GENERATED_TIME_ALIAS);
     let uuid_alias_ident = format_ident!("{}", super::model::GENERATED_UUID_ALIAS);
     let decimal_alias_ident = format_ident!("{}", super::model::GENERATED_DECIMAL_ALIAS);
+    let json_alias_ident = format_ident!("{}", super::model::GENERATED_JSON_ALIAS);
+    let json_object_alias_ident =
+        format_ident!("{}", super::model::GENERATED_JSON_OBJECT_ALIAS);
+    let json_array_alias_ident = format_ident!("{}", super::model::GENERATED_JSON_ARRAY_ALIAS);
     let type_aliases = quote! {
         #[allow(non_camel_case_types)]
         type #datetime_alias_ident = #runtime_crate::chrono::DateTime<#runtime_crate::chrono::Utc>;
@@ -112,6 +117,12 @@ pub fn expand_service_module(
         type #uuid_alias_ident = #runtime_crate::uuid::Uuid;
         #[allow(non_camel_case_types)]
         type #decimal_alias_ident = #runtime_crate::rust_decimal::Decimal;
+        #[allow(non_camel_case_types)]
+        type #json_alias_ident = #runtime_crate::serde_json::Value;
+        #[allow(non_camel_case_types)]
+        type #json_object_alias_ident = #runtime_crate::serde_json::Value;
+        #[allow(non_camel_case_types)]
+        type #json_array_alias_ident = #runtime_crate::serde_json::Value;
     };
     let include_path_lit = Literal::string(include_path);
     let resources = service
@@ -1314,6 +1325,7 @@ fn resource_struct_tokens(
     let update_ident = format_ident!("{struct_ident}Update");
     let list_query_tokens = list_query_tokens(resource, runtime_crate);
     let generated_from_row = generated_from_row_tokens(resource, runtime_crate);
+    let object_validator_defs = typed_object_validator_defs(resource, runtime_crate);
     let fields = resource.fields.iter().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
@@ -1341,6 +1353,8 @@ fn resource_struct_tokens(
 
     match resource.write_style {
         WriteModelStyle::ExistingStructWithDtos => quote! {
+            #(#object_validator_defs)*
+
             #[derive(
                 Debug,
                 Clone,
@@ -1364,6 +1378,8 @@ fn resource_struct_tokens(
             #list_query_tokens
         },
         WriteModelStyle::GeneratedStructWithDtos => quote! {
+            #(#object_validator_defs)*
+
             #[derive(
                 Debug,
                 Clone,
@@ -1401,6 +1417,286 @@ fn resource_struct_tokens(
     }
 }
 
+fn typed_object_validator_defs(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
+    resource
+        .fields
+        .iter()
+        .flat_map(|field| {
+            let path = vec![field.name()];
+            collect_typed_object_validator_defs(resource, field, &path, runtime_crate)
+        })
+        .collect()
+}
+
+fn collect_typed_object_validator_defs(
+    resource: &ResourceSpec,
+    field: &super::model::FieldSpec,
+    path: &[String],
+    runtime_crate: &Path,
+) -> Vec<TokenStream> {
+    let Some(nested_fields) = field.object_fields.as_deref() else {
+        return Vec::new();
+    };
+
+    let mut definitions = Vec::new();
+    for nested_field in nested_fields {
+        let mut nested_path = path.to_vec();
+        nested_path.push(nested_field.name());
+        definitions.extend(collect_typed_object_validator_defs(
+            resource,
+            nested_field,
+            &nested_path,
+            runtime_crate,
+        ));
+    }
+
+    let struct_ident = typed_object_validator_ident(resource, path);
+    let field_defs = nested_fields.iter().map(|nested_field| {
+        let ident = &nested_field.ident;
+        let mut nested_path = path.to_vec();
+        nested_path.push(nested_field.name());
+        let ty = typed_object_validator_field_type_tokens(resource, nested_field, &nested_path, runtime_crate);
+        if super::model::is_optional_type(&nested_field.ty) {
+            quote! {
+                #[serde(default)]
+                pub #ident: #ty,
+            }
+        } else {
+            quote! {
+                pub #ident: #ty,
+            }
+        }
+    });
+    let validations = nested_fields
+        .iter()
+        .map(typed_object_validator_field_check_tokens);
+
+    definitions.push(quote! {
+        #[derive(Debug, Clone, #runtime_crate::serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct #struct_ident {
+            #(#field_defs)*
+        }
+
+        impl #struct_ident {
+            fn validate(&self, base_path: &str) -> Result<(), (String, String)> {
+                #(#validations)*
+                Ok(())
+            }
+        }
+    });
+
+    definitions
+}
+
+fn typed_object_validator_ident(resource: &ResourceSpec, path: &[String]) -> syn::Ident {
+    let suffix = path
+        .iter()
+        .map(|segment| segment.to_upper_camel_case())
+        .collect::<String>();
+    format_ident!("{}{}ObjectSchema", resource.struct_ident, suffix)
+}
+
+fn typed_object_validator_scalar_type_tokens(ty: &Type, runtime_crate: &Path) -> TokenStream {
+    let base_ty = super::model::base_type(ty);
+    if let Some(kind) = super::model::structured_scalar_kind(&base_ty) {
+        return match kind {
+            super::model::StructuredScalarKind::Json => {
+                quote!(#runtime_crate::serde_json::Value)
+            }
+            super::model::StructuredScalarKind::JsonObject => {
+                quote!(#runtime_crate::serde_json::Map<String, #runtime_crate::serde_json::Value>)
+            }
+            super::model::StructuredScalarKind::JsonArray => {
+                quote!(Vec<#runtime_crate::serde_json::Value>)
+            }
+            _ => structured_scalar_type_tokens(kind, runtime_crate),
+        };
+    }
+
+    if super::model::is_bool_type(&base_ty) {
+        quote!(bool)
+    } else {
+        quote!(#base_ty)
+    }
+}
+
+fn typed_object_validator_list_item_type_tokens(ty: &Type, runtime_crate: &Path) -> TokenStream {
+    if let Some(kind) = super::model::structured_scalar_kind(ty) {
+        return match kind {
+            super::model::StructuredScalarKind::Json => {
+                quote!(#runtime_crate::serde_json::Value)
+            }
+            super::model::StructuredScalarKind::JsonObject => {
+                quote!(#runtime_crate::serde_json::Map<String, #runtime_crate::serde_json::Value>)
+            }
+            super::model::StructuredScalarKind::JsonArray => {
+                quote!(Vec<#runtime_crate::serde_json::Value>)
+            }
+            _ => structured_scalar_type_tokens(kind, runtime_crate),
+        };
+    }
+
+    if super::model::is_bool_type(ty) {
+        quote!(bool)
+    } else {
+        quote!(#ty)
+    }
+}
+
+fn typed_object_validator_field_type_tokens(
+    resource: &ResourceSpec,
+    field: &super::model::FieldSpec,
+    path: &[String],
+    runtime_crate: &Path,
+) -> TokenStream {
+    let inner_ty = if field.object_fields.is_some() {
+        let ident = typed_object_validator_ident(resource, path);
+        quote!(#ident)
+    } else if let Some(item_ty) = field.list_item_ty.as_ref() {
+        let item_ty = typed_object_validator_list_item_type_tokens(item_ty, runtime_crate);
+        quote!(Vec<#item_ty>)
+    } else {
+        typed_object_validator_scalar_type_tokens(&field.ty, runtime_crate)
+    };
+
+    if super::model::is_optional_type(&field.ty) {
+        quote!(Option<#inner_ty>)
+    } else {
+        inner_ty
+    }
+}
+
+fn typed_object_validator_field_check_tokens(
+    field: &super::model::FieldSpec,
+) -> TokenStream {
+    let ident = &field.ident;
+    let field_name = field.name();
+    let field_name_lit = Literal::string(&field_name);
+
+    if field.object_fields.is_some() {
+        return if super::model::is_optional_type(&field.ty) {
+            quote! {
+                if let Some(value) = &self.#ident {
+                    let nested_path = format!("{}.{}", base_path, #field_name_lit);
+                    value.validate(nested_path.as_str())?;
+                }
+            }
+        } else {
+            quote! {
+                let nested_path = format!("{}.{}", base_path, #field_name_lit);
+                self.#ident.validate(nested_path.as_str())?;
+            }
+        };
+    }
+
+    if field.validation.is_empty() {
+        return quote! {};
+    }
+
+    let checks = typed_object_validator_scalar_checks(field);
+    if checks.is_empty() {
+        return quote! {};
+    }
+
+    if super::model::is_optional_type(&field.ty) {
+        quote! {
+            if let Some(value) = &self.#ident {
+                let field_path = format!("{}.{}", base_path, #field_name_lit);
+                #(#checks)*
+            }
+        }
+    } else {
+        quote! {
+            let value = &self.#ident;
+            let field_path = format!("{}.{}", base_path, #field_name_lit);
+            #(#checks)*
+        }
+    }
+}
+
+fn typed_object_validator_scalar_checks(
+    field: &super::model::FieldSpec,
+) -> Vec<TokenStream> {
+    let mut checks = Vec::new();
+
+    if let Some(min_length) = field.validation.min_length {
+        checks.push(quote! {
+            if value.chars().count() < #min_length {
+                return Err((
+                    field_path.clone(),
+                    format!("Field `{}` must have at least {} characters", field_path, #min_length),
+                ));
+            }
+        });
+    }
+
+    if let Some(max_length) = field.validation.max_length {
+        checks.push(quote! {
+            if value.chars().count() > #max_length {
+                return Err((
+                    field_path.clone(),
+                    format!("Field `{}` must have at most {} characters", field_path, #max_length),
+                ));
+            }
+        });
+    }
+
+    match field.sql_type.as_str() {
+        sql_type if super::model::is_integer_sql_type(sql_type) => {
+            if let Some(super::model::NumericBound::Integer(minimum)) = &field.validation.minimum {
+                let minimum = Literal::i64_unsuffixed(*minimum);
+                checks.push(quote! {
+                    if (*value as i64) < #minimum {
+                        return Err((
+                            field_path.clone(),
+                            format!("Field `{}` must be at least {}", field_path, #minimum),
+                        ));
+                    }
+                });
+            }
+            if let Some(super::model::NumericBound::Integer(maximum)) = &field.validation.maximum {
+                let maximum = Literal::i64_unsuffixed(*maximum);
+                checks.push(quote! {
+                    if (*value as i64) > #maximum {
+                        return Err((
+                            field_path.clone(),
+                            format!("Field `{}` must be at most {}", field_path, #maximum),
+                        ));
+                    }
+                });
+            }
+        }
+        "REAL" => {
+            if let Some(minimum) = &field.validation.minimum {
+                let minimum = Literal::f64_unsuffixed(minimum.as_f64());
+                checks.push(quote! {
+                    if (*value as f64) < #minimum {
+                        return Err((
+                            field_path.clone(),
+                            format!("Field `{}` must be at least {}", field_path, #minimum),
+                        ));
+                    }
+                });
+            }
+            if let Some(maximum) = &field.validation.maximum {
+                let maximum = Literal::f64_unsuffixed(maximum.as_f64());
+                checks.push(quote! {
+                    if (*value as f64) > #maximum {
+                        return Err((
+                            field_path.clone(),
+                            format!("Field `{}` must be at most {}", field_path, #maximum),
+                        ));
+                    }
+                });
+            }
+        }
+        _ => {}
+    }
+
+    checks
+}
+
 fn structured_scalar_type_tokens(
     kind: super::model::StructuredScalarKind,
     runtime_crate: &Path,
@@ -1415,6 +1711,9 @@ fn structured_scalar_type_tokens(
         super::model::StructuredScalarKind::Decimal => {
             quote!(#runtime_crate::rust_decimal::Decimal)
         }
+        super::model::StructuredScalarKind::Json
+        | super::model::StructuredScalarKind::JsonObject
+        | super::model::StructuredScalarKind::JsonArray => quote!(#runtime_crate::serde_json::Value),
     }
 }
 
@@ -1437,11 +1736,139 @@ fn structured_scalar_to_text_tokens(
             Some(quote!(#value.as_hyphenated().to_string()))
         }
         super::model::StructuredScalarKind::Decimal => Some(quote!(#value.normalize().to_string())),
+        super::model::StructuredScalarKind::Json
+        | super::model::StructuredScalarKind::JsonObject
+        | super::model::StructuredScalarKind::JsonArray => Some(quote!(
+            #runtime_crate::serde_json::to_string(#value).expect("JSON fields should serialize")
+        )),
+    }
+}
+
+fn json_bind_tokens(field: &super::model::FieldSpec, runtime_crate: &Path) -> Option<TokenStream> {
+    if field.list_item_ty.is_some() {
+        let ident = &field.ident;
+        if super::model::is_optional_type(&field.ty) {
+            return Some(quote! {
+                item.#ident.as_ref().map(|value| {
+                    #runtime_crate::serde_json::to_string(value)
+                        .expect("list fields should serialize")
+                })
+            });
+        }
+        return Some(quote! {
+            #runtime_crate::serde_json::to_string(&item.#ident)
+                .expect("list fields should serialize")
+        });
+    }
+
+    match super::model::structured_scalar_kind(&field.ty) {
+        Some(
+            super::model::StructuredScalarKind::Json
+            | super::model::StructuredScalarKind::JsonObject
+            | super::model::StructuredScalarKind::JsonArray,
+        ) => {
+            let ident = &field.ident;
+            if super::model::is_optional_type(&field.ty) {
+                Some(quote! {
+                    item.#ident.as_ref().map(|value| {
+                        #runtime_crate::serde_json::to_string(value)
+                            .expect("JSON fields should serialize")
+                    })
+                })
+            } else {
+                Some(quote! {
+                    #runtime_crate::serde_json::to_string(&item.#ident)
+                        .expect("JSON fields should serialize")
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn list_field_from_text_tokens(
+    base_ty: &Type,
+    value_ident: TokenStream,
+    field_name_lit: &Literal,
+    runtime_crate: &Path,
+) -> TokenStream {
+    quote! {
+        #runtime_crate::serde_json::from_str::<#base_ty>(&#value_ident).map_err(
+            |error| #runtime_crate::sqlx::Error::ColumnDecode {
+                index: #field_name_lit.to_owned(),
+                source: Box::new(error),
+            }
+        )?
+    }
+}
+
+fn structured_scalar_from_text_tokens(
+    kind: super::model::StructuredScalarKind,
+    base_ty: &Type,
+    value_ident: TokenStream,
+    field_name_lit: &Literal,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match kind {
+        super::model::StructuredScalarKind::DateTime
+        | super::model::StructuredScalarKind::Date
+        | super::model::StructuredScalarKind::Time
+        | super::model::StructuredScalarKind::Uuid
+        | super::model::StructuredScalarKind::Decimal => quote! {
+            #value_ident.parse::<#base_ty>().map_err(|error| #runtime_crate::sqlx::Error::ColumnDecode {
+                index: #field_name_lit.to_owned(),
+                source: Box::new(error),
+            })?
+        },
+        super::model::StructuredScalarKind::Json => quote! {
+            #runtime_crate::serde_json::from_str::<#base_ty>(&#value_ident).map_err(
+                |error| #runtime_crate::sqlx::Error::ColumnDecode {
+                    index: #field_name_lit.to_owned(),
+                    source: Box::new(error),
+                }
+            )?
+        },
+        super::model::StructuredScalarKind::JsonObject => quote! {{
+            let parsed = #runtime_crate::serde_json::from_str::<#base_ty>(&#value_ident).map_err(
+                |error| #runtime_crate::sqlx::Error::ColumnDecode {
+                    index: #field_name_lit.to_owned(),
+                    source: Box::new(error),
+                }
+            )?;
+            if !matches!(parsed, #runtime_crate::serde_json::Value::Object(_)) {
+                return Err(#runtime_crate::sqlx::Error::ColumnDecode {
+                    index: #field_name_lit.to_owned(),
+                    source: Box::new(::std::io::Error::new(
+                        ::std::io::ErrorKind::InvalidData,
+                        "expected JSON object",
+                    )),
+                });
+            }
+            parsed
+        }},
+        super::model::StructuredScalarKind::JsonArray => quote! {{
+            let parsed = #runtime_crate::serde_json::from_str::<#base_ty>(&#value_ident).map_err(
+                |error| #runtime_crate::sqlx::Error::ColumnDecode {
+                    index: #field_name_lit.to_owned(),
+                    source: Box::new(error),
+                }
+            )?;
+            if !matches!(parsed, #runtime_crate::serde_json::Value::Array(_)) {
+                return Err(#runtime_crate::sqlx::Error::ColumnDecode {
+                    index: #field_name_lit.to_owned(),
+                    source: Box::new(::std::io::Error::new(
+                        ::std::io::ErrorKind::InvalidData,
+                        "expected JSON array",
+                    )),
+                });
+            }
+            parsed
+        }},
     }
 }
 
 fn field_supports_sort(field: &super::model::FieldSpec) -> bool {
-    super::model::supports_sort(&field.ty)
+    super::model::supports_field_sort(field)
 }
 
 fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {
@@ -1451,26 +1878,93 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
         let ty = &field.ty;
         let field_name_lit = Literal::string(&field.name());
 
-        if super::model::is_structured_scalar_type(&field.ty) {
+        if field.list_item_ty.is_some() {
             let base_ty = super::model::base_type(&field.ty);
+            if super::model::is_optional_type(&field.ty) {
+                let parsed_value = list_field_from_text_tokens(
+                    &base_ty,
+                    quote!(value),
+                    &field_name_lit,
+                    runtime_crate,
+                );
+                quote! {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<String>, _>(row, #field_name_lit)? {
+                        Some(value) => Some(#parsed_value),
+                        None => None,
+                    };
+                }
+            } else {
+                let parsed_value = list_field_from_text_tokens(
+                    &base_ty,
+                    quote!(value),
+                    &field_name_lit,
+                    runtime_crate,
+                );
+                quote! {
+                    let #ident: #ty = {
+                        let value = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #field_name_lit)?;
+                        #parsed_value
+                    };
+                }
+            }
+        } else if super::model::is_structured_scalar_type(&field.ty) {
+            let base_ty = super::model::base_type(&field.ty);
+            let kind = super::model::structured_scalar_kind(&field.ty)
+                .expect("structured scalar kind should exist");
+            let parsed_value = if kind == super::model::StructuredScalarKind::JsonObject
+                && field.object_fields.is_some()
+            {
+                let validator_ident =
+                    typed_object_validator_ident(resource, &[field.name()]);
+                quote! {{
+                    let parsed = #runtime_crate::serde_json::from_str::<#base_ty>(&value).map_err(
+                        |error| #runtime_crate::sqlx::Error::ColumnDecode {
+                            index: #field_name_lit.to_owned(),
+                            source: Box::new(error),
+                        }
+                    )?;
+                    let validated: #validator_ident = #runtime_crate::serde_json::from_value(parsed.clone()).map_err(
+                        |error| #runtime_crate::sqlx::Error::ColumnDecode {
+                            index: #field_name_lit.to_owned(),
+                            source: Box::new(::std::io::Error::new(
+                                ::std::io::ErrorKind::InvalidData,
+                                format!("Field `{}` is invalid: {}", #field_name_lit, error),
+                            )),
+                        }
+                    )?;
+                    if let Err((_field_path, message)) = validated.validate(#field_name_lit) {
+                        return Err(#runtime_crate::sqlx::Error::ColumnDecode {
+                            index: #field_name_lit.to_owned(),
+                            source: Box::new(::std::io::Error::new(
+                                ::std::io::ErrorKind::InvalidData,
+                                message,
+                            )),
+                        });
+                    }
+                    parsed
+                }}
+            } else {
+                structured_scalar_from_text_tokens(
+                    kind,
+                    &base_ty,
+                    quote!(value),
+                    &field_name_lit,
+                    runtime_crate,
+                )
+            };
             if super::model::is_optional_type(&field.ty) {
                 quote! {
                     let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<String>, _>(row, #field_name_lit)? {
-                        Some(value) => Some(value.parse::<#base_ty>().map_err(|error| #runtime_crate::sqlx::Error::ColumnDecode {
-                            index: #field_name_lit.to_owned(),
-                            source: Box::new(error),
-                        })?),
+                        Some(value) => Some(#parsed_value),
                         None => None,
                     };
                 }
             } else {
                 quote! {
-                    let #ident: #ty = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #field_name_lit)?
-                        .parse::<#ty>()
-                        .map_err(|error| #runtime_crate::sqlx::Error::ColumnDecode {
-                            index: #field_name_lit.to_owned(),
-                            source: Box::new(error),
-                        })?;
+                    let #ident: #ty = {
+                        let value = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #field_name_lit)?;
+                        #parsed_value
+                    };
                 }
             }
         } else if super::model::is_bool_type(&field.ty) {
@@ -1545,11 +2039,15 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
         .filter(|field| field_supports_sort(field))
         .collect::<Vec<_>>();
     let filter_fields = resource.fields.iter().flat_map(|field| {
-        let filter_ident = format_ident!("filter_{}", field.ident);
-        let base_ty = list_filter_field_ty(field, runtime_crate);
-        let mut tokens = vec![quote! {
-            pub #filter_ident: Option<#base_ty>,
-        }];
+        let mut tokens = Vec::new();
+
+        if super::model::supports_exact_filters(field) {
+            let filter_ident = format_ident!("filter_{}", field.ident);
+            let base_ty = list_filter_field_ty(field, runtime_crate);
+            tokens.push(quote! {
+                pub #filter_ident: Option<#base_ty>,
+            });
+        }
 
         if super::model::supports_contains_filters(field) {
             let contains_ident = format_ident!("filter_{}_contains", field.ident);
@@ -1558,10 +2056,10 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             });
         }
 
-        if super::model::supports_range_filters(&field.ty) {
+        if super::model::supports_exact_filters(field) && super::model::supports_range_filters(&field.ty) {
             for suffix in ["gt", "gte", "lt", "lte"] {
                 let ident = format_ident!("filter_{}_{}", field.ident, suffix);
-                let range_ty = base_ty.clone();
+                let range_ty = list_filter_field_ty(field, runtime_crate);
                 tokens.push(quote! {
                     pub #ident: Option<#range_ty>,
                 });
@@ -1767,6 +2265,11 @@ fn resource_impl_tokens(
         .map(|field| {
             let ident = &field.ident;
             let field_name = field.name();
+            if let Some(json_value) = json_bind_tokens(field, runtime_crate) {
+                return quote! {
+                    q = q.bind(#json_value);
+                };
+            }
             if let Some(source) = create_assignment_source(resource, &field_name) {
                 if hybrid_create_scope_field.as_deref() == Some(field_name.as_str())
                     && matches!(source, PolicyValueSource::Claim(_))
@@ -1830,6 +2333,11 @@ fn resource_impl_tokens(
         .map(|field| {
             let ident = &field.ident;
             let field_name = field.name();
+            if let Some(json_value) = json_bind_tokens(field, runtime_crate) {
+                return quote! {
+                    q = q.bind(#json_value);
+                };
+            }
             if let Some(source) = create_assignment_source(resource, &field_name) {
                 match source {
                     PolicyValueSource::Claim(_) => {
@@ -1885,8 +2393,19 @@ fn resource_impl_tokens(
         .bind_fields
         .iter()
         .map(|ident| {
-            quote! {
-                q = q.bind(&item.#ident);
+            let field = resource
+                .fields
+                .iter()
+                .find(|field| field.ident == *ident)
+                .expect("update field should exist");
+            if let Some(json_value) = json_bind_tokens(field, runtime_crate) {
+                quote! {
+                    q = q.bind(#json_value);
+                }
+            } else {
+                quote! {
+                    q = q.bind(&item.#ident);
+                }
             }
         })
         .collect::<Vec<_>>();
@@ -3773,7 +4292,6 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
         .iter()
         .map(|field| {
             let field_name = Literal::string(&field.name());
-            let filter_ident = format_ident!("filter_{}", field.ident);
             let contains_filter_tokens = if super::model::supports_contains_filters(field) {
                 let contains_ident = format_ident!("filter_{}_contains", field.ident);
                 quote! {
@@ -3789,71 +4307,74 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
             } else {
                 quote! {}
             };
-            if super::model::is_structured_scalar_type(&field.ty) {
-                let exact_value =
-                    structured_scalar_to_text_tokens(&field.ty, quote!(value), runtime_crate);
-                let exact_value = exact_value.expect("structured scalar should render as text");
-                if super::model::supports_range_filters(&field.ty) {
-                    let gt_ident = format_ident!("filter_{}_gt", field.ident);
-                    let gte_ident = format_ident!("filter_{}_gte", field.ident);
-                    let lt_ident = format_ident!("filter_{}_lt", field.ident);
-                    let lte_ident = format_ident!("filter_{}_lte", field.ident);
-                    quote! {
-                        if let Some(value) = &query.#filter_ident {
-                            conditions.push(format!(
-                                "{} = {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(#exact_value));
-                        }
-                        if let Some(value) = &query.#gt_ident {
-                            conditions.push(format!(
-                                "{} > {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(#exact_value));
-                        }
-                        if let Some(value) = &query.#gte_ident {
-                            conditions.push(format!(
-                                "{} >= {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(#exact_value));
-                        }
-                        if let Some(value) = &query.#lt_ident {
-                            conditions.push(format!(
-                                "{} < {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(#exact_value));
-                        }
-                        if let Some(value) = &query.#lte_ident {
-                            conditions.push(format!(
-                                "{} <= {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(#exact_value));
-                        }
-                    }
-                } else {
-                    quote! {
-                        if let Some(value) = &query.#filter_ident {
-                            conditions.push(format!(
-                                "{} = {}",
-                                #field_name,
-                                Self::list_placeholder(filter_binds.len() + 1)
-                            ));
-                            filter_binds.push(#bind_ident::Text(#exact_value));
-                        }
-                    }
-                }
+            let exact_filter_tokens = if !super::model::supports_exact_filters(field) {
+                quote! {}
             } else {
-                if super::model::is_bool_type(&field.ty) {
+                let filter_ident = format_ident!("filter_{}", field.ident);
+                if super::model::is_structured_scalar_type(&field.ty) {
+                    let exact_value =
+                        structured_scalar_to_text_tokens(&field.ty, quote!(value), runtime_crate);
+                    let exact_value = exact_value.expect("structured scalar should render as text");
+                    if super::model::supports_range_filters(&field.ty) {
+                        let gt_ident = format_ident!("filter_{}_gt", field.ident);
+                        let gte_ident = format_ident!("filter_{}_gte", field.ident);
+                        let lt_ident = format_ident!("filter_{}_lt", field.ident);
+                        let lte_ident = format_ident!("filter_{}_lte", field.ident);
+                        quote! {
+                            if let Some(value) = &query.#filter_ident {
+                                conditions.push(format!(
+                                    "{} = {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(#exact_value));
+                            }
+                            if let Some(value) = &query.#gt_ident {
+                                conditions.push(format!(
+                                    "{} > {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(#exact_value));
+                            }
+                            if let Some(value) = &query.#gte_ident {
+                                conditions.push(format!(
+                                    "{} >= {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(#exact_value));
+                            }
+                            if let Some(value) = &query.#lt_ident {
+                                conditions.push(format!(
+                                    "{} < {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(#exact_value));
+                            }
+                            if let Some(value) = &query.#lte_ident {
+                                conditions.push(format!(
+                                    "{} <= {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(#exact_value));
+                            }
+                        }
+                    } else {
+                        quote! {
+                            if let Some(value) = &query.#filter_ident {
+                                conditions.push(format!(
+                                    "{} = {}",
+                                    #field_name,
+                                    Self::list_placeholder(filter_binds.len() + 1)
+                                ));
+                                filter_binds.push(#bind_ident::Text(#exact_value));
+                            }
+                        }
+                    }
+                } else if super::model::is_bool_type(&field.ty) {
                     quote! {
                         if let Some(value) = query.#filter_ident {
                             conditions.push(format!(
@@ -3895,10 +4416,13 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                                 ));
                                 filter_binds.push(#bind_ident::Text(value.clone()));
                             }
-                            #contains_filter_tokens
                         },
                     }
                 }
+            };
+            quote! {
+                #exact_filter_tokens
+                #contains_filter_tokens
             }
         })
         .collect()
@@ -3932,6 +4456,7 @@ fn create_validation_tokens(
         .into_iter()
         .filter_map(|field| {
             validation_tokens(
+                resource,
                 field.field,
                 &field.field.ident,
                 create_payload_field_is_optional(&field),
@@ -3946,6 +4471,7 @@ fn update_validation_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Ve
         .into_iter()
         .filter_map(|field| {
             validation_tokens(
+                resource,
                 field,
                 &field.ident,
                 super::model::is_optional_type(&field.ty),
@@ -3956,18 +4482,20 @@ fn update_validation_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Ve
 }
 
 fn validation_tokens(
+    resource: &ResourceSpec,
     field: &super::model::FieldSpec,
     ident: &syn::Ident,
     optional: bool,
     runtime_crate: &Path,
 ) -> Option<TokenStream> {
-    if field.validation.is_empty() {
+    if field.validation.is_empty() && field.object_fields.is_none() {
         return None;
     }
 
     let field_name = Literal::string(&field.name());
     let checks = validation_checks(field, &field_name, runtime_crate);
-    if checks.is_empty() {
+    let object_checks = typed_object_payload_validation_tokens(resource, field, runtime_crate);
+    if checks.is_empty() && object_checks.is_none() {
         return None;
     }
 
@@ -3975,12 +4503,43 @@ fn validation_tokens(
         quote! {
             if let Some(value) = &item.#ident {
                 #(#checks)*
+                #object_checks
             }
         }
     } else {
         quote! {
             let value = &item.#ident;
             #(#checks)*
+            #object_checks
+        }
+    })
+}
+
+fn typed_object_payload_validation_tokens(
+    resource: &ResourceSpec,
+    field: &super::model::FieldSpec,
+    runtime_crate: &Path,
+) -> Option<TokenStream> {
+    if field.object_fields.is_none() {
+        return None;
+    }
+
+    let field_name = field.name();
+    let field_name_lit = Literal::string(&field_name);
+    let validator_ident = typed_object_validator_ident(resource, &[field_name]);
+
+    Some(quote! {
+        let parsed: #validator_ident = match #runtime_crate::serde_json::from_value(value.clone()) {
+            Ok(value) => value,
+            Err(error) => {
+                return #runtime_crate::core::errors::validation_error(
+                    #field_name_lit,
+                    format!("Field `{}` is invalid: {}", #field_name_lit, error),
+                );
+            }
+        };
+        if let Err((field_path, message)) = parsed.validate(#field_name_lit) {
+            return #runtime_crate::core::errors::validation_error(field_path, message);
         }
     })
 }

@@ -267,7 +267,9 @@ Field configuration controls generated Rust types, SQL columns, validations, and
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].fields[].name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Duplicate field names are rejected per resource. |
-| resources[].fields[].type | Enum or raw Rust type string | None | Yes | See Scalar Types | Supported scalar keywords are listed below. Raw Rust types are parsed with `syn` and inferred to SQL best-effort. |
+| resources[].fields[].type | Enum or raw Rust type string | None | Yes | See Field Types | Supported built-in field type keywords are listed below. Raw Rust types are parsed with `syn` and inferred to SQL best-effort. |
+| resources[].fields[].items | Built-in field type keyword | None | Yes when `type = List` | See Field Types | Required for `List` fields. The current first version accepts built-in item types only and stores the resulting list as JSON text. |
+| resources[].fields[].fields | List<Field> or Map<FieldName, Field \| Type> | None | Yes when `type = Object` | Nested field definitions | Required for `Object` fields. Nested fields currently support scalar, JSON, nested `Object`, and `List` child shapes and are stored together as a JSON object encoded in text. |
 | resources[].fields[].nullable | Bool | false | No | true, false | Wraps the generated Rust field type in `Option<T>`. `generated` fields are also emitted as optional even when `nullable` is false. |
 | resources[].fields[].id | Bool | false, but the field matching `id_field` is treated as the ID | No | true, false | Primary key semantics are inferred when the field name matches the resource `id_field`. |
 | resources[].fields[].generated | Enum | Auto-inferred from the field name and ID role when omitted | No | None, AutoIncrement, CreatedAt, UpdatedAt | If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`. |
@@ -540,9 +542,9 @@ Custom auth UI pages must not collide with built-in auth routes and each path mu
 | security.auth.admin_dashboard.path | String | None | Yes when the block is present | Absolute path beginning with `/` | Cannot be empty or conflict with built-in auth paths such as `/auth/login`. |
 | security.auth.admin_dashboard.title | String | Admin Dashboard | No | Display title | Defaults to `Admin Dashboard` when omitted. |
 
-## Scalar Types
+## Field Types
 
-These are the canonical field type keywords accepted by `.eon`. Raw Rust type strings are also allowed.
+These are the canonical built-in field type keywords accepted by `.eon`. Raw Rust type strings are also allowed.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -557,6 +559,11 @@ These are the canonical field type keywords accepted by `.eon`. Raw Rust type st
 | Time | Rust field type | n/a | n/a | chrono::NaiveTime | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Uuid | Rust field type | n/a | n/a | uuid::Uuid | Stored as text/char values depending on backend. Supports equality filters and sort. |
 | Decimal | Rust field type | n/a | n/a | rust_decimal::Decimal | Stored as text/varchar values. Supports equality filters but not generated sort helpers. |
+| Json | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text. Round-trips through the API as native JSON, but current generated/native list helpers do not expose equality, range, or contains filters for it. |
+| JsonObject | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text and validated to be a JSON object. OpenAPI emits it as an object schema. Current list helpers do not expose equality, range, or contains filters for it. |
+| JsonArray | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text and validated to be a JSON array. OpenAPI emits it as an array schema. Current list helpers do not expose equality, range, or contains filters for it. |
+| List | Built-in collection field type | n/a | n/a | Use with `items`, for example `{ type: List, items: I64 }` | Stored as a JSON array encoded in text. OpenAPI emits an array schema based on `items`. Current generated/native list helpers do not expose equality, range, or contains filters for `List` fields. |
+| Object | Built-in structured field type | n/a | n/a | Use with `fields`, for example `{ type: Object, fields: [{ name: "raw", type: String }] }` | Stored as a JSON object encoded in text. Nested fields are validated recursively in generated handlers and native `vsr serve`, and OpenAPI emits a closed object schema with nested properties. |
 | "<raw Rust type>" | Rust field type | n/a | n/a | Any type parsable by `syn` | SQL type inference is best-effort. Structured-scalar-specific validation and filter helpers only apply to the built-in scalar keywords above. |
 
 ## Derived Behavior

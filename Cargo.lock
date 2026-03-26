@@ -6086,6 +6086,7 @@ dependencies = [
  "dotenv",
  "flate2",
  "indicatif",
+ "jsonwebtoken",
  "log",
  "rand 0.10.0",
  "rcgen",

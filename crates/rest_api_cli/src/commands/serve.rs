@@ -16,7 +16,8 @@ use rest_macro_core::compiler::{
     self, DbBackend, FieldSpec, GeneratedValue, NumericBound, OpenApiSpecOptions,
     PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression, PolicyFilterOperator,
     PolicyValueSource, ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec,
-    StructuredScalarKind, default_service_database_url, supports_range_filters, supports_sort,
+    StructuredScalarKind, default_service_database_url, supports_exact_filters,
+    supports_field_sort, supports_range_filters,
 };
 use rest_macro_core::database::{
     prepare_database_engine, resolve_database_config, resolve_database_url,
@@ -359,9 +360,12 @@ impl DynamicResource {
 struct DynamicField {
     name: String,
     kind: FieldKind,
+    list_item_kind: Option<FieldKind>,
+    object_fields: Option<Vec<DynamicField>>,
     optional: bool,
     generated: GeneratedValue,
     validation: compiler::FieldValidation,
+    supports_exact_filters: bool,
     supports_sort: bool,
     supports_range_filters: bool,
 }
@@ -369,16 +373,34 @@ struct DynamicField {
 impl DynamicField {
     fn from_spec(spec: FieldSpec) -> anyhow::Result<Self> {
         let name = spec.name();
-        let kind = FieldKind::from_field(&spec)
+        let list_item_kind = spec.list_item_ty.as_ref().and_then(FieldKind::from_type);
+        let object_fields = spec
+            .object_fields
+            .clone()
+            .map(|fields| {
+                fields
+                    .into_iter()
+                    .map(DynamicField::from_spec)
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let kind = if list_item_kind.is_some() {
+            Some(FieldKind::List)
+        } else {
+            FieldKind::from_field(&spec)
+        }
             .ok_or_else(|| anyhow!("unsupported field type for dynamic serve: `{name}`"))?;
         let optional = compiler::is_optional_type(&spec.ty);
         Ok(Self {
             name,
             kind,
+            list_item_kind,
+            object_fields,
             optional,
             generated: spec.generated,
             validation: spec.validation.clone(),
-            supports_sort: supports_sort(&spec.ty),
+            supports_exact_filters: supports_exact_filters(&spec),
+            supports_sort: supports_field_sort(&spec),
             supports_range_filters: supports_range_filters(&spec.ty),
         })
     }
@@ -395,28 +417,39 @@ enum FieldKind {
     Time,
     Uuid,
     Decimal,
+    Json,
+    JsonObject,
+    JsonArray,
+    List,
 }
 
 impl FieldKind {
-    fn from_field(field: &FieldSpec) -> Option<Self> {
-        match compiler::structured_scalar_kind(&field.ty) {
+    fn from_type(ty: &Type) -> Option<Self> {
+        match compiler::structured_scalar_kind(ty) {
             Some(StructuredScalarKind::DateTime) => Some(Self::DateTime),
             Some(StructuredScalarKind::Date) => Some(Self::Date),
             Some(StructuredScalarKind::Time) => Some(Self::Time),
             Some(StructuredScalarKind::Uuid) => Some(Self::Uuid),
             Some(StructuredScalarKind::Decimal) => Some(Self::Decimal),
+            Some(StructuredScalarKind::Json) => Some(Self::Json),
+            Some(StructuredScalarKind::JsonObject) => Some(Self::JsonObject),
+            Some(StructuredScalarKind::JsonArray) => Some(Self::JsonArray),
             None => {
-                if is_bool_type(&field.ty) {
+                if is_bool_type(ty) {
                     Some(Self::Boolean)
-                } else if is_integer_sql_type(field.sql_type.as_str()) {
-                    Some(Self::Integer)
-                } else if field.sql_type == "REAL" {
-                    Some(Self::Real)
                 } else {
-                    Some(Self::Text)
+                    match compiler::infer_sql_type(ty, DbBackend::Sqlite).as_str() {
+                        sql_type if is_integer_sql_type(sql_type) => Some(Self::Integer),
+                        "REAL" => Some(Self::Real),
+                        _ => Some(Self::Text),
+                    }
                 }
             }
         }
+    }
+
+    fn from_field(field: &FieldSpec) -> Option<Self> {
+        Self::from_type(&field.ty)
     }
 }
 
@@ -1002,6 +1035,10 @@ fn supports_contains_filters(field: &DynamicField) -> bool {
             | FieldKind::Time
             | FieldKind::Uuid
             | FieldKind::Decimal
+            | FieldKind::Json
+            | FieldKind::JsonObject
+            | FieldKind::JsonArray
+            | FieldKind::List
     )
 }
 
@@ -1088,8 +1125,13 @@ fn parse_body_value(
                 ))
             }
         }
-        Some(value) => parse_json_value(field, value)
-            .map_err(|_| errors::bad_request("invalid_json", "Request body is not valid JSON")),
+        Some(value) => parse_json_value(field, value).map_err(|error| {
+            if field.object_fields.is_some() {
+                errors::validation_error(error.field, error.message)
+            } else {
+                errors::bad_request("invalid_json", "Request body is not valid JSON")
+            }
+        }),
     }
 }
 
@@ -1115,26 +1157,64 @@ fn parse_query_value(field: &DynamicField, value: &str) -> anyhow::Result<BoundV
         | FieldKind::Decimal => Ok(BoundValue::Text(normalize_text_field_value(
             field.kind, value,
         )?)),
+        FieldKind::Json | FieldKind::JsonObject | FieldKind::JsonArray | FieldKind::List => {
+            bail!("JSON fields do not support query filters")
+        }
     }
 }
 
-fn parse_json_value(field: &DynamicField, value: &Value) -> anyhow::Result<BoundValue> {
-    match field.kind {
+#[derive(Debug)]
+struct JsonFieldError {
+    field: String,
+    message: String,
+}
+
+impl JsonFieldError {
+    fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for JsonFieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.field, self.message)
+    }
+}
+
+impl std::error::Error for JsonFieldError {}
+
+fn expected_json_field(path: &str, expected: &str) -> JsonFieldError {
+    JsonFieldError::new(
+        path,
+        format!("Field `{path}` must be {expected}"),
+    )
+}
+
+fn invalid_json_field(path: &str, detail: impl Into<String>) -> JsonFieldError {
+    JsonFieldError::new(path, format!("Field `{path}` is invalid: {}", detail.into()))
+}
+
+fn normalize_json_item_value(kind: FieldKind, value: &Value) -> anyhow::Result<Value> {
+    match kind {
         FieldKind::Integer => value
             .as_i64()
-            .map(BoundValue::Integer)
+            .map(Value::from)
             .ok_or_else(|| anyhow!("expected integer")),
         FieldKind::Real => value
             .as_f64()
-            .map(BoundValue::Real)
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
             .ok_or_else(|| anyhow!("expected number")),
         FieldKind::Boolean => value
             .as_bool()
-            .map(BoundValue::Bool)
+            .map(Value::Bool)
             .ok_or_else(|| anyhow!("expected boolean")),
         FieldKind::Text => value
             .as_str()
-            .map(|value| BoundValue::Text(value.to_owned()))
+            .map(|value| Value::String(value.to_owned()))
             .ok_or_else(|| anyhow!("expected string")),
         FieldKind::DateTime
         | FieldKind::Date
@@ -1142,10 +1222,400 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> anyhow::Result<Bound
         | FieldKind::Uuid
         | FieldKind::Decimal => {
             let value = value.as_str().ok_or_else(|| anyhow!("expected string"))?;
-            Ok(BoundValue::Text(normalize_text_field_value(
-                field.kind, value,
-            )?))
+            Ok(Value::String(normalize_text_field_value(kind, value)?))
         }
+        FieldKind::Json => Ok(value.clone()),
+        FieldKind::JsonObject => {
+            if matches!(value, Value::Object(_)) {
+                Ok(value.clone())
+            } else {
+                bail!("expected object")
+            }
+        }
+        FieldKind::JsonArray => {
+            if matches!(value, Value::Array(_)) {
+                Ok(value.clone())
+            } else {
+                bail!("expected array")
+            }
+        }
+        FieldKind::List => bail!("list items cannot contain nested lists yet"),
+    }
+}
+
+fn normalize_typed_object_value(
+    field: &DynamicField,
+    value: &Value,
+    path: &str,
+) -> Result<Value, JsonFieldError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| expected_json_field(path, "an object"))?;
+    let nested_fields = field
+        .object_fields
+        .as_deref()
+        .ok_or_else(|| expected_json_field(path, "an object"))?;
+
+    for key in object.keys() {
+        if nested_fields.iter().all(|candidate| candidate.name != *key) {
+            let nested_path = format!("{path}.{key}");
+            return Err(JsonFieldError::new(
+                nested_path.clone(),
+                format!("Field `{nested_path}` is not allowed"),
+            ));
+        }
+    }
+
+    let mut normalized = Map::new();
+    for nested_field in nested_fields {
+        let nested_path = format!("{path}.{}", nested_field.name);
+        match object.get(nested_field.name.as_str()) {
+            Some(Value::Null) => {
+                if nested_field.optional {
+                    normalized.insert(nested_field.name.clone(), Value::Null);
+                } else {
+                    return Err(JsonFieldError::new(
+                        nested_path.clone(),
+                        format!("Field `{nested_path}` must not be null"),
+                    ));
+                }
+            }
+            Some(nested_value) => {
+                normalized.insert(
+                    nested_field.name.clone(),
+                    normalize_typed_field_json_value(nested_field, nested_value, &nested_path)?,
+                );
+            }
+            None => {
+                if !nested_field.optional {
+                    return Err(JsonFieldError::new(
+                        nested_path.clone(),
+                        format!("Field `{nested_path}` is required"),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(Value::Object(normalized))
+}
+
+fn apply_nested_validation(
+    field: &DynamicField,
+    value: &Value,
+    path: &str,
+) -> Result<(), JsonFieldError> {
+    if field.validation.is_empty() || matches!(value, Value::Null) {
+        return Ok(());
+    }
+
+    if let Some(min_length) = field.validation.min_length {
+        let text = value
+            .as_str()
+            .ok_or_else(|| expected_json_field(path, "a string"))?;
+        if text.chars().count() < min_length {
+            return Err(JsonFieldError::new(
+                path,
+                format!("Field `{path}` must have at least {min_length} characters"),
+            ));
+        }
+    }
+
+    if let Some(max_length) = field.validation.max_length {
+        let text = value
+            .as_str()
+            .ok_or_else(|| expected_json_field(path, "a string"))?;
+        if text.chars().count() > max_length {
+            return Err(JsonFieldError::new(
+                path,
+                format!("Field `{path}` must have at most {max_length} characters"),
+            ));
+        }
+    }
+
+    match field.kind {
+        FieldKind::Integer => {
+            let actual = value
+                .as_i64()
+                .ok_or_else(|| expected_json_field(path, "an integer"))?;
+            if let Some(NumericBound::Integer(minimum)) = &field.validation.minimum {
+                if actual < *minimum {
+                    return Err(JsonFieldError::new(
+                        path,
+                        format!("Field `{path}` must be at least {minimum}"),
+                    ));
+                }
+            }
+            if let Some(NumericBound::Integer(maximum)) = &field.validation.maximum {
+                if actual > *maximum {
+                    return Err(JsonFieldError::new(
+                        path,
+                        format!("Field `{path}` must be at most {maximum}"),
+                    ));
+                }
+            }
+        }
+        FieldKind::Real => {
+            let actual = value
+                .as_f64()
+                .ok_or_else(|| expected_json_field(path, "a number"))?;
+            if let Some(minimum) = &field.validation.minimum {
+                if actual < minimum.as_f64() {
+                    return Err(JsonFieldError::new(
+                        path,
+                        format!("Field `{path}` must be at least {}", minimum.as_f64()),
+                    ));
+                }
+            }
+            if let Some(maximum) = &field.validation.maximum {
+                if actual > maximum.as_f64() {
+                    return Err(JsonFieldError::new(
+                        path,
+                        format!("Field `{path}` must be at most {}", maximum.as_f64()),
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn normalize_typed_field_json_value(
+    field: &DynamicField,
+    value: &Value,
+    path: &str,
+) -> Result<Value, JsonFieldError> {
+    let normalized = match field.kind {
+        FieldKind::Integer => value
+            .as_i64()
+            .map(Value::from)
+            .ok_or_else(|| expected_json_field(path, "an integer"))?,
+        FieldKind::Real => value
+            .as_f64()
+            .and_then(serde_json::Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(|| expected_json_field(path, "a number"))?,
+        FieldKind::Boolean => value
+            .as_bool()
+            .map(Value::Bool)
+            .ok_or_else(|| expected_json_field(path, "a boolean"))?,
+        FieldKind::Text => value
+            .as_str()
+            .map(|value| Value::String(value.to_owned()))
+            .ok_or_else(|| expected_json_field(path, "a string"))?,
+        FieldKind::DateTime
+        | FieldKind::Date
+        | FieldKind::Time
+        | FieldKind::Uuid
+        | FieldKind::Decimal => {
+            let value = value
+                .as_str()
+                .ok_or_else(|| expected_json_field(path, "a string"))?;
+            Value::String(
+                normalize_text_field_value(field.kind, value)
+                    .map_err(|error| invalid_json_field(path, error.to_string()))?,
+            )
+        }
+        FieldKind::Json => value.clone(),
+        FieldKind::JsonObject => {
+            if field.object_fields.is_some() {
+                normalize_typed_object_value(field, value, path)?
+            } else if matches!(value, Value::Object(_)) {
+                value.clone()
+            } else {
+                return Err(expected_json_field(path, "an object"));
+            }
+        }
+        FieldKind::JsonArray => {
+            if matches!(value, Value::Array(_)) {
+                value.clone()
+            } else {
+                return Err(expected_json_field(path, "an array"));
+            }
+        }
+        FieldKind::List => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| expected_json_field(path, "an array"))?;
+            let item_kind = field
+                .list_item_kind
+                .ok_or_else(|| expected_json_field(path, "an array"))?;
+            let normalized = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    normalize_json_item_value(item_kind, item).map_err(|error| {
+                        invalid_json_field(&format!("{path}[{index}]"), error.to_string())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Value::Array(normalized)
+        }
+    };
+
+    apply_nested_validation(field, &normalized, path)?;
+    Ok(normalized)
+}
+
+fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, JsonFieldError> {
+    match field.kind {
+        FieldKind::Integer => value
+            .as_i64()
+            .map(BoundValue::Integer)
+            .ok_or_else(|| expected_json_field(&field.name, "an integer")),
+        FieldKind::Real => value
+            .as_f64()
+            .map(BoundValue::Real)
+            .ok_or_else(|| expected_json_field(&field.name, "a number")),
+        FieldKind::Boolean => value
+            .as_bool()
+            .map(BoundValue::Bool)
+            .ok_or_else(|| expected_json_field(&field.name, "a boolean")),
+        FieldKind::Text => value
+            .as_str()
+            .map(|value| BoundValue::Text(value.to_owned()))
+            .ok_or_else(|| expected_json_field(&field.name, "a string")),
+        FieldKind::DateTime
+        | FieldKind::Date
+        | FieldKind::Time
+        | FieldKind::Uuid
+        | FieldKind::Decimal => {
+            let value = value
+                .as_str()
+                .ok_or_else(|| expected_json_field(&field.name, "a string"))?;
+            Ok(BoundValue::Text(
+                normalize_text_field_value(field.kind, value)
+                    .map_err(|error| invalid_json_field(&field.name, error.to_string()))?,
+            ))
+        }
+        FieldKind::Json => Ok(BoundValue::Text(
+            serde_json::to_string(value).expect("JSON values should serialize"),
+        )),
+        FieldKind::JsonObject => {
+            let normalized = if field.object_fields.is_some() {
+                normalize_typed_object_value(field, value, &field.name)?
+            } else if matches!(value, Value::Object(_)) {
+                value.clone()
+            } else {
+                return Err(expected_json_field(&field.name, "an object"));
+            };
+            Ok(BoundValue::Text(
+                serde_json::to_string(&normalized).expect("JSON values should serialize"),
+            ))
+        }
+        FieldKind::JsonArray => {
+            if !matches!(value, Value::Array(_)) {
+                return Err(expected_json_field(&field.name, "an array"));
+            }
+            Ok(BoundValue::Text(
+                serde_json::to_string(value).expect("JSON values should serialize"),
+            ))
+        }
+        FieldKind::List => {
+            let items = value
+                .as_array()
+                .ok_or_else(|| expected_json_field(&field.name, "an array"))?;
+            let item_kind = field
+                .list_item_kind
+                .ok_or_else(|| expected_json_field(&field.name, "an array"))?;
+            let normalized = items
+                .iter()
+                .map(|item| normalize_json_item_value(item_kind, item))
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(|error| invalid_json_field(&field.name, error.to_string()))?;
+            Ok(BoundValue::Text(
+                serde_json::to_string(&Value::Array(normalized))
+                    .expect("list values should serialize"),
+            ))
+        }
+    }
+}
+
+fn parse_stored_json_value(field: &DynamicField, value: String) -> Result<Value, sqlx::Error> {
+    let parsed = serde_json::from_str::<Value>(&value).map_err(|error| sqlx::Error::ColumnDecode {
+        index: field.name.clone(),
+        source: Box::new(error),
+    })?;
+    match field.kind {
+        FieldKind::Json => Ok(parsed),
+        FieldKind::JsonObject => {
+            if field.object_fields.is_some() {
+                normalize_typed_object_value(field, &parsed, &field.name).map_err(|error| {
+                    sqlx::Error::ColumnDecode {
+                        index: field.name.clone(),
+                        source: Box::new(error),
+                    }
+                })
+            } else if matches!(parsed, Value::Object(_)) {
+                Ok(parsed)
+            } else {
+                Err(sqlx::Error::ColumnDecode {
+                    index: field.name.clone(),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "expected JSON object",
+                    )),
+                })
+            }
+        }
+        FieldKind::JsonArray => {
+            if matches!(parsed, Value::Array(_)) {
+                Ok(parsed)
+            } else {
+                Err(sqlx::Error::ColumnDecode {
+                    index: field.name.clone(),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "expected JSON array",
+                    )),
+                })
+            }
+        }
+        FieldKind::List => {
+            let items = match parsed {
+                Value::Array(items) => items,
+                _ => {
+                    return Err(sqlx::Error::ColumnDecode {
+                        index: field.name.clone(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "expected JSON array",
+                        )),
+                    });
+                }
+            };
+            let item_kind = field.list_item_kind.ok_or_else(|| sqlx::Error::ColumnDecode {
+                index: field.name.clone(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing list item kind",
+                )),
+            })?;
+            let normalized = items
+                .iter()
+                .map(|item| {
+                    normalize_json_item_value(item_kind, item).map_err(|error| {
+                        sqlx::Error::ColumnDecode {
+                            index: field.name.clone(),
+                            source: Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                error.to_string(),
+                            )),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Array(normalized))
+        }
+        _ => Err(sqlx::Error::ColumnDecode {
+            index: field.name.clone(),
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expected JSON field",
+            )),
+        }),
     }
 }
 
@@ -1278,6 +1748,16 @@ fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Va
                         .unwrap_or(Value::Null)
                 } else {
                     Value::String(row.try_get::<String, _>(field.name.as_str())?)
+                }
+            }
+            FieldKind::Json | FieldKind::JsonObject | FieldKind::JsonArray | FieldKind::List => {
+                if field.optional {
+                    match row.try_get::<Option<String>, _>(field.name.as_str())? {
+                        Some(value) => parse_stored_json_value(field, value)?,
+                        None => Value::Null,
+                    }
+                } else {
+                    parse_stored_json_value(field, row.try_get::<String, _>(field.name.as_str())?)?
                 }
             }
         };
@@ -2152,13 +2632,15 @@ fn build_list_plan(
     }
 
     for field in &resource.fields {
-        let exact_name = format!("filter_{}", field.name);
-        if let Some(value) = query.remove(exact_name.as_str()) {
-            let parsed = parse_query_value(field, value.as_str()).map_err(|_| {
-                errors::bad_request("invalid_query", "Query parameters are invalid")
-            })?;
-            conditions.push(format!("{} = {}", field.name, BIND_MARKER));
-            filter_binds.push(parsed);
+        if field.supports_exact_filters {
+            let exact_name = format!("filter_{}", field.name);
+            if let Some(value) = query.remove(exact_name.as_str()) {
+                let parsed = parse_query_value(field, value.as_str()).map_err(|_| {
+                    errors::bad_request("invalid_query", "Query parameters are invalid")
+                })?;
+                conditions.push(format!("{} = {}", field.name, BIND_MARKER));
+                filter_binds.push(parsed);
+            }
         }
 
         if supports_contains_filters(field) {
@@ -2172,7 +2654,7 @@ fn build_list_plan(
             }
         }
 
-        if field.supports_range_filters {
+        if field.supports_exact_filters && field.supports_range_filters {
             for (suffix, operator) in [("_gt", ">"), ("_gte", ">="), ("_lt", "<"), ("_lte", "<=")] {
                 let name = format!("filter_{}{}", field.name, suffix);
                 if let Some(value) = query.remove(name.as_str()) {
@@ -3003,21 +3485,34 @@ async fn delete_hybrid_fallback(
 
 #[cfg(test)]
 mod tests {
-    use super::{DynamicService, NativeServeState, build_api_scope, build_openapi_json};
+    use super::{
+        BoundValue, DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,
+        build_openapi_json, parse_json_value,
+    };
     use actix_web::{App, HttpResponse, http::StatusCode, test, web};
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use rest_macro_core::authorization::AuthorizationRuntime;
-    use rest_macro_core::compiler;
+    use rest_macro_core::compiler::{self, GeneratedValue};
     use rest_macro_core::database::{
         prepare_database_engine, resolve_database_config, service_base_dir_from_config_path,
     };
     use rest_macro_core::db::{DbPool, query};
     use rest_macro_core::static_files::configure_static_mounts_with_runtime;
+    use serde::Serialize;
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_TURSO_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const TEST_JWT_SECRET: &str = "serve-object-fields-secret";
+
+    #[derive(Serialize)]
+    struct TestClaims {
+        sub: i64,
+        roles: Vec<String>,
+        exp: usize,
+    }
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3045,6 +3540,19 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn issue_token(user_id: i64, roles: &[&str]) -> String {
+        encode(
+            &Header::default(),
+            &TestClaims {
+                sub: user_id,
+                roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+                exp: 4_102_444_800,
+            },
+            &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+        )
+        .expect("test token should encode")
     }
 
     async fn build_test_state(
@@ -3216,6 +3724,329 @@ mod tests {
         let response = test::call_service(&app, request).await;
 
         assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_roundtrips_json_fields_without_query_filters() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("json_fields_api.eon", false).await;
+        query(
+            "INSERT INTO block_document (id, payload, attributes, blocks) VALUES (?, ?, ?, ?)",
+        )
+        .bind(1_i64)
+        .bind(r#"{"title":"Hello blocks","protected":false,"version":2}"#)
+        .bind(r#"{"align":"wide","level":3}"#)
+        .bind(r#"[{"name":"core/paragraph","attrs":{"dropCap":true}}]"#)
+        .execute(&state.pool)
+        .await
+        .expect("json seed data should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+
+        let list_request = test::TestRequest::get()
+            .uri("/api/block_document")
+            .to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["total"], 1);
+        assert_eq!(list_body["items"][0]["payload"]["title"], "Hello blocks");
+        assert_eq!(list_body["items"][0]["attributes"]["level"], 3);
+        assert_eq!(list_body["items"][0]["blocks"][0]["name"], "core/paragraph");
+
+        let filter_request = test::TestRequest::get()
+            .uri("/api/block_document?filter_payload=%7B%7D")
+            .to_request();
+        let filter_response = test::call_service(&app, filter_request).await;
+        assert_eq!(filter_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_roundtrips_typed_list_fields_without_query_filters() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("list_fields_api.eon", false).await;
+        query("INSERT INTO entry (id, categories, tags, blocks) VALUES (?, ?, ?, ?)")
+            .bind(1_i64)
+            .bind("[1,2,3]")
+            .bind(r#"["news","ai"]"#)
+            .bind(r#"[{"name":"core/paragraph"}]"#)
+            .execute(&state.pool)
+            .await
+            .expect("list seed data should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+
+        let list_request = test::TestRequest::get().uri("/api/entry").to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["items"][0]["categories"][0], 1);
+        assert_eq!(list_body["items"][0]["tags"][1], "ai");
+        assert_eq!(list_body["items"][0]["blocks"][0]["name"], "core/paragraph");
+
+        let filter_request = test::TestRequest::get()
+            .uri("/api/entry?filter_categories=1")
+            .to_request();
+        let filter_response = test::call_service(&app, filter_request).await;
+        assert_eq!(filter_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_roundtrips_typed_object_fields_without_query_filters() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("object_fields_api.eon", false).await;
+        query("INSERT INTO entry (id, title, settings) VALUES (?, ?, ?)")
+            .bind(1_i64)
+            .bind(r#"{"raw":"Hello world","rendered":"<p>Hello world</p>"}"#)
+            .bind(r#"{"featured":true,"categories":[1,2],"seo":{"slug":"hello-world"}}"#)
+            .execute(&state.pool)
+            .await
+            .expect("object seed data should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let list_request = test::TestRequest::get().uri("/api/entry").to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["items"][0]["title"]["raw"], "Hello world");
+        assert_eq!(list_body["items"][0]["settings"]["seo"]["slug"], "hello-world");
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/entry")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": {
+                    "raw": "Typed object title",
+                    "rendered": "<p>Typed object title</p>"
+                },
+                "settings": {
+                    "featured": false,
+                    "categories": [5, 8],
+                    "seo": {
+                        "slug": "typed-object-title"
+                    }
+                }
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body: Value = test::read_body_json(create_response).await;
+        assert_eq!(create_body["title"]["rendered"], "<p>Typed object title</p>");
+        assert_eq!(create_body["settings"]["categories"][1], 8);
+
+        let invalid_request = test::TestRequest::post()
+            .uri("/api/entry")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": {
+                    "raw": "no"
+                }
+            }))
+            .to_request();
+        let invalid_response = test::call_service(&app, invalid_request).await;
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_body: Value = test::read_body_json(invalid_response).await;
+        assert_eq!(invalid_body["code"], "validation_error");
+        assert_eq!(invalid_body["field"], "title.raw");
+
+        let filter_request = test::TestRequest::get()
+            .uri("/api/entry?filter_title=%7B%7D")
+            .to_request();
+        let filter_response = test::call_service(&app, filter_request).await;
+        assert_eq!(filter_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn parse_json_value_enforces_json_field_shapes() {
+        let json_field = DynamicField {
+            name: "payload".to_owned(),
+            kind: FieldKind::Json,
+            list_item_kind: None,
+            object_fields: None,
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+        let object_field = DynamicField {
+            name: "attributes".to_owned(),
+            kind: FieldKind::JsonObject,
+            list_item_kind: None,
+            object_fields: None,
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+        let array_field = DynamicField {
+            name: "blocks".to_owned(),
+            kind: FieldKind::JsonArray,
+            list_item_kind: None,
+            object_fields: None,
+            optional: true,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+
+        assert_eq!(
+            parse_json_value(&json_field, &json!({"title": "Hello"})).expect("json should parse"),
+            BoundValue::Text(r#"{"title":"Hello"}"#.to_owned())
+        );
+        assert_eq!(
+            parse_json_value(&object_field, &json!({"align": "wide"}))
+                .expect("object json should parse"),
+            BoundValue::Text(r#"{"align":"wide"}"#.to_owned())
+        );
+        assert_eq!(
+            parse_json_value(&array_field, &json!(["core/paragraph"]))
+                .expect("array json should parse"),
+            BoundValue::Text(r#"["core/paragraph"]"#.to_owned())
+        );
+        assert!(parse_json_value(&object_field, &json!(["wrong"])).is_err());
+        assert!(parse_json_value(&array_field, &json!({"wrong": true})).is_err());
+    }
+
+    #[actix_web::test]
+    async fn parse_json_value_enforces_typed_list_item_shapes() {
+        let list_field = DynamicField {
+            name: "categories".to_owned(),
+            kind: FieldKind::List,
+            list_item_kind: Some(FieldKind::Integer),
+            object_fields: None,
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+        let block_list_field = DynamicField {
+            name: "blocks".to_owned(),
+            kind: FieldKind::List,
+            list_item_kind: Some(FieldKind::JsonObject),
+            object_fields: None,
+            optional: true,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+
+        assert_eq!(
+            parse_json_value(&list_field, &json!([1, 2, 3])).expect("list should parse"),
+            BoundValue::Text("[1,2,3]".to_owned())
+        );
+        assert_eq!(
+            parse_json_value(&block_list_field, &json!([{"name": "core/paragraph"}]))
+                .expect("json object list should parse"),
+            BoundValue::Text(r#"[{"name":"core/paragraph"}]"#.to_owned())
+        );
+        assert!(parse_json_value(&list_field, &json!(["wrong"])).is_err());
+        assert!(parse_json_value(&block_list_field, &json!([1, 2])).is_err());
+    }
+
+    #[actix_web::test]
+    async fn parse_json_value_enforces_typed_object_shapes() {
+        let object_field = DynamicField {
+            name: "title".to_owned(),
+            kind: FieldKind::JsonObject,
+            list_item_kind: None,
+            object_fields: Some(vec![
+                DynamicField {
+                    name: "raw".to_owned(),
+                    kind: FieldKind::Text,
+                    list_item_kind: None,
+                    object_fields: None,
+                    optional: false,
+                    generated: GeneratedValue::None,
+                    validation: compiler::FieldValidation {
+                        min_length: Some(3),
+                        max_length: None,
+                        minimum: None,
+                        maximum: None,
+                    },
+                    supports_exact_filters: false,
+                    supports_sort: false,
+                    supports_range_filters: false,
+                },
+                DynamicField {
+                    name: "rendered".to_owned(),
+                    kind: FieldKind::Text,
+                    list_item_kind: None,
+                    object_fields: None,
+                    optional: true,
+                    generated: GeneratedValue::None,
+                    validation: compiler::FieldValidation::default(),
+                    supports_exact_filters: false,
+                    supports_sort: false,
+                    supports_range_filters: false,
+                },
+            ]),
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+
+        assert_eq!(
+            parse_json_value(
+                &object_field,
+                &json!({
+                    "raw": "Typed object title",
+                    "rendered": "<p>Typed object title</p>"
+                })
+            )
+            .expect("typed object should parse"),
+            BoundValue::Text(
+                r#"{"raw":"Typed object title","rendered":"<p>Typed object title</p>"}"#
+                    .to_owned()
+            )
+        );
+
+        let too_short = parse_json_value(&object_field, &json!({ "raw": "no" }))
+            .expect_err("nested validation should fail");
+        assert_eq!(too_short.field, "title.raw");
+
+        let unknown = parse_json_value(
+            &object_field,
+            &json!({
+                "raw": "valid title",
+                "extra": true
+            }),
+        )
+        .expect_err("unknown nested fields should fail");
+        assert_eq!(unknown.field, "title.extra");
     }
 
     #[actix_web::test]

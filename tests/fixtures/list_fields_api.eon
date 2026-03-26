@@ -1,0 +1,16 @@
+module: "list_fields_api"
+resources: [
+    {
+        name: "Entry"
+        list: {
+            default_limit: 10
+            max_limit: 50
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "categories", type: List, items: I64 }
+            { name: "tags", type: List, items: String }
+            { name: "blocks", type: List, items: JsonObject, nullable: true }
+        ]
+    }
+]

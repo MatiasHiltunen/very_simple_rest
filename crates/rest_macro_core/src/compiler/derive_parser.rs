@@ -168,6 +168,8 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         parsed_fields.push(FieldSpec {
             ident,
             ty: field.ty.clone(),
+            list_item_ty: None,
+            object_fields: None,
             sql_type: infer_sql_type(&field.ty, db),
             is_id,
             generated,
