@@ -2062,12 +2062,16 @@ mod tests {
             .expect("runtime assignment migration should apply");
         drop(pool);
 
+        let initial_expires_at = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::days(1))
+            .expect("initial expiry should compute")
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
         let create_output = root.join("create.json");
         create_runtime_assignment(
             &fixture_path("authz_management_api.eon"),
             7,
             "template:FamilyMember@Family=42",
-            Some("2026-03-25T00:00:00Z"),
+            Some(&initial_expires_at),
             Some(1),
             &database_url,
             None,

@@ -16,6 +16,10 @@ clap = { version = "4.6", features = ["derive"] }
 dialoguer = "0.12"
 console = "0.16"
 indicatif = "0.18"
+actix-web = { workspace = true, features = ["rustls-0_23"] }
+actix-cors.workspace = true
+actix-files.workspace = true
+base64.workspace = true
 sqlx = { workspace = true, features = ["postgres", "mysql"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
@@ -26,6 +30,7 @@ bcrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+rust_decimal.workspace = true
 uuid.workspace = true
 colored = "3.1"
 rand.workspace = true
@@ -38,6 +43,9 @@ sha2.workspace = true
 aws-config = "1.8"
 aws-sdk-s3 = "1.84"
 aws-credential-types = "1.2"
+log.workspace = true
+syn.workspace = true
+url = "2"
 
 [lib]
 name = "vsra"

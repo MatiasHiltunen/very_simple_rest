@@ -66,6 +66,7 @@ dependencies = [
  "actix-codec",
  "actix-rt",
  "actix-service",
+ "actix-tls",
  "actix-utils",
  "base64",
  "bitflags",
@@ -159,6 +160,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "actix-tls"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6176099de3f58fbddac916a7f8c6db297e021d706e7a6b99947785fee14abe9f"
+dependencies = [
+ "actix-rt",
+ "actix-service",
+ "actix-utils",
+ "futures-core",
+ "impl-more",
+ "pin-project-lite",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "actix-utils"
 version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -181,6 +201,7 @@ dependencies = [
  "actix-rt",
  "actix-server",
  "actix-service",
+ "actix-tls",
  "actix-utils",
  "actix-web-codegen",
  "bytes",
@@ -6047,10 +6068,14 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 name = "vsra"
 version = "0.1.1"
 dependencies = [
+ "actix-cors",
+ "actix-files",
+ "actix-web",
  "anyhow",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "base64",
  "bcrypt",
  "brotli",
  "chrono",
@@ -6061,17 +6086,21 @@ dependencies = [
  "dotenv",
  "flate2",
  "indicatif",
+ "log",
  "rand 0.10.0",
  "rcgen",
  "regex",
  "reqwest",
  "rest_macro_core",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
+ "syn 2.0.117",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "uuid",
 ]
 

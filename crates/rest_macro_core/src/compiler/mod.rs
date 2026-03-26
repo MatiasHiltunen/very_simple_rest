@@ -13,9 +13,11 @@ use syn::{DeriveInput, LitStr, Path};
 
 pub use authorization::{compile_resource_authorization, compile_service_authorization};
 pub use model::{
-    DbBackend, FieldSpec, GeneratedTemporalKind, GeneratedValue, ReferentialAction, RelationSpec,
-    ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode,
-    StaticMountSpec, StructuredScalarKind, default_service_database_url, is_date_type,
+    DbBackend, FieldSpec, FieldValidation, GeneratedTemporalKind, GeneratedValue, NumericBound,
+    PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
+    PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource, ReferentialAction,
+    RelationSpec, ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec, StaticCacheProfile,
+    StaticMode, StaticMountSpec, StructuredScalarKind, default_service_database_url, is_date_type,
     is_datetime_type, is_decimal_type, is_optional_type, is_structured_scalar_type, is_time_type,
     is_uuid_type, structured_scalar_kind, supports_range_filters, supports_sort,
     temporal_scalar_kind,

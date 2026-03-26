@@ -126,6 +126,25 @@ enum Commands {
         force: bool,
     },
 
+    /// Serve a `.eon` service directly without generating or compiling a Rust project
+    Serve {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Override the bind address; otherwise `BIND_ADDR` or the service default is used
+        #[arg(long, value_name = "ADDR")]
+        bind_addr: Option<String>,
+
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
+        with_auth: bool,
+
+        /// Exclude built-in auth routes
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
+    },
+
     /// Generate an OpenAPI document from a `.eon` service or derive-based Rust sources
     #[command(name = "openapi")]
     OpenApi {
@@ -579,6 +598,25 @@ enum ServerCommand {
         /// Overwrite the output binary if it already exists
         #[arg(long)]
         force: bool,
+    },
+
+    /// Serve a `.eon` service directly without generating or compiling a Rust project
+    Serve {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: PathBuf,
+
+        /// Override the bind address; otherwise `BIND_ADDR` or the service default is used
+        #[arg(long, value_name = "ADDR")]
+        bind_addr: Option<String>,
+
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
+        with_auth: bool,
+
+        /// Exclude built-in auth routes
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
     },
 }
 
@@ -1170,6 +1208,29 @@ async fn main() -> Result<()> {
                     *force,
                 )?;
             }
+            ServerCommand::Serve {
+                input,
+                bind_addr,
+                with_auth,
+                without_auth,
+            } => {
+                println!("{}", "Starting native runtime server...".green().bold());
+                let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+                let serve_database_url = database_url_for_service_input(
+                    cli_database_url.as_ref(),
+                    env_database_url.as_ref(),
+                    config_path.as_deref(),
+                    Some(input),
+                    &database_url,
+                )?;
+                commands::serve::serve_service(
+                    input,
+                    &serve_database_url,
+                    bind_addr.as_deref(),
+                    include_builtin_auth,
+                )
+                .await?;
+            }
         },
 
         Commands::Build {
@@ -1197,6 +1258,34 @@ async fn main() -> Result<()> {
                 *keep_build_dir,
                 *force,
             )?;
+        }
+
+        Commands::Serve {
+            input,
+            bind_addr,
+            with_auth,
+            without_auth,
+        } => {
+            println!("{}", "Starting native runtime server...".green().bold());
+            let input = input
+                .clone()
+                .or_else(|| config_path.clone())
+                .ok_or_else(|| anyhow!("serve requires a `.eon` input path or --config"))?;
+            let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+            let serve_database_url = database_url_for_service_input(
+                cli_database_url.as_ref(),
+                env_database_url.as_ref(),
+                config_path.as_deref(),
+                Some(&input),
+                &database_url,
+            )?;
+            commands::serve::serve_service(
+                &input,
+                &serve_database_url,
+                bind_addr.as_deref(),
+                include_builtin_auth,
+            )
+            .await?;
         }
 
         Commands::OpenApi {
@@ -1863,6 +1952,36 @@ mod tests {
     #[test]
     fn build_command_accepts_positional_service_input() {
         assert!(Cli::try_parse_from(["vsr", "build", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn serve_command_accepts_positional_service_input() {
+        assert!(Cli::try_parse_from(["vsr", "serve", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn serve_command_accepts_without_auth_alias() {
+        assert!(Cli::try_parse_from(["vsr", "serve", "todo_app.eon", "--no-auth",]).is_ok());
+    }
+
+    #[test]
+    fn server_serve_subcommand_accepts_input() {
+        assert!(Cli::try_parse_from(["vsr", "server", "serve", "--input", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn server_serve_subcommand_accepts_without_auth_alias() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "server",
+                "serve",
+                "--input",
+                "todo_app.eon",
+                "--no-auth",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
