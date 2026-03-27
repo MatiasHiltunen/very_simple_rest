@@ -2116,7 +2116,7 @@ mod tests {
 
         tokio::runtime::Runtime::new()
             .expect("tokio runtime should initialize")
-            .block_on(run_setup(&database_url, Some(&bundle_eon), true))
+            .block_on(run_setup(&database_url, Some(&bundle_eon), true, false))
             .expect("setup should initialize the bridgeboard database");
 
         assert!(

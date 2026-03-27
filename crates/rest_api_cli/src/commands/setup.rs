@@ -1,41 +1,75 @@
 use crate::commands::admin::{create_admin, create_admin_with_options, prompt_admin_credentials};
 use crate::commands::db::connect_database;
-use crate::commands::env::generate_env_template;
+use crate::commands::env::{EnvFileReport, default_env_path, generate_env_template, load_env_file};
 use crate::commands::migrate::apply_setup_migrations;
-use crate::error::Result;
+use crate::commands::tls::generate_self_signed_certificate;
+use crate::error::{Error, Result};
 use colored::Colorize;
 use dialoguer::Confirm;
 use rest_macro_core::auth::{AuthDbBackend, auth_user_table_ident};
+use rest_macro_core::compiler::{self, ServiceSpec};
+use rest_macro_core::database::DatabaseEngine;
 use rest_macro_core::db::query_scalar;
-use std::path::Path;
+use rest_macro_core::tls::{
+    DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH, ResolvedTlsPaths, resolve_tls_paths,
+};
+use std::path::{Path, PathBuf};
+
+#[derive(Default)]
+struct SetupBootstrapReport {
+    env_generated: Option<EnvFileReport>,
+    env_loaded_from: Option<PathBuf>,
+    tls: Option<TlsBootstrapReport>,
+}
+
+enum TlsBootstrapReport {
+    Generated {
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    },
+    Existing {
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    },
+    SkippedMissing {
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    },
+}
 
 /// Run setup wizard to initialize the API
 pub async fn run_setup(
     database_url: &str,
     config_path: Option<&Path>,
     non_interactive: bool,
+    database_url_is_explicit: bool,
 ) -> Result<()> {
     println!(
         "{}",
         "=== very_simple_rest API Setup Wizard ===".cyan().bold()
     );
 
-    // Step 1: Check database connection
-    println!("\n{}", "Step 1: Checking database connection".cyan().bold());
-    let pool = connect_database(database_url, config_path).await?;
+    println!("\n{}", "Step 1: Preparing local environment".cyan().bold());
+    let bootstrap = bootstrap_setup_environment(config_path, non_interactive)?;
+    let effective_database_url = if database_url_is_explicit {
+        database_url.to_owned()
+    } else {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| database_url.to_owned())
+    };
+
+    println!("\n{}", "Step 2: Checking database connection".cyan().bold());
+    let pool = connect_database(&effective_database_url, config_path).await?;
     println!("{}", "✓ Database connection successful".green());
 
-    // Step 2: Apply auth and service migrations if needed
-    println!("\n{}", "Step 2: Setting up database schema".cyan().bold());
-    apply_setup_migrations(database_url, config_path)
+    println!("\n{}", "Step 3: Setting up database schema".cyan().bold());
+    apply_setup_migrations(&effective_database_url, config_path)
         .await
-        .map_err(|error| crate::error::Error::Config(error.to_string()))?;
+        .map_err(|error| Error::Config(error.to_string()))?;
     println!("{}", "✓ Schema migrated/verified".green());
 
-    // Step 3: Check if admin user already exists
-    println!("\n{}", "Step 3: Verifying admin user".cyan().bold());
+    println!("\n{}", "Step 4: Verifying admin user".cyan().bold());
     let auth_backend =
-        AuthDbBackend::from_database_url(database_url).unwrap_or(AuthDbBackend::Sqlite);
+        AuthDbBackend::from_database_url(&effective_database_url).unwrap_or(AuthDbBackend::Sqlite);
     let admin_exists = query_scalar::<sqlx::Any, i64>(&format!(
         "SELECT COUNT(*) FROM {} WHERE role = 'admin'",
         auth_user_table_ident(auth_backend)
@@ -55,7 +89,7 @@ pub async fn run_setup(
 
             if create_another {
                 let (email, password) = prompt_admin_credentials().await?;
-                create_admin(database_url, config_path, email, password).await?;
+                create_admin(&effective_database_url, config_path, email, password).await?;
             }
         }
     } else {
@@ -64,41 +98,394 @@ pub async fn run_setup(
             "No admin user found. You need to create an admin user.".yellow()
         );
 
-        // Try to get credentials from environment variables
         let env_email = std::env::var("ADMIN_EMAIL").ok();
         let env_password = std::env::var("ADMIN_PASSWORD").ok();
 
         if non_interactive {
             if let (Some(email), Some(password)) = (env_email, env_password) {
                 println!("Using admin credentials from environment variables");
-                create_admin_with_options(database_url, config_path, email, password, false)
-                    .await?;
+                create_admin_with_options(
+                    &effective_database_url,
+                    config_path,
+                    email,
+                    password,
+                    false,
+                )
+                .await?;
             } else {
                 println!("{}", "Warning: Cannot create admin user in non-interactive mode without ADMIN_EMAIL and ADMIN_PASSWORD environment variables.".yellow());
             }
         } else {
-            // In interactive mode, always prompt for credentials
             let (email, password) = prompt_admin_credentials().await?;
-            create_admin_with_options(database_url, config_path, email, password, true).await?;
-        }
-    }
-
-    // Step 4: Generate .env template if needed
-    println!("\n{}", "Step 4: Environment configuration".cyan().bold());
-    if !non_interactive {
-        let create_env = Confirm::new()
-            .with_prompt("Do you want to generate a .env template file?")
-            .default(true)
-            .interact()
-            .unwrap_or(false);
-
-        if create_env {
-            generate_env_template(config_path)?;
+            create_admin_with_options(&effective_database_url, config_path, email, password, true)
+                .await?;
         }
     }
 
     println!("\n{}", "Setup completed successfully!".green().bold());
+    print_setup_summary(&bootstrap);
     println!("You can now start your API server.");
 
     Ok(())
+}
+
+fn bootstrap_setup_environment(
+    config_path: Option<&Path>,
+    non_interactive: bool,
+) -> Result<SetupBootstrapReport> {
+    let mut report = SetupBootstrapReport::default();
+    let env_path = default_env_path(config_path)?;
+    let required_turso_var = match config_path {
+        Some(path) => required_turso_encryption_var(path)?,
+        None => None,
+    };
+    let turso_key_missing = required_turso_var
+        .as_deref()
+        .map(required_env_var_is_missing)
+        .unwrap_or(false);
+
+    let generate_env = if non_interactive {
+        config_path.is_some() && (!env_path.exists() || turso_key_missing)
+    } else {
+        let prompt = if env_path.exists() {
+            format!("Generate or refresh {} before setup?", env_path.display())
+        } else {
+            format!("Generate {} before setup?", env_path.display())
+        };
+        Confirm::new()
+            .with_prompt(prompt)
+            .default(!env_path.exists() || turso_key_missing)
+            .interact()
+            .unwrap_or(false)
+    };
+
+    if generate_env {
+        let env_report = generate_env_template(config_path)?;
+        println!(
+            "{} {}",
+            "Generated environment file:".green().bold(),
+            env_report.path.display()
+        );
+        if let Some(backup_path) = &env_report.backup_path {
+            println!(
+                "{} {}",
+                "Backed up previous environment file to:".green().bold(),
+                backup_path.display()
+            );
+        }
+        println!("{} JWT_SECRET", "Generated secret in .env:".green().bold());
+        if let Some(var_name) = &env_report.generated_turso_encryption_var {
+            println!(
+                "{} {} in {}",
+                "Generated local Turso encryption key:".green().bold(),
+                var_name,
+                env_report.path.display()
+            );
+        }
+        load_env_file(&env_report.path)?;
+        println!(
+            "{} {}",
+            "Loaded environment file for this setup run:".green().bold(),
+            env_report.path.display()
+        );
+        report.env_loaded_from = Some(env_report.path.clone());
+        report.env_generated = Some(env_report);
+    } else if env_path.exists() {
+        load_env_file(&env_path)?;
+        println!(
+            "{} {}",
+            "Loaded environment file for this setup run:".green().bold(),
+            env_path.display()
+        );
+        report.env_loaded_from = Some(env_path);
+    }
+
+    if let Some(var_name) = required_turso_var
+        && required_env_var_is_missing(var_name.as_str())
+    {
+        println!(
+            "{} {}",
+            "Warning: missing local Turso encryption key in the environment:"
+                .yellow()
+                .bold(),
+            var_name
+        );
+        println!(
+            "{}",
+            "Database setup may fail until the key is set in the environment or generated into .env."
+                .yellow()
+        );
+    }
+
+    if let Some(config_path) = config_path {
+        report.tls = maybe_prepare_tls_assets(config_path, non_interactive)?;
+    }
+
+    Ok(report)
+}
+
+fn required_turso_encryption_var(config_path: &Path) -> Result<Option<String>> {
+    let service = load_service(config_path)?;
+    Ok(match &service.database.engine {
+        DatabaseEngine::TursoLocal(engine) => engine.encryption_key_env.clone(),
+        DatabaseEngine::Sqlx => None,
+    })
+}
+
+fn maybe_prepare_tls_assets(
+    config_path: &Path,
+    non_interactive: bool,
+) -> Result<Option<TlsBootstrapReport>> {
+    let service = load_service(config_path)?;
+    if !service.tls.is_enabled() {
+        return Ok(None);
+    }
+
+    let resolved = resolve_service_tls_paths(config_path, &service)?;
+    let cert_exists = resolved.cert_path.exists();
+    let key_exists = resolved.key_path.exists();
+
+    if cert_exists && key_exists {
+        println!(
+            "{} {}",
+            "Using existing TLS certificate:".green().bold(),
+            resolved.cert_path.display()
+        );
+        println!(
+            "{} {}",
+            "Using existing TLS private key:".green().bold(),
+            resolved.key_path.display()
+        );
+        return Ok(Some(TlsBootstrapReport::Existing {
+            cert_path: resolved.cert_path,
+            key_path: resolved.key_path,
+        }));
+    }
+
+    if cert_exists || key_exists {
+        println!(
+            "{}",
+            "TLS is configured but only one of the certificate/key files exists.".yellow()
+        );
+        println!(
+            "Certificate path: {}\nKey path: {}",
+            resolved.cert_path.display(),
+            resolved.key_path.display()
+        );
+        println!(
+            "{}",
+            "Run `vsr tls self-signed --force` or fix the configured TLS paths before serving HTTPS."
+                .yellow()
+        );
+        return Ok(Some(TlsBootstrapReport::SkippedMissing {
+            cert_path: resolved.cert_path,
+            key_path: resolved.key_path,
+        }));
+    }
+
+    let generate_certs = if non_interactive {
+        uses_default_dev_tls_paths(&service)
+    } else {
+        Confirm::new()
+            .with_prompt(format!(
+                "Generate self-signed TLS certs at {} and {}?",
+                resolved.cert_path.display(),
+                resolved.key_path.display()
+            ))
+            .default(true)
+            .interact()
+            .unwrap_or(false)
+    };
+
+    if !generate_certs {
+        println!(
+            "{}",
+            "Skipping TLS certificate generation. HTTPS serving will fail until certs exist."
+                .yellow()
+        );
+        return Ok(Some(TlsBootstrapReport::SkippedMissing {
+            cert_path: resolved.cert_path,
+            key_path: resolved.key_path,
+        }));
+    }
+
+    let (cert_path, key_path) =
+        generate_self_signed_certificate(Some(config_path), None, None, &[], false)?;
+    Ok(Some(TlsBootstrapReport::Generated {
+        cert_path,
+        key_path,
+    }))
+}
+
+fn load_service(config_path: &Path) -> Result<ServiceSpec> {
+    compiler::load_service_from_path(config_path).map_err(|error| Error::Config(error.to_string()))
+}
+
+fn resolve_service_tls_paths(
+    config_path: &Path,
+    service: &ServiceSpec,
+) -> Result<ResolvedTlsPaths> {
+    let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    resolve_tls_paths(&service.tls, base_dir).map_err(|error| {
+        Error::Config(format!(
+            "failed to resolve TLS paths for `{}`: {error}",
+            config_path.display()
+        ))
+    })
+}
+
+fn uses_default_dev_tls_paths(service: &ServiceSpec) -> bool {
+    service.tls.cert_path.as_deref() == Some(DEFAULT_TLS_CERT_PATH)
+        && service.tls.key_path.as_deref() == Some(DEFAULT_TLS_KEY_PATH)
+}
+
+fn required_env_var_is_missing(var_name: &str) -> bool {
+    std::env::var(var_name)
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+}
+
+fn print_setup_summary(report: &SetupBootstrapReport) {
+    println!("\n{}", "Setup summary".cyan().bold());
+
+    if let Some(env_report) = &report.env_generated {
+        println!("Generated .env: {}", env_report.path.display());
+        if let Some(backup_path) = &env_report.backup_path {
+            println!("Previous .env backup: {}", backup_path.display());
+        }
+        println!("Generated JWT_SECRET in: {}", env_report.path.display());
+        if let Some(var_name) = &env_report.generated_turso_encryption_var {
+            println!("Generated {var_name} in: {}", env_report.path.display());
+        }
+    } else if let Some(env_path) = &report.env_loaded_from {
+        println!("Loaded .env from: {}", env_path.display());
+    }
+
+    match &report.tls {
+        Some(TlsBootstrapReport::Generated {
+            cert_path,
+            key_path,
+        }) => {
+            println!("Generated TLS certificate: {}", cert_path.display());
+            println!("Generated TLS private key: {}", key_path.display());
+        }
+        Some(TlsBootstrapReport::Existing {
+            cert_path,
+            key_path,
+        }) => {
+            println!("Using TLS certificate: {}", cert_path.display());
+            println!("Using TLS private key: {}", key_path.display());
+        }
+        Some(TlsBootstrapReport::SkippedMissing {
+            cert_path,
+            key_path,
+        }) => {
+            println!(
+                "TLS files still missing: {} and {}",
+                cert_path.display(),
+                key_path.display()
+            );
+        }
+        None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_setup;
+    use crate::commands::db::database_url_from_service_config;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        std::env::temp_dir().join(format!("vsr_setup_{prefix}_{stamp}"))
+    }
+
+    #[tokio::test]
+    async fn setup_generates_env_and_dev_tls_before_database_bootstrap() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("TLS_CERT_PATH");
+            std::env::remove_var("TLS_KEY_PATH");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
+
+        let root = temp_root("bootstrap");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config_path = root.join("setup_api.eon");
+        fs::write(
+            &config_path,
+            r#"
+            module: "setup_api"
+            database: {
+                engine: {
+                    kind: TursoLocal
+                    path: "var/data/setup_api.db"
+                    encryption_key_env: "TURSO_ENCRYPTION_KEY"
+                }
+            }
+            tls: {}
+            resources: [
+                {
+                    name: "Note"
+                    fields: [
+                        { name: "id", type: I64, id: true }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+
+        let database_url =
+            database_url_from_service_config(&config_path).expect("database url should resolve");
+        run_setup(&database_url, Some(&config_path), true, false)
+            .await
+            .expect("setup should complete");
+
+        let env_path = root.join(".env");
+        let env_contents = fs::read_to_string(&env_path).expect(".env should exist");
+        assert!(env_contents.contains("JWT_SECRET="));
+        let turso_line = env_contents
+            .lines()
+            .find(|line| line.starts_with("TURSO_ENCRYPTION_KEY="))
+            .expect("turso key should be written");
+        let turso_key = turso_line
+            .split_once('=')
+            .map(|(_, value)| value)
+            .expect("turso key line should split");
+        assert_eq!(turso_key.len(), 64);
+        assert!(turso_key.chars().all(|ch| ch.is_ascii_hexdigit()));
+
+        assert!(root.join("var/data/setup_api.db").exists());
+        assert!(root.join("certs/dev-cert.pem").exists());
+        assert!(root.join("certs/dev-key.pem").exists());
+
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("TLS_CERT_PATH");
+            std::env::remove_var("TLS_KEY_PATH");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
 }

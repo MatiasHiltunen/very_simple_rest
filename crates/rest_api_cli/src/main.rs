@@ -1018,8 +1018,13 @@ async fn main() -> Result<()> {
 
         Commands::Setup { non_interactive } => {
             println!("{}", "Running setup wizard...".green().bold());
-            commands::setup::run_setup(&database_url, config_path.as_deref(), *non_interactive)
-                .await?;
+            commands::setup::run_setup(
+                &database_url,
+                config_path.as_deref(),
+                *non_interactive,
+                cli_database_url.is_some(),
+            )
+            .await?;
         }
 
         Commands::CreateAdmin { email, password } => {

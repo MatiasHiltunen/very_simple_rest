@@ -1,18 +1,35 @@
-use crate::error::Result;
-use colored::Colorize;
+use crate::error::{Error, Result};
 use rand::distr::{Alphanumeric, SampleString};
-use rand::rng;
+use rand::{RngExt, rng};
 use rest_macro_core::auth::{AuthClaimType, AuthEmailProvider};
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Generate a secure random string for JWT secret
 fn generate_random_secret(length: usize) -> String {
     let mut random = rng();
     Alphanumeric.sample_string(&mut random, length)
+}
+
+fn generate_random_hex(bytes_len: usize) -> String {
+    let mut random = rng();
+    let mut output = String::with_capacity(bytes_len * 2);
+    for _ in 0..(bytes_len * 2) {
+        let value = random.random_range(0_u8..16_u8);
+        write!(&mut output, "{value:x}").expect("hex write should succeed");
+    }
+    output
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnvFileReport {
+    pub path: PathBuf,
+    pub backup_path: Option<PathBuf>,
+    pub generated_turso_encryption_var: Option<String>,
+    pub generated_jwt_secret: bool,
 }
 
 struct EnvTemplateConfig {
@@ -118,13 +135,14 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     writeln!(&mut output).unwrap();
 
     if let Some(var_name) = &config.turso_encryption_var {
+        let turso_key = generate_random_hex(32);
         let heading = if var_name == DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV {
             "# Local Turso encryption used by the compiled database engine"
         } else {
             "# Local Turso encryption"
         };
         writeln!(&mut output, "{heading}").unwrap();
-        writeln!(&mut output, "{var_name}=64_hex_characters_here").unwrap();
+        writeln!(&mut output, "{var_name}={turso_key}").unwrap();
         writeln!(
             &mut output,
             "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
@@ -325,34 +343,101 @@ fn admin_claim_type_label(ty: AuthClaimType) -> &'static str {
     }
 }
 
-/// Generate .env template file
-pub fn generate_env_template(config_path: Option<&Path>) -> Result<()> {
-    let env_path = Path::new(".env");
+fn absolutize_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
 
-    // Check if .env already exists
-    if env_path.exists() {
-        println!("{}", "Warning: .env file already exists".yellow());
-        println!("A backup will be created before generating a new one.");
+pub fn default_env_path(config_path: Option<&Path>) -> Result<PathBuf> {
+    let relative = match config_path {
+        Some(config_path) => config_path
+            .parent()
+            .map(|parent| parent.join(".env"))
+            .unwrap_or_else(|| PathBuf::from(".env")),
+        None => PathBuf::from(".env"),
+    };
+    absolutize_path(&relative)
+}
 
-        // Create backup
-        let backup_path = Path::new(".env.backup");
-        std::fs::copy(env_path, backup_path)?;
-        println!("Backup created at .env.backup");
+pub fn load_env_file(path: &Path) -> Result<()> {
+    dotenv::from_path(path).map_err(|error| {
+        Error::Config(format!(
+            "failed to load environment file `{}`: {error}",
+            path.display()
+        ))
+    })
+}
+
+pub fn write_env_file(
+    output_path: Option<&Path>,
+    config_path: Option<&Path>,
+    backup_existing: bool,
+    refuse_existing: bool,
+) -> Result<EnvFileReport> {
+    let env_path = match output_path {
+        Some(path) => absolutize_path(path)?,
+        None => default_env_path(config_path)?,
+    };
+
+    if let Some(parent) = env_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
+    let backup_path = if env_path.exists() {
+        if refuse_existing {
+            return Err(Error::Config(format!(
+                "Environment file already exists at {}. Use --force to overwrite.",
+                env_path.display()
+            )));
+        }
+
+        if backup_existing {
+            let backup_name = format!(
+                "{}.backup",
+                env_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(".env")
+            );
+            let backup_path = env_path
+                .parent()
+                .map(|parent| parent.join(&backup_name))
+                .unwrap_or_else(|| PathBuf::from(backup_name));
+            std::fs::copy(&env_path, &backup_path)?;
+            Some(backup_path)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let config = env_template_config(config_path)?;
     let content = render_env_template(config_path)?;
-    std::fs::write(env_path, content)?;
+    std::fs::write(&env_path, content)?;
 
-    println!("{}", "✓ .env template generated successfully".green());
-    println!("Edit the .env file to customize your configuration.");
+    Ok(EnvFileReport {
+        path: env_path,
+        backup_path,
+        generated_turso_encryption_var: config.turso_encryption_var,
+        generated_jwt_secret: true,
+    })
+}
 
-    Ok(())
+/// Generate .env template file
+pub fn generate_env_template(config_path: Option<&Path>) -> Result<EnvFileReport> {
+    write_env_file(None, config_path, true, false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::render_env_template;
+    use super::{default_env_path, render_env_template, write_env_file};
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -360,12 +445,29 @@ mod tests {
             .join(name)
     }
 
+    fn temp_root(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        std::env::temp_dir().join(format!("vsr_env_{prefix}_{stamp}"))
+    }
+
+    fn env_line_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+    }
+
     #[test]
     fn rendered_env_template_reflects_service_security_and_turso_vars() {
         let content = render_env_template(Some(&fixture_path("security_api.eon")))
             .expect("security fixture should render");
         assert!(content.contains("DATABASE_URL=sqlite:var/data/security_api.db?mode=rwc"));
-        assert!(content.contains("TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
+        let turso_key =
+            env_line_value(&content, "TURSO_ENCRYPTION_KEY").expect("turso key should exist");
+        assert_eq!(turso_key.len(), 64);
+        assert!(turso_key.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert!(content.contains("# CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000"));
         assert!(content.contains("# TRUSTED_PROXIES=127.0.0.1,::1"));
         assert!(content.contains("APP_LOG=debug,sqlx=warn"));
@@ -376,7 +478,10 @@ mod tests {
         let content = render_env_template(Some(&fixture_path("turso_local_encrypted_api.eon")))
             .expect("encrypted fixture should render");
         assert!(content.contains("DATABASE_URL=sqlite:var/data/turso_encrypted.db?mode=rwc"));
-        assert!(content.contains("TURSO_ENCRYPTION_KEY=64_hex_characters_here"));
+        let turso_key =
+            env_line_value(&content, "TURSO_ENCRYPTION_KEY").expect("turso key should exist");
+        assert_eq!(turso_key.len(), 64);
+        assert!(turso_key.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -397,5 +502,41 @@ mod tests {
         assert!(content.contains("# ADMIN_CLAIM_WORKSPACE_ID=1"));
         assert!(content.contains("# ADMIN_IS_STAFF=true"));
         assert!(content.contains("# ADMIN_PLAN=pro"));
+    }
+
+    #[test]
+    fn default_env_path_uses_service_directory_when_config_is_present() {
+        let config = PathBuf::from("/tmp/example/service/api.eon");
+        assert_eq!(
+            default_env_path(Some(&config)).expect("env path should resolve"),
+            PathBuf::from("/tmp/example/service/.env")
+        );
+    }
+
+    #[test]
+    fn write_env_file_can_backup_existing_env_in_service_directory() {
+        let root = temp_root("write_env");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config = root.join("api.eon");
+        fs::copy(fixture_path("security_api.eon"), &config).expect("fixture should copy");
+        let env_path = root.join(".env");
+        fs::write(&env_path, "DATABASE_URL=sqlite:old.db\n").expect("existing env should write");
+
+        let report = write_env_file(None, Some(&config), true, false)
+            .expect("env file should write with backup");
+        assert_eq!(report.path, env_path);
+        assert_eq!(report.backup_path, Some(root.join(".env.backup")));
+        assert!(
+            fs::read_to_string(root.join(".env.backup"))
+                .expect("backup should read")
+                .contains("DATABASE_URL=sqlite:old.db")
+        );
+        assert!(
+            fs::read_to_string(&report.path)
+                .expect("env should read")
+                .contains("JWT_SECRET=")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }
