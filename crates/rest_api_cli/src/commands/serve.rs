@@ -252,6 +252,7 @@ struct DynamicResource {
     computed_fields: Vec<compiler::ComputedFieldSpec>,
     create_fields: Vec<CreateFieldRule>,
     update_field_names: Vec<String>,
+    actions: Vec<DynamicResourceAction>,
     read_requires_auth: bool,
     hybrid: Option<HybridResourceConfig>,
     nested_relations: Vec<NestedRoute>,
@@ -279,8 +280,7 @@ impl DynamicResource {
             .iter()
             .enumerate()
             .filter_map(|(index, field)| {
-                field.expose_in_api
-                    .then(|| (field.api_name.clone(), index))
+                field.expose_in_api.then(|| (field.api_name.clone(), index))
             })
             .collect::<HashMap<_, _>>();
         let response_contexts = spec
@@ -308,6 +308,11 @@ impl DynamicResource {
             })
             .map(FieldSpec::name)
             .collect();
+        let actions = spec
+            .actions
+            .iter()
+            .map(DynamicResourceAction::from_spec)
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let hybrid = build_hybrid_resource_config(&spec, service);
         let nested_relations = spec
             .fields
@@ -371,6 +376,7 @@ impl DynamicResource {
             computed_fields,
             create_fields,
             update_field_names,
+            actions,
             hybrid,
             nested_relations,
             many_to_many_routes,
@@ -394,7 +400,10 @@ impl DynamicResource {
         Ok(&self.fields[index])
     }
 
-    fn response_context_fields(&self, requested: Option<&str>) -> Result<Option<&[String]>, HttpResponse> {
+    fn response_context_fields(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<Option<&[String]>, HttpResponse> {
         let context_name = requested.or(self.default_response_context.as_deref());
         match context_name {
             Some(name) => self
@@ -479,7 +488,7 @@ impl DynamicField {
         } else {
             FieldKind::from_field(&spec)
         }
-            .ok_or_else(|| anyhow!("unsupported field type for dynamic serve: `{name}`"))?;
+        .ok_or_else(|| anyhow!("unsupported field type for dynamic serve: `{name}`"))?;
         let optional = compiler::is_optional_type(&spec.ty);
         Ok(Self {
             name,
@@ -583,8 +592,57 @@ struct ManyToManyRoute {
 }
 
 #[derive(Clone)]
+struct DynamicResourceAction {
+    path: String,
+    behavior: DynamicResourceActionBehavior,
+}
+
+#[derive(Clone)]
+enum DynamicResourceActionBehavior {
+    UpdateFields {
+        assignments: Vec<ActionUpdateAssignment>,
+    },
+    DeleteResource,
+}
+
+impl DynamicResourceAction {
+    fn from_spec(spec: &compiler::ResourceActionSpec) -> anyhow::Result<Self> {
+        Ok(Self {
+            path: spec.path.clone(),
+            behavior: match &spec.behavior {
+                compiler::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
+                    DynamicResourceActionBehavior::UpdateFields {
+                        assignments: assignments
+                            .iter()
+                            .map(ActionUpdateAssignment::from_action_spec)
+                            .collect::<anyhow::Result<Vec<_>>>()?,
+                    }
+                }
+                compiler::ResourceActionBehaviorSpec::DeleteResource => {
+                    DynamicResourceActionBehavior::DeleteResource
+                }
+            },
+        })
+    }
+
+    fn requires_input(&self) -> bool {
+        match &self.behavior {
+            DynamicResourceActionBehavior::UpdateFields { assignments } => {
+                assignments.iter().any(|assignment| {
+                    matches!(assignment.source, ActionAssignmentSource::InputField(_))
+                })
+            }
+            DynamicResourceActionBehavior::DeleteResource => false,
+        }
+    }
+}
+
+#[derive(Clone)]
 enum ListScope {
-    ParentField { field_name: String, value: i64 },
+    ParentField {
+        field_name: String,
+        value: i64,
+    },
     ManyToMany {
         through_table: String,
         source_field: String,
@@ -612,6 +670,40 @@ enum BoundValue {
     Integer(i64),
     Real(f64),
     Text(String),
+}
+
+#[derive(Clone)]
+struct UpdateAssignment {
+    field_name: String,
+    value: BoundValue,
+}
+
+#[derive(Clone)]
+struct ActionUpdateAssignment {
+    field_name: String,
+    source: ActionAssignmentSource,
+}
+
+#[derive(Clone)]
+enum ActionAssignmentSource {
+    Literal(BoundValue),
+    InputField(String),
+}
+
+impl ActionUpdateAssignment {
+    fn from_action_spec(spec: &compiler::ResourceActionAssignmentSpec) -> anyhow::Result<Self> {
+        Ok(Self {
+            field_name: spec.field.clone(),
+            source: match &spec.value {
+                compiler::ResourceActionValueSpec::Literal(value) => {
+                    ActionAssignmentSource::Literal(bound_value_from_action_json(value)?)
+                }
+                compiler::ResourceActionValueSpec::InputField(name) => {
+                    ActionAssignmentSource::InputField(name.clone())
+                }
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -767,6 +859,47 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
             },
         ));
     cfg.service(item);
+
+    for action in &resource.actions {
+        let action_path = format!("/{}/{{id}}/{}", resource.api_name, action.path);
+        let action_resource = resource.clone();
+        let action_spec = action.clone();
+        let action_route = if action.requires_input() {
+            web::resource(action_path).route(web::post().to(
+                move |path: web::Path<i64>,
+                      item: web::Json<Map<String, Value>>,
+                      user: UserContext,
+                      state: web::Data<NativeServeState>| {
+                    let resource = action_resource.clone();
+                    let action = action_spec.clone();
+                    async move {
+                        action_handler(
+                            path.into_inner(),
+                            Some(item.into_inner()),
+                            user,
+                            state,
+                            resource,
+                            action,
+                        )
+                        .await
+                    }
+                },
+            ))
+        } else {
+            web::resource(action_path).route(web::post().to(
+                move |path: web::Path<i64>,
+                      user: UserContext,
+                      state: web::Data<NativeServeState>| {
+                    let resource = action_resource.clone();
+                    let action = action_spec.clone();
+                    async move {
+                        action_handler(path.into_inner(), None, user, state, resource, action).await
+                    }
+                },
+            ))
+        };
+        cfg.service(action_route);
+    }
 
     for relation in &resource.nested_relations {
         let nested_path = format!(
@@ -1289,10 +1422,37 @@ fn apply_field_transforms_to_text(
     transforms: &[compiler::FieldTransform],
     value: String,
 ) -> String {
-    transforms.iter().fold(value, |current, transform| match transform {
-        compiler::FieldTransform::Trim => current.trim().to_owned(),
-        compiler::FieldTransform::Lowercase => current.to_lowercase(),
-    })
+    transforms
+        .iter()
+        .fold(value, |current, transform| match transform {
+            compiler::FieldTransform::Trim => current.trim().to_owned(),
+            compiler::FieldTransform::Lowercase => current.to_lowercase(),
+            compiler::FieldTransform::CollapseWhitespace => {
+                current.split_whitespace().collect::<Vec<_>>().join(" ")
+            }
+            compiler::FieldTransform::Slugify => slugify_text(current.as_str()),
+        })
+}
+
+fn slugify_text(value: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+
+    for ch in value.chars() {
+        if ch.is_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            for lower in ch.to_lowercase() {
+                slug.push(lower);
+            }
+        } else if !slug.is_empty() {
+            pending_dash = true;
+        }
+    }
+
+    slug
 }
 
 fn bound_value_to_json(value: &BoundValue) -> Value {
@@ -1305,6 +1465,26 @@ fn bound_value_to_json(value: &BoundValue) -> Value {
             .unwrap_or(Value::Null),
         BoundValue::Text(value) => Value::String(value.clone()),
     }
+}
+
+fn bound_value_from_action_json(value: &Value) -> anyhow::Result<BoundValue> {
+    Ok(match value {
+        Value::Null => BoundValue::Null,
+        Value::Bool(value) => BoundValue::Bool(*value),
+        Value::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                BoundValue::Integer(integer)
+            } else if let Some(real) = value.as_f64() {
+                BoundValue::Real(real)
+            } else {
+                bail!("unsupported numeric action value `{value}`");
+            }
+        }
+        Value::String(value) => BoundValue::Text(value.clone()),
+        Value::Array(_) | Value::Object(_) => {
+            bail!("structured action values are not supported at runtime")
+        }
+    })
 }
 
 fn parse_body_value(
@@ -1405,14 +1585,14 @@ impl std::fmt::Display for JsonFieldError {
 impl std::error::Error for JsonFieldError {}
 
 fn expected_json_field(path: &str, expected: &str) -> JsonFieldError {
-    JsonFieldError::new(
-        path,
-        format!("Field `{path}` must be {expected}"),
-    )
+    JsonFieldError::new(path, format!("Field `{path}` must be {expected}"))
 }
 
 fn invalid_json_field(path: &str, detail: impl Into<String>) -> JsonFieldError {
-    JsonFieldError::new(path, format!("Field `{path}` is invalid: {}", detail.into()))
+    JsonFieldError::new(
+        path,
+        format!("Field `{path}` is invalid: {}", detail.into()),
+    )
 }
 
 fn normalize_json_item_value(kind: FieldKind, value: &Value) -> anyhow::Result<Value> {
@@ -1537,10 +1717,7 @@ fn apply_nested_validation(
         if !enum_values.iter().any(|candidate| candidate == text) {
             return Err(JsonFieldError::new(
                 path,
-                format!(
-                    "Field `{path}` must be one of: {}",
-                    enum_values.join(", ")
-                ),
+                format!("Field `{path}` must be one of: {}", enum_values.join(", ")),
             ));
         }
     }
@@ -1784,10 +1961,11 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
 }
 
 fn parse_stored_json_value(field: &DynamicField, value: String) -> Result<Value, sqlx::Error> {
-    let parsed = serde_json::from_str::<Value>(&value).map_err(|error| sqlx::Error::ColumnDecode {
-        index: field.name.clone(),
-        source: Box::new(error),
-    })?;
+    let parsed =
+        serde_json::from_str::<Value>(&value).map_err(|error| sqlx::Error::ColumnDecode {
+            index: field.name.clone(),
+            source: Box::new(error),
+        })?;
     match field.kind {
         FieldKind::Json => Ok(parsed),
         FieldKind::JsonObject => {
@@ -1836,13 +2014,15 @@ fn parse_stored_json_value(field: &DynamicField, value: String) -> Result<Value,
                     });
                 }
             };
-            let item_kind = field.list_item_kind.ok_or_else(|| sqlx::Error::ColumnDecode {
-                index: field.name.clone(),
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "missing list item kind",
-                )),
-            })?;
+            let item_kind = field
+                .list_item_kind
+                .ok_or_else(|| sqlx::Error::ColumnDecode {
+                    index: field.name.clone(),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "missing list item kind",
+                    )),
+                })?;
             let normalized = items
                 .iter()
                 .map(|item| {
@@ -2358,14 +2538,20 @@ async fn effective_create_field_value(
                     return claim_value.ok_or_else(|| {
                         errors::forbidden(
                             "missing_claim",
-                            format!("Missing required claim for create field `{}`", field.api_name),
+                            format!(
+                                "Missing required claim for create field `{}`",
+                                field.api_name
+                            ),
                         )
                     });
                 }
                 return claim_value.ok_or_else(|| {
                     errors::forbidden(
                         "missing_claim",
-                        format!("Missing required claim for create field `{}`", field.api_name),
+                        format!(
+                            "Missing required claim for create field `{}`",
+                            field.api_name
+                        ),
                     )
                 });
             }
@@ -3089,7 +3275,8 @@ fn build_list_plan(
                     "Cursor does not match the current sort field",
                 ));
             }
-            select_only_conditions.push(format!("{} {comparator} {BIND_MARKER}", resource.id_field));
+            select_only_conditions
+                .push(format!("{} {comparator} {BIND_MARKER}", resource.id_field));
             select_only_binds.push(BoundValue::Integer(cursor_payload.last_id));
         } else {
             let cursor_value = match (&sort_field_spec.kind, &cursor_payload.value) {
@@ -3512,14 +3699,12 @@ async fn get_handler(
         return response;
     }
     match fetch_readable_by_id(&resource, dynamic_service.as_ref(), &state, &user, id).await {
-        Ok(Some(item)) => match apply_response_context_to_item(
-            &resource,
-            item,
-            requested_context.as_deref(),
-        ) {
-            Ok(value) => HttpResponse::Ok().json(value),
-            Err(response) => response,
-        },
+        Ok(Some(item)) => {
+            match apply_response_context_to_item(&resource, item, requested_context.as_deref()) {
+                Ok(value) => HttpResponse::Ok().json(value),
+                Err(response) => response,
+            }
+        }
         Ok(None) => match fetch_hybrid_authorized_by_id(
             &resource,
             &state,
@@ -3529,14 +3714,13 @@ async fn get_handler(
         )
         .await
         {
-            Ok(Some(item)) => match apply_response_context_to_item(
-                &resource,
-                item,
-                requested_context.as_deref(),
-            ) {
-                Ok(value) => HttpResponse::Ok().json(value),
-                Err(response) => response,
-            },
+            Ok(Some(item)) => {
+                match apply_response_context_to_item(&resource, item, requested_context.as_deref())
+                {
+                    Ok(value) => HttpResponse::Ok().json(value),
+                    Err(response) => response,
+                }
+            }
             Ok(None) => errors::not_found("Not found"),
             Err(response) => response,
         },
@@ -3654,16 +3838,14 @@ async fn create_handler(
     )
     .await
     {
-        Ok(Some(item)) => match apply_response_context_to_item(
-            &resource,
-            item,
-            requested_context.as_deref(),
-        ) {
-            Ok(value) => HttpResponse::Created()
-                .append_header(("Location", location))
-                .json(value),
-            Err(response) => response,
-        },
+        Ok(Some(item)) => {
+            match apply_response_context_to_item(&resource, item, requested_context.as_deref()) {
+                Ok(value) => HttpResponse::Created()
+                    .append_header(("Location", location))
+                    .json(value),
+                Err(response) => response,
+            }
+        }
         Ok(None) => match fetch_hybrid_authorized_by_id(
             &resource,
             &state,
@@ -3673,16 +3855,15 @@ async fn create_handler(
         )
         .await
         {
-            Ok(Some(item)) => match apply_response_context_to_item(
-                &resource,
-                item,
-                requested_context.as_deref(),
-            ) {
-                Ok(value) => HttpResponse::Created()
-                    .append_header(("Location", location))
-                    .json(value),
-                Err(response) => response,
-            },
+            Ok(Some(item)) => {
+                match apply_response_context_to_item(&resource, item, requested_context.as_deref())
+                {
+                    Ok(value) => HttpResponse::Created()
+                        .append_header(("Location", location))
+                        .json(value),
+                    Err(response) => response,
+                }
+            }
             Ok(None) => HttpResponse::Created()
                 .append_header(("Location", location))
                 .finish(),
@@ -3708,29 +3889,119 @@ async fn update_handler(
     }
 
     let mut assignments = Vec::new();
-    let mut write_binds = Vec::new();
     for field_name in &resource.update_field_names {
         let field = match resource.field(field_name.as_str()) {
             Ok(field) => field,
             Err(error) => return errors::internal_error(error.to_string()),
         };
-        let value = match parse_body_value(field, payload.get(field.api_name.as_str()), field.optional) {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
+        let value =
+            match parse_body_value(field, payload.get(field.api_name.as_str()), field.optional) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
         if let Err(response) = apply_validation(field, &value) {
             return response;
         }
-        assignments.push(format!(
+        assignments.push(UpdateAssignment {
+            field_name: field.name.clone(),
+            value,
+        });
+    }
+    execute_update_assignments(id, &user, &state, &resource, assignments).await
+}
+
+async fn action_handler(
+    id: i64,
+    payload: Option<Map<String, Value>>,
+    user: UserContext,
+    state: web::Data<NativeServeState>,
+    resource: Arc<DynamicResource>,
+    action: DynamicResourceAction,
+) -> HttpResponse {
+    match &action.behavior {
+        DynamicResourceActionBehavior::UpdateFields { assignments } => {
+            if let Err(response) =
+                require_role(&user, resource.requires_role(AuthorizationAction::Update))
+            {
+                return response;
+            }
+            let empty_payload = Map::new();
+            let payload = payload.as_ref().unwrap_or(&empty_payload);
+            let assignments = match action_update_assignments(&resource, assignments, payload) {
+                Ok(assignments) => assignments,
+                Err(response) => return response,
+            };
+            execute_update_assignments(id, &user, &state, &resource, assignments).await
+        }
+        DynamicResourceActionBehavior::DeleteResource => {
+            delete_handler(id, user, state, resource).await
+        }
+    }
+}
+
+fn action_update_assignments(
+    resource: &DynamicResource,
+    action_assignments: &[ActionUpdateAssignment],
+    payload: &Map<String, Value>,
+) -> Result<Vec<UpdateAssignment>, HttpResponse> {
+    let mut assignments = Vec::with_capacity(action_assignments.len());
+
+    for assignment in action_assignments {
+        let field = resource
+            .field(assignment.field_name.as_str())
+            .map_err(|error| errors::internal_error(error.to_string()))?;
+        let value = match &assignment.source {
+            ActionAssignmentSource::Literal(value) => value.clone(),
+            ActionAssignmentSource::InputField(name) => {
+                let mut input_field = field.clone();
+                input_field.api_name = name.clone();
+                let value = match parse_body_value(
+                    &input_field,
+                    payload.get(name.as_str()),
+                    field.optional,
+                ) {
+                    Ok(value) => value,
+                    Err(response) => return Err(response),
+                };
+                if let Err(response) = apply_validation(&input_field, &value) {
+                    return Err(response);
+                }
+                value
+            }
+        };
+        assignments.push(UpdateAssignment {
+            field_name: assignment.field_name.clone(),
+            value,
+        });
+    }
+
+    Ok(assignments)
+}
+
+async fn execute_update_assignments(
+    id: i64,
+    user: &UserContext,
+    state: &NativeServeState,
+    resource: &DynamicResource,
+    assignments: Vec<UpdateAssignment>,
+) -> HttpResponse {
+    if assignments.is_empty() {
+        return errors::bad_request("no_updatable_fields", "No updatable fields configured");
+    }
+
+    let mut assignment_sql = Vec::new();
+    let mut write_binds = Vec::new();
+    for assignment in &assignments {
+        assignment_sql.push(format!(
             "{} = {}",
-            field.name,
+            assignment.field_name,
             placeholder(resource.db, write_binds.len() + 1)
         ));
-        write_binds.push(value);
+        write_binds.push(assignment.value.clone());
     }
     for field in &resource.fields {
         if field.generated == GeneratedValue::UpdatedAt {
-            assignments.push(format!(
+            assignment_sql.push(format!(
                 "{} = {}",
                 field.name,
                 generated_temporal_expression(resource.db, field)
@@ -3738,19 +4009,20 @@ async fn update_handler(
         }
     }
 
+    let assignment_sql_joined = assignment_sql.join(", ");
     let policy = resource.policies.update.as_ref();
     let mut sql = format!(
         "UPDATE {} SET {} WHERE {} = {}",
         resource.table_name,
-        assignments.join(", "),
+        assignment_sql_joined,
         resource.id_field,
         placeholder(resource.db, write_binds.len() + 1),
     );
     let mut binds = write_binds.clone();
     if let Some(policy) = policy
-        && !(resource.policies.admin_bypass && is_admin(&user))
+        && !(resource.policies.admin_bypass && is_admin(user))
     {
-        match build_row_policy_plan(&resource, state.dynamic_service.as_ref(), policy, &user)
+        match build_row_policy_plan(resource, state.dynamic_service.as_ref(), policy, user)
             .map_err(|error| errors::internal_error(error.to_string()))
         {
             Ok(PlanOutcome::Resolved(plan)) => {
@@ -3769,10 +4041,10 @@ async fn update_handler(
             Ok(PlanOutcome::Indeterminate) => {
                 return update_hybrid_fallback(
                     id,
-                    &user,
-                    &state,
-                    &resource,
-                    assignments.join(", "),
+                    user,
+                    state,
+                    resource,
+                    assignment_sql_joined,
                     write_binds,
                 )
                 .await;
@@ -3791,10 +4063,10 @@ async fn update_handler(
         Ok(result) if result.rows_affected() == 0 => {
             update_hybrid_fallback(
                 id,
-                &user,
-                &state,
-                &resource,
-                assignments.join(", "),
+                user,
+                state,
+                resource,
+                assignment_sql_joined,
                 write_binds,
             )
             .await
@@ -4179,16 +4451,14 @@ mod tests {
             std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
         }
         let (dynamic_service, state) = build_test_state("json_fields_api.eon", false).await;
-        query(
-            "INSERT INTO block_document (id, payload, attributes, blocks) VALUES (?, ?, ?, ?)",
-        )
-        .bind(1_i64)
-        .bind(r#"{"title":"Hello blocks","protected":false,"version":2}"#)
-        .bind(r#"{"align":"wide","level":3}"#)
-        .bind(r#"[{"name":"core/paragraph","attrs":{"dropCap":true}}]"#)
-        .execute(&state.pool)
-        .await
-        .expect("json seed data should insert");
+        query("INSERT INTO block_document (id, payload, attributes, blocks) VALUES (?, ?, ?, ?)")
+            .bind(1_i64)
+            .bind(r#"{"title":"Hello blocks","protected":false,"version":2}"#)
+            .bind(r#"{"align":"wide","level":3}"#)
+            .bind(r#"[{"name":"core/paragraph","attrs":{"dropCap":true}}]"#)
+            .execute(&state.pool)
+            .await
+            .expect("json seed data should insert");
 
         let app = test::init_service(
             App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
@@ -4276,7 +4546,10 @@ mod tests {
         assert_eq!(list_response.status(), StatusCode::OK);
         let list_body: Value = test::read_body_json(list_response).await;
         assert_eq!(list_body["items"][0]["title"]["raw"], "Hello world");
-        assert_eq!(list_body["items"][0]["settings"]["seo"]["slug"], "hello-world");
+        assert_eq!(
+            list_body["items"][0]["settings"]["seo"]["slug"],
+            "hello-world"
+        );
 
         let create_request = test::TestRequest::post()
             .uri("/api/entry")
@@ -4298,7 +4571,10 @@ mod tests {
         let create_response = test::call_service(&app, create_request).await;
         assert_eq!(create_response.status(), StatusCode::CREATED);
         let create_body: Value = test::read_body_json(create_response).await;
-        assert_eq!(create_body["title"]["rendered"], "<p>Typed object title</p>");
+        assert_eq!(
+            create_body["title"]["rendered"],
+            "<p>Typed object title</p>"
+        );
         assert_eq!(create_body["settings"]["categories"][1], 8);
 
         let invalid_request = test::TestRequest::post()
@@ -4341,10 +4617,10 @@ mod tests {
             .uri("/api/posts")
             .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
             .set_json(json!({
-                "slug": "  HeLLo-World  ",
+                "slug": "  Hello,   World!  ",
                 "status": " DRAFT ",
                 "title": {
-                    "raw": "  Hello world  ",
+                    "raw": "  Hello   world \n again  ",
                     "rendered": "  <p>Hello world</p>  "
                 }
             }))
@@ -4354,17 +4630,17 @@ mod tests {
         let created: Value = test::read_body_json(create_response).await;
         assert_eq!(created["slug"], "hello-world");
         assert_eq!(created["status"], "draft");
-        assert_eq!(created["title"]["raw"], "Hello world");
+        assert_eq!(created["title"]["raw"], "Hello world again");
         assert_eq!(created["title"]["rendered"], "<p>Hello world</p>");
 
         let update_request = test::TestRequest::put()
             .uri("/api/posts/1")
             .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
             .set_json(json!({
-                "slug": "  NeXt-Post  ",
+                "slug": "  Next__Post!!!  ",
                 "status": " PUBLISHED ",
                 "title": {
-                    "raw": "  Updated title  ",
+                    "raw": "  Updated   title\t\tagain  ",
                     "rendered": "  <p>Updated title</p>  "
                 }
             }))
@@ -4385,7 +4661,7 @@ mod tests {
         let updated: Value = test::read_body_json(get_response).await;
         assert_eq!(updated["slug"], "next-post");
         assert_eq!(updated["status"], "published");
-        assert_eq!(updated["title"]["raw"], "Updated title");
+        assert_eq!(updated["title"]["raw"], "Updated title again");
         assert_eq!(updated["title"]["rendered"], "<p>Updated title</p>");
     }
 
@@ -4525,7 +4801,9 @@ mod tests {
         let cursor_body: Value = test::read_body_json(cursor_response).await;
         assert_eq!(cursor_body["items"][0]["title"], "Gamma");
 
-        let nested_request = test::TestRequest::get().uri("/api/posts/1/comments").to_request();
+        let nested_request = test::TestRequest::get()
+            .uri("/api/posts/1/comments")
+            .to_request();
         let nested_response = test::call_service(&app, nested_request).await;
         assert_eq!(nested_response.status(), StatusCode::OK);
         let nested_body: Value = test::read_body_json(nested_response).await;
@@ -4682,7 +4960,9 @@ mod tests {
         let edit_body: Value = test::read_body_json(edit_response).await;
         assert_eq!(edit_body["secret"], "secret alpha");
 
-        let list_request = test::TestRequest::get().uri("/api/posts?sort=title").to_request();
+        let list_request = test::TestRequest::get()
+            .uri("/api/posts?sort=title")
+            .to_request();
         let list_response = test::call_service(&app, list_request).await;
         assert_eq!(list_response.status(), StatusCode::OK);
         let list_body: Value = test::read_body_json(list_response).await;
@@ -4986,8 +5266,7 @@ mod tests {
             )
             .expect("typed object should parse"),
             BoundValue::Text(
-                r#"{"raw":"Typed object title","rendered":"<p>Typed object title</p>"}"#
-                    .to_owned()
+                r#"{"raw":"Typed object title","rendered":"<p>Typed object title</p>"}"#.to_owned()
             )
         );
 
@@ -5013,10 +5292,7 @@ mod tests {
             api_name: "slug".to_owned(),
             expose_in_api: true,
             enum_values: None,
-            transforms: vec![
-                compiler::FieldTransform::Trim,
-                compiler::FieldTransform::Lowercase,
-            ],
+            transforms: vec![compiler::FieldTransform::Slugify],
             kind: FieldKind::Text,
             list_item_kind: None,
             object_fields: None,
@@ -5060,7 +5336,7 @@ mod tests {
                     api_name: "raw".to_owned(),
                     expose_in_api: true,
                     enum_values: None,
-                    transforms: vec![compiler::FieldTransform::Trim],
+                    transforms: vec![compiler::FieldTransform::CollapseWhitespace],
                     kind: FieldKind::Text,
                     list_item_kind: None,
                     object_fields: None,
@@ -5097,28 +5373,103 @@ mod tests {
         };
 
         assert_eq!(
-            parse_json_value(&text_field, &json!("  HeLLo-World  "))
+            parse_json_value(&text_field, &json!("  Hello,   World!  "))
                 .expect("text field should normalize"),
             BoundValue::Text("hello-world".to_owned())
         );
         assert_eq!(
-            parse_json_value(&enum_field, &json!(" DRAFT "))
-                .expect("enum field should normalize"),
+            parse_json_value(&enum_field, &json!(" DRAFT ")).expect("enum field should normalize"),
             BoundValue::Text("draft".to_owned())
         );
         assert_eq!(
             parse_json_value(
                 &object_field,
                 &json!({
-                    "raw": "  Hello world  ",
+                    "raw": "  Hello   world \n again  ",
                     "rendered": "  <p>Hello world</p>  "
                 })
             )
             .expect("nested object field should normalize"),
             BoundValue::Text(
-                r#"{"raw":"Hello world","rendered":"<p>Hello world</p>"}"#.to_owned()
+                r#"{"raw":"Hello world again","rendered":"<p>Hello world</p>"}"#.to_owned()
             )
         );
+    }
+
+    #[actix_web::test]
+    async fn native_serve_applies_resource_actions() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+
+        let (dynamic_service, state) = build_test_state("resource_actions_api.eon", false).await;
+        query("INSERT INTO post (id, title, slug, status) VALUES (1, 'Draft', 'draft', 'draft')")
+            .execute(&state.pool)
+            .await
+            .expect("seed row should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["editor"]);
+
+        let action_request = test::TestRequest::post()
+            .uri("/api/posts/1/go-live")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .to_request();
+        let action_response = test::call_service(&app, action_request).await;
+        assert_eq!(action_response.status(), StatusCode::OK);
+        assert!(test::read_body(action_response).await.is_empty());
+
+        let rename_request = test::TestRequest::post()
+            .uri("/api/posts/1/rename")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "newTitle": "Fresh Launch",
+                "newSlug": " Fresh   Launch! ",
+                "newStatus": " REVIEW "
+            }))
+            .to_request();
+        let rename_response = test::call_service(&app, rename_request).await;
+        assert_eq!(rename_response.status(), StatusCode::OK);
+        assert!(test::read_body(rename_response).await.is_empty());
+
+        let invalid_rename_request = test::TestRequest::post()
+            .uri("/api/posts/1/rename")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "newTitle": "bad",
+                "newSlug": "still-valid",
+                "newStatus": "draft"
+            }))
+            .to_request();
+        let invalid_rename_response = test::call_service(&app, invalid_rename_request).await;
+        assert_eq!(invalid_rename_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_rename_body: Value = test::read_body_json(invalid_rename_response).await;
+        assert_eq!(invalid_rename_body["code"], "validation_error");
+        assert_eq!(invalid_rename_body["field"], "newTitle");
+
+        let get_request = test::TestRequest::get().uri("/api/posts/1").to_request();
+        let get_response = test::call_service(&app, get_request).await;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body: Value = test::read_body_json(get_response).await;
+        assert_eq!(get_body["title"], "Fresh Launch");
+        assert_eq!(get_body["slug"], "fresh-launch");
+        assert_eq!(get_body["status"], "review");
+
+        let purge_request = test::TestRequest::post()
+            .uri("/api/posts/1/purge")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .to_request();
+        let purge_response = test::call_service(&app, purge_request).await;
+        assert_eq!(purge_response.status(), StatusCode::OK);
+
+        let missing_request = test::TestRequest::get().uri("/api/posts/1").to_request();
+        let missing_response = test::call_service(&app, missing_request).await;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
     }
 
     #[actix_web::test]

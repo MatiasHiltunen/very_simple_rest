@@ -4,25 +4,31 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, Utc};
 use heck::ToSnakeCase;
 use proc_macro2::Span;
 use quote::ToTokens;
+use rust_decimal::Decimal;
 use serde::de::{self, Deserializer, Error as _, MapAccess, Visitor};
+use serde_json::Value as JsonValue;
 use syn::{LitStr, Type};
+use uuid::Uuid;
 
 use super::model::{
     DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation, GENERATED_DATE_ALIAS,
     GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
     GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
-    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound,
-    PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
-    PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource, ReferentialAction,
-    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind,
-    ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
-    default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
-    sanitize_struct_ident, supports_declared_index,
+    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
+    PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
+    PolicyFilterOperator, PolicyValueSource, ReferentialAction, ResourceActionAssignmentSpec,
+    ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
+    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceSpec,
+    ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
+    default_resource_module_ident, infer_generated_value, infer_sql_type, is_json_array_type,
+    is_json_object_type, is_json_type, is_list_field, is_optional_type, is_typed_object_field,
+    sanitize_module_ident, sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
     validate_authorization_contract, validate_field_transforms, validate_field_validations,
-    is_optional_type,
     validate_list_config, validate_logging_config, validate_policy_claim_sources,
     validate_relations, validate_row_policies, validate_runtime_config, validate_security_config,
     validate_sql_identifier, validate_tls_config,
@@ -503,6 +509,8 @@ struct ResourceDocument {
     indexes: Vec<IndexDocument>,
     #[serde(default)]
     many_to_many: Vec<ManyToManyDocument>,
+    #[serde(default)]
+    actions: Vec<ResourceActionDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
@@ -518,12 +526,49 @@ struct MixinDocument {
 
 #[derive(Default, serde::Deserialize)]
 struct ResourceApiDocument {
-    #[serde(default, deserialize_with = "deserialize_api_field_projection_documents")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_api_field_projection_documents"
+    )]
     fields: Vec<ApiFieldProjectionDocument>,
     #[serde(default)]
     default_context: Option<String>,
     #[serde(default, deserialize_with = "deserialize_response_context_documents")]
     contexts: Vec<ResponseContextDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceActionDocument {
+    name: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    behavior: ResourceActionBehaviorDocument,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceActionBehaviorDocument {
+    kind: String,
+    #[serde(default)]
+    set: BTreeMap<String, ResourceActionAssignmentValueDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum ResourceActionAssignmentValueDocument {
+    Input(ResourceActionInputValueDocument),
+    Literal(JsonValue),
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceActionInputValueDocument {
+    input: String,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -800,6 +845,8 @@ struct ResourceMapValueDocument {
     indexes: Vec<IndexDocument>,
     #[serde(default)]
     many_to_many: Vec<ManyToManyDocument>,
+    #[serde(default)]
+    actions: Vec<ResourceActionDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
@@ -994,6 +1041,7 @@ impl ResourceMapValueDocument {
             use_mixins: self.use_mixins,
             indexes: self.indexes,
             many_to_many: self.many_to_many,
+            actions: self.actions,
             fields: self.fields,
         })
     }
@@ -1413,7 +1461,8 @@ impl<'de> Visitor<'de> for ResponseContextDocumentsVisitor {
         let mut seen = HashSet::new();
         let mut contexts = Vec::new();
 
-        while let Some((key, value)) = map.next_entry::<String, ResponseContextMapValueDocument>()?
+        while let Some((key, value)) =
+            map.next_entry::<String, ResponseContextMapValueDocument>()?
         {
             if !seen.insert(key.clone()) {
                 return Err(A::Error::custom(format!(
@@ -1540,7 +1589,10 @@ fn build_enums(documents: Vec<EnumDocument>) -> syn::Result<Vec<EnumSpec>> {
         syn::parse_str::<syn::Ident>(&document.name).map_err(|_| {
             syn::Error::new(
                 Span::call_site(),
-                format!("enum name `{}` is not a valid Rust identifier", document.name),
+                format!(
+                    "enum name `{}` is not a valid Rust identifier",
+                    document.name
+                ),
             )
         })?;
         if document.values.is_empty() {
@@ -1554,7 +1606,10 @@ fn build_enums(documents: Vec<EnumDocument>) -> syn::Result<Vec<EnumSpec>> {
             if !seen_values.insert(value.clone()) {
                 return Err(syn::Error::new(
                     Span::call_site(),
-                    format!("enum `{}` contains duplicate value `{value}`", document.name),
+                    format!(
+                        "enum `{}` contains duplicate value `{value}`",
+                        document.name
+                    ),
                 ));
             }
         }
@@ -1581,7 +1636,10 @@ fn build_mixins(documents: Vec<MixinDocument>) -> syn::Result<HashMap<String, Mi
         syn::parse_str::<syn::Ident>(document.name.as_str()).map_err(|_| {
             syn::Error::new(
                 Span::call_site(),
-                format!("mixin name `{}` is not a valid Rust identifier", document.name),
+                format!(
+                    "mixin name `{}` is not a valid Rust identifier",
+                    document.name
+                ),
             )
         })?;
         validate_mixin_document(&document)?;
@@ -1617,7 +1675,10 @@ fn validate_mixin_document(mixin: &MixinDocument) -> syn::Result<()> {
         if field.id {
             return Err(syn::Error::new(
                 Span::call_site(),
-                format!("mixin `{}` cannot declare id field `{}`", mixin.name, field.name),
+                format!(
+                    "mixin `{}` cannot declare id field `{}`",
+                    mixin.name, field.name
+                ),
             ));
         }
     }
@@ -1631,7 +1692,10 @@ fn validate_mixin_document(mixin: &MixinDocument) -> syn::Result<()> {
         if index.fields.is_empty() {
             return Err(syn::Error::new(
                 Span::call_site(),
-                format!("mixin `{}` index definitions must declare at least one field", mixin.name),
+                format!(
+                    "mixin `{}` index definitions must declare at least one field",
+                    mixin.name
+                ),
             ));
         }
         for field_name in &index.fields {
@@ -1732,12 +1796,9 @@ fn build_resources_with_enums(
         let configured_id = resource.id_field.unwrap_or_else(|| "id".to_owned());
         let resource_api = resource.api.unwrap_or_default();
         let resource_many_to_many = resource.many_to_many;
+        let resource_actions = resource.actions;
         let has_api_projection_block = !resource_api.fields.is_empty();
-        if has_api_projection_block
-            && resource
-                .fields
-                .iter()
-                .any(|field| field.api_name.is_some())
+        if has_api_projection_block && resource.fields.iter().any(|field| field.api_name.is_some())
         {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -1767,8 +1828,11 @@ fn build_resources_with_enums(
                 let field_api_name = field.api_name.unwrap_or_else(|| field.name.clone());
                 validate_api_name(
                     field_api_name.as_str(),
-                    format!("field `{}` on resource `{struct_name}` api_name", field.name)
-                        .as_str(),
+                    format!(
+                        "field `{}` on resource `{struct_name}` api_name",
+                        field.name
+                    )
+                    .as_str(),
                 )?;
                 if !seen_field_api_names.insert(field_api_name.clone()) {
                     return Err(syn::Error::new(
@@ -1858,19 +1922,28 @@ fn build_resources_with_enums(
                 if is_id {
                     return Err(syn::Error::new(
                         Span::call_site(),
-                        format!("field `{}` on resource `{struct_name}` cannot be a list ID field", field.name),
+                        format!(
+                            "field `{}` on resource `{struct_name}` cannot be a list ID field",
+                            field.name
+                        ),
                     ));
                 }
                 if field.relation.is_some() {
                     return Err(syn::Error::new(
                         Span::call_site(),
-                        format!("field `{}` on resource `{struct_name}` cannot combine `type = List` with `relation`", field.name),
+                        format!(
+                            "field `{}` on resource `{struct_name}` cannot combine `type = List` with `relation`",
+                            field.name
+                        ),
                     ));
                 }
                 if field.validate.is_some() {
                     return Err(syn::Error::new(
                         Span::call_site(),
-                        format!("field `{}` on resource `{struct_name}` cannot combine `type = List` with `validate` yet", field.name),
+                        format!(
+                            "field `{}` on resource `{struct_name}` cannot combine `type = List` with `validate` yet",
+                            field.name
+                        ),
                     ));
                 }
             }
@@ -1939,6 +2012,12 @@ fn build_resources_with_enums(
             struct_name.as_str(),
         )?;
         let indexes = build_index_specs(resource.indexes);
+        let actions = build_resource_action_specs(
+            struct_name.as_str(),
+            fields.as_slice(),
+            &policies,
+            resource_actions,
+        )?;
         pending_many_to_many.push((struct_name.clone(), resource_many_to_many));
 
         result.push(ResourceSpec {
@@ -1955,6 +2034,7 @@ fn build_resources_with_enums(
             list: parse_list_config(resource.list),
             indexes,
             many_to_many: Vec::new(),
+            actions,
             computed_fields,
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
@@ -2145,6 +2225,490 @@ fn resolve_resource_selector<'a>(
         })
 }
 
+fn build_resource_action_specs(
+    resource_name: &str,
+    fields: &[FieldSpec],
+    policies: &RowPolicies,
+    documents: Vec<ResourceActionDocument>,
+) -> syn::Result<Vec<ResourceActionSpec>> {
+    let controlled_fields = policies
+        .controlled_filter_fields()
+        .into_iter()
+        .chain(
+            policies
+                .iter_assignments()
+                .map(|(_, policy)| policy.field.clone()),
+        )
+        .collect::<HashSet<_>>();
+    let mut seen_names = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut actions = Vec::with_capacity(documents.len());
+
+    for document in documents {
+        validate_api_name(
+            document.name.as_str(),
+            format!("resource `{resource_name}` action `{}`", document.name).as_str(),
+        )?;
+        if !seen_names.insert(document.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "duplicate action `{}` on resource `{resource_name}`",
+                    document.name
+                ),
+            ));
+        }
+        let path = document.path.unwrap_or_else(|| document.name.clone());
+        validate_api_name(
+            path.as_str(),
+            format!("resource `{resource_name}` action `{}` path", document.name).as_str(),
+        )?;
+        if !seen_paths.insert(path.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate action path `{path}` on resource `{resource_name}`",),
+            ));
+        }
+
+        let target = parse_resource_action_target(
+            document.target.as_deref(),
+            resource_name,
+            document.name.as_str(),
+        )?;
+        let method = parse_resource_action_method(
+            document.method.as_deref(),
+            resource_name,
+            document.name.as_str(),
+        )?;
+        let behavior = parse_resource_action_behavior(
+            resource_name,
+            document.name.as_str(),
+            fields,
+            &controlled_fields,
+            document.behavior,
+        )?;
+        let input_fields = match &behavior {
+            ResourceActionBehaviorSpec::UpdateFields { assignments } => assignments
+                .iter()
+                .filter_map(|assignment| match &assignment.value {
+                    ResourceActionValueSpec::InputField(name) => {
+                        Some(ResourceActionInputFieldSpec {
+                            name: name.clone(),
+                            target_field: assignment.field.clone(),
+                        })
+                    }
+                    ResourceActionValueSpec::Literal(_) => None,
+                })
+                .collect(),
+            ResourceActionBehaviorSpec::DeleteResource => Vec::new(),
+        };
+
+        actions.push(ResourceActionSpec {
+            name: document.name,
+            path,
+            target,
+            method,
+            input_fields,
+            behavior,
+        });
+    }
+
+    Ok(actions)
+}
+
+fn parse_resource_action_target(
+    value: Option<&str>,
+    resource_name: &str,
+    action_name: &str,
+) -> syn::Result<ResourceActionTarget> {
+    match value.unwrap_or("Item") {
+        "Item" => Ok(ResourceActionTarget::Item),
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` has unsupported target `{other}`; only `Item` is supported"
+            ),
+        )),
+    }
+}
+
+fn parse_resource_action_method(
+    value: Option<&str>,
+    resource_name: &str,
+    action_name: &str,
+) -> syn::Result<ResourceActionMethod> {
+    match value.unwrap_or("POST") {
+        "POST" => Ok(ResourceActionMethod::Post),
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` has unsupported method `{other}`; only `POST` is supported"
+            ),
+        )),
+    }
+}
+
+fn parse_resource_action_behavior(
+    resource_name: &str,
+    action_name: &str,
+    fields: &[FieldSpec],
+    controlled_fields: &HashSet<String>,
+    document: ResourceActionBehaviorDocument,
+) -> syn::Result<ResourceActionBehaviorSpec> {
+    match document.kind.as_str() {
+        "UpdateFields" => {
+            if document.set.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "resource `{resource_name}` action `{action_name}` must declare at least one `behavior.set` field"
+                    ),
+                ));
+            }
+            let mut seen_input_fields = HashSet::new();
+            let assignments = document
+                .set
+                .into_iter()
+                .map(|(field_name, value)| {
+                    let Some(field) = fields.iter().find(|field| field.name() == field_name) else {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "resource `{resource_name}` action `{action_name}` references unknown field `{field_name}`"
+                            ),
+                        ));
+                    };
+                    validate_resource_action_assignment_field(
+                        resource_name,
+                        action_name,
+                        field,
+                        controlled_fields,
+                    )?;
+                    Ok(ResourceActionAssignmentSpec {
+                        field: field_name,
+                        value: match value {
+                            ResourceActionAssignmentValueDocument::Literal(value) => {
+                                ResourceActionValueSpec::Literal(
+                                    normalize_resource_action_field_value(
+                                        resource_name,
+                                        action_name,
+                                        field,
+                                        &value,
+                                    )?,
+                                )
+                            }
+                            ResourceActionAssignmentValueDocument::Input(input) => {
+                                validate_api_name(
+                                    input.input.as_str(),
+                                    format!(
+                                        "resource `{resource_name}` action `{action_name}` input"
+                                    )
+                                    .as_str(),
+                                )?;
+                                if !seen_input_fields.insert(input.input.clone()) {
+                                    return Err(syn::Error::new(
+                                        Span::call_site(),
+                                        format!(
+                                            "resource `{resource_name}` action `{action_name}` reuses input field `{}` across multiple assignments; duplicate action inputs are not supported yet",
+                                            input.input
+                                        ),
+                                    ));
+                                }
+                                ResourceActionValueSpec::InputField(input.input)
+                            }
+                        },
+                    })
+                })
+                .collect::<syn::Result<Vec<_>>>()?;
+            Ok(ResourceActionBehaviorSpec::UpdateFields { assignments })
+        }
+        "DeleteResource" => {
+            if !document.set.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "resource `{resource_name}` action `{action_name}` with `DeleteResource` behavior cannot declare `behavior.set` fields"
+                    ),
+                ));
+            }
+            Ok(ResourceActionBehaviorSpec::DeleteResource)
+        }
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` has unsupported behavior kind `{other}`; only `UpdateFields` and `DeleteResource` are supported"
+            ),
+        )),
+    }
+}
+
+fn validate_resource_action_assignment_field(
+    resource_name: &str,
+    action_name: &str,
+    field: &FieldSpec,
+    controlled_fields: &HashSet<String>,
+) -> syn::Result<()> {
+    if field.is_id {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` cannot assign id field `{}`",
+                field.name()
+            ),
+        ));
+    }
+    if field.generated.skip_update_bind() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` cannot assign generated field `{}`",
+                field.name()
+            ),
+        ));
+    }
+    if controlled_fields.contains(&field.name()) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` cannot assign policy-controlled field `{}`",
+                field.name()
+            ),
+        ));
+    }
+    if is_typed_object_field(field)
+        || is_list_field(field)
+        || is_json_type(&field.ty)
+        || is_json_object_type(&field.ty)
+        || is_json_array_type(&field.ty)
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` action `{action_name}` only supports scalar assignment fields in the first slice; `{}` is not supported",
+                field.name()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_resource_action_field_value(
+    resource_name: &str,
+    action_name: &str,
+    field: &FieldSpec,
+    value: &JsonValue,
+) -> syn::Result<JsonValue> {
+    let label = format!(
+        "resource `{resource_name}` action `{action_name}` field `{}`",
+        field.name()
+    );
+
+    if value.is_null() {
+        return if is_optional_type(&field.ty) {
+            Ok(JsonValue::Null)
+        } else {
+            Err(syn::Error::new(
+                Span::call_site(),
+                format!("{label} cannot be null"),
+            ))
+        };
+    }
+
+    let normalized =
+        if let Some(kind) = structured_scalar_kind(&field.ty) {
+            let text = value.as_str().ok_or_else(|| {
+                syn::Error::new(Span::call_site(), format!("{label} must be a string"))
+            })?;
+            JsonValue::String(normalize_structured_scalar_action_text(kind, text).map_err(
+                |error| syn::Error::new(Span::call_site(), format!("{label} is invalid: {error}")),
+            )?)
+        } else if super::model::is_bool_type(&field.ty) {
+            JsonValue::Bool(value.as_bool().ok_or_else(|| {
+                syn::Error::new(Span::call_site(), format!("{label} must be a boolean"))
+            })?)
+        } else {
+            match infer_sql_type(&field.ty, DbBackend::Sqlite).as_str() {
+                sql_type if super::model::is_integer_sql_type(sql_type) => {
+                    JsonValue::from(value.as_i64().ok_or_else(|| {
+                        syn::Error::new(Span::call_site(), format!("{label} must be an integer"))
+                    })?)
+                }
+                "REAL" => JsonValue::Number(
+                    serde_json::Number::from_f64(value.as_f64().ok_or_else(|| {
+                        syn::Error::new(Span::call_site(), format!("{label} must be a number"))
+                    })?)
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            Span::call_site(),
+                            format!("{label} must be a finite number"),
+                        )
+                    })?,
+                ),
+                _ => {
+                    let text = value.as_str().ok_or_else(|| {
+                        syn::Error::new(Span::call_site(), format!("{label} must be a string"))
+                    })?;
+                    JsonValue::String(apply_action_field_transforms(field.transforms(), text))
+                }
+            }
+        };
+
+    validate_resource_action_scalar_value(field, &normalized, &label)?;
+    Ok(normalized)
+}
+
+fn normalize_structured_scalar_action_text(
+    kind: super::model::StructuredScalarKind,
+    value: &str,
+) -> Result<String, String> {
+    Ok(match kind {
+        super::model::StructuredScalarKind::DateTime => DateTime::parse_from_rfc3339(value)
+            .map_err(|error| format!("invalid date-time `{value}`: {error}"))?
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Micros, false),
+        super::model::StructuredScalarKind::Date => NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map_err(|error| format!("invalid date `{value}`: {error}"))?
+            .format("%Y-%m-%d")
+            .to_string(),
+        super::model::StructuredScalarKind::Time => value
+            .parse::<NaiveTime>()
+            .map_err(|error| format!("invalid time `{value}`: {error}"))?
+            .format("%H:%M:%S.%6f")
+            .to_string(),
+        super::model::StructuredScalarKind::Uuid => Uuid::parse_str(value)
+            .map_err(|error| format!("invalid uuid `{value}`: {error}"))?
+            .as_hyphenated()
+            .to_string(),
+        super::model::StructuredScalarKind::Decimal => value
+            .parse::<Decimal>()
+            .map_err(|error| format!("invalid decimal `{value}`: {error}"))?
+            .normalize()
+            .to_string(),
+        super::model::StructuredScalarKind::Json
+        | super::model::StructuredScalarKind::JsonObject
+        | super::model::StructuredScalarKind::JsonArray => {
+            return Err("JSON scalar fields are not supported in action assignments".to_owned());
+        }
+    })
+}
+
+fn apply_action_field_transforms(transforms: &[FieldTransform], value: &str) -> String {
+    transforms
+        .iter()
+        .fold(value.to_owned(), |current, transform| match transform {
+            FieldTransform::Trim => current.trim().to_owned(),
+            FieldTransform::Lowercase => current.to_lowercase(),
+            FieldTransform::CollapseWhitespace => {
+                current.split_whitespace().collect::<Vec<_>>().join(" ")
+            }
+            FieldTransform::Slugify => {
+                let mut slug = String::new();
+                let mut pending_dash = false;
+                for ch in current.chars() {
+                    if ch.is_alphanumeric() {
+                        if pending_dash && !slug.is_empty() {
+                            slug.push('-');
+                        }
+                        pending_dash = false;
+                        for lower in ch.to_lowercase() {
+                            slug.push(lower);
+                        }
+                    } else if !slug.is_empty() {
+                        pending_dash = true;
+                    }
+                }
+                slug
+            }
+        })
+}
+
+fn validate_resource_action_scalar_value(
+    field: &FieldSpec,
+    value: &JsonValue,
+    label: &str,
+) -> syn::Result<()> {
+    if let Some(enum_values) = field.enum_values() {
+        let text = value.as_str().ok_or_else(|| {
+            syn::Error::new(Span::call_site(), format!("{label} must be a string"))
+        })?;
+        if !enum_values.iter().any(|candidate| candidate == text) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{label} must be one of: {}", enum_values.join(", ")),
+            ));
+        }
+    }
+
+    if let Some(min_length) = field.validation.min_length {
+        let text = value.as_str().ok_or_else(|| {
+            syn::Error::new(Span::call_site(), format!("{label} must be a string"))
+        })?;
+        if text.chars().count() < min_length {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{label} must have at least {min_length} characters"),
+            ));
+        }
+    }
+    if let Some(max_length) = field.validation.max_length {
+        let text = value.as_str().ok_or_else(|| {
+            syn::Error::new(Span::call_site(), format!("{label} must be a string"))
+        })?;
+        if text.chars().count() > max_length {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{label} must have at most {max_length} characters"),
+            ));
+        }
+    }
+
+    match infer_sql_type(&field.ty, DbBackend::Sqlite).as_str() {
+        sql_type if super::model::is_integer_sql_type(sql_type) => {
+            if let Some(NumericBound::Integer(minimum)) = &field.validation.minimum
+                && value.as_i64().is_some_and(|actual| actual < *minimum)
+            {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("{label} must be at least {minimum}"),
+                ));
+            }
+            if let Some(NumericBound::Integer(maximum)) = &field.validation.maximum
+                && value.as_i64().is_some_and(|actual| actual > *maximum)
+            {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("{label} must be at most {maximum}"),
+                ));
+            }
+        }
+        "REAL" => {
+            if let Some(minimum) = &field.validation.minimum
+                && value
+                    .as_f64()
+                    .is_some_and(|actual| actual < minimum.as_f64())
+            {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("{label} must be at least {}", minimum.as_f64()),
+                ));
+            }
+            if let Some(maximum) = &field.validation.maximum
+                && value
+                    .as_f64()
+                    .is_some_and(|actual| actual > maximum.as_f64())
+            {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("{label} must be at most {}", maximum.as_f64()),
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn build_computed_field_spec(
     api_name: &str,
     template: &str,
@@ -2160,7 +2724,9 @@ fn build_computed_field_spec(
     while let Some(start_offset) = template[cursor..].find('{') {
         let start = cursor + start_offset;
         if start > cursor {
-            parts.push(ComputedFieldPart::Literal(template[cursor..start].to_owned()));
+            parts.push(ComputedFieldPart::Literal(
+                template[cursor..start].to_owned(),
+            ));
         }
         let placeholder_start = start + 1;
         let Some(end_offset) = template[placeholder_start..].find('}') else {
@@ -2267,7 +2833,11 @@ fn apply_resource_api_projections(
     {
         validate_api_name(
             projection.name.as_str(),
-            format!("resource `{resource_name}` api.fields `{}`", projection.name).as_str(),
+            format!(
+                "resource `{resource_name}` api.fields `{}`",
+                projection.name
+            )
+            .as_str(),
         )?;
         if !seen_api_names.insert(projection.name.clone()) {
             return Err(syn::Error::new(
@@ -2291,7 +2861,10 @@ fn apply_resource_api_projections(
                 ),
             ));
         }
-        let Some(field) = fields.iter_mut().find(|field| field.name() == *storage_field_name) else {
+        let Some(field) = fields
+            .iter_mut()
+            .find(|field| field.name() == *storage_field_name)
+        else {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!(
@@ -2315,7 +2888,11 @@ fn apply_resource_api_projections(
     {
         validate_api_name(
             projection.name.as_str(),
-            format!("resource `{resource_name}` api.fields `{}`", projection.name).as_str(),
+            format!(
+                "resource `{resource_name}` api.fields `{}`",
+                projection.name
+            )
+            .as_str(),
         )?;
         if !seen_api_names.insert(projection.name.clone()) {
             return Err(syn::Error::new(
@@ -2362,7 +2939,10 @@ fn validate_hidden_projection_fields(
         if field.expose_in_api() || field.is_id || field.generated.skip_insert() {
             continue;
         }
-        let assigned_on_create = policies.create.iter().any(|policy| policy.field == field.name());
+        let assigned_on_create = policies
+            .create
+            .iter()
+            .any(|policy| policy.field == field.name());
         if assigned_on_create || is_optional_type(&field.ty) {
             continue;
         }
@@ -2586,14 +3166,20 @@ fn build_object_fields(
         if !seen_api_names.insert(field_api_name.clone()) {
             return Err(syn::Error::new(
                 Span::call_site(),
-                format!("duplicate nested field api_name `{}` in {context}", field_api_name),
+                format!(
+                    "duplicate nested field api_name `{}` in {context}",
+                    field_api_name
+                ),
             ));
         }
 
         if field.id {
             return Err(syn::Error::new(
                 Span::call_site(),
-                format!("nested field `{}` in {context} cannot set `id = true`", field.name),
+                format!(
+                    "nested field `{}` in {context} cannot set `id = true`",
+                    field.name
+                ),
             ));
         }
         if field.generated != GeneratedValue::None {
@@ -2647,7 +3233,12 @@ fn build_object_fields(
                         ),
                     ));
                 }
-                Some(build_object_fields(db, field.fields, nested_context.as_str(), enums)?)
+                Some(build_object_fields(
+                    db,
+                    field.fields,
+                    nested_context.as_str(),
+                    enums,
+                )?)
             }
             _ => {
                 if !field.fields.is_empty() {
@@ -2677,7 +3268,10 @@ fn build_object_fields(
             ident: syn::parse_str(&field.name).map_err(|_| {
                 syn::Error::new(
                     Span::call_site(),
-                    format!("nested field name `{}` in {context} is not a valid Rust identifier", field.name),
+                    format!(
+                        "nested field name `{}` in {context} is not a valid Rust identifier",
+                        field.name
+                    ),
                 )
             })?,
             api_name: field_api_name,
@@ -3768,9 +4362,7 @@ fn validate_api_name(value: &str, label: &str) -> syn::Result<()> {
     {
         return Err(syn::Error::new(
             Span::call_site(),
-            format!(
-                "{label} `{value}` must use only ASCII letters, digits, `_`, or `-`"
-            ),
+            format!("{label} `{value}` must use only ASCII letters, digits, `_`, or `-`"),
         ));
     }
     Ok(())
@@ -3970,9 +4562,7 @@ fn parse_field_validation_document(document: Option<FieldValidationDocument>) ->
     }
 }
 
-fn parse_field_transforms_document(
-    transforms: Vec<String>,
-) -> syn::Result<Vec<FieldTransform>> {
+fn parse_field_transforms_document(transforms: Vec<String>) -> syn::Result<Vec<FieldTransform>> {
     transforms
         .into_iter()
         .map(|transform| match transform.as_str() {
@@ -3980,10 +4570,15 @@ fn parse_field_transforms_document(
             "Lowercase" | "lowercase" | "lower_case" | "lower-case" => {
                 Ok(FieldTransform::Lowercase)
             }
+            "CollapseWhitespace"
+            | "collapse_whitespace"
+            | "collapse-whitespace"
+            | "collapsewhitespace" => Ok(FieldTransform::CollapseWhitespace),
+            "Slugify" | "slugify" => Ok(FieldTransform::Slugify),
             _ => Err(syn::Error::new(
                 Span::call_site(),
                 format!(
-                    "unknown write-time transform `{transform}`; expected one of: Trim, Lowercase"
+                    "unknown write-time transform `{transform}`; expected one of: Trim, Lowercase, CollapseWhitespace, Slugify"
                 ),
             )),
         })
@@ -4799,6 +5394,7 @@ mod tests {
                 use_mixins: Vec::new(),
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
+                actions: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4856,6 +5452,7 @@ mod tests {
                 use_mixins: Vec::new(),
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
+                actions: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4971,6 +5568,7 @@ mod tests {
                 use_mixins: Vec::new(),
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
+                actions: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -5067,6 +5665,7 @@ mod tests {
                 use_mixins: Vec::new(),
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
+                actions: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -5158,6 +5757,7 @@ mod tests {
                 use_mixins: Vec::new(),
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
+                actions: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -5275,8 +5875,8 @@ mod tests {
         let settings = resources[0]
             .find_field("settings")
             .expect("settings field should exist");
-        let title_fields = super::super::model::object_fields(title)
-            .expect("title should define object fields");
+        let title_fields =
+            super::super::model::object_fields(title).expect("title should define object fields");
         let settings_fields = super::super::model::object_fields(settings)
             .expect("settings should define object fields");
 
@@ -5323,20 +5923,25 @@ resources: [
 ]
 "#,
         );
-        let resources = build_resources(DbBackend::Sqlite, document.resources)
-            .expect("resources should build");
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
 
         let resource = &resources[0];
         let title = resource
             .find_field("title_text")
             .expect("title field should exist");
-        let meta = resource.find_field("meta").expect("meta field should exist");
-        let meta_fields = super::super::model::object_fields(meta)
-            .expect("meta should define object fields");
+        let meta = resource
+            .find_field("meta")
+            .expect("meta field should exist");
+        let meta_fields =
+            super::super::model::object_fields(meta).expect("meta should define object fields");
 
         assert_eq!(resource.api_name(), "posts");
         assert_eq!(
-            resource.find_field("id").expect("id should exist").api_name(),
+            resource
+                .find_field("id")
+                .expect("id should exist")
+                .api_name(),
             "postId"
         );
         assert_eq!(title.api_name(), "title");
@@ -5410,13 +6015,13 @@ resources: [
         name: "Post"
         fields: [
             { name: "id", type: I64, id: true }
-            { name: "slug", type: String, transforms: [Trim, Lowercase] }
+            { name: "slug", type: String, transforms: [Slugify] }
             { name: "status", type: PostStatus, transforms: [Trim, Lowercase] }
             {
                 name: "title"
                 type: Object
                 fields: [
-                    { name: "raw", type: String, transforms: [Trim] }
+                    { name: "raw", type: String, transforms: [CollapseWhitespace] }
                 ]
             }
         ]
@@ -5428,20 +6033,21 @@ resources: [
         let resources = build_resources_with_enums(DbBackend::Sqlite, document.resources, &enums)
             .expect("resources should build");
         let resource = &resources[0];
-        let slug = resource.find_field("slug").expect("slug field should exist");
+        let slug = resource
+            .find_field("slug")
+            .expect("slug field should exist");
         let status = resource
             .find_field("status")
             .expect("status field should exist");
-        let title = resource.find_field("title").expect("title field should exist");
+        let title = resource
+            .find_field("title")
+            .expect("title field should exist");
         let title_fields =
             super::super::model::object_fields(title).expect("title should define object fields");
 
         assert_eq!(
             slug.transforms(),
-            &[
-                super::super::model::FieldTransform::Trim,
-                super::super::model::FieldTransform::Lowercase,
-            ]
+            &[super::super::model::FieldTransform::Slugify]
         );
         assert_eq!(
             status.transforms(),
@@ -5452,7 +6058,7 @@ resources: [
         );
         assert_eq!(
             title_fields[0].transforms(),
-            &[super::super::model::FieldTransform::Trim]
+            &[super::super::model::FieldTransform::CollapseWhitespace]
         );
     }
 
@@ -5477,7 +6083,37 @@ resources: [
         assert!(
             error
                 .to_string()
-                .contains("field `workspace_id` does not support write-time transforms"),
+                .contains("field `workspace_id` does not support write-time transform `Trim`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_slugify_transform_on_enum_fields() {
+        let document = parse_document(
+            r#"
+enums: {
+    PostStatus: ["draft", "published"]
+}
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "status", type: PostStatus, transforms: [Slugify] }
+        ]
+    }
+]
+"#,
+        );
+        let enums = build_enums(document.enums).expect("enums should build");
+        let error = build_resources_with_enums(DbBackend::Sqlite, document.resources, &enums)
+            .expect_err("slugify enum fields should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("field `status` does not support write-time transform `Slugify`"),
             "unexpected error: {error}"
         );
     }
@@ -5538,10 +6174,12 @@ resources: [
 ]
 "#,
         );
-        let resources = build_resources(DbBackend::Sqlite, document.resources)
-            .expect("resources should build");
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
         let resource = &resources[0];
-        let slug = resource.find_field("slug").expect("slug field should exist");
+        let slug = resource
+            .find_field("slug")
+            .expect("slug field should exist");
 
         assert!(slug.unique);
         assert_eq!(resource.indexes.len(), 2);
@@ -5632,8 +6270,8 @@ resources: [
 ]
 "#,
         );
-        let resources = build_resources(DbBackend::Sqlite, document.resources)
-            .expect("resources should build");
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
         let post = resources
             .iter()
             .find(|resource| resource.table_name == "post")
@@ -5702,6 +6340,237 @@ resources: [
     }
 
     #[test]
+    fn parses_resource_update_actions_with_normalized_values() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        actions: [
+            {
+                name: "publish"
+                path: "go-live"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        status: " Published "
+                        slug: " Launch   Post! "
+                    }
+                }
+            }
+            {
+                name: "rename"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        title: { input: "newTitle" }
+                        slug: { input: "newSlug" }
+                        status: { input: "newStatus" }
+                    }
+                }
+            }
+            {
+                name: "purge"
+                behavior: {
+                    kind: "DeleteResource"
+                }
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String, validate: { min_length: 5 } }
+            { name: "slug", type: String, transforms: [Slugify] }
+            { name: "status", type: String, transforms: [Trim, Lowercase] }
+        ]
+    }
+]
+"#,
+        );
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
+        let action = resources[0]
+            .actions
+            .iter()
+            .find(|action| action.name == "publish")
+            .expect("publish action should exist");
+
+        assert_eq!(action.path, "go-live");
+        assert_eq!(action.target, ResourceActionTarget::Item);
+        assert_eq!(action.method, ResourceActionMethod::Post);
+        let ResourceActionBehaviorSpec::UpdateFields { assignments } = &action.behavior else {
+            panic!("publish action should use UpdateFields");
+        };
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0].field, "slug");
+        assert_eq!(
+            assignments[0].value,
+            ResourceActionValueSpec::Literal(JsonValue::String("launch-post".to_owned()))
+        );
+        assert_eq!(assignments[1].field, "status");
+        assert_eq!(
+            assignments[1].value,
+            ResourceActionValueSpec::Literal(JsonValue::String("published".to_owned()))
+        );
+
+        let rename = resources[0]
+            .actions
+            .iter()
+            .find(|action| action.name == "rename")
+            .expect("rename action should exist");
+        assert_eq!(
+            rename.input_fields,
+            vec![
+                ResourceActionInputFieldSpec {
+                    name: "newSlug".to_owned(),
+                    target_field: "slug".to_owned(),
+                },
+                ResourceActionInputFieldSpec {
+                    name: "newStatus".to_owned(),
+                    target_field: "status".to_owned(),
+                },
+                ResourceActionInputFieldSpec {
+                    name: "newTitle".to_owned(),
+                    target_field: "title".to_owned(),
+                },
+            ]
+        );
+        let ResourceActionBehaviorSpec::UpdateFields { assignments } = &rename.behavior else {
+            panic!("rename action should use UpdateFields");
+        };
+        assert_eq!(assignments.len(), 3);
+        assert_eq!(assignments[0].field, "slug");
+        assert_eq!(
+            assignments[0].value,
+            ResourceActionValueSpec::InputField("newSlug".to_owned())
+        );
+        assert_eq!(assignments[1].field, "status");
+        assert_eq!(
+            assignments[1].value,
+            ResourceActionValueSpec::InputField("newStatus".to_owned())
+        );
+        assert_eq!(assignments[2].field, "title");
+        assert_eq!(
+            assignments[2].value,
+            ResourceActionValueSpec::InputField("newTitle".to_owned())
+        );
+
+        let purge = resources[0]
+            .actions
+            .iter()
+            .find(|action| action.name == "purge")
+            .expect("purge action should exist");
+        assert!(purge.input_fields.is_empty());
+        assert_eq!(purge.behavior, ResourceActionBehaviorSpec::DeleteResource);
+    }
+
+    #[test]
+    fn rejects_resource_actions_on_generated_or_unknown_fields() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        actions: [
+            {
+                name: "publish"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        published_at: "2026-03-27T12:00:00Z"
+                    }
+                }
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "published_at", type: DateTime, generated: "UpdatedAt" }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("generated action assignment should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot assign generated field `published_at`")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_resource_action_input_names() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        actions: [
+            {
+                name: "rename"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        title: { input: "value" }
+                        slug: { input: "value" }
+                    }
+                }
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+            { name: "slug", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("duplicate action inputs should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("reuses input field `value` across multiple assignments")
+        );
+    }
+
+    #[test]
+    fn rejects_delete_resource_actions_with_assignments() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        actions: [
+            {
+                name: "purge"
+                behavior: {
+                    kind: "DeleteResource"
+                    set: {
+                        status: "deleted"
+                    }
+                }
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "status", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("delete resource action assignments should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("with `DeleteResource` behavior cannot declare `behavior.set` fields")
+        );
+    }
+
+    #[test]
     fn expands_local_mixins_into_resource_fields_and_indexes() {
         let document = parse_document(
             r#"
@@ -5737,9 +6606,8 @@ resources: [
         let mixins = build_mixins(document.mixins).expect("mixins should build");
         let expanded_resources =
             expand_resource_mixins(document.resources, &mixins).expect("resources should expand");
-        let resources =
-            build_resources_with_enums(DbBackend::Sqlite, expanded_resources, &[])
-                .expect("resources should build");
+        let resources = build_resources_with_enums(DbBackend::Sqlite, expanded_resources, &[])
+            .expect("resources should build");
         let resource = &resources[0];
 
         assert!(resource.find_field("tenant_id").is_some());
@@ -5781,7 +6649,11 @@ resources: [
             Ok(_) => panic!("unknown mixin should fail"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("references unknown mixin `MissingMixin`"));
+        assert!(
+            error
+                .to_string()
+                .contains("references unknown mixin `MissingMixin`")
+        );
     }
 
     #[test]
@@ -5839,7 +6711,11 @@ resources: [
         );
         let error = build_resources(DbBackend::Sqlite, document.resources)
             .expect_err("duplicate field api_name should fail");
-        assert!(error.to_string().contains("duplicate field api_name `title`"));
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate field api_name `title`")
+        );
     }
 
     #[test]
@@ -5866,8 +6742,8 @@ resources: [
 ]
 "#,
         );
-        let resources = build_resources(DbBackend::Sqlite, document.resources)
-            .expect("resources should build");
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
         let resource = &resources[0];
 
         assert_eq!(resource.api_fields().count(), 3);
@@ -5911,8 +6787,8 @@ resources: [
 ]
 "#,
         );
-        let resources = build_resources(DbBackend::Sqlite, document.resources)
-            .expect("resources should build");
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
         let resource = &resources[0];
 
         assert_eq!(resource.computed_fields.len(), 2);
@@ -6018,8 +6894,8 @@ resources: [
 ]
 "#,
         );
-        let resources = build_resources(DbBackend::Sqlite, document.resources)
-            .expect("resources should build");
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
         let resource = &resources[0];
 
         assert_eq!(
@@ -6083,6 +6959,7 @@ resources: [
                 use_mixins: Vec::new(),
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
+                actions: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),

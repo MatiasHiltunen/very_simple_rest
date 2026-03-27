@@ -471,6 +471,272 @@ fn vsr_serve_supports_builtin_auth_and_authz_management() {
 }
 
 #[test]
+fn vsr_serve_applies_field_transforms_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-transform-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("field_transforms_api.eon");
+    fs::copy(fixture_path("field_transforms_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true)
+                .await
+                .expect("setup should initialize auth-enabled service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-transform.stdout.log");
+    let stderr_log = root.join("serve-transform.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-transform-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve transform flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(login_response.status(), reqwest::StatusCode::OK);
+    let login_body: Value = login_response.json().expect("login body should decode");
+    let token = login_body["token"]
+        .as_str()
+        .expect("login should return a token")
+        .to_owned();
+
+    let create_response = client
+        .post(format!("{base_url}/api/posts"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "slug": "  Hello,   World!  ",
+            "status": " DRAFT ",
+            "title": {
+                "raw": "  Hello   world \n again  ",
+                "rendered": "  <p>Hello world</p>  "
+            }
+        }))
+        .send()
+        .expect("post create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created: Value = create_response.json().expect("created post should decode");
+    assert_eq!(created["slug"], "hello-world");
+    assert_eq!(created["status"], "draft");
+    assert_eq!(created["title"]["raw"], "Hello world again");
+    assert_eq!(created["title"]["rendered"], "<p>Hello world</p>");
+
+    let update_response = client
+        .put(format!("{base_url}/api/posts/1"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "slug": "  Next__Post!!!  ",
+            "status": " PUBLISHED ",
+            "title": {
+                "raw": "  Updated   title\t\tagain  ",
+                "rendered": "  <p>Updated title</p>  "
+            }
+        }))
+        .send()
+        .expect("post update should succeed");
+    assert_eq!(update_response.status(), reqwest::StatusCode::OK);
+
+    let get_response = client
+        .get(format!("{base_url}/api/posts/1"))
+        .send()
+        .expect("post get should succeed");
+    assert_eq!(get_response.status(), reqwest::StatusCode::OK);
+    let updated: Value = get_response.json().expect("updated post should decode");
+    assert_eq!(updated["slug"], "next-post");
+    assert_eq!(updated["status"], "published");
+    assert_eq!(updated["title"]["raw"], "Updated title again");
+    assert_eq!(updated["title"]["rendered"], "<p>Updated title</p>");
+}
+
+#[test]
+fn vsr_serve_applies_resource_actions_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-action-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("resource_actions_api.eon");
+    fs::copy(fixture_path("resource_actions_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true)
+                .await
+                .expect("setup should initialize auth-enabled service");
+
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "INSERT INTO post (id, title, slug, status) VALUES (1, 'Draft', 'draft', 'draft')",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-action.stdout.log");
+    let stderr_log = root.join("serve-action.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-action-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve action flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(login_response.status(), reqwest::StatusCode::OK);
+    let login_body: Value = login_response.json().expect("login body should decode");
+    let token = login_body["token"]
+        .as_str()
+        .expect("login should return a token")
+        .to_owned();
+
+    let action_response = client
+        .post(format!("{base_url}/api/posts/1/go-live"))
+        .bearer_auth(&token)
+        .send()
+        .expect("action request should succeed");
+    assert_eq!(action_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(action_response.text().expect("action body should read"), "");
+
+    let rename_response = client
+        .post(format!("{base_url}/api/posts/1/rename"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "newTitle": "Fresh Launch",
+            "newSlug": " Fresh   Launch! ",
+            "newStatus": " REVIEW "
+        }))
+        .send()
+        .expect("rename action request should succeed");
+    assert_eq!(rename_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(rename_response.text().expect("rename body should read"), "");
+
+    let invalid_rename_response = client
+        .post(format!("{base_url}/api/posts/1/rename"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "newTitle": "bad",
+            "newSlug": "still-valid",
+            "newStatus": "draft"
+        }))
+        .send()
+        .expect("invalid rename action request should respond");
+    assert_eq!(
+        invalid_rename_response.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let invalid_rename_body: Value = invalid_rename_response
+        .json()
+        .expect("invalid rename body should decode");
+    assert_eq!(invalid_rename_body["code"], "validation_error");
+    assert_eq!(invalid_rename_body["field"], "newTitle");
+
+    let get_response = client
+        .get(format!("{base_url}/api/posts/1"))
+        .send()
+        .expect("post fetch should succeed");
+    assert_eq!(get_response.status(), reqwest::StatusCode::OK);
+    let fetched: Value = get_response.json().expect("fetched post should decode");
+    assert_eq!(fetched["title"], "Fresh Launch");
+    assert_eq!(fetched["slug"], "fresh-launch");
+    assert_eq!(fetched["status"], "review");
+
+    let purge_response = client
+        .post(format!("{base_url}/api/posts/1/purge"))
+        .bearer_auth(&token)
+        .send()
+        .expect("purge action request should succeed");
+    assert_eq!(purge_response.status(), reqwest::StatusCode::OK);
+
+    let missing_response = client
+        .get(format!("{base_url}/api/posts/1"))
+        .send()
+        .expect("missing get request should respond");
+    assert_eq!(missing_response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[test]
 fn vsr_server_serve_subcommand_starts_native_runtime() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {

@@ -103,8 +103,7 @@ pub fn expand_service_module(
     let uuid_alias_ident = format_ident!("{}", super::model::GENERATED_UUID_ALIAS);
     let decimal_alias_ident = format_ident!("{}", super::model::GENERATED_DECIMAL_ALIAS);
     let json_alias_ident = format_ident!("{}", super::model::GENERATED_JSON_ALIAS);
-    let json_object_alias_ident =
-        format_ident!("{}", super::model::GENERATED_JSON_OBJECT_ALIAS);
+    let json_object_alias_ident = format_ident!("{}", super::model::GENERATED_JSON_OBJECT_ALIAS);
     let json_array_alias_ident = format_ident!("{}", super::model::GENERATED_JSON_ARRAY_ALIAS);
     let type_aliases = quote! {
         #[allow(non_camel_case_types)]
@@ -1323,6 +1322,11 @@ fn resource_struct_tokens(
     let struct_ident = &resource.struct_ident;
     let create_ident = format_ident!("{struct_ident}Create");
     let update_ident = format_ident!("{struct_ident}Update");
+    let action_input_structs = resource
+        .actions
+        .iter()
+        .filter_map(|action| resource_action_input_struct_tokens(resource, action, runtime_crate))
+        .collect::<Vec<_>>();
     let list_query_tokens = list_query_tokens(resource, runtime_crate);
     let generated_from_row = generated_from_row_tokens(resource, runtime_crate);
     let object_validator_defs = typed_object_validator_defs(resource, runtime_crate);
@@ -1381,6 +1385,8 @@ fn resource_struct_tokens(
                 #(#update_fields)*
             }
 
+            #(#action_input_structs)*
+
             #list_query_tokens
         },
         WriteModelStyle::GeneratedStructWithDtos => quote! {
@@ -1417,6 +1423,8 @@ fn resource_struct_tokens(
             pub struct #update_ident {
                 #(#update_fields)*
             }
+
+            #(#action_input_structs)*
 
             #list_query_tokens
         },
@@ -1539,7 +1547,12 @@ fn collect_typed_object_validator_defs(
         let ident = &nested_field.ident;
         let mut nested_path = path.to_vec();
         nested_path.push(nested_field.name());
-        let ty = typed_object_validator_field_type_tokens(resource, nested_field, &nested_path, runtime_crate);
+        let ty = typed_object_validator_field_type_tokens(
+            resource,
+            nested_field,
+            &nested_path,
+            runtime_crate,
+        );
         let rename_attr = serde_rename_attr(nested_field.api_name(), &nested_field.name());
         if super::model::is_optional_type(&nested_field.ty) {
             quote! {
@@ -1589,12 +1602,14 @@ fn typed_object_normalizer_ident(resource: &ResourceSpec, path: &[String]) -> sy
         .iter()
         .map(|segment| segment.to_upper_camel_case())
         .collect::<String>();
-    format_ident!("normalize_{}_{}_object", resource.struct_ident.to_string().to_snake_case(), suffix.to_snake_case())
+    format_ident!(
+        "normalize_{}_{}_object",
+        resource.struct_ident.to_string().to_snake_case(),
+        suffix.to_snake_case()
+    )
 }
 
-fn string_transform_ops(
-    transforms: &[super::model::FieldTransform],
-) -> Vec<TokenStream> {
+fn string_transform_ops(transforms: &[super::model::FieldTransform]) -> Vec<TokenStream> {
     transforms
         .iter()
         .map(|transform| match transform {
@@ -1603,6 +1618,29 @@ fn string_transform_ops(
             },
             super::model::FieldTransform::Lowercase => quote! {
                 *value = value.to_lowercase();
+            },
+            super::model::FieldTransform::CollapseWhitespace => quote! {
+                *value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            },
+            super::model::FieldTransform::Slugify => quote! {
+                {
+                    let mut slug = String::new();
+                    let mut pending_dash = false;
+                    for ch in value.chars() {
+                        if ch.is_alphanumeric() {
+                            if pending_dash && !slug.is_empty() {
+                                slug.push('-');
+                            }
+                            pending_dash = false;
+                            for lower in ch.to_lowercase() {
+                                slug.push(lower);
+                            }
+                        } else if !slug.is_empty() {
+                            pending_dash = true;
+                        }
+                    }
+                    *value = slug;
+                }
             },
         })
         .collect()
@@ -1678,9 +1716,7 @@ fn typed_object_validator_field_type_tokens(
     }
 }
 
-fn typed_object_validator_field_check_tokens(
-    field: &super::model::FieldSpec,
-) -> TokenStream {
+fn typed_object_validator_field_check_tokens(field: &super::model::FieldSpec) -> TokenStream {
     let ident = &field.ident;
     let field_name = field.api_name().to_owned();
     let field_name_lit = Literal::string(&field_name);
@@ -1726,9 +1762,7 @@ fn typed_object_validator_field_check_tokens(
     }
 }
 
-fn typed_object_validator_scalar_checks(
-    field: &super::model::FieldSpec,
-) -> Vec<TokenStream> {
+fn typed_object_validator_scalar_checks(field: &super::model::FieldSpec) -> Vec<TokenStream> {
     let mut checks = Vec::new();
 
     if let Some(enum_values) = field.enum_values() {
@@ -1840,7 +1874,9 @@ fn structured_scalar_type_tokens(
         }
         super::model::StructuredScalarKind::Json
         | super::model::StructuredScalarKind::JsonObject
-        | super::model::StructuredScalarKind::JsonArray => quote!(#runtime_crate::serde_json::Value),
+        | super::model::StructuredScalarKind::JsonArray => {
+            quote!(#runtime_crate::serde_json::Value)
+        }
     }
 }
 
@@ -2187,7 +2223,9 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             });
         }
 
-        if super::model::supports_exact_filters(field) && super::model::supports_range_filters(&field.ty) {
+        if super::model::supports_exact_filters(field)
+            && super::model::supports_range_filters(&field.ty)
+        {
             for suffix in ["gt", "gte", "lt", "lte"] {
                 let ident = format_ident!("filter_{}_{}", field.ident, suffix);
                 let range_ty = list_filter_field_ty(field, runtime_crate);
@@ -3650,6 +3688,17 @@ fn resource_impl_tokens(
             }
         },
     );
+    let resource_action_route_registrations = resource.actions.iter().map(|action| {
+        let handler_ident = format_ident!("action_{}", action.name.to_snake_case());
+        let resource_api_name = Literal::string(resource.api_name());
+        let action_path = Literal::string(&action.path);
+        quote! {
+            cfg.service(
+                web::resource(format!("/{}/{{id}}/{}", #resource_api_name, #action_path))
+                    .route(web::post().to(Self::#handler_ident))
+            );
+        }
+    });
     let nested_handlers = relation_routes.map(|(field_ident, _, _)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
         if read_requires_auth {
@@ -3974,6 +4023,9 @@ fn resource_impl_tokens(
             }
         },
     );
+    let resource_action_handlers = resource.actions.iter().map(|action| {
+        resource_action_handler_tokens(resource, action, hybrid, &query_bind_matches, runtime_crate)
+    });
     let get_all_handler = if read_requires_auth {
         if hybrid.map(|config| config.collection_read).unwrap_or(false) {
             quote! {
@@ -4222,6 +4274,7 @@ fn resource_impl_tokens(
 
                 #(#nested_route_registrations)*
                 #(#many_to_many_route_registrations)*
+                #(#resource_action_route_registrations)*
             }
 
             #anonymous_user_context_fn
@@ -4229,6 +4282,7 @@ fn resource_impl_tokens(
             #contains_filter_helper
 
             #(#many_to_many_handlers)*
+            #(#resource_action_handlers)*
             #(#object_normalizer_defs)*
 
             fn can_read(user: &#runtime_crate::core::auth::UserContext) -> bool {
@@ -4775,6 +4829,62 @@ fn update_payload_type(resource: &ResourceSpec) -> TokenStream {
     }
 }
 
+fn resource_action_input_ident(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+) -> syn::Ident {
+    format_ident!(
+        "{}{}ActionInput",
+        resource.struct_ident,
+        action.name.to_upper_camel_case()
+    )
+}
+
+fn resource_action_input_field_ident(index: usize) -> syn::Ident {
+    format_ident!("field_{index}")
+}
+
+fn resource_action_input_struct_tokens(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+    runtime_crate: &Path,
+) -> Option<TokenStream> {
+    if action.input_fields.is_empty() {
+        return None;
+    }
+
+    let ident = resource_action_input_ident(resource, action);
+    let fields = action
+        .input_fields
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let target_field = resource
+                .find_field(input.target_field.as_str())
+                .expect("validated action input target field should exist");
+            let field_ident = resource_action_input_field_ident(index);
+            let ty = &target_field.ty;
+            let rename = Literal::string(input.name.as_str());
+            quote! {
+                #[serde(rename = #rename)]
+                pub #field_ident: #ty,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Some(quote! {
+        #[derive(
+            Debug,
+            Clone,
+            #runtime_crate::serde::Serialize,
+            #runtime_crate::serde::Deserialize
+        )]
+        pub struct #ident {
+            #(#fields)*
+        }
+    })
+}
+
 struct CreatePayloadField<'a> {
     field: &'a super::model::FieldSpec,
     allow_admin_override: bool,
@@ -4850,6 +4960,418 @@ fn update_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpe
                 && !controlled_fields.contains(&field.name())
         })
         .collect()
+}
+
+fn resource_action_handler_tokens(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+    hybrid: Option<HybridResourceEnforcement<'_>>,
+    query_bind_matches: &[TokenStream],
+    runtime_crate: &Path,
+) -> TokenStream {
+    let handler_ident = format_ident!("action_{}", action.name.to_snake_case());
+    match &action.behavior {
+        super::model::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
+            let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
+            let action_input_ty = resource_action_input_ident(resource, action);
+            let runtime_arg = if hybrid.map(|config| config.update).unwrap_or(false) {
+                quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
+            } else {
+                quote!()
+            };
+            let action_payload_arg = if action.input_fields.is_empty() {
+                quote!()
+            } else {
+                quote!(item: web::Json<#action_input_ty>,)
+            };
+            let action_normalization = action
+                .input_fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, input)| {
+                    let field = resource
+                        .find_field(input.target_field.as_str())
+                        .expect("validated action input target field should exist");
+                    let ident = resource_action_input_field_ident(index);
+                    normalization_tokens(
+                        resource,
+                        field,
+                        &ident,
+                        super::model::is_optional_type(&field.ty),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let action_validation = action
+                .input_fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, input)| {
+                    let mut field = resource
+                        .find_field(input.target_field.as_str())
+                        .expect("validated action input target field should exist")
+                        .clone();
+                    field.api_name = input.name.clone();
+                    let ident = resource_action_input_field_ident(index);
+                    validation_tokens(
+                        resource,
+                        &field,
+                        &ident,
+                        super::model::is_optional_type(&field.ty),
+                        runtime_crate,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let action_payload_setup = if action.input_fields.is_empty() {
+                quote!()
+            } else {
+                quote! {
+                    let mut item = item.into_inner();
+                    #(#action_normalization)*
+                    #(#action_validation)*
+                }
+            };
+            let action_bind_statements = assignments
+                .iter()
+                .map(|assignment| resource_action_bind_statement(action, assignment))
+                .collect::<Vec<_>>();
+            let mut update_clauses = assignments
+                .iter()
+                .enumerate()
+                .map(|(index, assignment)| {
+                    format!(
+                        "{} = {}",
+                        assignment.field,
+                        resource.db.placeholder(index + 1)
+                    )
+                })
+                .collect::<Vec<_>>();
+            update_clauses.extend(
+                resource
+                    .fields
+                    .iter()
+                    .filter(|field| field.generated == GeneratedValue::UpdatedAt)
+                    .map(|field| {
+                        format!(
+                            "{} = {}",
+                            field.name(),
+                            resource.db.generated_temporal_expression(
+                                super::model::temporal_scalar_kind(&field.ty)
+                            )
+                        )
+                    }),
+            );
+            let update_sql = update_clauses.join(", ");
+            let where_index = assignments.len() + 1;
+            let policy_start_index = Literal::usize_unsuffixed(assignments.len() + 2);
+            let where_index_literal = Literal::usize_unsuffixed(where_index);
+            let table_name = Literal::string(&resource.table_name);
+            let id_field = Literal::string(&resource.id_field);
+            let update_sql_literal = Literal::string(&update_sql);
+            let admin_bypass = resource.policies.admin_bypass;
+            let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
+
+            if !resource.policies.has_update_filters() {
+                let sql = format!(
+                    "UPDATE {} SET {} WHERE {} = {}",
+                    resource.table_name,
+                    update_sql,
+                    resource.id_field,
+                    resource.db.placeholder(where_index)
+                );
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        #action_payload_arg
+                        db: web::Data<DbPool>
+                        #runtime_arg
+                    ) -> impl Responder {
+                        #update_check
+                        let id = path.into_inner();
+                        #action_payload_setup
+                        let sql = #sql;
+                        let mut q = #runtime_crate::db::query(sql);
+                        #(#action_bind_statements)*
+                        q = q.bind(id);
+                        match q.execute(db.get_ref()).await {
+                            Ok(result) if result.rows_affected() == 0 => {
+                                #runtime_crate::core::errors::not_found("Not found")
+                            }
+                            Ok(_) => HttpResponse::Ok().finish(),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                }
+            } else {
+                let plan_ident = policy_plan_ident(resource);
+                let admin_sql = format!(
+                    "UPDATE {} SET {} WHERE {} = {}",
+                    resource.table_name,
+                    update_sql,
+                    resource.id_field,
+                    resource.db.placeholder(where_index)
+                );
+                let hybrid_update_fallback = if hybrid.map(|config| config.update).unwrap_or(false)
+                {
+                    quote! {
+                        match Self::fetch_runtime_authorized_by_id(
+                            id,
+                            &user,
+                            runtime.get_ref(),
+                            db.get_ref(),
+                            #runtime_crate::core::authorization::AuthorizationAction::Update,
+                        )
+                        .await
+                        {
+                            Ok(Some(_)) => {
+                                let sql = #admin_sql;
+                                let mut q = #runtime_crate::db::query(sql);
+                                #(#action_bind_statements)*
+                                q = q.bind(id);
+                                match q.execute(db.get_ref()).await {
+                                    Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                    Ok(_) => HttpResponse::Ok().finish(),
+                                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                }
+                            }
+                            Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                            Err(response) => response,
+                        }
+                    }
+                } else {
+                    quote!(#runtime_crate::core::errors::not_found("Not found"))
+                };
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        #action_payload_arg
+                        db: web::Data<DbPool>
+                        #runtime_arg
+                    ) -> impl Responder {
+                        #update_check
+                        let id = path.into_inner();
+                        #action_payload_setup
+                        if #admin_bypass && #is_admin {
+                            let sql = #admin_sql;
+                            let mut q = #runtime_crate::db::query(sql);
+                            #(#action_bind_statements)*
+                            q = q.bind(id);
+                            match q.execute(db.get_ref()).await {
+                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        } else {
+                            match Self::update_policy_plan(&user, #policy_start_index) {
+                                #plan_ident::Resolved { condition, binds } => {
+                                    let sql = format!(
+                                        "UPDATE {} SET {} WHERE {} = {} AND {}",
+                                        #table_name,
+                                        #update_sql_literal,
+                                        #id_field,
+                                        Self::list_placeholder(#where_index_literal),
+                                        condition
+                                    );
+                                    let mut q = #runtime_crate::db::query(&sql);
+                                    #(#action_bind_statements)*
+                                    q = q.bind(id);
+                                    for bind in binds {
+                                        q = match bind {
+                                            #(#query_bind_matches)*
+                                        };
+                                    }
+                                    match q.execute(db.get_ref()).await {
+                                        Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
+                                        Ok(_) => HttpResponse::Ok().finish(),
+                                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                    }
+                                }
+                                #plan_ident::Indeterminate => #hybrid_update_fallback,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        super::model::ResourceActionBehaviorSpec::DeleteResource => {
+            let delete_check = role_guard(runtime_crate, resource.roles.delete.as_deref());
+            let delete_runtime_arg = if hybrid.map(|config| config.delete).unwrap_or(false) {
+                quote!(, runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>)
+            } else {
+                quote!()
+            };
+            let table_name = Literal::string(&resource.table_name);
+            let id_field = Literal::string(&resource.id_field);
+            let admin_bypass = resource.policies.admin_bypass;
+            let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
+
+            if !resource.policies.has_delete_filters() {
+                let id_placeholder = resource.db.placeholder(1);
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>
+                        #delete_runtime_arg
+                    ) -> impl Responder {
+                        #delete_check
+                        let sql = format!(
+                            "DELETE FROM {} WHERE {} = {}",
+                            #table_name,
+                            #id_field,
+                            #id_placeholder
+                        );
+                        match #runtime_crate::db::query(&sql)
+                            .bind(path.into_inner())
+                            .execute(db.get_ref())
+                            .await
+                        {
+                            Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                            Ok(_) => HttpResponse::Ok().finish(),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                }
+            } else {
+                let plan_ident = policy_plan_ident(resource);
+                let admin_sql = format!(
+                    "DELETE FROM {} WHERE {} = {}",
+                    resource.table_name,
+                    resource.id_field,
+                    resource.db.placeholder(1)
+                );
+                let hybrid_delete_fallback = if hybrid.map(|config| config.delete).unwrap_or(false)
+                {
+                    quote! {
+                        match Self::fetch_runtime_authorized_by_id(
+                            id,
+                            &user,
+                            runtime.get_ref(),
+                            db.get_ref(),
+                            #runtime_crate::core::authorization::AuthorizationAction::Delete,
+                        )
+                        .await
+                        {
+                            Ok(Some(_)) => {
+                                let sql = #admin_sql;
+                                match #runtime_crate::db::query(sql)
+                                    .bind(id)
+                                    .execute(db.get_ref())
+                                    .await
+                                {
+                                    Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                    Ok(_) => HttpResponse::Ok().finish(),
+                                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                }
+                            }
+                            Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                            Err(response) => response,
+                        }
+                    }
+                } else {
+                    quote!(#runtime_crate::core::errors::not_found("Not found"))
+                };
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>
+                        #delete_runtime_arg
+                    ) -> impl Responder {
+                        #delete_check
+                        let id = path.into_inner();
+                        if #admin_bypass && #is_admin {
+                            let sql = #admin_sql;
+                            match #runtime_crate::db::query(sql)
+                                .bind(id)
+                                .execute(db.get_ref())
+                                .await
+                            {
+                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        } else {
+                            match Self::delete_policy_plan(&user, 2) {
+                                #plan_ident::Resolved { condition, binds } => {
+                                    let sql = format!(
+                                        "DELETE FROM {} WHERE {} = {} AND {}",
+                                        #table_name,
+                                        #id_field,
+                                        Self::list_placeholder(1),
+                                        condition
+                                    );
+                                    let mut q = #runtime_crate::db::query(&sql);
+                                    q = q.bind(id);
+                                    for bind in binds {
+                                        q = match bind {
+                                            #(#query_bind_matches)*
+                                        };
+                                    }
+                                    match q.execute(db.get_ref()).await {
+                                        Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
+                                        Ok(_) => HttpResponse::Ok().finish(),
+                                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                    }
+                                }
+                                #plan_ident::Indeterminate => #hybrid_delete_fallback,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn resource_action_bind_statement(
+    action: &super::model::ResourceActionSpec,
+    assignment: &super::model::ResourceActionAssignmentSpec,
+) -> TokenStream {
+    match &assignment.value {
+        super::model::ResourceActionValueSpec::Literal(serde_json::Value::Null) => quote! {
+            q = q.bind::<Option<String>>(None);
+        },
+        super::model::ResourceActionValueSpec::Literal(serde_json::Value::Bool(value)) => quote! {
+            q = q.bind(#value);
+        },
+        super::model::ResourceActionValueSpec::Literal(serde_json::Value::Number(value)) => {
+            if let Some(integer) = value.as_i64() {
+                quote! {
+                    q = q.bind(#integer);
+                }
+            } else if let Some(real) = value.as_f64() {
+                quote! {
+                    q = q.bind(#real);
+                }
+            } else {
+                unreachable!("action numeric values should be normalized to integers or reals")
+            }
+        }
+        super::model::ResourceActionValueSpec::Literal(serde_json::Value::String(value)) => {
+            let value = Literal::string(value);
+            quote! {
+                q = q.bind(#value);
+            }
+        }
+        super::model::ResourceActionValueSpec::Literal(
+            serde_json::Value::Array(_) | serde_json::Value::Object(_),
+        ) => {
+            unreachable!("structured action values are not supported in the first slice")
+        }
+        super::model::ResourceActionValueSpec::InputField(name) => {
+            let index = action
+                .input_fields
+                .iter()
+                .position(|field| field.name == *name)
+                .expect("validated action input field should exist");
+            let ident = resource_action_input_field_ident(index);
+            quote! {
+                q = q.bind(&item.#ident);
+            }
+        }
+    }
 }
 
 fn list_query_ident(resource: &ResourceSpec) -> syn::Ident {

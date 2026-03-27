@@ -4,10 +4,11 @@ use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
 use super::model::{
-    ComputedFieldSpec, FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec,
-    is_list_field, is_optional_type, is_typed_object_field, list_item_type, object_fields,
-    read_requires_auth, structured_scalar_kind, supports_contains_filters,
-    supports_exact_filters, supports_field_sort, supports_range_filters,
+    ComputedFieldSpec, FieldSpec, GeneratedValue, PolicyValueSource, ResourceActionMethod,
+    ResourceActionTarget, ResourceSpec, ServiceSpec, is_list_field, is_optional_type,
+    is_typed_object_field, list_item_type, object_fields, read_requires_auth,
+    structured_scalar_kind, supports_contains_filters, supports_exact_filters, supports_field_sort,
+    supports_range_filters,
 };
 
 #[derive(Clone, Debug)]
@@ -92,6 +93,23 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
             format!("/{}/{{id}}", resource.api_name()),
             item_path_item(resource),
         );
+        for action in &resource.actions {
+            if action.target != ResourceActionTarget::Item
+                || action.method != ResourceActionMethod::Post
+            {
+                continue;
+            }
+            if !action.input_fields.is_empty() {
+                schemas.insert(
+                    action_input_schema_name(resource, action),
+                    action_input_schema(resource, action),
+                );
+            }
+            paths.insert(
+                format!("/{}/{{id}}/{}", resource.api_name(), action.path),
+                item_action_path_item(resource, action),
+            );
+        }
 
         for field in &resource.fields {
             let Some(relation) = field.relation.as_ref() else {
@@ -107,11 +125,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
                 .map(|candidate| candidate.api_name().to_owned())
                 .unwrap_or_else(|| relation.references_table.clone());
             paths.insert(
-                format!(
-                    "/{}/{{parent_id}}/{}",
-                    parent_api_name,
-                    resource.api_name()
-                ),
+                format!("/{}/{{parent_id}}/{}", parent_api_name, resource.api_name()),
                 nested_collection_path_item(resource, &parent_api_name, field.api_name()),
             );
         }
@@ -239,6 +253,40 @@ fn item_path_item(resource: &ResourceSpec) -> Value {
             "responses": delete_responses(),
         },
     })
+}
+
+fn item_action_path_item(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+) -> Value {
+    let id_description = resource
+        .find_field(resource.id_field.as_str())
+        .map(|field| field.api_name())
+        .unwrap_or(resource.id_field.as_str());
+    let id_parameter = id_parameter("id", id_description);
+    let mut post = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("Run {} on {}", action.name.to_case(CaseKind::Pascal), resource_name(resource)),
+        "operationId": format!("{}{}", action.name.to_case(CaseKind::Pascal), resource_name(resource)),
+        "parameters": [id_parameter],
+        "security": bearer_security(),
+        "responses": match &action.behavior {
+            super::model::ResourceActionBehaviorSpec::UpdateFields { .. } => {
+                json!(update_responses())
+            }
+            super::model::ResourceActionBehaviorSpec::DeleteResource => {
+                json!(delete_responses())
+            }
+        },
+    });
+    if matches!(
+        &action.behavior,
+        super::model::ResourceActionBehaviorSpec::UpdateFields { .. }
+    ) && !action.input_fields.is_empty()
+    {
+        post["requestBody"] = json_request_body(action_input_schema_name(resource, action));
+    }
+    json!({ "post": post })
 }
 
 fn nested_collection_path_item(
@@ -1234,6 +1282,44 @@ fn create_payload_schema(resource: &ResourceSpec) -> Value {
     schema
 }
 
+fn action_input_schema_name(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+) -> String {
+    format!(
+        "{}{}ActionInput",
+        resource_name(resource),
+        action.name.to_case(CaseKind::Pascal)
+    )
+}
+
+fn action_input_schema(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+) -> Value {
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+
+    for input in &action.input_fields {
+        let field = resource
+            .find_field(input.target_field.as_str())
+            .expect("validated action input target field should exist");
+        properties.insert(input.name.clone(), field_schema(field));
+        if !is_optional_type(&field.ty) {
+            required.push(input.name.clone());
+        }
+    }
+
+    let mut schema = json!({
+        "type": "object",
+        "properties": properties,
+    });
+    if !required.is_empty() {
+        schema["required"] = json!(required);
+    }
+    schema
+}
+
 fn field_schema(field: &FieldSpec) -> Value {
     field_schema_with_optional(field, false)
 }
@@ -1594,9 +1680,58 @@ mod tests {
             "limit"
         );
         assert_eq!(
-            document["paths"]["/posts/{parent_id}/tags"]["get"]["responses"]["200"]["content"]
-                ["application/json"]["schema"]["$ref"],
+            document["paths"]["/posts/{parent_id}/tags"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
             "#/components/schemas/TagListResponse"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_resource_action_paths() {
+        let service = load_service_from_path(&fixture_path("resource_actions_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Resource Actions API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert!(document["paths"]["/posts/{id}/go-live"]["post"].is_object());
+        assert_eq!(
+            document["paths"]["/posts/{id}/go-live"]["post"]["parameters"][0]["name"],
+            "id"
+        );
+        assert!(
+            document["paths"]["/posts/{id}/go-live"]["post"]
+                .get("requestBody")
+                .is_none()
+        );
+        assert_eq!(
+            document["paths"]["/posts/{id}/rename"]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/PostRenameActionInput"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["PostRenameActionInput"]["properties"]["newTitle"]["type"],
+            "string"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["PostRenameActionInput"]["required"],
+            json!(["newSlug", "newStatus", "newTitle"])
+        );
+        assert_eq!(
+            document["paths"]["/posts/{id}/go-live"]["post"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert!(
+            document["paths"]["/posts/{id}/purge"]["post"]
+                .get("requestBody")
+                .is_none()
+        );
+        assert_eq!(
+            document["paths"]["/posts/{id}/purge"]["post"]["responses"]["200"]["description"],
+            "Deleted"
         );
     }
 
@@ -1850,15 +1985,18 @@ mod tests {
             json!(false)
         );
         assert_eq!(
-            document["components"]["schemas"]["Entry"]["properties"]["title"]["properties"]["raw"]["type"],
+            document["components"]["schemas"]["Entry"]["properties"]["title"]["properties"]["raw"]
+                ["type"],
             json!("string")
         );
         assert_eq!(
-            document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["categories"]["items"]["type"],
+            document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["categories"]
+                ["items"]["type"],
             json!("integer")
         );
         assert_eq!(
-            document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["seo"]["additionalProperties"],
+            document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["seo"]
+                ["additionalProperties"],
             json!(false)
         );
     }
@@ -1886,7 +2024,8 @@ mod tests {
             json!(["draft", "published", "archived"])
         );
         assert_eq!(
-            document["components"]["schemas"]["Post"]["properties"]["workflow"]["properties"]["current"]["enum"],
+            document["components"]["schemas"]["Post"]["properties"]["workflow"]["properties"]["current"]
+                ["enum"],
             json!(["draft", "published", "archived"])
         );
         assert_eq!(
@@ -1917,7 +2056,11 @@ mod tests {
 
         assert!(document["paths"].get("/posts").is_some());
         assert!(document["paths"].get("/posts/{id}").is_some());
-        assert!(document["paths"].get("/posts/{parent_id}/comments").is_some());
+        assert!(
+            document["paths"]
+                .get("/posts/{parent_id}/comments")
+                .is_some()
+        );
         assert!(document["paths"].get("/blog_post").is_none());
         assert!(document["paths"].get("/comment_row").is_none());
         assert_eq!(
@@ -1979,12 +2122,16 @@ mod tests {
             document["components"]["schemas"]["Post"]["properties"]["author"]["type"],
             json!("integer")
         );
-        assert!(document["components"]["schemas"]["Post"]["properties"]
-            .get("draft_body")
-            .is_none());
-        assert!(document["components"]["schemas"]["Post"]["properties"]
-            .get("internal_note")
-            .is_none());
+        assert!(
+            document["components"]["schemas"]["Post"]["properties"]
+                .get("draft_body")
+                .is_none()
+        );
+        assert!(
+            document["components"]["schemas"]["Post"]["properties"]
+                .get("internal_note")
+                .is_none()
+        );
         assert!(
             parameters
                 .iter()

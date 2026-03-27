@@ -641,6 +641,14 @@ object or just a type such as `title: String`.",
                 "Declares read-side collection routes over an explicit join resource without changing the underlying storage schema.",
             ),
             row(
+                "resources[].actions",
+                "List<Action>",
+                "No declared custom actions",
+                "No",
+                "See Resource Actions",
+                "Declares additional resource-scoped routes. The current slice supports item-scoped `POST` actions with declarative `UpdateFields` or `DeleteResource` behaviors.",
+            ),
+            row(
                 "resources[].fields",
                 "List or keyed map",
                 "None",
@@ -869,6 +877,62 @@ object or just a type such as `title: String`.",
 
     push_section(
         &mut markdown,
+        "Resource Actions",
+        "Resource actions declare extra resource-scoped routes beyond CRUD. The current executable slice is intentionally narrow: item-scoped `POST` routes with declarative `UpdateFields` or `DeleteResource` behaviors that reuse the normal CRUD auth and row-policy semantics.",
+        &[
+            row(
+                "resources[].actions[].name",
+                "String",
+                "Required",
+                "Yes",
+                "Valid API identifier",
+                "Must be unique per resource. The name is used as the default path segment when `path` is omitted.",
+            ),
+            row(
+                "resources[].actions[].path",
+                "String",
+                "Defaults to `name`",
+                "No",
+                "Valid API path segment",
+                "Becomes the trailing route segment for item actions, for example `/{resource}/{id}/{path}`.",
+            ),
+            row(
+                "resources[].actions[].target",
+                "Enum",
+                "Item",
+                "No",
+                "Item",
+                "Only item-scoped actions are supported in the first slice.",
+            ),
+            row(
+                "resources[].actions[].method",
+                "Enum",
+                "POST",
+                "No",
+                "POST",
+                "Only `POST` is supported in the first slice.",
+            ),
+            row(
+                "resources[].actions[].behavior.kind",
+                "Enum",
+                "Required",
+                "Yes",
+                "UpdateFields, DeleteResource",
+                "Selects the built-in declarative action behavior.",
+            ),
+            row(
+                "resources[].actions[].behavior.set",
+                "Map<String, Scalar | { input: String }>",
+                "None",
+                "Yes for `UpdateFields`",
+                "Storage field names mapped to fixed scalar values or named request-body inputs",
+                "Field names reference storage fields, not API projection aliases. The current slice only supports scalar assignment targets, rejects IDs, generated fields, and policy-controlled fields, and applies the normal field transforms and validation rules to fixed values and input-backed assignments alike. Input names become JSON request-body properties for the action route. `DeleteResource` does not accept `behavior.set`.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
         "Row Policies",
         "Row policies support both the newer explicit form and older owner/set-owner shorthands. \
 `read`, `update`, and `delete` accept a single filter, an array that implies `all_of`, or an \
@@ -1066,8 +1130,8 @@ referenced by `exists` conditions.\n\n",
                 "List<Enum>",
                 "[]",
                 "No",
-                "Trim, Lowercase",
-                "Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values.",
+                "Trim, Lowercase, CollapseWhitespace, Slugify",
+                "Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. `Slugify` is limited to non-enum text fields.",
             ),
             row(
                 "resources[].fields[].generated",
@@ -1172,16 +1236,14 @@ referenced by `exists` conditions.\n\n",
         &mut markdown,
         "Write-Time Transforms",
         "Write-time transforms normalize request payload values on create and update before validation, policy-driven create requirements, and persistence. They do not change query filter semantics directly; they change the stored value.",
-        &[
-            row(
-                "resources[].fields[].transforms[]",
-                "Enum",
-                "None",
-                "No",
-                "Trim, Lowercase",
-                "`Trim` removes leading and trailing Unicode whitespace. `Lowercase` applies Rust string lowercasing. Transforms currently support text and enum-backed text fields only.",
-            ),
-        ],
+        &[row(
+            "resources[].fields[].transforms[]",
+            "Enum",
+            "None",
+            "No",
+            "Trim, Lowercase, CollapseWhitespace, Slugify",
+            "`Trim` removes leading and trailing Unicode whitespace. `Lowercase` applies Rust string lowercasing. `CollapseWhitespace` collapses all whitespace runs to a single ASCII space. `Slugify` converts non-alphanumeric separators into `-`, lowercases letters, and trims separators from the ends. `Slugify` currently supports non-enum text fields only.",
+        )],
     );
 
     push_section(

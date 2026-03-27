@@ -8,6 +8,7 @@ use actix_web::http::{Method, Uri, header::HeaderName};
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use quote::ToTokens;
+use serde_json::Value as JsonValue;
 use syn::{Ident, Type};
 
 use crate::auth::{AuthClaimType, AuthEmailProvider, SessionCookieSameSite};
@@ -84,11 +85,7 @@ impl StructuredScalarKind {
             Self::DateTime => Some(GeneratedTemporalKind::DateTime),
             Self::Date => Some(GeneratedTemporalKind::Date),
             Self::Time => Some(GeneratedTemporalKind::Time),
-            Self::Uuid
-            | Self::Decimal
-            | Self::Json
-            | Self::JsonObject
-            | Self::JsonArray => None,
+            Self::Uuid | Self::Decimal | Self::Json | Self::JsonObject | Self::JsonArray => None,
         }
     }
 }
@@ -610,6 +607,8 @@ pub enum WriteModelStyle {
 pub enum FieldTransform {
     Trim,
     Lowercase,
+    CollapseWhitespace,
+    Slugify,
 }
 
 #[derive(Clone)]
@@ -656,6 +655,52 @@ pub struct ManyToManySpec {
     pub through_table: String,
     pub source_field: String,
     pub target_field: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceActionTarget {
+    Item,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceActionMethod {
+    Post,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResourceActionValueSpec {
+    Literal(JsonValue),
+    InputField(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceActionInputFieldSpec {
+    pub name: String,
+    pub target_field: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceActionAssignmentSpec {
+    pub field: String,
+    pub value: ResourceActionValueSpec,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResourceActionBehaviorSpec {
+    UpdateFields {
+        assignments: Vec<ResourceActionAssignmentSpec>,
+    },
+    DeleteResource,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceActionSpec {
+    pub name: String,
+    pub path: String,
+    pub target: ResourceActionTarget,
+    pub method: ResourceActionMethod,
+    pub input_fields: Vec<ResourceActionInputFieldSpec>,
+    pub behavior: ResourceActionBehaviorSpec,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -712,6 +757,7 @@ pub struct ResourceSpec {
     pub list: ListConfig,
     pub indexes: Vec<IndexSpec>,
     pub many_to_many: Vec<ManyToManySpec>,
+    pub actions: Vec<ResourceActionSpec>,
     pub computed_fields: Vec<ComputedFieldSpec>,
     pub fields: Vec<FieldSpec>,
     pub write_style: WriteModelStyle,
@@ -789,13 +835,11 @@ impl ResourceSpec {
     }
 
     pub fn response_field_names(&self) -> impl Iterator<Item = &str> {
-        self.api_fields()
-            .map(|field| field.api_name())
-            .chain(
-                self.computed_fields
-                    .iter()
-                    .map(|field| field.api_name.as_str()),
-            )
+        self.api_fields().map(|field| field.api_name()).chain(
+            self.computed_fields
+                .iter()
+                .map(|field| field.api_name.as_str()),
+        )
     }
 
     pub fn api_fields(&self) -> impl Iterator<Item = &FieldSpec> {
@@ -848,6 +892,7 @@ impl std::fmt::Debug for ResourceSpec {
             .field("list", &self.list)
             .field("indexes", &self.indexes)
             .field("many_to_many", &self.many_to_many)
+            .field("actions", &self.actions)
             .field("computed_fields", &self.computed_fields)
             .field("fields", &self.fields)
             .field("write_style", &self.write_style)
@@ -1066,6 +1111,19 @@ pub fn supports_field_transforms(field: &FieldSpec) -> bool {
         && !is_bool_type(&field.ty)
         && !is_integer_sql_type(field.sql_type.as_str())
         && !matches!(field.sql_type.as_str(), "REAL")
+}
+
+pub fn supports_field_transform(field: &FieldSpec, transform: FieldTransform) -> bool {
+    if !supports_field_transforms(field) {
+        return false;
+    }
+
+    match transform {
+        FieldTransform::Trim | FieldTransform::Lowercase | FieldTransform::CollapseWhitespace => {
+            true
+        }
+        FieldTransform::Slugify => field.enum_values.is_none(),
+    }
 }
 
 pub fn is_list_field(field: &FieldSpec) -> bool {
@@ -1370,7 +1428,10 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
         if field.enum_values.is_some() {
             return Err(syn::Error::new(
                 span,
-                format!("enum field `{}` does not support validation constraints", field.name()),
+                format!(
+                    "enum field `{}` does not support validation constraints",
+                    field.name()
+                ),
             ));
         }
 
@@ -1509,15 +1570,18 @@ pub fn validate_field_transforms(fields: &[FieldSpec], span: Span) -> syn::Resul
             ));
         }
 
-        if !supports_field_transforms(field) {
-            return Err(syn::Error::new(
-                span,
-                format!("field `{}` does not support write-time transforms", field.name()),
-            ));
-        }
-
         let mut seen = std::collections::HashSet::new();
         for transform in &field.transforms {
+            if !supports_field_transform(field, *transform) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "field `{}` does not support write-time transform `{:?}`",
+                        field.name(),
+                        transform
+                    ),
+                ));
+            }
             if !seen.insert(*transform) {
                 return Err(syn::Error::new(
                     span,

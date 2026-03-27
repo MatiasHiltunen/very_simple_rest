@@ -185,6 +185,7 @@ Each resource describes one generated REST model and its CRUD surface.
 | resources[].use | List<String> | [] | No | Declared mixin names | Expands the listed local mixins into the resource before normal field/index validation. Using the same mixin more than once is rejected. |
 | resources[].indexes | List<Index> | No explicit indexes | No | See Indexes | Declares explicit single-field or composite indexes in addition to the automatic relation and policy-derived index hints. |
 | resources[].many_to_many | List<ManyToMany> | No declared many-to-many routes | No | See Many-to-Many | Declares read-side collection routes over an explicit join resource without changing the underlying storage schema. |
+| resources[].actions | List<Action> | No declared custom actions | No | See Resource Actions | Declares additional resource-scoped routes. The current slice supports item-scoped `POST` actions with declarative `UpdateFields` or `DeleteResource` behaviors. |
 | resources[].fields | List or keyed map | None | Yes | Field definitions | Each resource must define its fields explicitly. |
 
 ## Resource API
@@ -255,6 +256,19 @@ Many-to-many definitions currently describe read-side nested collection routes o
 | resources[].many_to_many[].through | String | Required | Yes | Existing join resource name or table name | Names the explicit join resource that connects the source and target resources. |
 | resources[].many_to_many[].source_field | String | Required | Yes | Join resource field name | The named join field must declare a relation back to the source resource ID field. |
 | resources[].many_to_many[].target_field | String | Required | Yes | Join resource field name | The named join field must declare a relation to the target resource ID field. |
+
+## Resource Actions
+
+Resource actions declare extra resource-scoped routes beyond CRUD. The current executable slice is intentionally narrow: item-scoped `POST` routes with declarative `UpdateFields` or `DeleteResource` behaviors that reuse the normal CRUD auth and row-policy semantics.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].actions[].name | String | Required | Yes | Valid API identifier | Must be unique per resource. The name is used as the default path segment when `path` is omitted. |
+| resources[].actions[].path | String | Defaults to `name` | No | Valid API path segment | Becomes the trailing route segment for item actions, for example `/{resource}/{id}/{path}`. |
+| resources[].actions[].target | Enum | Item | No | Item | Only item-scoped actions are supported in the first slice. |
+| resources[].actions[].method | Enum | POST | No | POST | Only `POST` is supported in the first slice. |
+| resources[].actions[].behavior.kind | Enum | Required | Yes | UpdateFields, DeleteResource | Selects the built-in declarative action behavior. |
+| resources[].actions[].behavior.set | Map<String, Scalar \| { input: String }> | None | Yes for `UpdateFields` | Storage field names mapped to fixed scalar values or named request-body inputs | Field names reference storage fields, not API projection aliases. The current slice only supports scalar assignment targets, rejects IDs, generated fields, and policy-controlled fields, and applies the normal field transforms and validation rules to fixed values and input-backed assignments alike. Input names become JSON request-body properties for the action route. `DeleteResource` does not accept `behavior.set`. |
 
 ## Row Policies
 
@@ -348,7 +362,7 @@ Field configuration controls generated Rust types, SQL columns, validations, and
 | resources[].fields[].nullable | Bool | false | No | true, false | Wraps the generated Rust field type in `Option<T>`. `generated` fields are also emitted as optional even when `nullable` is false. |
 | resources[].fields[].id | Bool | false, but the field matching `id_field` is treated as the ID | No | true, false | Primary key semantics are inferred when the field name matches the resource `id_field`. |
 | resources[].fields[].unique | Bool | false | No | true, false | Declares a unique single-column index for supported scalar storage fields. Typed `Object`, `List`, and JSON fields do not support `unique`. |
-| resources[].fields[].transforms | List<Enum> | [] | No | Trim, Lowercase | Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. |
+| resources[].fields[].transforms | List<Enum> | [] | No | Trim, Lowercase, CollapseWhitespace, Slugify | Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. `Slugify` is limited to non-enum text fields. |
 | resources[].fields[].generated | Enum | Auto-inferred from the field name and ID role when omitted | No | None, AutoIncrement, CreatedAt, UpdatedAt | If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`. |
 | resources[].fields[].relation | Map | None | No | See Relations | Declares a foreign-key style relationship and optional nested route generation. |
 | resources[].fields[].validate | Map | None | No | See Field Validation | Validation is supported for text, integer, and real fields only. |
@@ -380,7 +394,7 @@ Write-time transforms normalize request payload values on create and update befo
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].fields[].transforms[] | Enum | None | No | Trim, Lowercase | `Trim` removes leading and trailing Unicode whitespace. `Lowercase` applies Rust string lowercasing. Transforms currently support text and enum-backed text fields only. |
+| resources[].fields[].transforms[] | Enum | None | No | Trim, Lowercase, CollapseWhitespace, Slugify | `Trim` removes leading and trailing Unicode whitespace. `Lowercase` applies Rust string lowercasing. `CollapseWhitespace` collapses all whitespace runs to a single ASCII space. `Slugify` converts non-alphanumeric separators into `-`, lowercases letters, and trims separators from the ends. `Slugify` currently supports non-enum text fields only. |
 
 ## Static Mounts
 

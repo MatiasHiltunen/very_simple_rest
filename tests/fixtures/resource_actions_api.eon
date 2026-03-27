@@ -1,0 +1,48 @@
+module: "resource_actions_api"
+resources: [
+    {
+        name: "Post"
+        table: "post"
+        api_name: "posts"
+        roles: {
+            update: "editor"
+            delete: "editor"
+        }
+        actions: [
+            {
+                name: "publish"
+                path: "go-live"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        status: " Published "
+                        slug: " Launch   Post! "
+                    }
+                }
+            }
+            {
+                name: "rename"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        title: { input: "newTitle" }
+                        slug: { input: "newSlug" }
+                        status: { input: "newStatus" }
+                    }
+                }
+            }
+            {
+                name: "purge"
+                behavior: {
+                    kind: "DeleteResource"
+                }
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String, validate: { min_length: 5 } }
+            { name: "slug", type: String, transforms: [Slugify] }
+            { name: "status", type: String, transforms: [Trim, Lowercase] }
+        ]
+    }
+]
