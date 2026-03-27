@@ -16,7 +16,9 @@ pub fn generate_env_file(path: Option<String>, config_path: Option<&Path>) -> Re
         "Environment file created at:".green(),
         report.path.display()
     );
-    println!("{} JWT_SECRET", "Generated secret:".green());
+    if report.generated_jwt_secret {
+        println!("{} JWT_SECRET", "Generated secret:".green());
+    }
     if let Some(var_name) = &report.generated_turso_encryption_var {
         println!(
             "{} {} in {}",

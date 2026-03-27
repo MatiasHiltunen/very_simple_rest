@@ -64,7 +64,7 @@ pub async fn run_setup(
     println!("\n{}", "Step 3: Setting up database schema".cyan().bold());
     apply_setup_migrations(&effective_database_url, config_path)
         .await
-        .map_err(|error| Error::Config(error.to_string()))?;
+        .map_err(|error| Error::Config(format!("{error:#}")))?;
     println!("{}", "✓ Schema migrated/verified".green());
 
     println!("\n{}", "Step 4: Verifying admin user".cyan().bold());
@@ -173,11 +173,28 @@ fn bootstrap_setup_environment(
                 backup_path.display()
             );
         }
-        println!("{} JWT_SECRET", "Generated secret in .env:".green().bold());
+        if env_report.generated_jwt_secret {
+            println!("{} JWT_SECRET", "Generated secret in .env:".green().bold());
+        } else if env_report.preserved_jwt_secret {
+            println!(
+                "{} JWT_SECRET in {}",
+                "Preserved existing secret in .env:".green().bold(),
+                env_report.path.display()
+            );
+        }
         if let Some(var_name) = &env_report.generated_turso_encryption_var {
             println!(
                 "{} {} in {}",
                 "Generated local Turso encryption key:".green().bold(),
+                var_name,
+                env_report.path.display()
+            );
+        } else if let Some(var_name) = &env_report.preserved_turso_encryption_var {
+            println!(
+                "{} {} in {}",
+                "Preserved existing local Turso encryption key:"
+                    .green()
+                    .bold(),
                 var_name,
                 env_report.path.display()
             );
@@ -353,9 +370,15 @@ fn print_setup_summary(report: &SetupBootstrapReport) {
         if let Some(backup_path) = &env_report.backup_path {
             println!("Previous .env backup: {}", backup_path.display());
         }
-        println!("Generated JWT_SECRET in: {}", env_report.path.display());
+        if env_report.generated_jwt_secret {
+            println!("Generated JWT_SECRET in: {}", env_report.path.display());
+        } else if env_report.preserved_jwt_secret {
+            println!("Preserved JWT_SECRET in: {}", env_report.path.display());
+        }
         if let Some(var_name) = &env_report.generated_turso_encryption_var {
             println!("Generated {var_name} in: {}", env_report.path.display());
+        } else if let Some(var_name) = &env_report.preserved_turso_encryption_var {
+            println!("Preserved {var_name} in: {}", env_report.path.display());
         }
     } else if let Some(env_path) = &report.env_loaded_from {
         println!("Loaded .env from: {}", env_path.display());

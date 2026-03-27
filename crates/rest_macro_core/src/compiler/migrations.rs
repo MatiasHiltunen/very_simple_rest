@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use proc_macro2::Span;
 
 use super::model::{
-    GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_optional_type, temporal_scalar_kind,
+    DbBackend, GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_optional_type,
+    temporal_scalar_kind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,11 +106,15 @@ fn topologically_sorted_resources(service: &ServiceSpec) -> syn::Result<Vec<&Res
         resource_map: &HashMap<&'a str, &'a ResourceSpec>,
         states: &mut HashMap<&'a str, VisitState>,
         ordered: &mut Vec<&'a ResourceSpec>,
+        allow_cycles: bool,
     ) -> syn::Result<()> {
         let table_name = resource.table_name.as_str();
         match states.get(table_name) {
             Some(VisitState::Done) => return Ok(()),
             Some(VisitState::Visiting) => {
+                if allow_cycles {
+                    return Ok(());
+                }
                 return Err(syn::Error::new(
                     Span::call_site(),
                     format!(
@@ -126,7 +131,7 @@ fn topologically_sorted_resources(service: &ServiceSpec) -> syn::Result<Vec<&Res
         for field in &resource.fields {
             if let Some(relation) = &field.relation {
                 let referenced_table = relation.references_table.as_str();
-                if resource_map.contains_key(referenced_table) {
+                if referenced_table != table_name && resource_map.contains_key(referenced_table) {
                     dependencies.insert(referenced_table);
                 }
             }
@@ -136,7 +141,13 @@ fn topologically_sorted_resources(service: &ServiceSpec) -> syn::Result<Vec<&Res
             let dependency_resource = resource_map
                 .get(dependency)
                 .expect("dependency exists in resource map");
-            visit(dependency_resource, resource_map, states, ordered)?;
+            visit(
+                dependency_resource,
+                resource_map,
+                states,
+                ordered,
+                allow_cycles,
+            )?;
         }
 
         states.insert(table_name, VisitState::Done);
@@ -149,11 +160,21 @@ fn topologically_sorted_resources(service: &ServiceSpec) -> syn::Result<Vec<&Res
         .iter()
         .map(|resource| (resource.table_name.as_str(), resource))
         .collect::<HashMap<_, _>>();
+    let allow_cycles = service
+        .resources
+        .iter()
+        .all(|resource| resource.db == DbBackend::Sqlite);
     let mut states = HashMap::new();
     let mut ordered = Vec::with_capacity(service.resources.len());
 
     for resource in &service.resources {
-        visit(resource, &resource_map, &mut states, &mut ordered)?;
+        visit(
+            resource,
+            &resource_map,
+            &mut states,
+            &mut ordered,
+            allow_cycles,
+        )?;
     }
 
     Ok(ordered)
@@ -362,20 +383,10 @@ fn rendered_indexes(
 
     for field in &resource.fields {
         if field.relation.is_some() {
-            insert_index(
-                &mut indexed,
-                resource,
-                vec![field.name()],
-                false,
-            );
+            insert_index(&mut indexed, resource, vec![field.name()], false);
         }
         if field.unique {
-            insert_index(
-                &mut indexed,
-                resource,
-                vec![field.name()],
-                true,
-            );
+            insert_index(&mut indexed, resource, vec![field.name()], true);
         }
     }
 
@@ -571,16 +582,12 @@ mod tests {
             render_service_migration_sql(&loaded.service).expect("migration sql should render");
 
         assert!(sql.contains("CREATE UNIQUE INDEX uidx_workspace_slug ON workspace (slug);"));
-        assert!(
-            sql.contains(
-                "CREATE UNIQUE INDEX uidx_workspace_tenant_id_slug ON workspace (tenant_id, slug);"
-            )
-        );
-        assert!(
-            sql.contains(
-                "CREATE INDEX idx_workspace_status_published_at ON workspace (status, published_at);"
-            )
-        );
+        assert!(sql.contains(
+            "CREATE UNIQUE INDEX uidx_workspace_tenant_id_slug ON workspace (tenant_id, slug);"
+        ));
+        assert!(sql.contains(
+            "CREATE INDEX idx_workspace_status_published_at ON workspace (status, published_at);"
+        ));
     }
 
     #[test]
@@ -595,7 +602,9 @@ mod tests {
         assert!(sql.contains("tenant_id INTEGER NOT NULL"));
         assert!(sql.contains("slug TEXT NOT NULL"));
         assert!(sql.contains("CREATE UNIQUE INDEX uidx_post_slug ON post (slug);"));
-        assert!(sql.contains("CREATE UNIQUE INDEX uidx_post_tenant_id_slug ON post (tenant_id, slug);"));
+        assert!(
+            sql.contains("CREATE UNIQUE INDEX uidx_post_tenant_id_slug ON post (tenant_id, slug);")
+        );
     }
 
     #[test]
@@ -606,6 +615,102 @@ mod tests {
             render_service_migration_sql(&loaded.service).expect("migration sql should render");
 
         assert!(sql.contains("FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE"));
+    }
+
+    #[test]
+    fn migration_sql_allows_self_referential_relations() {
+        let schema_path = temp_schema_path("sqlite_self_ref_migration");
+        fs::write(
+            &schema_path,
+            r#"module: "self_ref"
+resources: [
+    {
+        name: "Category"
+        table: "category"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "parent_id"
+                type: I64
+                nullable: true
+                relation: {
+                    references: "category.id"
+                    on_delete: SetNull
+                }
+            }
+        ]
+    }
+]
+"#,
+        )
+        .expect("schema should be written");
+
+        let loaded = load_service_from_path(&schema_path).expect("schema should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("CREATE TABLE category"));
+        assert!(sql.contains("FOREIGN KEY (parent_id) REFERENCES category(id) ON DELETE SET NULL"));
+
+        let _ = fs::remove_file(schema_path);
+    }
+
+    #[test]
+    fn migration_sql_allows_sqlite_mutual_relation_cycles() {
+        let schema_path = temp_schema_path("sqlite_mutual_cycle_migration");
+        fs::write(
+            &schema_path,
+            r#"module: "mutual_cycle"
+resources: [
+    {
+        name: "Post"
+        table: "post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "featured_media_id"
+                type: I64
+                nullable: true
+                relation: {
+                    references: "media.id"
+                    on_delete: SetNull
+                }
+            }
+        ]
+    }
+    {
+        name: "Media"
+        table: "media"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "post_id"
+                type: I64
+                nullable: true
+                relation: {
+                    references: "post.id"
+                    on_delete: SetNull
+                }
+            }
+        ]
+    }
+]
+"#,
+        )
+        .expect("schema should be written");
+
+        let loaded = load_service_from_path(&schema_path).expect("schema should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("CREATE TABLE post"));
+        assert!(sql.contains("CREATE TABLE media"));
+        assert!(
+            sql.contains("FOREIGN KEY (featured_media_id) REFERENCES media(id) ON DELETE SET NULL")
+        );
+        assert!(sql.contains("FOREIGN KEY (post_id) REFERENCES post(id) ON DELETE SET NULL"));
+
+        let _ = fs::remove_file(schema_path);
     }
 
     #[test]

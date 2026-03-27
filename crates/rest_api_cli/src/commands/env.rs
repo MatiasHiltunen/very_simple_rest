@@ -4,7 +4,7 @@ use rand::{RngExt, rng};
 use rest_macro_core::auth::{AuthClaimType, AuthEmailProvider};
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,9 @@ pub struct EnvFileReport {
     pub path: PathBuf,
     pub backup_path: Option<PathBuf>,
     pub generated_turso_encryption_var: Option<String>,
+    pub preserved_turso_encryption_var: Option<String>,
     pub generated_jwt_secret: bool,
+    pub preserved_jwt_secret: bool,
 }
 
 struct EnvTemplateConfig {
@@ -118,9 +120,8 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
     })
 }
 
-pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
+fn render_env_template_with_config(config: &EnvTemplateConfig) -> String {
     let jwt_secret = generate_random_secret(32);
-    let config = env_template_config(config_path)?;
     let mut output = String::new();
 
     writeln!(&mut output, "# very_simple_rest API Configuration").unwrap();
@@ -282,7 +283,12 @@ pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
     )
     .unwrap();
 
-    Ok(output)
+    output
+}
+
+pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
+    let config = env_template_config(config_path)?;
+    Ok(render_env_template_with_config(&config))
 }
 
 fn configured_admin_claim_env_examples(
@@ -386,6 +392,12 @@ pub fn write_env_file(
         std::fs::create_dir_all(parent)?;
     }
 
+    let existing_assignments = if env_path.exists() {
+        parse_env_assignments(&std::fs::read_to_string(&env_path)?)
+    } else {
+        BTreeMap::new()
+    };
+
     let backup_path = if env_path.exists() {
         if refuse_existing {
             return Err(Error::Config(format!(
@@ -416,20 +428,101 @@ pub fn write_env_file(
     };
 
     let config = env_template_config(config_path)?;
-    let content = render_env_template(config_path)?;
+    let preserved_jwt_secret = existing_env_value(&existing_assignments, "JWT_SECRET").is_some();
+    let preserved_turso_encryption_var = config
+        .turso_encryption_var
+        .as_ref()
+        .filter(|var_name| existing_env_value(&existing_assignments, var_name.as_str()).is_some())
+        .cloned();
+    let content = merge_env_template_with_existing(
+        &render_env_template_with_config(&config),
+        &existing_assignments,
+    );
     std::fs::write(&env_path, content)?;
 
     Ok(EnvFileReport {
         path: env_path,
         backup_path,
-        generated_turso_encryption_var: config.turso_encryption_var,
-        generated_jwt_secret: true,
+        generated_turso_encryption_var: if config.turso_encryption_var.is_some()
+            && preserved_turso_encryption_var.is_none()
+        {
+            config.turso_encryption_var
+        } else {
+            None
+        },
+        preserved_turso_encryption_var,
+        generated_jwt_secret: !preserved_jwt_secret,
+        preserved_jwt_secret,
     })
 }
 
 /// Generate .env template file
 pub fn generate_env_template(config_path: Option<&Path>) -> Result<EnvFileReport> {
     write_env_file(None, config_path, true, false)
+}
+
+fn parse_env_assignments(content: &str) -> BTreeMap<String, String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let (key, value) = trimmed.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn existing_env_value<'a>(
+    existing_assignments: &'a BTreeMap<String, String>,
+    key: &str,
+) -> Option<&'a String> {
+    existing_assignments
+        .get(key)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn merge_env_template_with_existing(
+    rendered: &str,
+    existing_assignments: &BTreeMap<String, String>,
+) -> String {
+    if existing_assignments.is_empty() {
+        return rendered.to_owned();
+    }
+
+    let mut merged = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for line in rendered.lines() {
+        if let Some((key, _)) = line.split_once('=')
+            && let Some(existing_value) = existing_env_value(existing_assignments, key.trim())
+        {
+            merged.push(format!("{}={}", key.trim(), existing_value));
+            seen.insert(key.trim().to_owned());
+            continue;
+        }
+        merged.push(line.to_owned());
+    }
+
+    let extra_assignments = existing_assignments
+        .iter()
+        .filter(|(key, value)| !seen.contains(key.as_str()) && !value.trim().is_empty())
+        .collect::<Vec<_>>();
+    if !extra_assignments.is_empty() {
+        merged.push(String::new());
+        merged.push("# Preserved existing variables".to_owned());
+        for (key, value) in extra_assignments {
+            merged.push(format!("{key}={value}"));
+        }
+    }
+
+    format!("{}\n", merged.join("\n"))
 }
 
 #[cfg(test)]
@@ -536,6 +629,39 @@ mod tests {
                 .expect("env should read")
                 .contains("JWT_SECRET=")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_env_file_preserves_existing_secret_values_and_custom_vars() {
+        let root = temp_root("preserve_env");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config = root.join("api.eon");
+        fs::copy(fixture_path("turso_local_encrypted_api.eon"), &config)
+            .expect("fixture should copy");
+        let env_path = root.join(".env");
+        fs::write(
+            &env_path,
+            "DATABASE_URL=sqlite:custom.db?mode=rwc\nJWT_SECRET=preserve-jwt\nTURSO_ENCRYPTION_KEY=preserve-key\nEXTRA_TOKEN=keep-me\n",
+        )
+        .expect("existing env should write");
+
+        let report = write_env_file(None, Some(&config), true, false)
+            .expect("env file should preserve existing values");
+        let content = fs::read_to_string(&report.path).expect("env should read");
+
+        assert!(report.preserved_jwt_secret);
+        assert!(!report.generated_jwt_secret);
+        assert_eq!(
+            report.preserved_turso_encryption_var.as_deref(),
+            Some("TURSO_ENCRYPTION_KEY")
+        );
+        assert_eq!(report.generated_turso_encryption_var, None);
+        assert!(content.contains("DATABASE_URL=sqlite:custom.db?mode=rwc"));
+        assert!(content.contains("JWT_SECRET=preserve-jwt"));
+        assert!(content.contains("TURSO_ENCRYPTION_KEY=preserve-key"));
+        assert!(content.contains("EXTRA_TOKEN=keep-me"));
 
         let _ = fs::remove_dir_all(root);
     }
