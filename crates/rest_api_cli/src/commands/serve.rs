@@ -447,6 +447,7 @@ struct DynamicField {
     api_name: String,
     expose_in_api: bool,
     enum_values: Option<Vec<String>>,
+    transforms: Vec<compiler::FieldTransform>,
     kind: FieldKind,
     list_item_kind: Option<FieldKind>,
     object_fields: Option<Vec<DynamicField>>,
@@ -485,6 +486,7 @@ impl DynamicField {
             api_name,
             expose_in_api: spec.expose_in_api(),
             enum_values: spec.enum_values().map(|values| values.to_vec()),
+            transforms: spec.transforms().to_vec(),
             kind,
             list_item_kind,
             object_fields,
@@ -1283,6 +1285,16 @@ fn normalize_text_field_value(kind: FieldKind, value: &str) -> anyhow::Result<St
     })
 }
 
+fn apply_field_transforms_to_text(
+    transforms: &[compiler::FieldTransform],
+    value: String,
+) -> String {
+    transforms.iter().fold(value, |current, transform| match transform {
+        compiler::FieldTransform::Trim => current.trim().to_owned(),
+        compiler::FieldTransform::Lowercase => current.to_lowercase(),
+    })
+}
+
 fn bound_value_to_json(value: &BoundValue) -> Value {
     match value {
         BoundValue::Null => Value::Null,
@@ -1631,7 +1643,12 @@ fn normalize_typed_field_json_value(
             .ok_or_else(|| expected_json_field(path, "a boolean"))?,
         FieldKind::Text => value
             .as_str()
-            .map(|value| Value::String(value.to_owned()))
+            .map(|value| {
+                Value::String(apply_field_transforms_to_text(
+                    field.transforms.as_slice(),
+                    value.to_owned(),
+                ))
+            })
             .ok_or_else(|| expected_json_field(path, "a string"))?,
         FieldKind::DateTime
         | FieldKind::Date
@@ -1703,7 +1720,12 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
             .ok_or_else(|| expected_json_field(&field.api_name, "a boolean")),
         FieldKind::Text => value
             .as_str()
-            .map(|value| BoundValue::Text(value.to_owned()))
+            .map(|value| {
+                BoundValue::Text(apply_field_transforms_to_text(
+                    field.transforms.as_slice(),
+                    value.to_owned(),
+                ))
+            })
             .ok_or_else(|| expected_json_field(&field.api_name, "a string")),
         FieldKind::DateTime
         | FieldKind::Date
@@ -3699,7 +3721,11 @@ async fn update_handler(
         if let Err(response) = apply_validation(field, &value) {
             return response;
         }
-        assignments.push(format!("{} = {}", field.name, BIND_MARKER));
+        assignments.push(format!(
+            "{} = {}",
+            field.name,
+            placeholder(resource.db, write_binds.len() + 1)
+        ));
         write_binds.push(value);
     }
     for field in &resource.fields {
@@ -4298,6 +4324,72 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn native_serve_applies_text_transforms_on_create_and_update() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("field_transforms_api.eon", false).await;
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "slug": "  HeLLo-World  ",
+                "status": " DRAFT ",
+                "title": {
+                    "raw": "  Hello world  ",
+                    "rendered": "  <p>Hello world</p>  "
+                }
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let created: Value = test::read_body_json(create_response).await;
+        assert_eq!(created["slug"], "hello-world");
+        assert_eq!(created["status"], "draft");
+        assert_eq!(created["title"]["raw"], "Hello world");
+        assert_eq!(created["title"]["rendered"], "<p>Hello world</p>");
+
+        let update_request = test::TestRequest::put()
+            .uri("/api/posts/1")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "slug": "  NeXt-Post  ",
+                "status": " PUBLISHED ",
+                "title": {
+                    "raw": "  Updated title  ",
+                    "rendered": "  <p>Updated title</p>  "
+                }
+            }))
+            .to_request();
+        let update_response = test::call_service(&app, update_request).await;
+        let update_status = update_response.status();
+        let update_body = test::read_body(update_response).await;
+        assert_eq!(
+            update_status,
+            StatusCode::OK,
+            "update failed: {}",
+            String::from_utf8_lossy(&update_body)
+        );
+
+        let get_request = test::TestRequest::get().uri("/api/posts/1").to_request();
+        let get_response = test::call_service(&app, get_request).await;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let updated: Value = test::read_body_json(get_response).await;
+        assert_eq!(updated["slug"], "next-post");
+        assert_eq!(updated["status"], "published");
+        assert_eq!(updated["title"]["raw"], "Updated title");
+        assert_eq!(updated["title"]["rendered"], "<p>Updated title</p>");
+    }
+
+    #[actix_web::test]
     async fn native_serve_lists_many_to_many_routes_via_join_resources() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
@@ -4717,6 +4809,7 @@ mod tests {
             api_name: "payload".to_owned(),
             expose_in_api: true,
             enum_values: None,
+            transforms: Vec::new(),
             kind: FieldKind::Json,
             list_item_kind: None,
             object_fields: None,
@@ -4732,6 +4825,7 @@ mod tests {
             api_name: "attributes".to_owned(),
             expose_in_api: true,
             enum_values: None,
+            transforms: Vec::new(),
             kind: FieldKind::JsonObject,
             list_item_kind: None,
             object_fields: None,
@@ -4747,6 +4841,7 @@ mod tests {
             api_name: "blocks".to_owned(),
             expose_in_api: true,
             enum_values: None,
+            transforms: Vec::new(),
             kind: FieldKind::JsonArray,
             list_item_kind: None,
             object_fields: None,
@@ -4783,6 +4878,7 @@ mod tests {
             api_name: "categories".to_owned(),
             expose_in_api: true,
             enum_values: None,
+            transforms: Vec::new(),
             kind: FieldKind::List,
             list_item_kind: Some(FieldKind::Integer),
             object_fields: None,
@@ -4798,6 +4894,7 @@ mod tests {
             api_name: "blocks".to_owned(),
             expose_in_api: true,
             enum_values: None,
+            transforms: Vec::new(),
             kind: FieldKind::List,
             list_item_kind: Some(FieldKind::JsonObject),
             object_fields: None,
@@ -4829,6 +4926,7 @@ mod tests {
             api_name: "title".to_owned(),
             expose_in_api: true,
             enum_values: None,
+            transforms: Vec::new(),
             kind: FieldKind::JsonObject,
             list_item_kind: None,
             object_fields: Some(vec![
@@ -4837,6 +4935,7 @@ mod tests {
                     api_name: "raw".to_owned(),
                     expose_in_api: true,
                     enum_values: None,
+                    transforms: Vec::new(),
                     kind: FieldKind::Text,
                     list_item_kind: None,
                     object_fields: None,
@@ -4857,6 +4956,7 @@ mod tests {
                     api_name: "rendered".to_owned(),
                     expose_in_api: true,
                     enum_values: None,
+                    transforms: Vec::new(),
                     kind: FieldKind::Text,
                     list_item_kind: None,
                     object_fields: None,
@@ -4904,6 +5004,121 @@ mod tests {
         )
         .expect_err("unknown nested fields should fail");
         assert_eq!(unknown.field, "title.extra");
+    }
+
+    #[actix_web::test]
+    async fn parse_json_value_applies_declared_text_transforms() {
+        let text_field = DynamicField {
+            name: "slug".to_owned(),
+            api_name: "slug".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
+            transforms: vec![
+                compiler::FieldTransform::Trim,
+                compiler::FieldTransform::Lowercase,
+            ],
+            kind: FieldKind::Text,
+            list_item_kind: None,
+            object_fields: None,
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: true,
+            supports_sort: true,
+            supports_range_filters: false,
+        };
+        let enum_field = DynamicField {
+            name: "status".to_owned(),
+            api_name: "status".to_owned(),
+            expose_in_api: true,
+            enum_values: Some(vec!["draft".to_owned(), "published".to_owned()]),
+            transforms: vec![
+                compiler::FieldTransform::Trim,
+                compiler::FieldTransform::Lowercase,
+            ],
+            kind: FieldKind::Text,
+            list_item_kind: None,
+            object_fields: None,
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: true,
+            supports_sort: true,
+            supports_range_filters: false,
+        };
+        let object_field = DynamicField {
+            name: "title".to_owned(),
+            api_name: "title".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
+            transforms: Vec::new(),
+            kind: FieldKind::JsonObject,
+            list_item_kind: None,
+            object_fields: Some(vec![
+                DynamicField {
+                    name: "raw".to_owned(),
+                    api_name: "raw".to_owned(),
+                    expose_in_api: true,
+                    enum_values: None,
+                    transforms: vec![compiler::FieldTransform::Trim],
+                    kind: FieldKind::Text,
+                    list_item_kind: None,
+                    object_fields: None,
+                    optional: false,
+                    generated: GeneratedValue::None,
+                    validation: compiler::FieldValidation::default(),
+                    supports_exact_filters: false,
+                    supports_sort: false,
+                    supports_range_filters: false,
+                },
+                DynamicField {
+                    name: "rendered".to_owned(),
+                    api_name: "rendered".to_owned(),
+                    expose_in_api: true,
+                    enum_values: None,
+                    transforms: vec![compiler::FieldTransform::Trim],
+                    kind: FieldKind::Text,
+                    list_item_kind: None,
+                    object_fields: None,
+                    optional: true,
+                    generated: GeneratedValue::None,
+                    validation: compiler::FieldValidation::default(),
+                    supports_exact_filters: false,
+                    supports_sort: false,
+                    supports_range_filters: false,
+                },
+            ]),
+            optional: false,
+            generated: GeneratedValue::None,
+            validation: compiler::FieldValidation::default(),
+            supports_exact_filters: false,
+            supports_sort: false,
+            supports_range_filters: false,
+        };
+
+        assert_eq!(
+            parse_json_value(&text_field, &json!("  HeLLo-World  "))
+                .expect("text field should normalize"),
+            BoundValue::Text("hello-world".to_owned())
+        );
+        assert_eq!(
+            parse_json_value(&enum_field, &json!(" DRAFT "))
+                .expect("enum field should normalize"),
+            BoundValue::Text("draft".to_owned())
+        );
+        assert_eq!(
+            parse_json_value(
+                &object_field,
+                &json!({
+                    "raw": "  Hello world  ",
+                    "rendered": "  <p>Hello world</p>  "
+                })
+            )
+            .expect("nested object field should normalize"),
+            BoundValue::Text(
+                r#"{"raw":"Hello world","rendered":"<p>Hello world</p>"}"#.to_owned()
+            )
+        );
     }
 
     #[actix_web::test]

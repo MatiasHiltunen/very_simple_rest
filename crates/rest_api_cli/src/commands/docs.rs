@@ -1062,6 +1062,14 @@ referenced by `exists` conditions.\n\n",
                 "Declares a unique single-column index for supported scalar storage fields. Typed `Object`, `List`, and JSON fields do not support `unique`.",
             ),
             row(
+                "resources[].fields[].transforms",
+                "List<Enum>",
+                "[]",
+                "No",
+                "Trim, Lowercase",
+                "Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values.",
+            ),
+            row(
                 "resources[].fields[].generated",
                 "Enum",
                 "Auto-inferred from the field name and ID role when omitted",
@@ -1156,6 +1164,22 @@ referenced by `exists` conditions.\n\n",
                 "No",
                 "Integer or float literal",
                 "Only valid for integer and real fields. Must be `>= minimum` when both are set.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Write-Time Transforms",
+        "Write-time transforms normalize request payload values on create and update before validation, policy-driven create requirements, and persistence. They do not change query filter semantics directly; they change the stored value.",
+        &[
+            row(
+                "resources[].fields[].transforms[]",
+                "Enum",
+                "None",
+                "No",
+                "Trim, Lowercase",
+                "`Trim` removes leading and trailing Unicode whitespace. `Lowercase` applies Rust string lowercasing. Transforms currently support text and enum-backed text fields only.",
             ),
         ],
     );

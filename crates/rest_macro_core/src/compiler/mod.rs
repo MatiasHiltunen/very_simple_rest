@@ -13,7 +13,8 @@ use syn::{DeriveInput, LitStr, Path};
 
 pub use authorization::{compile_resource_authorization, compile_service_authorization};
 pub use model::{
-    ComputedFieldPart, ComputedFieldSpec, DbBackend, EnumSpec, FieldSpec, FieldValidation,
+    ComputedFieldPart, ComputedFieldSpec, DbBackend, EnumSpec, FieldSpec, FieldTransform,
+    FieldValidation,
     GeneratedTemporalKind, GeneratedValue, IndexSpec, NumericBound, PolicyAssignment,
     PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
     PolicyFilterOperator, PolicyValueSource, ReferentialAction, RelationSpec, ResourceSpec,
@@ -24,7 +25,8 @@ pub use model::{
     is_list_field, is_optional_type, is_structured_scalar_type, is_time_type,
     is_typed_object_field, is_uuid_type, list_item_type, object_fields,
     structured_scalar_kind, supports_declared_index, supports_exact_filters,
-    supports_field_sort, supports_range_filters, supports_sort, temporal_scalar_kind,
+    supports_field_sort, supports_field_transforms, supports_range_filters, supports_sort,
+    temporal_scalar_kind, validate_field_transforms,
 };
 pub use openapi::OpenApiSpecOptions;
 

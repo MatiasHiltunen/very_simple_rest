@@ -1,0 +1,50 @@
+module: "field_transforms_api"
+enums: {
+    PostStatus: ["draft", "published"]
+}
+resources: [
+    {
+        name: "Post"
+        api_name: "posts"
+        roles: {
+            create: "user"
+            update: "user"
+        }
+        list: {
+            default_limit: 10
+            max_limit: 50
+        }
+        fields: [
+            { name: "id", type: I64 }
+            {
+                name: "slug"
+                type: String
+                transforms: [Trim, Lowercase]
+                validate: { min_length: 3 }
+            }
+            {
+                name: "status"
+                type: PostStatus
+                transforms: [Trim, Lowercase]
+            }
+            {
+                name: "title"
+                type: Object
+                fields: [
+                    {
+                        name: "raw"
+                        type: String
+                        transforms: [Trim]
+                        validate: { min_length: 3 }
+                    }
+                    {
+                        name: "rendered"
+                        type: String
+                        nullable: true
+                        transforms: [Trim]
+                    }
+                ]
+            }
+        ]
+    }
+]

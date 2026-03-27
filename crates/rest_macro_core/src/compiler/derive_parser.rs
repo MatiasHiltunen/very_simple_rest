@@ -172,6 +172,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
             unique: false,
             enum_name: None,
             enum_values: None,
+            transforms: Vec::new(),
             ty: field.ty.clone(),
             list_item_ty: None,
             object_fields: None,

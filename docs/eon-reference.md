@@ -348,6 +348,7 @@ Field configuration controls generated Rust types, SQL columns, validations, and
 | resources[].fields[].nullable | Bool | false | No | true, false | Wraps the generated Rust field type in `Option<T>`. `generated` fields are also emitted as optional even when `nullable` is false. |
 | resources[].fields[].id | Bool | false, but the field matching `id_field` is treated as the ID | No | true, false | Primary key semantics are inferred when the field name matches the resource `id_field`. |
 | resources[].fields[].unique | Bool | false | No | true, false | Declares a unique single-column index for supported scalar storage fields. Typed `Object`, `List`, and JSON fields do not support `unique`. |
+| resources[].fields[].transforms | List<Enum> | [] | No | Trim, Lowercase | Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. |
 | resources[].fields[].generated | Enum | Auto-inferred from the field name and ID role when omitted | No | None, AutoIncrement, CreatedAt, UpdatedAt | If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`. |
 | resources[].fields[].relation | Map | None | No | See Relations | Declares a foreign-key style relationship and optional nested route generation. |
 | resources[].fields[].validate | Map | None | No | See Field Validation | Validation is supported for text, integer, and real fields only. |
@@ -372,6 +373,14 @@ Validation is checked at compile time and only certain combinations are allowed.
 | resources[].fields[].validate.max_length | usize | None | No | Non-negative integer | Only valid for text-like fields. Must be `>= min_length` when both are set. |
 | resources[].fields[].validate.minimum | i64 or f64 | None | No | Integer or float literal | Only valid for integer and real fields. Integer SQL fields require integer bounds. |
 | resources[].fields[].validate.maximum | i64 or f64 | None | No | Integer or float literal | Only valid for integer and real fields. Must be `>= minimum` when both are set. |
+
+## Write-Time Transforms
+
+Write-time transforms normalize request payload values on create and update before validation, policy-driven create requirements, and persistence. They do not change query filter semantics directly; they change the stored value.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].fields[].transforms[] | Enum | None | No | Trim, Lowercase | `Trim` removes leading and trailing Unicode whitespace. `Lowercase` applies Rust string lowercasing. Transforms currently support text and enum-backed text fields only. |
 
 ## Static Mounts
 

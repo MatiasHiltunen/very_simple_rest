@@ -1442,6 +1442,76 @@ fn typed_object_validator_defs(resource: &ResourceSpec, runtime_crate: &Path) ->
         .collect()
 }
 
+fn typed_object_normalizer_defs(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
+    resource
+        .api_fields()
+        .flat_map(|field| {
+            let path = vec![field.name()];
+            collect_typed_object_normalizer_defs(resource, field, &path, runtime_crate)
+        })
+        .collect()
+}
+
+fn collect_typed_object_normalizer_defs(
+    resource: &ResourceSpec,
+    field: &super::model::FieldSpec,
+    path: &[String],
+    runtime_crate: &Path,
+) -> Vec<TokenStream> {
+    let Some(nested_fields) = field.object_fields.as_deref() else {
+        return Vec::new();
+    };
+
+    let mut definitions = Vec::new();
+    for nested_field in nested_fields {
+        let mut nested_path = path.to_vec();
+        nested_path.push(nested_field.name());
+        definitions.extend(collect_typed_object_normalizer_defs(
+            resource,
+            nested_field,
+            &nested_path,
+            runtime_crate,
+        ));
+    }
+
+    let helper_ident = typed_object_normalizer_ident(resource, path);
+    let statements = nested_fields.iter().filter_map(|nested_field| {
+        let field_name = Literal::string(nested_field.api_name());
+        if nested_field.object_fields.is_some() {
+            let mut nested_path = path.to_vec();
+            nested_path.push(nested_field.name());
+            let nested_helper_ident = typed_object_normalizer_ident(resource, &nested_path);
+            Some(quote! {
+                if let Some(value) = object.get_mut(#field_name) {
+                    Self::#nested_helper_ident(value);
+                }
+            })
+        } else if !nested_field.transforms().is_empty() {
+            let transform_ops = string_transform_ops(nested_field.transforms());
+            Some(quote! {
+                if let Some(value) = object.get_mut(#field_name) {
+                    if let #runtime_crate::serde_json::Value::String(value) = value {
+                        #(#transform_ops)*
+                    }
+                }
+            })
+        } else {
+            None
+        }
+    });
+
+    definitions.push(quote! {
+        fn #helper_ident(value: &mut #runtime_crate::serde_json::Value) {
+            let Some(object) = value.as_object_mut() else {
+                return;
+            };
+            #(#statements)*
+        }
+    });
+
+    definitions
+}
+
 fn collect_typed_object_validator_defs(
     resource: &ResourceSpec,
     field: &super::model::FieldSpec,
@@ -1512,6 +1582,30 @@ fn typed_object_validator_ident(resource: &ResourceSpec, path: &[String]) -> syn
         .map(|segment| segment.to_upper_camel_case())
         .collect::<String>();
     format_ident!("{}{}ObjectSchema", resource.struct_ident, suffix)
+}
+
+fn typed_object_normalizer_ident(resource: &ResourceSpec, path: &[String]) -> syn::Ident {
+    let suffix = path
+        .iter()
+        .map(|segment| segment.to_upper_camel_case())
+        .collect::<String>();
+    format_ident!("normalize_{}_{}_object", resource.struct_ident.to_string().to_snake_case(), suffix.to_snake_case())
+}
+
+fn string_transform_ops(
+    transforms: &[super::model::FieldTransform],
+) -> Vec<TokenStream> {
+    transforms
+        .iter()
+        .map(|transform| match transform {
+            super::model::FieldTransform::Trim => quote! {
+                *value = value.trim().to_owned();
+            },
+            super::model::FieldTransform::Lowercase => quote! {
+                *value = value.to_lowercase();
+            },
+        })
+        .collect()
 }
 
 fn typed_object_validator_scalar_type_tokens(ty: &Type, runtime_crate: &Path) -> TokenStream {
@@ -2290,6 +2384,7 @@ fn resource_impl_tokens(
             Some(#name) => Ok(Some(&[#(#fields),*])),
         }
     });
+    let object_normalizer_defs = typed_object_normalizer_defs(resource, runtime_crate);
     let computed_field_insertions = resource.computed_fields.iter().map(|field| {
         let api_name = Literal::string(&field.api_name);
         let parts = field.parts.iter().map(|part| match part {
@@ -2348,6 +2443,8 @@ fn resource_impl_tokens(
     let read_check = role_guard(runtime_crate, resource.roles.read.as_deref());
     let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
     let delete_check = role_guard(runtime_crate, resource.roles.delete.as_deref());
+    let create_normalization = create_normalization_tokens(resource, authorization);
+    let update_normalization = update_normalization_tokens(resource);
     let create_validation = create_validation_tokens(resource, authorization, runtime_crate);
     let update_validation = update_validation_tokens(resource, runtime_crate);
     let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
@@ -4132,6 +4229,7 @@ fn resource_impl_tokens(
             #contains_filter_helper
 
             #(#many_to_many_handlers)*
+            #(#object_normalizer_defs)*
 
             fn can_read(user: &#runtime_crate::core::auth::UserContext) -> bool {
                 #can_read_body
@@ -4623,6 +4721,8 @@ fn resource_impl_tokens(
                 #create_runtime_arg
             ) -> impl Responder {
                 #create_check
+                let mut item = item.into_inner();
+                #(#create_normalization)*
                 #(#create_validation)*
                 #create_require_check
                 #create_body
@@ -4636,6 +4736,8 @@ fn resource_impl_tokens(
                 #update_runtime_arg
             ) -> impl Responder {
                 #update_check
+                let mut item = item.into_inner();
+                #(#update_normalization)*
                 #(#update_validation)*
                 #update_body
             }
@@ -5030,6 +5132,79 @@ fn create_validation_tokens(
             )
         })
         .collect()
+}
+
+fn create_normalization_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+) -> Vec<TokenStream> {
+    create_payload_fields(resource, authorization)
+        .into_iter()
+        .filter_map(|field| {
+            normalization_tokens(
+                resource,
+                field.field,
+                &field.field.ident,
+                create_payload_field_is_optional(&field),
+            )
+        })
+        .collect()
+}
+
+fn update_normalization_tokens(resource: &ResourceSpec) -> Vec<TokenStream> {
+    update_payload_fields(resource)
+        .into_iter()
+        .filter_map(|field| {
+            normalization_tokens(
+                resource,
+                field,
+                &field.ident,
+                super::model::is_optional_type(&field.ty),
+            )
+        })
+        .collect()
+}
+
+fn normalization_tokens(
+    resource: &ResourceSpec,
+    field: &super::model::FieldSpec,
+    ident: &syn::Ident,
+    optional: bool,
+) -> Option<TokenStream> {
+    if let Some(_nested_fields) = field.object_fields.as_deref() {
+        let helper_ident = typed_object_normalizer_ident(resource, &[field.name()]);
+        return Some(if optional {
+            quote! {
+                if let Some(value) = &mut item.#ident {
+                    Self::#helper_ident(value);
+                }
+            }
+        } else {
+            quote! {
+                Self::#helper_ident(&mut item.#ident);
+            }
+        });
+    }
+
+    if field.transforms().is_empty() {
+        return None;
+    }
+
+    let transform_ops = string_transform_ops(field.transforms());
+    Some(if optional {
+        quote! {
+            if let Some(value) = &mut item.#ident {
+                #(#transform_ops)*
+            }
+        }
+    } else {
+        quote! {
+            {
+                let value = &mut item.#ident;
+                #(#transform_ops)*
+            }
+        }
+    })
 }
 
 fn update_validation_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {

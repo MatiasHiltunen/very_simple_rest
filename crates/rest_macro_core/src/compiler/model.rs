@@ -606,6 +606,12 @@ pub enum WriteModelStyle {
     GeneratedStructWithDtos,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FieldTransform {
+    Trim,
+    Lowercase,
+}
+
 #[derive(Clone)]
 pub struct FieldSpec {
     pub ident: Ident,
@@ -614,6 +620,7 @@ pub struct FieldSpec {
     pub unique: bool,
     pub enum_name: Option<String>,
     pub enum_values: Option<Vec<String>>,
+    pub transforms: Vec<FieldTransform>,
     pub ty: Type,
     pub list_item_ty: Option<Type>,
     pub object_fields: Option<Vec<FieldSpec>>,
@@ -683,6 +690,10 @@ impl FieldSpec {
 
     pub fn enum_values(&self) -> Option<&[String]> {
         self.enum_values.as_deref()
+    }
+
+    pub fn transforms(&self) -> &[FieldTransform] {
+        self.transforms.as_slice()
     }
 }
 
@@ -802,6 +813,7 @@ impl std::fmt::Debug for FieldSpec {
             .field("unique", &self.unique)
             .field("enum_name", &self.enum_name)
             .field("enum_values", &self.enum_values)
+            .field("transforms", &self.transforms)
             .field("ty", &self.ty.to_token_stream().to_string())
             .field(
                 "list_item_ty",
@@ -1045,6 +1057,15 @@ pub fn supports_declared_index(field: &FieldSpec) -> bool {
         && !is_json_type(&field.ty)
         && !is_json_object_type(&field.ty)
         && !is_json_array_type(&field.ty)
+}
+
+pub fn supports_field_transforms(field: &FieldSpec) -> bool {
+    field.list_item_ty.is_none()
+        && field.object_fields.is_none()
+        && !is_structured_scalar_type(&field.ty)
+        && !is_bool_type(&field.ty)
+        && !is_integer_sql_type(field.sql_type.as_str())
+        && !matches!(field.sql_type.as_str(), "REAL")
 }
 
 pub fn is_list_field(field: &FieldSpec) -> bool {
@@ -1459,6 +1480,51 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
                     format!(
                         "field `{}` does not support validation constraints",
                         field.name()
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_field_transforms(fields: &[FieldSpec], span: Span) -> syn::Result<()> {
+    for field in fields {
+        if let Some(nested_fields) = field.object_fields.as_deref() {
+            validate_field_transforms(nested_fields, span)?;
+        }
+
+        if field.transforms.is_empty() {
+            continue;
+        }
+
+        if field.generated != GeneratedValue::None {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "generated field `{}` does not support write-time transforms",
+                    field.name()
+                ),
+            ));
+        }
+
+        if !supports_field_transforms(field) {
+            return Err(syn::Error::new(
+                span,
+                format!("field `{}` does not support write-time transforms", field.name()),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for transform in &field.transforms {
+            if !seen.insert(*transform) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "field `{}` declares write-time transform `{:?}` more than once",
+                        field.name(),
+                        transform
                     ),
                 ));
             }

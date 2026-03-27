@@ -11,7 +11,7 @@ use serde::de::{self, Deserializer, Error as _, MapAccess, Visitor};
 use syn::{LitStr, Type};
 
 use super::model::{
-    DbBackend, EnumSpec, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS,
+    DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation, GENERATED_DATE_ALIAS,
     GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
     GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
     GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound,
@@ -20,8 +20,9 @@ use super::model::{
     ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind,
     ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
     default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
-    sanitize_struct_ident, supports_declared_index, validate_authorization_contract,
-    validate_field_validations, is_optional_type,
+    sanitize_struct_ident, supports_declared_index,
+    validate_authorization_contract, validate_field_transforms, validate_field_validations,
+    is_optional_type,
     validate_list_config, validate_logging_config, validate_policy_claim_sources,
     validate_relations, validate_row_policies, validate_runtime_config, validate_security_config,
     validate_sql_identifier, validate_tls_config,
@@ -699,6 +700,8 @@ struct FieldDocument {
     #[serde(default)]
     unique: bool,
     #[serde(default)]
+    transforms: Vec<String>,
+    #[serde(default)]
     relation: Option<RelationDocument>,
     #[serde(default)]
     validate: Option<FieldValidationDocument>,
@@ -835,6 +838,8 @@ struct FieldMapConfigDocument {
     generated: GeneratedValue,
     #[serde(default)]
     unique: bool,
+    #[serde(default)]
+    transforms: Vec<String>,
     #[serde(default)]
     relation: Option<RelationDocument>,
     #[serde(default)]
@@ -1026,6 +1031,7 @@ impl FieldMapValueDocument {
                 id: false,
                 generated: GeneratedValue::None,
                 unique: false,
+                transforms: Vec::new(),
                 relation: None,
                 validate: None,
             }),
@@ -1057,6 +1063,7 @@ impl FieldMapConfigDocument {
             id: self.id,
             generated: self.generated,
             unique: self.unique,
+            transforms: self.transforms,
             relation: self.relation,
             validate: self.validate,
         })
@@ -1873,6 +1880,7 @@ fn build_resources_with_enums(
                 None => None,
             };
             let validation = parse_field_validation_document(field.validate);
+            let transforms = parse_field_transforms_document(field.transforms)?;
 
             fields.push(FieldSpec {
                 ident: syn::parse_str(&field.name).map_err(|_| {
@@ -1886,6 +1894,7 @@ fn build_resources_with_enums(
                 unique: field.unique,
                 enum_name: parsed_ty.enum_name,
                 enum_values: parsed_ty.enum_values,
+                transforms,
                 ty: parsed_ty.ty,
                 list_item_ty: parsed_ty.list_item_ty,
                 object_fields,
@@ -1968,6 +1977,7 @@ fn build_resources_with_enums(
         validate_row_policies(resource, &result, &resource.policies, Span::call_site())?;
         validate_relations(&resource.fields, Span::call_site())?;
         validate_field_validations(&resource.fields, Span::call_site())?;
+        validate_field_transforms(&resource.fields, Span::call_site())?;
         validate_list_config(&resource.list, Span::call_site())?;
         validate_resource_indexes(resource, Span::call_site())?;
     }
@@ -2675,6 +2685,7 @@ fn build_object_fields(
             unique: field.unique,
             enum_name: parsed_ty.enum_name,
             enum_values: parsed_ty.enum_values,
+            transforms: parse_field_transforms_document(field.transforms)?,
             ty: parsed_ty.ty,
             list_item_ty: parsed_ty.list_item_ty,
             object_fields,
@@ -3959,6 +3970,26 @@ fn parse_field_validation_document(document: Option<FieldValidationDocument>) ->
     }
 }
 
+fn parse_field_transforms_document(
+    transforms: Vec<String>,
+) -> syn::Result<Vec<FieldTransform>> {
+    transforms
+        .into_iter()
+        .map(|transform| match transform.as_str() {
+            "Trim" | "trim" => Ok(FieldTransform::Trim),
+            "Lowercase" | "lowercase" | "lower_case" | "lower-case" => {
+                Ok(FieldTransform::Lowercase)
+            }
+            _ => Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "unknown write-time transform `{transform}`; expected one of: Trim, Lowercase"
+                ),
+            )),
+        })
+        .collect()
+}
+
 fn parse_numeric_bound_document(bound: NumericBoundDocument) -> NumericBound {
     match bound {
         NumericBoundDocument::Integer(value) => NumericBound::Integer(value),
@@ -4779,6 +4810,7 @@ mod tests {
                         id: true,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4792,6 +4824,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4834,6 +4867,7 @@ mod tests {
                         id: true,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4847,6 +4881,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4860,6 +4895,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4873,6 +4909,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4886,6 +4923,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4944,6 +4982,7 @@ mod tests {
                         id: true,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4957,6 +4996,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4970,6 +5010,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -4983,6 +5024,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5036,6 +5078,7 @@ mod tests {
                         id: true,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5049,6 +5092,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5062,6 +5106,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5124,6 +5169,7 @@ mod tests {
                         id: true,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5143,6 +5189,7 @@ mod tests {
                                 id: false,
                                 generated: GeneratedValue::None,
                                 unique: false,
+                                transforms: Vec::new(),
                                 relation: None,
                                 validate: Some(FieldValidationDocument {
                                     min_length: Some(3),
@@ -5161,6 +5208,7 @@ mod tests {
                                 id: false,
                                 generated: GeneratedValue::None,
                                 unique: false,
+                                transforms: Vec::new(),
                                 relation: None,
                                 validate: None,
                             },
@@ -5169,6 +5217,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5188,6 +5237,7 @@ mod tests {
                                 id: false,
                                 generated: GeneratedValue::None,
                                 unique: false,
+                                transforms: Vec::new(),
                                 relation: None,
                                 validate: None,
                             },
@@ -5201,6 +5251,7 @@ mod tests {
                                 id: false,
                                 generated: GeneratedValue::None,
                                 unique: false,
+                                transforms: Vec::new(),
                                 relation: None,
                                 validate: None,
                             },
@@ -5209,6 +5260,7 @@ mod tests {
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5344,6 +5396,90 @@ resources: [
         );
         assert_eq!(status.sql_type, "TEXT");
         assert_eq!(workflow_fields[0].enum_name(), Some("PostStatus"));
+    }
+
+    #[test]
+    fn parses_write_time_text_transforms_on_scalar_and_nested_fields() {
+        let document = parse_document(
+            r#"
+enums: {
+    PostStatus: ["draft", "published"]
+}
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "slug", type: String, transforms: [Trim, Lowercase] }
+            { name: "status", type: PostStatus, transforms: [Trim, Lowercase] }
+            {
+                name: "title"
+                type: Object
+                fields: [
+                    { name: "raw", type: String, transforms: [Trim] }
+                ]
+            }
+        ]
+    }
+]
+"#,
+        );
+        let enums = build_enums(document.enums).expect("enums should build");
+        let resources = build_resources_with_enums(DbBackend::Sqlite, document.resources, &enums)
+            .expect("resources should build");
+        let resource = &resources[0];
+        let slug = resource.find_field("slug").expect("slug field should exist");
+        let status = resource
+            .find_field("status")
+            .expect("status field should exist");
+        let title = resource.find_field("title").expect("title field should exist");
+        let title_fields =
+            super::super::model::object_fields(title).expect("title should define object fields");
+
+        assert_eq!(
+            slug.transforms(),
+            &[
+                super::super::model::FieldTransform::Trim,
+                super::super::model::FieldTransform::Lowercase,
+            ]
+        );
+        assert_eq!(
+            status.transforms(),
+            &[
+                super::super::model::FieldTransform::Trim,
+                super::super::model::FieldTransform::Lowercase,
+            ]
+        );
+        assert_eq!(
+            title_fields[0].transforms(),
+            &[super::super::model::FieldTransform::Trim]
+        );
+    }
+
+    #[test]
+    fn rejects_write_time_transforms_on_non_text_fields() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "workspace_id", type: I64, transforms: [Trim] }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("non-text transforms should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("field `workspace_id` does not support write-time transforms"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -5958,6 +6094,7 @@ resources: [
                         id: true,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
@@ -5971,6 +6108,7 @@ resources: [
                         id: false,
                         generated: GeneratedValue::None,
                         unique: false,
+                        transforms: Vec::new(),
                         relation: None,
                         validate: None,
                     },
