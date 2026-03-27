@@ -609,6 +609,11 @@ pub enum WriteModelStyle {
 #[derive(Clone)]
 pub struct FieldSpec {
     pub ident: Ident,
+    pub api_name: String,
+    pub expose_in_api: bool,
+    pub unique: bool,
+    pub enum_name: Option<String>,
+    pub enum_values: Option<Vec<String>>,
     pub ty: Type,
     pub list_item_ty: Option<Type>,
     pub object_fields: Option<Vec<FieldSpec>>,
@@ -619,9 +624,43 @@ pub struct FieldSpec {
     pub relation: Option<RelationSpec>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseContextSpec {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumSpec {
+    pub name: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexSpec {
+    pub fields: Vec<String>,
+    pub unique: bool,
+}
+
 impl FieldSpec {
     pub fn name(&self) -> String {
         self.ident.to_string()
+    }
+
+    pub fn api_name(&self) -> &str {
+        self.api_name.as_str()
+    }
+
+    pub fn expose_in_api(&self) -> bool {
+        self.expose_in_api
+    }
+
+    pub fn enum_name(&self) -> Option<&str> {
+        self.enum_name.as_deref()
+    }
+
+    pub fn enum_values(&self) -> Option<&[String]> {
+        self.enum_values.as_deref()
     }
 }
 
@@ -630,11 +669,15 @@ pub struct ResourceSpec {
     pub struct_ident: Ident,
     pub impl_module_ident: Ident,
     pub table_name: String,
+    pub api_name: String,
+    pub default_response_context: Option<String>,
+    pub response_contexts: Vec<ResponseContextSpec>,
     pub id_field: String,
     pub db: DbBackend,
     pub roles: RoleRequirements,
     pub policies: RowPolicies,
     pub list: ListConfig,
+    pub indexes: Vec<IndexSpec>,
     pub fields: Vec<FieldSpec>,
     pub write_style: WriteModelStyle,
 }
@@ -666,6 +709,7 @@ pub struct StaticMountSpec {
 #[derive(Clone)]
 pub struct ServiceSpec {
     pub module_ident: Ident,
+    pub enums: Vec<EnumSpec>,
     pub resources: Vec<ResourceSpec>,
     pub authorization: AuthorizationContract,
     pub static_mounts: Vec<StaticMountSpec>,
@@ -680,6 +724,38 @@ impl ResourceSpec {
     pub fn find_field(&self, field_name: &str) -> Option<&FieldSpec> {
         self.fields.iter().find(|field| field.name() == field_name)
     }
+
+    pub fn field_by_api_name(&self, field_name: &str) -> Option<&FieldSpec> {
+        self.fields
+            .iter()
+            .find(|field| field.expose_in_api() && field.api_name() == field_name)
+    }
+
+    pub fn api_name(&self) -> &str {
+        self.api_name.as_str()
+    }
+
+    pub fn default_response_context(&self) -> Option<&ResponseContextSpec> {
+        self.default_response_context
+            .as_deref()
+            .and_then(|name| self.response_context(name))
+    }
+
+    pub fn response_context(&self, name: &str) -> Option<&ResponseContextSpec> {
+        self.response_contexts
+            .iter()
+            .find(|context| context.name == name)
+    }
+
+    pub fn response_context_names(&self) -> impl Iterator<Item = &str> {
+        self.response_contexts
+            .iter()
+            .map(|context| context.name.as_str())
+    }
+
+    pub fn api_fields(&self) -> impl Iterator<Item = &FieldSpec> {
+        self.fields.iter().filter(|field| field.expose_in_api())
+    }
 }
 
 impl std::fmt::Debug for FieldSpec {
@@ -687,6 +763,11 @@ impl std::fmt::Debug for FieldSpec {
         f.debug_struct("FieldSpec")
             .field("ident", &self.ident)
             .field("name", &self.name())
+            .field("api_name", &self.api_name)
+            .field("expose_in_api", &self.expose_in_api)
+            .field("unique", &self.unique)
+            .field("enum_name", &self.enum_name)
+            .field("enum_values", &self.enum_values)
             .field("ty", &self.ty.to_token_stream().to_string())
             .field(
                 "list_item_ty",
@@ -711,11 +792,15 @@ impl std::fmt::Debug for ResourceSpec {
             .field("struct_ident", &self.struct_ident)
             .field("impl_module_ident", &self.impl_module_ident)
             .field("table_name", &self.table_name)
+            .field("api_name", &self.api_name)
+            .field("default_response_context", &self.default_response_context)
+            .field("response_contexts", &self.response_contexts)
             .field("id_field", &self.id_field)
             .field("db", &self.db)
             .field("roles", &self.roles)
             .field("policies", &self.policies)
             .field("list", &self.list)
+            .field("indexes", &self.indexes)
             .field("fields", &self.fields)
             .field("write_style", &self.write_style)
             .finish()
@@ -726,6 +811,7 @@ impl std::fmt::Debug for ServiceSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceSpec")
             .field("module_ident", &self.module_ident)
+            .field("enums", &self.enums)
             .field("resources", &self.resources)
             .field("authorization", &self.authorization)
             .field("static_mounts", &self.static_mounts)
@@ -884,7 +970,10 @@ pub fn supports_exact_filters(field: &FieldSpec) -> bool {
 }
 
 pub fn supports_contains_filters(field: &FieldSpec) -> bool {
-    if field.list_item_ty.is_some() || is_structured_scalar_type(&field.ty) {
+    if field.list_item_ty.is_some()
+        || is_structured_scalar_type(&field.ty)
+        || field.enum_values.is_some()
+    {
         return false;
     }
 
@@ -908,6 +997,18 @@ pub fn supports_field_sort(field: &FieldSpec) -> bool {
         return false;
     }
     supports_sort(&field.ty)
+}
+
+pub fn is_enum_field(field: &FieldSpec) -> bool {
+    field.enum_values.is_some()
+}
+
+pub fn supports_declared_index(field: &FieldSpec) -> bool {
+    field.object_fields.is_none()
+        && field.list_item_ty.is_none()
+        && !is_json_type(&field.ty)
+        && !is_json_object_type(&field.ty)
+        && !is_json_array_type(&field.ty)
 }
 
 pub fn is_list_field(field: &FieldSpec) -> bool {
@@ -960,6 +1061,13 @@ pub fn is_json_object_type(ty: &Type) -> bool {
 
 pub fn is_json_array_type(ty: &Type) -> bool {
     structured_scalar_kind(ty) == Some(StructuredScalarKind::JsonArray)
+}
+
+impl IndexSpec {
+    pub fn name_for_table(&self, table_name: &str) -> String {
+        let prefix = if self.unique { "uidx" } else { "idx" };
+        format!("{prefix}_{table_name}_{}", self.fields.join("_"))
+    }
 }
 
 pub fn infer_generated_value(field_name: &str, is_id: bool) -> GeneratedValue {
@@ -1200,6 +1308,13 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
         let validation = &field.validation;
         if validation.is_empty() {
             continue;
+        }
+
+        if field.enum_values.is_some() {
+            return Err(syn::Error::new(
+                span,
+                format!("enum field `{}` does not support validation constraints", field.name()),
+            ));
         }
 
         if is_structured_scalar_type(&field.ty) {

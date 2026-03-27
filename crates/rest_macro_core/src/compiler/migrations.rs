@@ -1,10 +1,17 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use proc_macro2::Span;
 
 use super::model::{
     GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_optional_type, temporal_scalar_kind,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenderedIndex {
+    name: String,
+    fields: Vec<String>,
+    unique: bool,
+}
 
 pub fn render_service_migration_sql(service: &ServiceSpec) -> syn::Result<String> {
     let ordered_resources = topologically_sorted_resources(service)?;
@@ -193,8 +200,8 @@ fn render_resource_diff_sql(
         .iter()
         .map(|field| (field.name(), field))
         .collect::<HashMap<_, _>>();
-    let next_indexed = indexed_fields(next, next_extra_index_fields);
-    let previous_indexed = indexed_fields(previous, previous_extra_index_fields);
+    let next_indexes = rendered_indexes(next, next_extra_index_fields);
+    let previous_indexes = rendered_indexes(previous, previous_extra_index_fields);
     let mut statements = Vec::new();
 
     if previous.id_field != next.id_field || previous.db != next.db {
@@ -224,18 +231,25 @@ fn render_resource_diff_sql(
         let field_name = next_field.name();
         match previous_fields.get(&field_name) {
             Some(previous_field) => validate_compatible_field(previous_field, next_field, next)?,
-            None => {
-                statements.push(render_add_column_sql(next, next_field)?);
-                if next_indexed.contains(&field_name) {
-                    statements.push(render_index_statement(next, &field_name));
-                }
-            }
+            None => statements.push(render_add_column_sql(next, next_field)?),
         }
     }
 
-    for index_field in next_indexed.difference(&previous_indexed) {
-        if previous_fields.contains_key(index_field.as_str()) {
-            statements.push(render_index_statement(next, index_field));
+    for (name, index) in &previous_indexes {
+        if index.unique && !next_indexes.contains_key(name) {
+            return Err(syn::Error::new(
+                next.struct_ident.span(),
+                format!(
+                    "unique index `{name}` was removed or changed on `{}`; write a manual migration",
+                    next.table_name
+                ),
+            ));
+        }
+    }
+
+    for (name, index) in &next_indexes {
+        if !previous_indexes.contains_key(name) {
+            statements.push(render_index_statement(next, index));
         }
     }
 
@@ -324,38 +338,76 @@ fn render_index_sql(
     resource: &ResourceSpec,
     extra_index_fields: Option<&BTreeSet<String>>,
 ) -> Vec<String> {
-    indexed_fields(resource, extra_index_fields)
-        .into_iter()
-        .map(|field_name| render_index_statement(resource, &field_name))
+    rendered_indexes(resource, extra_index_fields)
+        .into_values()
+        .map(|index| render_index_statement(resource, &index))
         .collect()
 }
 
-fn render_index_statement(resource: &ResourceSpec, field_name: &str) -> String {
+fn render_index_statement(resource: &ResourceSpec, index: &RenderedIndex) -> String {
+    let unique = if index.unique { "UNIQUE " } else { "" };
     format!(
-        "CREATE INDEX idx_{}_{} ON {} ({});",
-        resource.table_name, field_name, resource.table_name, field_name
+        "CREATE {unique}INDEX {} ON {} ({});",
+        index.name,
+        resource.table_name,
+        index.fields.join(", ")
     )
 }
 
-fn indexed_fields(
+fn rendered_indexes(
     resource: &ResourceSpec,
     extra_index_fields: Option<&BTreeSet<String>>,
-) -> BTreeSet<String> {
-    let mut indexed = BTreeSet::new();
+) -> BTreeMap<String, RenderedIndex> {
+    let mut indexed = BTreeMap::new();
 
     for field in &resource.fields {
         if field.relation.is_some() {
-            indexed.insert(field.name());
+            insert_index(
+                &mut indexed,
+                resource,
+                vec![field.name()],
+                false,
+            );
+        }
+        if field.unique {
+            insert_index(
+                &mut indexed,
+                resource,
+                vec![field.name()],
+                true,
+            );
         }
     }
 
-    indexed.extend(policy_index_fields(&resource.policies));
+    for field_name in policy_index_fields(&resource.policies) {
+        insert_index(&mut indexed, resource, vec![field_name], false);
+    }
     if let Some(extra_index_fields) = extra_index_fields {
-        indexed.extend(extra_index_fields.iter().cloned());
+        for field_name in extra_index_fields {
+            insert_index(&mut indexed, resource, vec![field_name.clone()], false);
+        }
+    }
+    for index in &resource.indexes {
+        insert_index(&mut indexed, resource, index.fields.clone(), index.unique);
     }
 
-    indexed.remove(&resource.id_field);
+    indexed.retain(|_, index| !(index.fields.len() == 1 && index.fields[0] == resource.id_field));
     indexed
+}
+
+fn insert_index(
+    indexed: &mut BTreeMap<String, RenderedIndex>,
+    resource: &ResourceSpec,
+    fields: Vec<String>,
+    unique: bool,
+) {
+    let spec = super::model::IndexSpec { fields, unique };
+    let name = spec.name_for_table(resource.table_name.as_str());
+    indexed.entry(name.clone()).or_insert(RenderedIndex {
+        name,
+        fields: spec.fields,
+        unique: spec.unique,
+    });
 }
 
 fn policy_index_fields(policies: &RowPolicies) -> BTreeSet<String> {
@@ -509,6 +561,26 @@ mod tests {
             sql.contains("CREATE INDEX idx_family_member_family_id ON family_member (family_id);")
         );
         assert!(sql.contains("CREATE INDEX idx_family_member_user_id ON family_member (user_id);"));
+    }
+
+    #[test]
+    fn migration_sql_renders_declared_unique_and_composite_indexes() {
+        let loaded = load_service_from_path(&fixture_path("unique_indexes_api.eon"))
+            .expect("fixture should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("CREATE UNIQUE INDEX uidx_workspace_slug ON workspace (slug);"));
+        assert!(
+            sql.contains(
+                "CREATE UNIQUE INDEX uidx_workspace_tenant_id_slug ON workspace (tenant_id, slug);"
+            )
+        );
+        assert!(
+            sql.contains(
+                "CREATE INDEX idx_workspace_status_published_at ON workspace (status, published_at);"
+            )
+        );
     }
 
     #[test]

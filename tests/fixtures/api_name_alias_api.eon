@@ -1,0 +1,43 @@
+module: "api_name_alias_api"
+resources: [
+    {
+        name: "Post"
+        table: "blog_post"
+        api_name: "posts"
+        roles: {
+            create: "user"
+        }
+        list: {
+            default_limit: 1
+            max_limit: 20
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title_text", api_name: "title", type: String, validate: { min_length: 3 } }
+            { name: "author_id", api_name: "author", type: I64 }
+            { name: "created_at", api_name: "createdAt", type: DateTime, nullable: true }
+        ]
+    }
+    {
+        name: "Comment"
+        table: "comment_row"
+        api_name: "comments"
+        list: {
+            default_limit: 10
+            max_limit: 50
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "body_text", api_name: "body", type: String }
+            {
+                name: "post_id"
+                api_name: "post"
+                type: I64
+                relation: {
+                    references: "blog_post.id"
+                    nested_route: true
+                }
+            }
+        ]
+    }
+]

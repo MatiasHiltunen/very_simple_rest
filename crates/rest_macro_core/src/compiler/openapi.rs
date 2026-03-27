@@ -76,7 +76,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         let name = resource_name(resource);
         schemas.insert(
             name.clone(),
-            object_schema(&resource.fields.iter().collect::<Vec<_>>()),
+            object_schema(&resource.api_fields().collect::<Vec<_>>()),
         );
         schemas.insert(format!("{name}Create"), create_payload_schema(resource));
         schemas.insert(
@@ -89,11 +89,11 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         );
 
         paths.insert(
-            format!("/{}", resource.table_name),
+            format!("/{}", resource.api_name()),
             collection_path_item(resource),
         );
         paths.insert(
-            format!("/{}/{{id}}", resource.table_name),
+            format!("/{}/{{id}}", resource.api_name()),
             item_path_item(resource),
         );
 
@@ -104,12 +104,19 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
             if !relation.nested_route {
                 continue;
             }
+            let parent_api_name = service
+                .resources
+                .iter()
+                .find(|candidate| candidate.table_name == relation.references_table)
+                .map(|candidate| candidate.api_name().to_owned())
+                .unwrap_or_else(|| relation.references_table.clone());
             paths.insert(
                 format!(
                     "/{}/{{parent_id}}/{}",
-                    relation.references_table, resource.table_name
+                    parent_api_name,
+                    resource.api_name()
                 ),
-                nested_collection_path_item(resource, &relation.references_table, &field.name()),
+                nested_collection_path_item(resource, &parent_api_name, field.api_name()),
             );
         }
     }
@@ -157,27 +164,39 @@ fn collection_path_item(resource: &ResourceSpec) -> Value {
     if read_requires_auth(resource) {
         get["security"] = bearer_security();
     }
+    let mut post = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("Create {}", resource_name(resource)),
+        "operationId": format!("create{}", resource_name(resource)),
+        "security": bearer_security(),
+        "requestBody": json_request_body(format!("{}Create", resource_name(resource))),
+        "responses": create_responses(),
+    });
+    if let Some(parameter) = response_context_parameter(resource) {
+        post["parameters"] = json!([parameter]);
+    }
 
     json!({
         "get": get,
-        "post": {
-            "tags": [resource_name(resource)],
-            "summary": format!("Create {}", resource_name(resource)),
-            "operationId": format!("create{}", resource_name(resource)),
-            "security": bearer_security(),
-            "requestBody": json_request_body(format!("{}Create", resource_name(resource))),
-            "responses": create_responses(),
-        },
+        "post": post,
     })
 }
 
 fn item_path_item(resource: &ResourceSpec) -> Value {
-    let id_parameter = id_parameter("id", &resource.id_field);
+    let id_description = resource
+        .find_field(resource.id_field.as_str())
+        .map(|field| field.api_name())
+        .unwrap_or(resource.id_field.as_str());
+    let id_parameter = id_parameter("id", id_description);
+    let mut get_parameters = vec![id_parameter.clone()];
+    if let Some(parameter) = response_context_parameter(resource) {
+        get_parameters.push(parameter);
+    }
     let mut get = json!({
         "tags": [resource_name(resource)],
         "summary": format!("Get {}", resource_name(resource)),
         "operationId": format!("get{}", resource_name(resource)),
-        "parameters": [id_parameter.clone()],
+        "parameters": get_parameters,
         "responses": get_one_responses(resource),
     });
     if read_requires_auth(resource) {
@@ -208,15 +227,15 @@ fn item_path_item(resource: &ResourceSpec) -> Value {
 
 fn nested_collection_path_item(
     resource: &ResourceSpec,
-    parent_table: &str,
+    parent_api_name: &str,
     relation_field: &str,
 ) -> Value {
     let mut parameters = vec![id_parameter("parent_id", relation_field)];
     parameters.extend(list_query_parameters(resource, Some(relation_field)));
     let mut get = json!({
         "tags": [resource_name(resource)],
-        "summary": format!("List {} by {}", resource_name(resource), parent_table),
-        "operationId": format!("list{}By{}", resource_name(resource), parent_table.to_case(CaseKind::Pascal)),
+        "summary": format!("List {} by {}", resource_name(resource), parent_api_name),
+        "operationId": format!("list{}By{}", resource_name(resource), parent_api_name.to_case(CaseKind::Pascal)),
         "parameters": parameters,
         "responses": nested_list_responses(resource),
     });
@@ -876,10 +895,9 @@ fn list_query_parameters(
     parent_relation_field: Option<&str>,
 ) -> Vec<Value> {
     let sortable_fields = resource
-        .fields
-        .iter()
+        .api_fields()
         .filter(|field| supports_field_sort(field))
-        .map(|field| field.name())
+        .map(|field| field.api_name().to_owned())
         .collect::<Vec<_>>();
     let mut limit_schema = json!({
         "type": "integer",
@@ -942,19 +960,22 @@ fn list_query_parameters(
             }
         }),
     ];
+    if let Some(parameter) = response_context_parameter(resource) {
+        parameters.push(parameter);
+    }
 
-    for field in &resource.fields {
-        let field_name = field.name();
+    for field in resource.api_fields() {
+        let api_field_name = field.api_name().to_owned();
         if supports_exact_filters(field) {
-            let description = if parent_relation_field == Some(field_name.as_str()) {
+            let description = if parent_relation_field == Some(api_field_name.as_str()) {
                 format!(
-                    "Exact-match filter for `{field_name}`. Nested route parent filtering is applied automatically."
+                    "Exact-match filter for `{api_field_name}`. Nested route parent filtering is applied automatically."
                 )
             } else {
-                format!("Exact-match filter for `{field_name}`")
+                format!("Exact-match filter for `{api_field_name}`")
             };
             parameters.push(json!({
-                "name": format!("filter_{field_name}"),
+                "name": format!("filter_{api_field_name}"),
                 "in": "query",
                 "required": false,
                 "description": description,
@@ -964,11 +985,11 @@ fn list_query_parameters(
 
         if supports_contains_filters(field) {
             parameters.push(json!({
-                "name": format!("filter_{field_name}_contains"),
+                "name": format!("filter_{api_field_name}_contains"),
                 "in": "query",
                 "required": false,
                 "description": format!(
-                    "Case-insensitive substring filter for `{field_name}`. `%`, `_`, and `\\` are treated literally."
+                    "Case-insensitive substring filter for `{api_field_name}`. `%`, `_`, and `\\` are treated literally."
                 ),
                 "schema": {
                     "type": "string"
@@ -991,11 +1012,11 @@ fn list_query_parameters(
             ] {
                 let qualifier = if inclusive { " or equal to" } else { "" };
                 parameters.push(json!({
-                    "name": format!("filter_{field_name}_{suffix}"),
+                    "name": format!("filter_{api_field_name}_{suffix}"),
                     "in": "query",
                     "required": false,
                     "description": format!(
-                        "Filter `{field_name}` values {operator}{qualifier} this {kind_label}"
+                        "Filter `{api_field_name}` values {operator}{qualifier} this {kind_label}"
                     ),
                     "schema": query_parameter_schema(field),
                 }));
@@ -1006,12 +1027,38 @@ fn list_query_parameters(
     parameters
 }
 
+fn response_context_parameter(resource: &ResourceSpec) -> Option<Value> {
+    let context_names = resource
+        .response_context_names()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if context_names.is_empty() {
+        return None;
+    }
+
+    let mut schema = json!({
+        "type": "string",
+        "enum": context_names
+    });
+    if let Some(default_context) = resource.default_response_context.as_deref() {
+        schema["default"] = json!(default_context);
+    }
+
+    Some(json!({
+        "name": "context",
+        "in": "query",
+        "required": false,
+        "description": "Named response context for the returned resource shape",
+        "schema": schema
+    }))
+}
+
 fn object_schema(fields: &[&FieldSpec]) -> Value {
     let mut properties = Map::new();
     let mut required = Vec::new();
 
     for field in fields {
-        let field_name = field.name();
+        let field_name = field.api_name().to_owned();
         properties.insert(field_name.clone(), field_schema(field));
         if !is_optional_type(&field.ty) {
             required.push(field_name);
@@ -1082,7 +1129,7 @@ fn create_payload_schema(resource: &ResourceSpec) -> Value {
     let mut required = Vec::new();
 
     for field in create_payload_fields(resource) {
-        let field_name = field.field.name();
+        let field_name = field.field.api_name().to_owned();
         properties.insert(
             field_name.clone(),
             field_schema_with_optional(field.field, field.allow_admin_override),
@@ -1139,6 +1186,10 @@ fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value 
 
     if force_optional || is_optional_type(&field.ty) {
         schema["nullable"] = json!(true);
+    }
+
+    if let Some(enum_values) = field.enum_values() {
+        schema["enum"] = json!(enum_values);
     }
 
     apply_field_validation_schema(field, &mut schema);
@@ -1698,6 +1749,185 @@ mod tests {
             document["components"]["schemas"]["Entry"]["properties"]["settings"]["properties"]["seo"]["additionalProperties"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn renders_openapi_enum_field_metadata() {
+        let service = load_service_from_path(&fixture_path("enum_fields_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Enum Fields API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/posts"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+        let filter_status = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_status")
+            .expect("enum exact filter should exist");
+
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["status"]["enum"],
+            json!(["draft", "published", "archived"])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["workflow"]["properties"]["current"]["enum"],
+            json!(["draft", "published", "archived"])
+        );
+        assert_eq!(
+            filter_status["schema"]["enum"],
+            json!(["draft", "published", "archived"])
+        );
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_status_contains"),
+            "enum fields should not advertise contains filters"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_api_aliases_for_paths_properties_and_query_parameters() {
+        let service = load_service_from_path(&fixture_path("api_name_alias_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("API Name Alias API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let post_parameters = document["paths"]["/posts"]["get"]["parameters"]
+            .as_array()
+            .expect("post list parameters should be an array");
+
+        assert!(document["paths"].get("/posts").is_some());
+        assert!(document["paths"].get("/posts/{id}").is_some());
+        assert!(document["paths"].get("/posts/{parent_id}/comments").is_some());
+        assert!(document["paths"].get("/blog_post").is_none());
+        assert!(document["paths"].get("/comment_row").is_none());
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["title"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["author"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["createdAt"]["format"],
+            json!("date-time")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Comment"]["properties"]["body"]["type"],
+            json!("string")
+        );
+        assert!(
+            post_parameters
+                .iter()
+                .any(|parameter| parameter["name"] == "filter_author")
+        );
+        assert!(
+            post_parameters
+                .iter()
+                .any(|parameter| parameter["name"] == "filter_title_contains")
+        );
+        assert!(
+            post_parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_author_id")
+        );
+        assert_eq!(
+            document["paths"]["/posts"]["get"]["parameters"][3]["schema"]["enum"],
+            json!(["id", "title", "author", "createdAt"])
+        );
+    }
+
+    #[test]
+    fn renders_openapi_resource_api_field_projections() {
+        let service = load_service_from_path(&fixture_path("api_projection_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("API Projection API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/posts"]["get"]["parameters"]
+            .as_array()
+            .expect("post list parameters should be an array");
+
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["title"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["author"]["type"],
+            json!("integer")
+        );
+        assert!(document["components"]["schemas"]["Post"]["properties"]
+            .get("draft_body")
+            .is_none());
+        assert!(document["components"]["schemas"]["Post"]["properties"]
+            .get("internal_note")
+            .is_none());
+        assert!(
+            parameters
+                .iter()
+                .any(|parameter| parameter["name"] == "filter_author")
+        );
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_author_id")
+        );
+        assert_eq!(
+            document["paths"]["/posts"]["get"]["parameters"][3]["schema"]["enum"],
+            json!(["id", "title", "author"])
+        );
+    }
+
+    #[test]
+    fn renders_openapi_response_context_parameters() {
+        let service = load_service_from_path(&fixture_path("api_contexts_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("API Contexts API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let list_parameters = document["paths"]["/posts"]["get"]["parameters"]
+            .as_array()
+            .expect("post list parameters should be an array");
+        let get_parameters = document["paths"]["/posts/{id}"]["get"]["parameters"]
+            .as_array()
+            .expect("post item parameters should be an array");
+        let post_parameters = document["paths"]["/posts"]["post"]["parameters"]
+            .as_array()
+            .expect("post create parameters should be an array");
+
+        assert!(
+            list_parameters
+                .iter()
+                .any(|parameter| parameter["name"] == "context")
+        );
+        assert_eq!(
+            list_parameters
+                .iter()
+                .find(|parameter| parameter["name"] == "context")
+                .expect("context parameter should exist")["schema"]["enum"],
+            json!(["view", "edit"])
+        );
+        assert!(
+            get_parameters
+                .iter()
+                .any(|parameter| parameter["name"] == "context")
+        );
+        assert_eq!(post_parameters[0]["name"], "context");
+        assert_eq!(post_parameters[0]["schema"]["default"], json!("view"));
     }
 
     #[test]

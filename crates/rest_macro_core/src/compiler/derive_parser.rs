@@ -167,6 +167,11 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
 
         parsed_fields.push(FieldSpec {
             ident,
+            api_name: field_name,
+            expose_in_api: true,
+            unique: false,
+            enum_name: None,
+            enum_values: None,
             ty: field.ty.clone(),
             list_item_ty: None,
             object_fields: None,
@@ -187,12 +192,16 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
     let parsed = ResourceSpec {
         struct_ident: struct_ident.clone(),
         impl_module_ident: default_resource_module_ident(&struct_ident),
-        table_name,
+        table_name: table_name.clone(),
+        api_name: table_name.clone(),
+        default_response_context: None,
+        response_contexts: Vec::new(),
         id_field,
         db,
         roles: roles.with_legacy_defaults(),
         policies,
         list,
+        indexes: Vec::new(),
         fields: parsed_fields,
         write_style: WriteModelStyle::ExistingStructWithDtos,
     };

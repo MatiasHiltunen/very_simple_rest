@@ -235,7 +235,10 @@ impl DynamicService {
 struct DynamicResource {
     resource_name: String,
     table_name: String,
+    api_name: String,
+    default_response_context: Option<String>,
     id_field: String,
+    id_api_name: String,
     db: DbBackend,
     roles: RoleRequirements,
     policies: RowPolicies,
@@ -244,6 +247,8 @@ struct DynamicResource {
     create_assignment_sources: HashMap<String, PolicyValueSource>,
     fields: Vec<DynamicField>,
     field_index: HashMap<String, usize>,
+    api_field_index: HashMap<String, usize>,
+    response_contexts: HashMap<String, Vec<String>>,
     create_fields: Vec<CreateFieldRule>,
     update_field_names: Vec<String>,
     read_requires_auth: bool,
@@ -253,6 +258,10 @@ struct DynamicResource {
 
 impl DynamicResource {
     fn from_spec(spec: ResourceSpec, service: &ServiceSpec) -> anyhow::Result<Self> {
+        let id_api_name = spec
+            .find_field(spec.id_field.as_str())
+            .map(|field| field.api_name().to_owned())
+            .unwrap_or_else(|| spec.id_field.clone());
         let fields = spec
             .fields
             .iter()
@@ -263,6 +272,19 @@ impl DynamicResource {
             .iter()
             .enumerate()
             .map(|(index, field)| (field.name.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let api_field_index = fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| {
+                field.expose_in_api
+                    .then(|| (field.api_name.clone(), index))
+            })
+            .collect::<HashMap<_, _>>();
+        let response_contexts = spec
+            .response_contexts
+            .iter()
+            .map(|context| (context.name.clone(), context.fields.clone()))
             .collect::<HashMap<_, _>>();
         let controlled_fields = policy_controlled_fields(&spec);
         let create_fields = build_create_field_rules(&spec, service)?;
@@ -276,7 +298,8 @@ impl DynamicResource {
             .fields
             .iter()
             .filter(|field| {
-                !field.is_id
+                field.expose_in_api()
+                    && !field.is_id
                     && !field.generated.skip_update_bind()
                     && !controlled_fields.contains(&field.name())
             })
@@ -293,7 +316,12 @@ impl DynamicResource {
                     .filter(|relation| relation.nested_route)
                     .map(|relation| NestedRoute {
                         field_name: field.name(),
-                        parent_table: relation.references_table.clone(),
+                        parent_api_name: service
+                            .resources
+                            .iter()
+                            .find(|candidate| candidate.table_name == relation.references_table)
+                            .map(|candidate| candidate.api_name().to_owned())
+                            .unwrap_or_else(|| relation.references_table.clone()),
                     })
             })
             .collect();
@@ -302,7 +330,10 @@ impl DynamicResource {
             read_requires_auth: spec.roles.read.is_some() || spec.policies.has_read_filters(),
             resource_name: spec.struct_ident.to_string(),
             table_name: spec.table_name.clone(),
+            api_name: spec.api_name().to_owned(),
+            default_response_context: spec.default_response_context.clone(),
             id_field: spec.id_field.clone(),
+            id_api_name,
             db: spec.db,
             roles: spec.roles.clone(),
             policies: spec.policies.clone(),
@@ -311,6 +342,8 @@ impl DynamicResource {
             create_assignment_sources,
             fields,
             field_index,
+            api_field_index,
+            response_contexts,
             create_fields,
             update_field_names,
             hybrid,
@@ -324,6 +357,32 @@ impl DynamicResource {
                 anyhow!("field `{field_name}` not found in `{}`", self.table_name)
             })?;
         Ok(&self.fields[index])
+    }
+
+    fn field_by_api_name(&self, field_name: &str) -> anyhow::Result<&DynamicField> {
+        let index = self
+            .api_field_index
+            .get(field_name)
+            .copied()
+            .ok_or_else(|| anyhow!("field `{field_name}` not found in `{}`", self.api_name))?;
+        Ok(&self.fields[index])
+    }
+
+    fn response_context_fields(&self, requested: Option<&str>) -> Result<Option<&[String]>, HttpResponse> {
+        let context_name = requested.or(self.default_response_context.as_deref());
+        match context_name {
+            Some(name) => self
+                .response_contexts
+                .get(name)
+                .map(|fields| Some(fields.as_slice()))
+                .ok_or_else(|| {
+                    errors::bad_request(
+                        "invalid_context",
+                        format!("Unknown response context `{name}`"),
+                    )
+                }),
+            None => Ok(None),
+        }
     }
 
     fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool {
@@ -359,6 +418,9 @@ impl DynamicResource {
 #[derive(Clone)]
 struct DynamicField {
     name: String,
+    api_name: String,
+    expose_in_api: bool,
+    enum_values: Option<Vec<String>>,
     kind: FieldKind,
     list_item_kind: Option<FieldKind>,
     object_fields: Option<Vec<DynamicField>>,
@@ -373,6 +435,7 @@ struct DynamicField {
 impl DynamicField {
     fn from_spec(spec: FieldSpec) -> anyhow::Result<Self> {
         let name = spec.name();
+        let api_name = spec.api_name().to_owned();
         let list_item_kind = spec.list_item_ty.as_ref().and_then(FieldKind::from_type);
         let object_fields = spec
             .object_fields
@@ -393,6 +456,9 @@ impl DynamicField {
         let optional = compiler::is_optional_type(&spec.ty);
         Ok(Self {
             name,
+            api_name,
+            expose_in_api: spec.expose_in_api(),
+            enum_values: spec.enum_values().map(|values| values.to_vec()),
             kind,
             list_item_kind,
             object_fields,
@@ -476,7 +542,7 @@ struct HybridResourceConfig {
 #[derive(Clone)]
 struct NestedRoute {
     field_name: String,
-    parent_table: String,
+    parent_api_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -576,8 +642,8 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
 }
 
 fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource>) {
-    let collection_path = format!("/{}", resource.table_name);
-    let item_path = format!("/{}/{{id}}", resource.table_name);
+    let collection_path = format!("/{}", resource.api_name);
+    let item_path = format!("/{}/{{id}}", resource.api_name);
 
     let list_resource = resource.clone();
     let create_resource = resource.clone();
@@ -657,7 +723,7 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
     for relation in &resource.nested_relations {
         let nested_path = format!(
             "/{}/{{parent_id}}/{}",
-            relation.parent_table, resource.table_name
+            relation.parent_api_name, resource.api_name
         );
         let nested_resource = resource.clone();
         let relation_field = relation.field_name.clone();
@@ -853,6 +919,9 @@ fn build_create_field_rules(
     let mut fields = Vec::new();
 
     for field in &resource.fields {
+        if !field.expose_in_api() {
+            continue;
+        }
         if field.generated.skip_insert() {
             continue;
         }
@@ -925,6 +994,18 @@ fn create_assignment_source<'a>(
         .iter()
         .find(|policy| policy.field == field_name)
         .map(|policy| &policy.source)
+}
+
+fn should_insert_field(resource: &DynamicResource, field: &DynamicField) -> bool {
+    if field.generated.skip_insert() {
+        return false;
+    }
+    if field.expose_in_api {
+        return true;
+    }
+    resource
+        .create_assignment_sources
+        .contains_key(field.name.as_str())
 }
 
 fn placeholder(backend: DbBackend, index: usize) -> String {
@@ -1025,6 +1106,9 @@ fn is_bool_type(ty: &Type) -> bool {
 }
 
 fn supports_contains_filters(field: &DynamicField) -> bool {
+    if field.enum_values.is_some() {
+        return false;
+    }
     !matches!(
         field.kind,
         FieldKind::Integer
@@ -1149,7 +1233,17 @@ fn parse_query_value(field: &DynamicField, value: &str) -> anyhow::Result<BoundV
             .parse::<bool>()
             .map(BoundValue::Bool)
             .with_context(|| format!("invalid boolean `{value}`")),
-        FieldKind::Text => Ok(BoundValue::Text(value.to_owned())),
+        FieldKind::Text => {
+            if let Some(enum_values) = field.enum_values.as_deref()
+                && !enum_values.iter().any(|candidate| candidate == value)
+            {
+                bail!(
+                    "invalid enum value `{value}`; expected one of: {}",
+                    enum_values.join(", ")
+                );
+            }
+            Ok(BoundValue::Text(value.to_owned()))
+        }
         FieldKind::DateTime
         | FieldKind::Date
         | FieldKind::Time
@@ -1257,7 +1351,10 @@ fn normalize_typed_object_value(
         .ok_or_else(|| expected_json_field(path, "an object"))?;
 
     for key in object.keys() {
-        if nested_fields.iter().all(|candidate| candidate.name != *key) {
+        if nested_fields
+            .iter()
+            .all(|candidate| candidate.api_name != *key)
+        {
             let nested_path = format!("{path}.{key}");
             return Err(JsonFieldError::new(
                 nested_path.clone(),
@@ -1268,11 +1365,11 @@ fn normalize_typed_object_value(
 
     let mut normalized = Map::new();
     for nested_field in nested_fields {
-        let nested_path = format!("{path}.{}", nested_field.name);
-        match object.get(nested_field.name.as_str()) {
+        let nested_path = format!("{path}.{}", nested_field.api_name);
+        match object.get(nested_field.api_name.as_str()) {
             Some(Value::Null) => {
                 if nested_field.optional {
-                    normalized.insert(nested_field.name.clone(), Value::Null);
+                    normalized.insert(nested_field.api_name.clone(), Value::Null);
                 } else {
                     return Err(JsonFieldError::new(
                         nested_path.clone(),
@@ -1282,7 +1379,7 @@ fn normalize_typed_object_value(
             }
             Some(nested_value) => {
                 normalized.insert(
-                    nested_field.name.clone(),
+                    nested_field.api_name.clone(),
                     normalize_typed_field_json_value(nested_field, nested_value, &nested_path)?,
                 );
             }
@@ -1305,7 +1402,26 @@ fn apply_nested_validation(
     value: &Value,
     path: &str,
 ) -> Result<(), JsonFieldError> {
-    if field.validation.is_empty() || matches!(value, Value::Null) {
+    if matches!(value, Value::Null) {
+        return Ok(());
+    }
+
+    if let Some(enum_values) = field.enum_values.as_deref() {
+        let text = value
+            .as_str()
+            .ok_or_else(|| expected_json_field(path, "a string"))?;
+        if !enum_values.iter().any(|candidate| candidate == text) {
+            return Err(JsonFieldError::new(
+                path,
+                format!(
+                    "Field `{path}` must be one of: {}",
+                    enum_values.join(", ")
+                ),
+            ));
+        }
+    }
+
+    if field.validation.is_empty() {
         return Ok(());
     }
 
@@ -1464,19 +1580,19 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
         FieldKind::Integer => value
             .as_i64()
             .map(BoundValue::Integer)
-            .ok_or_else(|| expected_json_field(&field.name, "an integer")),
+            .ok_or_else(|| expected_json_field(&field.api_name, "an integer")),
         FieldKind::Real => value
             .as_f64()
             .map(BoundValue::Real)
-            .ok_or_else(|| expected_json_field(&field.name, "a number")),
+            .ok_or_else(|| expected_json_field(&field.api_name, "a number")),
         FieldKind::Boolean => value
             .as_bool()
             .map(BoundValue::Bool)
-            .ok_or_else(|| expected_json_field(&field.name, "a boolean")),
+            .ok_or_else(|| expected_json_field(&field.api_name, "a boolean")),
         FieldKind::Text => value
             .as_str()
             .map(|value| BoundValue::Text(value.to_owned()))
-            .ok_or_else(|| expected_json_field(&field.name, "a string")),
+            .ok_or_else(|| expected_json_field(&field.api_name, "a string")),
         FieldKind::DateTime
         | FieldKind::Date
         | FieldKind::Time
@@ -1484,10 +1600,10 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
         | FieldKind::Decimal => {
             let value = value
                 .as_str()
-                .ok_or_else(|| expected_json_field(&field.name, "a string"))?;
+                .ok_or_else(|| expected_json_field(&field.api_name, "a string"))?;
             Ok(BoundValue::Text(
                 normalize_text_field_value(field.kind, value)
-                    .map_err(|error| invalid_json_field(&field.name, error.to_string()))?,
+                    .map_err(|error| invalid_json_field(&field.api_name, error.to_string()))?,
             ))
         }
         FieldKind::Json => Ok(BoundValue::Text(
@@ -1495,11 +1611,11 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
         )),
         FieldKind::JsonObject => {
             let normalized = if field.object_fields.is_some() {
-                normalize_typed_object_value(field, value, &field.name)?
+                normalize_typed_object_value(field, value, &field.api_name)?
             } else if matches!(value, Value::Object(_)) {
                 value.clone()
             } else {
-                return Err(expected_json_field(&field.name, "an object"));
+                return Err(expected_json_field(&field.api_name, "an object"));
             };
             Ok(BoundValue::Text(
                 serde_json::to_string(&normalized).expect("JSON values should serialize"),
@@ -1507,7 +1623,7 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
         }
         FieldKind::JsonArray => {
             if !matches!(value, Value::Array(_)) {
-                return Err(expected_json_field(&field.name, "an array"));
+                return Err(expected_json_field(&field.api_name, "an array"));
             }
             Ok(BoundValue::Text(
                 serde_json::to_string(value).expect("JSON values should serialize"),
@@ -1516,15 +1632,15 @@ fn parse_json_value(field: &DynamicField, value: &Value) -> Result<BoundValue, J
         FieldKind::List => {
             let items = value
                 .as_array()
-                .ok_or_else(|| expected_json_field(&field.name, "an array"))?;
+                .ok_or_else(|| expected_json_field(&field.api_name, "an array"))?;
             let item_kind = field
                 .list_item_kind
-                .ok_or_else(|| expected_json_field(&field.name, "an array"))?;
+                .ok_or_else(|| expected_json_field(&field.api_name, "an array"))?;
             let normalized = items
                 .iter()
                 .map(|item| normalize_json_item_value(item_kind, item))
                 .collect::<anyhow::Result<Vec<_>>>()
-                .map_err(|error| invalid_json_field(&field.name, error.to_string()))?;
+                .map_err(|error| invalid_json_field(&field.api_name, error.to_string()))?;
             Ok(BoundValue::Text(
                 serde_json::to_string(&Value::Array(normalized))
                     .expect("list values should serialize"),
@@ -1542,7 +1658,7 @@ fn parse_stored_json_value(field: &DynamicField, value: String) -> Result<Value,
         FieldKind::Json => Ok(parsed),
         FieldKind::JsonObject => {
             if field.object_fields.is_some() {
-                normalize_typed_object_value(field, &parsed, &field.name).map_err(|error| {
+                normalize_typed_object_value(field, &parsed, &field.api_name).map_err(|error| {
                     sqlx::Error::ColumnDecode {
                         index: field.name.clone(),
                         source: Box::new(error),
@@ -1620,7 +1736,30 @@ fn parse_stored_json_value(field: &DynamicField, value: String) -> Result<Value,
 }
 
 fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), HttpResponse> {
-    if field.validation.is_empty() || matches!(value, BoundValue::Null) {
+    if matches!(value, BoundValue::Null) {
+        return Ok(());
+    }
+
+    if let Some(enum_values) = field.enum_values.as_deref() {
+        let BoundValue::Text(text) = value else {
+            return Err(errors::validation_error(
+                field.api_name.clone(),
+                format!("Field `{}` must be a string enum value", field.api_name),
+            ));
+        };
+        if !enum_values.iter().any(|candidate| candidate == text) {
+            return Err(errors::validation_error(
+                field.api_name.clone(),
+                format!(
+                    "Field `{}` must be one of: {}",
+                    field.api_name,
+                    enum_values.join(", ")
+                ),
+            ));
+        }
+    }
+
+    if field.validation.is_empty() {
         return Ok(());
     }
 
@@ -1628,10 +1767,10 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
         if let BoundValue::Text(text) = value {
             if text.chars().count() < min_length {
                 return Err(errors::validation_error(
-                    field.name.clone(),
+                    field.api_name.clone(),
                     format!(
                         "Field `{}` must have at least {} characters",
-                        field.name, min_length
+                        field.api_name, min_length
                     ),
                 ));
             }
@@ -1642,10 +1781,10 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
         if let BoundValue::Text(text) = value {
             if text.chars().count() > max_length {
                 return Err(errors::validation_error(
-                    field.name.clone(),
+                    field.api_name.clone(),
                     format!(
                         "Field `{}` must have at most {} characters",
-                        field.name, max_length
+                        field.api_name, max_length
                     ),
                 ));
             }
@@ -1657,16 +1796,16 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
             if let Some(NumericBound::Integer(minimum)) = field.validation.minimum {
                 if *actual < minimum {
                     return Err(errors::validation_error(
-                        field.name.clone(),
-                        format!("Field `{}` must be at least {}", field.name, minimum),
+                        field.api_name.clone(),
+                        format!("Field `{}` must be at least {}", field.api_name, minimum),
                     ));
                 }
             }
             if let Some(NumericBound::Integer(maximum)) = field.validation.maximum {
                 if *actual > maximum {
                     return Err(errors::validation_error(
-                        field.name.clone(),
-                        format!("Field `{}` must be at most {}", field.name, maximum),
+                        field.api_name.clone(),
+                        format!("Field `{}` must be at most {}", field.api_name, maximum),
                     ));
                 }
             }
@@ -1675,10 +1814,10 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
             if let Some(minimum) = &field.validation.minimum {
                 if *actual < minimum.as_f64() {
                     return Err(errors::validation_error(
-                        field.name.clone(),
+                        field.api_name.clone(),
                         format!(
                             "Field `{}` must be at least {}",
-                            field.name,
+                            field.api_name,
                             minimum.as_f64()
                         ),
                     ));
@@ -1687,10 +1826,10 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
             if let Some(maximum) = &field.validation.maximum {
                 if *actual > maximum.as_f64() {
                     return Err(errors::validation_error(
-                        field.name.clone(),
+                        field.api_name.clone(),
                         format!(
                             "Field `{}` must be at most {}",
-                            field.name,
+                            field.api_name,
                             maximum.as_f64()
                         ),
                     ));
@@ -1706,6 +1845,9 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
 fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Value, sqlx::Error> {
     let mut map = Map::new();
     for field in &resource.fields {
+        if !field.expose_in_api {
+            continue;
+        }
         let value = match field.kind {
             FieldKind::Integer => {
                 if field.optional {
@@ -1761,9 +1903,72 @@ fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Va
                 }
             }
         };
-        map.insert(field.name.clone(), value);
+        map.insert(field.api_name.clone(), value);
     }
     Ok(Value::Object(map))
+}
+
+fn request_response_context(req: &HttpRequest) -> Option<String> {
+    form_urlencoded::parse(req.query_string().as_bytes())
+        .find_map(|(key, value)| (key == "context").then(|| value.into_owned()))
+}
+
+fn apply_response_context_to_item(
+    resource: &DynamicResource,
+    mut item: Value,
+    requested: Option<&str>,
+) -> Result<Value, HttpResponse> {
+    let Some(fields) = resource.response_context_fields(requested)? else {
+        return Ok(item);
+    };
+    let Value::Object(map) = &mut item else {
+        return Err(errors::internal_error(
+            "response item must be a JSON object".to_owned(),
+        ));
+    };
+    map.retain(|key, _| fields.iter().any(|field| field == key));
+    Ok(item)
+}
+
+fn apply_response_context_to_list_response(
+    resource: &DynamicResource,
+    response: ListResponse,
+    requested: Option<&str>,
+) -> Result<Value, HttpResponse> {
+    let ListResponse {
+        items,
+        total,
+        count,
+        limit,
+        offset,
+        next_offset,
+        next_cursor,
+    } = response;
+    let context_fields = resource.response_context_fields(requested)?;
+    let items = items
+        .into_iter()
+        .map(|mut item| {
+            if let Some(fields) = context_fields {
+                let Value::Object(map) = &mut item else {
+                    return Err(errors::internal_error(
+                        "response item must be a JSON object".to_owned(),
+                    ));
+                };
+                map.retain(|key, _| fields.iter().any(|field| field == key));
+            }
+            Ok(item)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(serde_json::json!({
+        "items": items,
+        "total": total,
+        "count": count,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": next_offset,
+        "next_cursor": next_cursor,
+    }))
 }
 
 fn json_field_to_scope_value(value: &Value) -> Option<String> {
@@ -1794,7 +1999,8 @@ fn current_row_scope_binding(
     item: &Value,
 ) -> Option<AuthorizationScopeBinding> {
     let hybrid = resource.hybrid.as_ref()?;
-    let value = item.get(hybrid.scope_field.as_str())?;
+    let scope_field = resource.field(hybrid.scope_field.as_str()).ok()?;
+    let value = item.get(scope_field.api_name.as_str())?;
     Some(AuthorizationScopeBinding {
         scope: hybrid.scope.clone(),
         value: json_field_to_scope_value(value)?,
@@ -1815,7 +2021,10 @@ fn list_scope_binding(
             value: value.to_string(),
         });
     }
-    let filter_name = format!("filter_{}", hybrid.scope_field);
+    let filter_name = resource
+        .field(hybrid.scope_field.as_str())
+        .map(|field| format!("filter_{}", field.api_name))
+        .ok()?;
     query
         .get(filter_name.as_str())
         .map(|value| AuthorizationScopeBinding {
@@ -1881,7 +2090,7 @@ fn resolve_create_source_value(
             let field = resource
                 .field(name)
                 .map_err(|error| errors::internal_error(error.to_string()))?;
-            parse_body_value(field, payload.get(name.as_str()), field.optional).map(Some)
+            parse_body_value(field, payload.get(field.api_name.as_str()), field.optional).map(Some)
         }
     }
 }
@@ -1913,24 +2122,24 @@ async fn effective_create_field_value(
                     .unwrap_or(false);
                 if allow_hybrid_runtime {
                     if is_admin(user) && allow_admin_override {
-                        if let Some(value) = payload.get(field.name.as_str()) {
+                        if let Some(value) = payload.get(field.api_name.as_str()) {
                             return parse_body_value(field, Some(value), true);
                         }
                         if let Some(value) = claim_value {
                             return Ok(value);
                         }
                         return Err(errors::validation_error(
-                            field.name.clone(),
-                            format!("Missing required create field `{}`", field.name),
+                            field.api_name.clone(),
+                            format!("Missing required create field `{}`", field.api_name),
                         ));
                     }
                     if let Some(value) = claim_value {
                         return Ok(value);
                     }
-                    let Some(raw_scope) = payload.get(field.name.as_str()) else {
+                    let Some(raw_scope) = payload.get(field.api_name.as_str()) else {
                         return Err(errors::validation_error(
-                            field.name.clone(),
-                            format!("Missing required create field `{}`", field.name),
+                            field.api_name.clone(),
+                            format!("Missing required create field `{}`", field.api_name),
                         ));
                     };
                     let scope_value = parse_body_value(field, Some(raw_scope), true)?;
@@ -1958,34 +2167,34 @@ async fn effective_create_field_value(
                         "forbidden",
                         format!(
                             "Insufficient privileges for create scope field `{}`",
-                            field.name
+                            field.api_name
                         ),
                     ));
                 }
                 if allow_admin_override {
                     if is_admin(user) {
-                        if let Some(value) = payload.get(field.name.as_str()) {
+                        if let Some(value) = payload.get(field.api_name.as_str()) {
                             return parse_body_value(field, Some(value), true);
                         }
                         if let Some(value) = claim_value {
                             return Ok(value);
                         }
                         return Err(errors::validation_error(
-                            field.name.clone(),
-                            format!("Missing required create field `{}`", field.name),
+                            field.api_name.clone(),
+                            format!("Missing required create field `{}`", field.api_name),
                         ));
                     }
                     return claim_value.ok_or_else(|| {
                         errors::forbidden(
                             "missing_claim",
-                            format!("Missing required claim for create field `{}`", field.name),
+                            format!("Missing required claim for create field `{}`", field.api_name),
                         )
                     });
                 }
                 return claim_value.ok_or_else(|| {
                     errors::forbidden(
                         "missing_claim",
-                        format!("Missing required claim for create field `{}`", field.name),
+                        format!("Missing required claim for create field `{}`", field.api_name),
                     )
                 });
             }
@@ -2006,7 +2215,7 @@ async fn effective_create_field_value(
         })?;
     parse_body_value(
         field,
-        payload.get(field.name.as_str()),
+        payload.get(field.api_name.as_str()),
         rule.payload_optional,
     )
 }
@@ -2213,7 +2422,7 @@ async fn evaluate_create_require(
     };
     let mut effective = HashMap::new();
     for field in &resource.fields {
-        if field.generated.skip_insert() {
+        if !should_insert_field(resource, field) {
             continue;
         }
         let value = effective_create_field_value(resource, field, payload, user, state).await?;
@@ -2446,7 +2655,7 @@ fn resolve_create_requirement_source_value(
                     "missing_claim",
                     format!(
                         "Missing required claim `{}` for create requirement field `{}`",
-                        name, target_field.name
+                        name, target_field.api_name
                     ),
                 )),
             }
@@ -2500,6 +2709,7 @@ fn build_list_plan(
     let cursor = query.remove("cursor");
     let sort = query.remove("sort");
     let order = query.remove("order");
+    query.remove("context");
 
     if cursor.is_some() && offset.is_some() {
         return Err(errors::bad_request(
@@ -2551,7 +2761,7 @@ fn build_list_plan(
             .ok_or_else(|| errors::bad_request("invalid_cursor", "Cursor is not valid"))?;
         (sort_field, sort_order, true)
     } else {
-        let sort_field = sort.unwrap_or_else(|| resource.id_field.clone());
+        let sort_field = sort.unwrap_or_else(|| resource.id_api_name.clone());
         let sort_order = match order {
             Some(order) => parse_sort_order(order.as_str()).ok_or_else(|| {
                 errors::bad_request("invalid_query", "Query parameters are invalid")
@@ -2568,7 +2778,7 @@ fn build_list_plan(
     };
 
     let sort_field_spec = resource
-        .field(sort_field.as_str())
+        .field_by_api_name(sort_field.as_str())
         .map_err(|_| errors::bad_request("invalid_query", "Query parameters are invalid"))?;
     if !sort_field_spec.supports_sort {
         return Err(errors::bad_request(
@@ -2583,7 +2793,7 @@ fn build_list_plan(
         ));
     }
     if cursor_mode
-        && sort_field != resource.id_field
+        && sort_field != resource.id_api_name
         && (!sort_field_spec.supports_sort || sort_field_spec.optional)
     {
         return Err(errors::bad_request(
@@ -2632,8 +2842,11 @@ fn build_list_plan(
     }
 
     for field in &resource.fields {
+        if !field.expose_in_api {
+            continue;
+        }
         if field.supports_exact_filters {
-            let exact_name = format!("filter_{}", field.name);
+            let exact_name = format!("filter_{}", field.api_name);
             if let Some(value) = query.remove(exact_name.as_str()) {
                 let parsed = parse_query_value(field, value.as_str()).map_err(|_| {
                     errors::bad_request("invalid_query", "Query parameters are invalid")
@@ -2644,7 +2857,7 @@ fn build_list_plan(
         }
 
         if supports_contains_filters(field) {
-            let contains_name = format!("filter_{}_contains", field.name);
+            let contains_name = format!("filter_{}_contains", field.api_name);
             if let Some(value) = query.remove(contains_name.as_str()) {
                 conditions.push(format!(
                     "LOWER({}) LIKE {} ESCAPE '\\'",
@@ -2656,7 +2869,7 @@ fn build_list_plan(
 
         if field.supports_exact_filters && field.supports_range_filters {
             for (suffix, operator) in [("_gt", ">"), ("_gte", ">="), ("_lt", "<"), ("_lte", "<=")] {
-                let name = format!("filter_{}{}", field.name, suffix);
+                let name = format!("filter_{}{}", field.api_name, suffix);
                 if let Some(value) = query.remove(name.as_str()) {
                     let parsed = parse_query_value(field, value.as_str()).map_err(|_| {
                         errors::bad_request("invalid_query", "Query parameters are invalid")
@@ -2681,14 +2894,14 @@ fn build_list_plan(
         } else {
             "<"
         };
-        if sort_field == resource.id_field {
+        if sort_field == resource.id_api_name {
             if !matches!(cursor_payload.value, CursorValue::Integer(_)) {
                 return Err(errors::bad_request(
                     "invalid_cursor",
                     "Cursor does not match the current sort field",
                 ));
             }
-            select_only_conditions.push(format!("{sort_field} {comparator} {BIND_MARKER}"));
+            select_only_conditions.push(format!("{} {comparator} {BIND_MARKER}", resource.id_field));
             select_only_binds.push(BoundValue::Integer(cursor_payload.last_id));
         } else {
             let cursor_value = match (&sort_field_spec.kind, &cursor_payload.value) {
@@ -2704,7 +2917,9 @@ fn build_list_plan(
                 }
             };
             select_only_conditions.push(format!(
-                "(({sort_field} {comparator} {BIND_MARKER}) OR ({sort_field} = {BIND_MARKER} AND {} {comparator} {BIND_MARKER}))",
+                "(({} {comparator} {BIND_MARKER}) OR ({} = {BIND_MARKER} AND {} {comparator} {BIND_MARKER}))",
+                sort_field_spec.name,
+                sort_field_spec.name,
                 resource.id_field
             ));
             select_only_binds.push(cursor_value.clone());
@@ -2749,10 +2964,10 @@ fn build_list_plan(
         );
     }
     select_sql.push_str(" ORDER BY ");
-    select_sql.push_str(sort_field.as_str());
+    select_sql.push_str(sort_field_spec.name.as_str());
     select_sql.push(' ');
     select_sql.push_str(sort_order.as_sql());
-    if sort_field != resource.id_field {
+    if sort_field != resource.id_api_name {
         select_sql.push_str(", ");
         select_sql.push_str(resource.id_field.as_str());
         select_sql.push(' ');
@@ -2828,7 +3043,7 @@ fn cursor_value_for_item(
     sort: &str,
 ) -> Result<CursorValue, HttpResponse> {
     let field = resource
-        .field(sort)
+        .field_by_api_name(sort)
         .map_err(|error| errors::internal_error(error.to_string()))?;
     let value = item.get(sort).ok_or_else(|| {
         errors::internal_error(format!("missing sort field `{sort}` in response item"))
@@ -2844,7 +3059,7 @@ fn cursor_value_for_item(
             .ok_or_else(|| errors::internal_error("invalid real cursor value".to_owned())),
         (FieldKind::Boolean, Value::Bool(value)) => Ok(CursorValue::Boolean(*value)),
         (_, Value::String(value)) => Ok(CursorValue::Text(value.clone())),
-        (_, Value::Number(value)) if sort == resource.id_field => value
+        (_, Value::Number(value)) if sort == resource.id_api_name => value
             .as_i64()
             .map(CursorValue::Integer)
             .ok_or_else(|| errors::internal_error("invalid id cursor value".to_owned())),
@@ -2855,7 +3070,7 @@ fn cursor_value_for_item(
 }
 
 fn id_for_item(resource: &DynamicResource, item: &Value) -> Result<i64, HttpResponse> {
-    item.get(resource.id_field.as_str())
+    item.get(resource.id_api_name.as_str())
         .and_then(Value::as_i64)
         .ok_or_else(|| errors::internal_error("missing persisted id in list item".to_owned()))
 }
@@ -3016,6 +3231,7 @@ async fn list_handler(
 ) -> HttpResponse {
     let dynamic_service = state.dynamic_service.clone();
     let user = user.unwrap_or_else(anonymous_user_context);
+    let requested_context = request_response_context(&req);
     if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Read)) {
         return response;
     }
@@ -3080,25 +3296,42 @@ async fn list_handler(
         Err(error) => return errors::internal_error(error.to_string()),
     };
     match finalize_list_response(&resource, plan, total, items) {
-        Ok(response) => HttpResponse::Ok().json(response),
+        Ok(response) => {
+            match apply_response_context_to_list_response(
+                &resource,
+                response,
+                requested_context.as_deref(),
+            ) {
+                Ok(value) => HttpResponse::Ok().json(value),
+                Err(response) => response,
+            }
+        }
         Err(response) => response,
     }
 }
 
 async fn get_handler(
     id: i64,
-    _req: HttpRequest,
+    req: HttpRequest,
     user: Option<UserContext>,
     state: web::Data<NativeServeState>,
     resource: Arc<DynamicResource>,
 ) -> HttpResponse {
     let dynamic_service = state.dynamic_service.clone();
     let user = user.unwrap_or_else(anonymous_user_context);
+    let requested_context = request_response_context(&req);
     if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Read)) {
         return response;
     }
     match fetch_readable_by_id(&resource, dynamic_service.as_ref(), &state, &user, id).await {
-        Ok(Some(item)) => HttpResponse::Ok().json(item),
+        Ok(Some(item)) => match apply_response_context_to_item(
+            &resource,
+            item,
+            requested_context.as_deref(),
+        ) {
+            Ok(value) => HttpResponse::Ok().json(value),
+            Err(response) => response,
+        },
         Ok(None) => match fetch_hybrid_authorized_by_id(
             &resource,
             &state,
@@ -3108,7 +3341,14 @@ async fn get_handler(
         )
         .await
         {
-            Ok(Some(item)) => HttpResponse::Ok().json(item),
+            Ok(Some(item)) => match apply_response_context_to_item(
+                &resource,
+                item,
+                requested_context.as_deref(),
+            ) {
+                Ok(value) => HttpResponse::Ok().json(value),
+                Err(response) => response,
+            },
             Ok(None) => errors::not_found("Not found"),
             Err(response) => response,
         },
@@ -3128,11 +3368,12 @@ async fn create_handler(
         return response;
     }
     let dynamic_service = state.dynamic_service.clone();
+    let requested_context = request_response_context(&req);
 
     let mut insert_fields = Vec::new();
     let mut insert_values = Vec::new();
     for field in &resource.fields {
-        if field.generated.skip_insert() {
+        if !should_insert_field(&resource, field) {
             continue;
         }
         let value =
@@ -3225,9 +3466,16 @@ async fn create_handler(
     )
     .await
     {
-        Ok(Some(item)) => HttpResponse::Created()
-            .append_header(("Location", location))
-            .json(item),
+        Ok(Some(item)) => match apply_response_context_to_item(
+            &resource,
+            item,
+            requested_context.as_deref(),
+        ) {
+            Ok(value) => HttpResponse::Created()
+                .append_header(("Location", location))
+                .json(value),
+            Err(response) => response,
+        },
         Ok(None) => match fetch_hybrid_authorized_by_id(
             &resource,
             &state,
@@ -3237,9 +3485,16 @@ async fn create_handler(
         )
         .await
         {
-            Ok(Some(item)) => HttpResponse::Created()
-                .append_header(("Location", location))
-                .json(item),
+            Ok(Some(item)) => match apply_response_context_to_item(
+                &resource,
+                item,
+                requested_context.as_deref(),
+            ) {
+                Ok(value) => HttpResponse::Created()
+                    .append_header(("Location", location))
+                    .json(value),
+                Err(response) => response,
+            },
             Ok(None) => HttpResponse::Created()
                 .append_header(("Location", location))
                 .finish(),
@@ -3271,8 +3526,7 @@ async fn update_handler(
             Ok(field) => field,
             Err(error) => return errors::internal_error(error.to_string()),
         };
-        let value = match parse_body_value(field, payload.get(field_name.as_str()), field.optional)
-        {
+        let value = match parse_body_value(field, payload.get(field.api_name.as_str()), field.optional) {
             Ok(value) => value,
             Err(response) => return response,
         };
@@ -3878,9 +4132,309 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn native_serve_uses_api_aliases_for_routes_payloads_and_queries() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("api_name_alias_api.eon", false).await;
+        query("INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)")
+            .bind(1_i64)
+            .bind("Alpha")
+            .bind(7_i64)
+            .bind("2026-03-26T10:00:00Z")
+            .execute(&state.pool)
+            .await
+            .expect("first aliased post should insert");
+        query("INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)")
+            .bind(2_i64)
+            .bind("Beta")
+            .bind(9_i64)
+            .bind("2026-03-26T11:00:00Z")
+            .execute(&state.pool)
+            .await
+            .expect("second aliased post should insert");
+        query("INSERT INTO comment_row (id, body_text, post_id) VALUES (?, ?, ?)")
+            .bind(1_i64)
+            .bind("First comment")
+            .bind(1_i64)
+            .execute(&state.pool)
+            .await
+            .expect("aliased comment should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Gamma",
+                "author": 7,
+                "createdAt": "2026-03-26T12:00:00Z"
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body: Value = test::read_body_json(create_response).await;
+        assert_eq!(create_body["title"], "Gamma");
+        assert_eq!(create_body["author"], 7);
+        assert!(create_body.get("title_text").is_none());
+
+        let list_request = test::TestRequest::get()
+            .uri("/api/posts?filter_author=7&sort=title&limit=1")
+            .to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["total"], 2);
+        assert_eq!(list_body["items"][0]["title"], "Alpha");
+        let next_cursor = list_body["next_cursor"]
+            .as_str()
+            .expect("next cursor should exist")
+            .to_owned();
+
+        let cursor_request = test::TestRequest::get()
+            .uri(format!("/api/posts?filter_author=7&limit=1&cursor={next_cursor}").as_str())
+            .to_request();
+        let cursor_response = test::call_service(&app, cursor_request).await;
+        assert_eq!(cursor_response.status(), StatusCode::OK);
+        let cursor_body: Value = test::read_body_json(cursor_response).await;
+        assert_eq!(cursor_body["items"][0]["title"], "Gamma");
+
+        let nested_request = test::TestRequest::get().uri("/api/posts/1/comments").to_request();
+        let nested_response = test::call_service(&app, nested_request).await;
+        assert_eq!(nested_response.status(), StatusCode::OK);
+        let nested_body: Value = test::read_body_json(nested_response).await;
+        assert_eq!(nested_body["items"][0]["body"], "First comment");
+        assert_eq!(nested_body["items"][0]["post"], 1);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_applies_resource_api_field_projections() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("api_projection_api.eon", false).await;
+        query(
+            "INSERT INTO blog_post (id, title_text, author_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(1_i64)
+        .bind("Alpha")
+        .bind(7_i64)
+        .bind("secret draft")
+        .bind("internal only")
+        .execute(&state.pool)
+        .await
+        .expect("projected post should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Gamma",
+                "author": 7
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body: Value = test::read_body_json(create_response).await;
+        assert_eq!(create_body["title"], "Gamma");
+        assert_eq!(create_body["author"], 7);
+        assert!(create_body.get("title_text").is_none());
+        assert!(create_body.get("draft_body").is_none());
+        assert!(create_body.get("internal_note").is_none());
+
+        let list_request = test::TestRequest::get()
+            .uri("/api/posts?filter_author=7&sort=title")
+            .to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["total"], 2);
+        assert_eq!(list_body["items"][0]["title"], "Alpha");
+        assert_eq!(list_body["items"][1]["title"], "Gamma");
+        assert!(list_body["items"][0].get("draft_body").is_none());
+        assert!(list_body["items"][0].get("internal_note").is_none());
+    }
+
+    #[actix_web::test]
+    async fn native_serve_applies_response_contexts_over_projected_fields() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("api_contexts_api.eon", false).await;
+        query("INSERT INTO blog_post (id, title_text, author_id, draft_body) VALUES (?, ?, ?, ?)")
+            .bind(1_i64)
+            .bind("Alpha")
+            .bind(7_i64)
+            .bind("secret alpha")
+            .execute(&state.pool)
+            .await
+            .expect("seed row should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let item_request = test::TestRequest::get().uri("/api/posts/1").to_request();
+        let item_response = test::call_service(&app, item_request).await;
+        assert_eq!(item_response.status(), StatusCode::OK);
+        let item_body: Value = test::read_body_json(item_response).await;
+        assert_eq!(item_body["title"], "Alpha");
+        assert!(item_body.get("secret").is_none());
+
+        let edit_request = test::TestRequest::get()
+            .uri("/api/posts/1?context=edit")
+            .to_request();
+        let edit_response = test::call_service(&app, edit_request).await;
+        assert_eq!(edit_response.status(), StatusCode::OK);
+        let edit_body: Value = test::read_body_json(edit_response).await;
+        assert_eq!(edit_body["secret"], "secret alpha");
+
+        let list_request = test::TestRequest::get().uri("/api/posts?sort=title").to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["items"][0]["title"], "Alpha");
+        assert!(list_body["items"][0].get("secret").is_none());
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts?context=edit")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Beta",
+                "author": 9,
+                "secret": "secret beta"
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body: Value = test::read_body_json(create_response).await;
+        assert_eq!(create_body["secret"], "secret beta");
+
+        let invalid_request = test::TestRequest::get()
+            .uri("/api/posts/1?context=unknown")
+            .to_request();
+        let invalid_response = test::call_service(&app, invalid_request).await;
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_enum_fields_validate_and_filter_exactly() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("enum_fields_api.eon", false).await;
+        query("INSERT INTO blog_post (id, title, status, workflow) VALUES (?, ?, ?, ?)")
+            .bind(1_i64)
+            .bind("Alpha")
+            .bind("published")
+            .bind(r#"{"current":"published","previous":"draft"}"#)
+            .execute(&state.pool)
+            .await
+            .expect("enum seed data should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let list_request = test::TestRequest::get()
+            .uri("/api/posts?filter_status=published")
+            .to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["items"][0]["status"], "published");
+        assert_eq!(list_body["items"][0]["workflow"]["current"], "published");
+
+        let invalid_filter_request = test::TestRequest::get()
+            .uri("/api/posts?filter_status=invalid")
+            .to_request();
+        let invalid_filter_response = test::call_service(&app, invalid_filter_request).await;
+        assert_eq!(invalid_filter_response.status(), StatusCode::BAD_REQUEST);
+
+        let contains_request = test::TestRequest::get()
+            .uri("/api/posts?filter_status_contains=pub")
+            .to_request();
+        let contains_response = test::call_service(&app, contains_request).await;
+        assert_eq!(contains_response.status(), StatusCode::BAD_REQUEST);
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Beta",
+                "status": "draft",
+                "workflow": {
+                    "current": "draft"
+                }
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body: Value = test::read_body_json(create_response).await;
+        assert_eq!(create_body["status"], "draft");
+
+        let invalid_create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Gamma",
+                "status": "wrong"
+            }))
+            .to_request();
+        let invalid_create_response = test::call_service(&app, invalid_create_request).await;
+        assert_eq!(invalid_create_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_create_body: Value = test::read_body_json(invalid_create_response).await;
+        assert_eq!(invalid_create_body["code"], "validation_error");
+        assert_eq!(invalid_create_body["field"], "status");
+
+        let invalid_nested_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Delta",
+                "status": "draft",
+                "workflow": {
+                    "current": "wrong"
+                }
+            }))
+            .to_request();
+        let invalid_nested_response = test::call_service(&app, invalid_nested_request).await;
+        assert_eq!(invalid_nested_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_nested_body: Value = test::read_body_json(invalid_nested_response).await;
+        assert_eq!(invalid_nested_body["code"], "validation_error");
+        assert_eq!(invalid_nested_body["field"], "workflow.current");
+    }
+
+    #[actix_web::test]
     async fn parse_json_value_enforces_json_field_shapes() {
         let json_field = DynamicField {
             name: "payload".to_owned(),
+            api_name: "payload".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
             kind: FieldKind::Json,
             list_item_kind: None,
             object_fields: None,
@@ -3893,6 +4447,9 @@ mod tests {
         };
         let object_field = DynamicField {
             name: "attributes".to_owned(),
+            api_name: "attributes".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
             kind: FieldKind::JsonObject,
             list_item_kind: None,
             object_fields: None,
@@ -3905,6 +4462,9 @@ mod tests {
         };
         let array_field = DynamicField {
             name: "blocks".to_owned(),
+            api_name: "blocks".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
             kind: FieldKind::JsonArray,
             list_item_kind: None,
             object_fields: None,
@@ -3938,6 +4498,9 @@ mod tests {
     async fn parse_json_value_enforces_typed_list_item_shapes() {
         let list_field = DynamicField {
             name: "categories".to_owned(),
+            api_name: "categories".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
             kind: FieldKind::List,
             list_item_kind: Some(FieldKind::Integer),
             object_fields: None,
@@ -3950,6 +4513,9 @@ mod tests {
         };
         let block_list_field = DynamicField {
             name: "blocks".to_owned(),
+            api_name: "blocks".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
             kind: FieldKind::List,
             list_item_kind: Some(FieldKind::JsonObject),
             object_fields: None,
@@ -3978,11 +4544,17 @@ mod tests {
     async fn parse_json_value_enforces_typed_object_shapes() {
         let object_field = DynamicField {
             name: "title".to_owned(),
+            api_name: "title".to_owned(),
+            expose_in_api: true,
+            enum_values: None,
             kind: FieldKind::JsonObject,
             list_item_kind: None,
             object_fields: Some(vec![
                 DynamicField {
                     name: "raw".to_owned(),
+                    api_name: "raw".to_owned(),
+                    expose_in_api: true,
+                    enum_values: None,
                     kind: FieldKind::Text,
                     list_item_kind: None,
                     object_fields: None,
@@ -4000,6 +4572,9 @@ mod tests {
                 },
                 DynamicField {
                     name: "rendered".to_owned(),
+                    api_name: "rendered".to_owned(),
+                    expose_in_api: true,
+                    enum_values: None,
                     kind: FieldKind::Text,
                     list_item_kind: None,
                     object_fields: None,

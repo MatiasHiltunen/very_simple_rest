@@ -1,0 +1,17 @@
+module: "unique_indexes_api"
+resources: [
+    {
+        name: "Workspace"
+        indexes: [
+            { fields: ["tenant_id", "slug"], unique: true }
+            { fields: ["status", "published_at"] }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "tenant_id", type: I64 }
+            { name: "slug", type: String, unique: true }
+            { name: "status", type: String }
+            { name: "published_at", type: DateTime, nullable: true }
+        ]
+    }
+]

@@ -973,7 +973,22 @@ fn required_index_names(
 
     for field in &resource.fields {
         if field.relation.is_some() {
-            indexes.insert(format!("idx_{}_{}", resource.table_name, field.name()));
+            indexes.insert(
+                compiler::IndexSpec {
+                    fields: vec![field.name()],
+                    unique: false,
+                }
+                .name_for_table(resource.table_name.as_str()),
+            );
+        }
+        if field.unique {
+            indexes.insert(
+                compiler::IndexSpec {
+                    fields: vec![field.name()],
+                    unique: true,
+                }
+                .name_for_table(resource.table_name.as_str()),
+            );
         }
     }
 
@@ -982,20 +997,60 @@ fn required_index_names(
             .policies
             .controlled_filter_fields()
             .into_iter()
-            .map(|field| format!("idx_{}_{}", resource.table_name, field)),
+            .map(|field| {
+                compiler::IndexSpec {
+                    fields: vec![field],
+                    unique: false,
+                }
+                .name_for_table(resource.table_name.as_str())
+            }),
     );
     indexes.extend(
         exists_target_index_fields(resources)
             .remove(resource.table_name.as_str())
             .into_iter()
             .flatten()
-            .map(|field| format!("idx_{}_{}", resource.table_name, field)),
+            .map(|field| {
+                compiler::IndexSpec {
+                    fields: vec![field],
+                    unique: false,
+                }
+                .name_for_table(resource.table_name.as_str())
+            }),
     );
     indexes.extend(
         resource
             .policies
             .iter_assignments()
-            .map(|(_, policy)| format!("idx_{}_{}", resource.table_name, policy.field)),
+            .map(|(_, policy)| {
+                compiler::IndexSpec {
+                    fields: vec![policy.field.clone()],
+                    unique: false,
+                }
+                .name_for_table(resource.table_name.as_str())
+            }),
+    );
+    indexes.extend(
+        resource
+            .indexes
+            .iter()
+            .map(|index| index.name_for_table(resource.table_name.as_str())),
+    );
+    indexes.remove(
+        compiler::IndexSpec {
+            fields: vec![resource.id_field.clone()],
+            unique: false,
+        }
+        .name_for_table(resource.table_name.as_str())
+        .as_str(),
+    );
+    indexes.remove(
+        compiler::IndexSpec {
+            fields: vec![resource.id_field.clone()],
+            unique: true,
+        }
+        .name_for_table(resource.table_name.as_str())
+        .as_str(),
     );
     indexes
 }
@@ -1246,6 +1301,7 @@ enum ApplyResult {
 #[cfg(test)]
 mod tests {
     use crate::commands::db::{connect_database, database_url_from_service_config};
+    use rest_macro_core::compiler;
     use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
     use rest_macro_core::authorization::{
         AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE, AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
@@ -1253,18 +1309,27 @@ mod tests {
     };
     use rest_macro_core::db::query_scalar;
     use sqlx::Row;
-    use std::sync::{Mutex, OnceLock};
+    use std::{
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
 
     use super::{
         BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, BUILTIN_AUTHZ_RUNTIME_MIGRATION,
         apply_auth_migration, apply_migrations, apply_setup_migrations, check_derive_migration,
         generate_authz_migration, generate_derive_migration, generate_diff_migration,
-        inspect_live_schema, migration_files,
+        inspect_live_schema, migration_files, required_index_names,
     };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
     }
 
     #[test]
@@ -1283,6 +1348,18 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["001_first.sql", "002_second.sql"]);
+    }
+
+    #[test]
+    fn required_index_names_include_declared_unique_and_composite_indexes() {
+        let service = compiler::load_service_from_path(&fixture_path("unique_indexes_api.eon"))
+            .expect("fixture should parse");
+        let resource = &service.resources[0];
+        let names = required_index_names(resource, &service.resources);
+
+        assert!(names.contains("uidx_workspace_slug"));
+        assert!(names.contains("uidx_workspace_tenant_id_slug"));
+        assert!(names.contains("idx_workspace_status_published_at"));
     }
 
     #[test]

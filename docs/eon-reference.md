@@ -49,7 +49,17 @@ These keys are read from the service root.
 | tls | Map | Disabled unless the block is present | No | See TLS | Any configured TLS field enables HTTPS/Rustls handling in emitted servers. |
 | static | Map | No static mounts | No | See Static Mounts | Declares filesystem-backed static directories and SPA mounts. |
 | security | Map | All optional features off / empty | No | See Security | Controls request limits, CORS, trusted proxies, auth settings, headers, and rate limits. |
+| enums | List<Enum> or Map<EnumName, Enum \| List<String>> | None | No | Named enum definitions | Declares reusable string-enum vocabularies that fields can reference by name. |
 | resources | List or keyed map | None | Yes | Resource definitions | A service must contain at least one resource. |
+
+## Enums
+
+The optional `enums` block declares reusable string-enum vocabularies for field definitions.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| enums.<enum_name>.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Enum names must be unique and are referenced from `resources[].fields[].type`. |
+| enums.<enum_name>.values | List<String> | Required when the enum exists | Yes | One or more unique string values | Enum values are validated at request time and emitted in OpenAPI schemas and exact-filter parameters. |
 
 ## Authorization Contract
 
@@ -155,11 +165,33 @@ Each resource describes one generated REST model and its CRUD surface.
 | --- | --- | --- | --- | --- | --- |
 | resources[].name | String | Required in list form; implied by the key in map form | Yes in list form | Any name that can sanitize to a Rust struct identifier | The generated Rust struct uses UpperCamelCase. Duplicate names are rejected after sanitization. |
 | resources[].table | String | The snake_case form of `name` | No | Valid SQL identifier | Controls the SQL table name and API path segment. |
+| resources[].api_name | String | The resolved table name | No | Valid API path segment | Overrides the public collection/item route segment without changing the storage table name. |
 | resources[].id_field | String | `id` | No | Field name | The named field must exist on the resource. |
 | resources[].roles | Map | No role checks | No | See Resource Roles | Declares coarse role gates for read/create/update/delete. |
 | resources[].policies | Map | `admin_bypass = true`; no row policies | No | See Row Policies | Declares row-level filters and assignments using `user.id` or `claim.<name>` sources. |
 | resources[].list | Map | No custom limit caps | No | See List Settings | Controls generated list endpoint defaults and hard caps. |
+| resources[].api | Map | No API projection or response contexts | No | See Resource API | Separates the public API field surface from storage fields and can define named response contexts. |
+| resources[].indexes | List<Index> | No explicit indexes | No | See Indexes | Declares explicit single-field or composite indexes in addition to the automatic relation and policy-derived index hints. |
 | resources[].fields | List or keyed map | None | Yes | Field definitions | Each resource must define its fields explicitly. |
+
+## Resource API
+
+The optional `api` block lets a resource expose a different public field surface from its storage fields and declare named response contexts over that public surface.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].api.fields | List<ApiFieldProjection> or Map<ApiFieldName, String \| ApiFieldProjection> | Expose every field by its storage name | No | Projection definitions | When present, only the projected fields are exposed in generated/native JSON payloads, list filters, sort names, and OpenAPI. Each projection maps one API field name to one storage field via `from`. |
+| resources[].api.default_context | String | No default context; responses use the full projected API field set | No | Configured context name | When set, list/get/create responses default to that named context unless a `context` query parameter overrides it. |
+| resources[].api.contexts | List<ResponseContext> or Map<ContextName, ResponseContext \| List<String>> | No named response contexts | No | Named context definitions | Each context is a subset of exposed API field names. Generated handlers and native `vsr serve` apply the selected context at response serialization time. |
+
+## Response Contexts
+
+Response contexts are named subsets of already-exposed API fields. They currently affect list/get/create response bodies and can be selected with `?context=<name>`.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].api.contexts[].name | String | Required in list form; implied by the key in map form | Yes in list form | Valid API identifier | Context names must be unique per resource and are exposed through OpenAPI as the `context` query parameter enum. |
+| resources[].api.contexts[].fields | List<String> | [] | No | Exposed API field names | Every listed field must already be exposed on the resource API surface, either directly or through `api.fields` projection. |
 
 ## Resource Roles
 
@@ -180,6 +212,15 @@ List settings tune generated list endpoint defaults.
 | --- | --- | --- | --- | --- | --- |
 | resources[].list.default_limit | u32 | None | No | Positive integer | Must be greater than 0. If both limits are set, `default_limit <= max_limit`. |
 | resources[].list.max_limit | u32 | None | No | Positive integer | Must be greater than 0. |
+
+## Indexes
+
+Resources can declare explicit indexes, while generated migrations and live-schema checks still infer additional non-unique indexes from relations and row-policy fields.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].indexes[].fields | List<String> | Required when the index exists | Yes | One or more storage field names | Field names reference storage columns, not API projection aliases. Composite indexes preserve the configured field order. |
+| resources[].indexes[].unique | Bool | false | No | true, false | When true, generated migrations emit `CREATE UNIQUE INDEX ...` for the configured field list. |
 
 ## Row Policies
 
@@ -267,11 +308,12 @@ Field configuration controls generated Rust types, SQL columns, validations, and
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].fields[].name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Duplicate field names are rejected per resource. |
-| resources[].fields[].type | Enum or raw Rust type string | None | Yes | See Field Types | Supported built-in field type keywords are listed below. Raw Rust types are parsed with `syn` and inferred to SQL best-effort. |
+| resources[].fields[].type | Enum or raw Rust type string | None | Yes | See Field Types | Supported built-in field type keywords and declared enum names are listed below. Other raw Rust types are parsed with `syn` and inferred to SQL best-effort. |
 | resources[].fields[].items | Built-in field type keyword | None | Yes when `type = List` | See Field Types | Required for `List` fields. The current first version accepts built-in item types only and stores the resulting list as JSON text. |
 | resources[].fields[].fields | List<Field> or Map<FieldName, Field \| Type> | None | Yes when `type = Object` | Nested field definitions | Required for `Object` fields. Nested fields currently support scalar, JSON, nested `Object`, and `List` child shapes and are stored together as a JSON object encoded in text. |
 | resources[].fields[].nullable | Bool | false | No | true, false | Wraps the generated Rust field type in `Option<T>`. `generated` fields are also emitted as optional even when `nullable` is false. |
 | resources[].fields[].id | Bool | false, but the field matching `id_field` is treated as the ID | No | true, false | Primary key semantics are inferred when the field name matches the resource `id_field`. |
+| resources[].fields[].unique | Bool | false | No | true, false | Declares a unique single-column index for supported scalar storage fields. Typed `Object`, `List`, and JSON fields do not support `unique`. |
 | resources[].fields[].generated | Enum | Auto-inferred from the field name and ID role when omitted | No | None, AutoIncrement, CreatedAt, UpdatedAt | If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`. |
 | resources[].fields[].relation | Map | None | No | See Relations | Declares a foreign-key style relationship and optional nested route generation. |
 | resources[].fields[].validate | Map | None | No | See Field Validation | Validation is supported for text, integer, and real fields only. |
@@ -559,6 +601,7 @@ These are the canonical built-in field type keywords accepted by `.eon`. Raw Rus
 | Time | Rust field type | n/a | n/a | chrono::NaiveTime | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Uuid | Rust field type | n/a | n/a | uuid::Uuid | Stored as text/char values depending on backend. Supports equality filters and sort. |
 | Decimal | Rust field type | n/a | n/a | rust_decimal::Decimal | Stored as text/varchar values. Supports equality filters but not generated sort helpers. |
+| <DeclaredEnumName> | Named enum field type | n/a | n/a | Any name declared under `enums` | Stored as text and validated against the declared string values. Supports exact filters and the normal string sort helpers, but not contains filters. |
 | Json | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text. Round-trips through the API as native JSON, but current generated/native list helpers do not expose equality, range, or contains filters for it. |
 | JsonObject | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text and validated to be a JSON object. OpenAPI emits it as an object schema. Current list helpers do not expose equality, range, or contains filters for it. |
 | JsonArray | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text and validated to be a JSON array. OpenAPI emits it as an array schema. Current list helpers do not expose equality, range, or contains filters for it. |

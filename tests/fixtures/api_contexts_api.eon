@@ -1,0 +1,34 @@
+module: "api_contexts_api"
+resources: [
+    {
+        name: "Post"
+        table: "blog_post"
+        api_name: "posts"
+        roles: {
+            create: "user"
+        }
+        list: {
+            default_limit: 10
+            max_limit: 50
+        }
+        api: {
+            fields: {
+                id: { from: "id" }
+                title: { from: "title_text" }
+                author: { from: "author_id" }
+                secret: { from: "draft_body" }
+            }
+            default_context: "view"
+            contexts: {
+                view: ["id", "title", "author"]
+                edit: ["id", "title", "author", "secret"]
+            }
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title_text", type: String, validate: { min_length: 3 } }
+            { name: "author_id", type: I64 }
+            { name: "draft_body", type: String, nullable: true }
+        ]
+    }
+]

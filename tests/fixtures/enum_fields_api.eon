@@ -1,0 +1,32 @@
+module: "enum_fields_api"
+enums: {
+    PostStatus: ["draft", "published", "archived"]
+}
+resources: [
+    {
+        name: "Post"
+        table: "blog_post"
+        api_name: "posts"
+        roles: {
+            create: "user"
+        }
+        list: {
+            default_limit: 10
+            max_limit: 50
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "status", type: PostStatus }
+            {
+                name: "workflow"
+                type: Object
+                nullable: true
+                fields: [
+                    { name: "current", type: PostStatus }
+                    { name: "previous", type: PostStatus, nullable: true }
+                ]
+            }
+        ]
+    }
+]

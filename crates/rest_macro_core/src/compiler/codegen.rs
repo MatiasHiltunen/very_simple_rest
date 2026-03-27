@@ -1326,10 +1326,12 @@ fn resource_struct_tokens(
     let list_query_tokens = list_query_tokens(resource, runtime_crate);
     let generated_from_row = generated_from_row_tokens(resource, runtime_crate);
     let object_validator_defs = typed_object_validator_defs(resource, runtime_crate);
-    let fields = resource.fields.iter().map(|field| {
+    let fields = resource.api_fields().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
+        let rename_attr = serde_rename_attr(field.api_name(), &field.name());
         quote! {
+            #rename_attr
             pub #ident: #ty,
         }
     });
@@ -1339,14 +1341,18 @@ fn resource_struct_tokens(
         .map(|field| {
             let ident = &field.field.ident;
             let ty = create_payload_field_ty(&field);
+            let rename_attr = serde_rename_attr(field.field.api_name(), &field.field.name());
             quote! {
+                #rename_attr
                 pub #ident: #ty,
             }
         });
     let update_fields = update_payload_fields(resource).into_iter().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
+        let rename_attr = serde_rename_attr(field.api_name(), &field.name());
         quote! {
+            #rename_attr
             pub #ident: #ty,
         }
     });
@@ -1417,10 +1423,18 @@ fn resource_struct_tokens(
     }
 }
 
+fn serde_rename_attr(api_name: &str, storage_name: &str) -> TokenStream {
+    if api_name == storage_name {
+        quote! {}
+    } else {
+        let api_name = Literal::string(api_name);
+        quote!(#[serde(rename = #api_name)])
+    }
+}
+
 fn typed_object_validator_defs(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
     resource
-        .fields
-        .iter()
+        .api_fields()
         .flat_map(|field| {
             let path = vec![field.name()];
             collect_typed_object_validator_defs(resource, field, &path, runtime_crate)
@@ -1456,13 +1470,16 @@ fn collect_typed_object_validator_defs(
         let mut nested_path = path.to_vec();
         nested_path.push(nested_field.name());
         let ty = typed_object_validator_field_type_tokens(resource, nested_field, &nested_path, runtime_crate);
+        let rename_attr = serde_rename_attr(nested_field.api_name(), &nested_field.name());
         if super::model::is_optional_type(&nested_field.ty) {
             quote! {
+                #rename_attr
                 #[serde(default)]
                 pub #ident: #ty,
             }
         } else {
             quote! {
+                #rename_attr
                 pub #ident: #ty,
             }
         }
@@ -1571,7 +1588,7 @@ fn typed_object_validator_field_check_tokens(
     field: &super::model::FieldSpec,
 ) -> TokenStream {
     let ident = &field.ident;
-    let field_name = field.name();
+    let field_name = field.api_name().to_owned();
     let field_name_lit = Literal::string(&field_name);
 
     if field.object_fields.is_some() {
@@ -1590,7 +1607,7 @@ fn typed_object_validator_field_check_tokens(
         };
     }
 
-    if field.validation.is_empty() {
+    if field.validation.is_empty() && field.enum_values().is_none() {
         return quote! {};
     }
 
@@ -1619,6 +1636,22 @@ fn typed_object_validator_scalar_checks(
     field: &super::model::FieldSpec,
 ) -> Vec<TokenStream> {
     let mut checks = Vec::new();
+
+    if let Some(enum_values) = field.enum_values() {
+        let enum_values = enum_values
+            .iter()
+            .map(|value| Literal::string(value.as_str()))
+            .collect::<Vec<_>>();
+        let enum_values_message = Literal::string(&enum_values_as_message(field));
+        checks.push(quote! {
+            if ![#(#enum_values),*].iter().any(|candidate| *candidate == value.as_str()) {
+                return Err((
+                    field_path.clone(),
+                    format!("Field `{}` must be one of: {}", field_path, #enum_values_message),
+                ));
+            }
+        });
+    }
 
     if let Some(min_length) = field.validation.min_length {
         checks.push(quote! {
@@ -1873,10 +1906,11 @@ fn field_supports_sort(field: &super::model::FieldSpec) -> bool {
 
 fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {
     let struct_ident = &resource.struct_ident;
-    let field_extracts = resource.fields.iter().map(|field| {
+    let field_extracts = resource.api_fields().map(|field| {
         let ident = &field.ident;
         let ty = &field.ty;
-        let field_name_lit = Literal::string(&field.name());
+        let storage_field_name_lit = Literal::string(&field.name());
+        let api_field_name_lit = Literal::string(field.api_name());
 
         if field.list_item_ty.is_some() {
             let base_ty = super::model::base_type(&field.ty);
@@ -1884,11 +1918,11 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                 let parsed_value = list_field_from_text_tokens(
                     &base_ty,
                     quote!(value),
-                    &field_name_lit,
+                    &storage_field_name_lit,
                     runtime_crate,
                 );
                 quote! {
-                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<String>, _>(row, #field_name_lit)? {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<String>, _>(row, #storage_field_name_lit)? {
                         Some(value) => Some(#parsed_value),
                         None => None,
                     };
@@ -1897,12 +1931,12 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                 let parsed_value = list_field_from_text_tokens(
                     &base_ty,
                     quote!(value),
-                    &field_name_lit,
+                    &storage_field_name_lit,
                     runtime_crate,
                 );
                 quote! {
                     let #ident: #ty = {
-                        let value = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #field_name_lit)?;
+                        let value = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #storage_field_name_lit)?;
                         #parsed_value
                     };
                 }
@@ -1919,22 +1953,22 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                 quote! {{
                     let parsed = #runtime_crate::serde_json::from_str::<#base_ty>(&value).map_err(
                         |error| #runtime_crate::sqlx::Error::ColumnDecode {
-                            index: #field_name_lit.to_owned(),
+                            index: #storage_field_name_lit.to_owned(),
                             source: Box::new(error),
                         }
                     )?;
                     let validated: #validator_ident = #runtime_crate::serde_json::from_value(parsed.clone()).map_err(
                         |error| #runtime_crate::sqlx::Error::ColumnDecode {
-                            index: #field_name_lit.to_owned(),
+                            index: #storage_field_name_lit.to_owned(),
                             source: Box::new(::std::io::Error::new(
                                 ::std::io::ErrorKind::InvalidData,
-                                format!("Field `{}` is invalid: {}", #field_name_lit, error),
+                                format!("Field `{}` is invalid: {}", #api_field_name_lit, error),
                             )),
                         }
                     )?;
-                    if let Err((_field_path, message)) = validated.validate(#field_name_lit) {
+                    if let Err((_field_path, message)) = validated.validate(#api_field_name_lit) {
                         return Err(#runtime_crate::sqlx::Error::ColumnDecode {
-                            index: #field_name_lit.to_owned(),
+                            index: #storage_field_name_lit.to_owned(),
                             source: Box::new(::std::io::Error::new(
                                 ::std::io::ErrorKind::InvalidData,
                                 message,
@@ -1948,13 +1982,13 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                     kind,
                     &base_ty,
                     quote!(value),
-                    &field_name_lit,
+                    &storage_field_name_lit,
                     runtime_crate,
                 )
             };
             if super::model::is_optional_type(&field.ty) {
                 quote! {
-                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<String>, _>(row, #field_name_lit)? {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<String>, _>(row, #storage_field_name_lit)? {
                         Some(value) => Some(#parsed_value),
                         None => None,
                     };
@@ -1962,7 +1996,7 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
             } else {
                 quote! {
                     let #ident: #ty = {
-                        let value = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #field_name_lit)?;
+                        let value = #runtime_crate::sqlx::Row::try_get::<String, _>(row, #storage_field_name_lit)?;
                         #parsed_value
                     };
                 }
@@ -1970,13 +2004,13 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
         } else if super::model::is_bool_type(&field.ty) {
             if super::model::is_optional_type(&field.ty) {
                 quote! {
-                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<bool>, _>(row, #field_name_lit) {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<Option<bool>, _>(row, #storage_field_name_lit) {
                         Ok(value) => value,
                         Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
-                            match #runtime_crate::sqlx::Row::try_get::<Option<i64>, _>(row, #field_name_lit) {
+                            match #runtime_crate::sqlx::Row::try_get::<Option<i64>, _>(row, #storage_field_name_lit) {
                                 Ok(value) => value.map(|value| value != 0),
                                 Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
-                                    #runtime_crate::sqlx::Row::try_get::<Option<i32>, _>(row, #field_name_lit)?
+                                    #runtime_crate::sqlx::Row::try_get::<Option<i32>, _>(row, #storage_field_name_lit)?
                                         .map(|value| value != 0)
                                 }
                                 Err(error) => return Err(error),
@@ -1987,13 +2021,13 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
                 }
             } else {
                 quote! {
-                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<bool, _>(row, #field_name_lit) {
+                    let #ident: #ty = match #runtime_crate::sqlx::Row::try_get::<bool, _>(row, #storage_field_name_lit) {
                         Ok(value) => value,
                         Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
-                            match #runtime_crate::sqlx::Row::try_get::<i64, _>(row, #field_name_lit) {
+                            match #runtime_crate::sqlx::Row::try_get::<i64, _>(row, #storage_field_name_lit) {
                                 Ok(value) => value != 0,
                                 Err(#runtime_crate::sqlx::Error::ColumnDecode { .. }) => {
-                                    #runtime_crate::sqlx::Row::try_get::<i32, _>(row, #field_name_lit)? != 0
+                                    #runtime_crate::sqlx::Row::try_get::<i32, _>(row, #storage_field_name_lit)? != 0
                                 }
                                 Err(error) => return Err(error),
                             }
@@ -2004,11 +2038,11 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
             }
         } else {
             quote! {
-                let #ident: #ty = #runtime_crate::sqlx::Row::try_get(row, #field_name_lit)?;
+                let #ident: #ty = #runtime_crate::sqlx::Row::try_get(row, #storage_field_name_lit)?;
             }
         }
     });
-    let field_names = resource.fields.iter().map(|field| &field.ident);
+    let field_names = resource.api_fields().map(|field| &field.ident);
 
     quote! {
         impl<'r> #runtime_crate::sqlx::FromRow<'r, #runtime_crate::sqlx::any::AnyRow> for #struct_ident {
@@ -2034,24 +2068,27 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     let cursor_payload_ident = list_cursor_payload_ident(resource);
     let struct_ident = &resource.struct_ident;
     let sortable_fields = resource
-        .fields
-        .iter()
+        .api_fields()
         .filter(|field| field_supports_sort(field))
         .collect::<Vec<_>>();
-    let filter_fields = resource.fields.iter().flat_map(|field| {
+    let filter_fields = resource.api_fields().flat_map(|field| {
         let mut tokens = Vec::new();
 
         if super::model::supports_exact_filters(field) {
             let filter_ident = format_ident!("filter_{}", field.ident);
             let base_ty = list_filter_field_ty(field, runtime_crate);
+            let rename = Literal::string(&format!("filter_{}", field.api_name()));
             tokens.push(quote! {
+                #[serde(rename = #rename)]
                 pub #filter_ident: Option<#base_ty>,
             });
         }
 
         if super::model::supports_contains_filters(field) {
             let contains_ident = format_ident!("filter_{}_contains", field.ident);
+            let rename = Literal::string(&format!("filter_{}_contains", field.api_name()));
             tokens.push(quote! {
+                #[serde(rename = #rename)]
                 pub #contains_ident: Option<String>,
             });
         }
@@ -2060,7 +2097,9 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             for suffix in ["gt", "gte", "lt", "lte"] {
                 let ident = format_ident!("filter_{}_{}", field.ident, suffix);
                 let range_ty = list_filter_field_ty(field, runtime_crate);
+                let rename = Literal::string(&format!("filter_{}_{}", field.api_name(), suffix));
                 tokens.push(quote! {
+                    #[serde(rename = #rename)]
                     pub #ident: Option<#range_ty>,
                 });
             }
@@ -2070,7 +2109,7 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     });
     let sort_variants = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
-        let field_name = Literal::string(&field.name());
+        let field_name = Literal::string(field.api_name());
         quote! {
             #[serde(rename = #field_name)]
             #variant_ident,
@@ -2085,14 +2124,14 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     });
     let sort_variant_name = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
-        let field_name = Literal::string(&field.name());
+        let field_name = Literal::string(field.api_name());
         quote! {
             Self::#variant_ident => #field_name,
         }
     });
     let sort_variant_parse = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
-        let field_name = Literal::string(&field.name());
+        let field_name = Literal::string(field.api_name());
         quote! {
             #field_name => Some(Self::#variant_ident),
         }
@@ -2107,6 +2146,7 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
             pub sort: Option<#sort_field_ident>,
             pub order: Option<#sort_order_ident>,
             pub cursor: Option<String>,
+            pub context: Option<String>,
             #(#filter_fields)*
         }
 
@@ -2225,6 +2265,7 @@ fn resource_impl_tokens(
 ) -> TokenStream {
     let struct_ident = &resource.struct_ident;
     let table_name = &resource.table_name;
+    let resource_api_name = Literal::string(resource.api_name());
     let id_field = &resource.id_field;
     let read_requires_auth = super::model::read_requires_auth(resource);
     let create_payload_ty = create_payload_type(resource);
@@ -2233,8 +2274,22 @@ fn resource_impl_tokens(
     let list_bind_ty = list_bind_type(resource);
     let list_plan_ty = list_plan_type(resource);
     let list_response_ty = list_response_type(resource);
+    let list_response_struct_ident = list_response_ident(resource);
     let default_limit_tokens = option_u32_tokens(resource.list.default_limit);
     let max_limit_tokens = option_u32_tokens(resource.list.max_limit);
+    let default_response_context_tokens = resource
+        .default_response_context
+        .as_deref()
+        .map(Literal::string)
+        .map(|context| quote!(Some(#context)))
+        .unwrap_or_else(|| quote!(None));
+    let response_context_match_arms = resource.response_contexts.iter().map(|context| {
+        let name = Literal::string(&context.name);
+        let fields = context.fields.iter().map(|field| Literal::string(field));
+        quote! {
+            Some(#name) => Ok(Some(&[#(#fields),*])),
+        }
+    });
     let create_check = role_guard(runtime_crate, resource.roles.create.as_deref());
     let read_check = role_guard(runtime_crate, resource.roles.read.as_deref());
     let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
@@ -2265,6 +2320,7 @@ fn resource_impl_tokens(
         .map(|field| {
             let ident = &field.ident;
             let field_name = field.name();
+            let api_field_name = field.api_name();
             if let Some(json_value) = json_bind_tokens(field, runtime_crate) {
                 return quote! {
                     q = q.bind(#json_value);
@@ -2275,7 +2331,7 @@ fn resource_impl_tokens(
                     && matches!(source, PolicyValueSource::Claim(_))
                 {
                     let value = optional_policy_source_value(source, field);
-                    let field_name_lit = Literal::string(&field_name);
+                    let field_name_lit = Literal::string(api_field_name);
                     quote! {
                         match #value {
                             Some(value) => {
@@ -2333,6 +2389,7 @@ fn resource_impl_tokens(
         .map(|field| {
             let ident = &field.ident;
             let field_name = field.name();
+            let api_field_name = field.api_name();
             if let Some(json_value) = json_bind_tokens(field, runtime_crate) {
                 return quote! {
                     q = q.bind(#json_value);
@@ -2342,7 +2399,7 @@ fn resource_impl_tokens(
                 match source {
                     PolicyValueSource::Claim(_) => {
                         let value = optional_policy_source_value(source, field);
-                        let field_name_lit = Literal::string(&field_name);
+                        let field_name_lit = Literal::string(api_field_name);
                         quote! {
                             match &item.#ident {
                                 Some(value) => {
@@ -2486,8 +2543,7 @@ fn resource_impl_tokens(
         }
     };
     let contains_filter_helper = if resource
-        .fields
-        .iter()
+        .api_fields()
         .any(super::model::supports_contains_filters)
     {
         quote! {
@@ -2545,12 +2601,13 @@ fn resource_impl_tokens(
         .expect("resource id field should exist");
     let id_field_ident = &id_field_spec.ident;
     let id_field_name_lit = Literal::string(id_field);
+    let id_field_api_name_lit = Literal::string(id_field_spec.api_name());
     let cursor_id_for_item_body = if super::model::is_optional_type(&id_field_spec.ty) {
         quote! {
             match item.#id_field_ident {
                 Some(value) => Ok(value as i64),
                 None => Err(#runtime_crate::core::errors::internal_error(
-                    format!("Cannot build cursor for `{}` without a persisted id", #id_field_name_lit),
+                    format!("Cannot build cursor for `{}` without a persisted id", #id_field_api_name_lit),
                 )),
             }
         }
@@ -2562,8 +2619,7 @@ fn resource_impl_tokens(
     let default_sort_variant =
         super::model::sanitize_struct_ident(&id_field_spec.name(), id_field_spec.ident.span());
     let sortable_fields = resource
-        .fields
-        .iter()
+        .api_fields()
         .filter(|field| field_supports_sort(field))
         .collect::<Vec<_>>();
     let cursor_support_arms = sortable_fields.iter().map(|field| {
@@ -2577,7 +2633,7 @@ fn resource_impl_tokens(
     let cursor_value_for_item_arms = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let ident = &field.ident;
-        let field_name_lit = Literal::string(&field.name());
+        let field_name_lit = Literal::string(field.api_name());
         if field.name() == resource.id_field {
             if super::model::is_optional_type(&field.ty) {
                 quote! {
@@ -2630,7 +2686,8 @@ fn resource_impl_tokens(
     });
     let cursor_condition_arms = sortable_fields.iter().map(|field| {
         let variant_ident = super::model::sanitize_struct_ident(&field.name(), field.ident.span());
-        let field_name_lit = Literal::string(&field.name());
+        let field_name_lit = Literal::string(field.api_name());
+        let field_column_lit = Literal::string(&field.name());
         if field.name() == resource.id_field {
             quote! {
                 #sort_field_ty::#variant_ident => match &cursor_payload.value {
@@ -2640,7 +2697,7 @@ fn resource_impl_tokens(
                         );
                         select_only_conditions.push(format!(
                             "{} {} {}",
-                            #field_name_lit,
+                            #field_column_lit,
                             comparator,
                             placeholder
                         ));
@@ -2701,10 +2758,10 @@ fn resource_impl_tokens(
                     let third = Self::list_placeholder(first_index + 2);
                     select_only_conditions.push(format!(
                         "(({} {} {}) OR ({} = {} AND {} {} {}))",
-                        #field_name_lit,
+                        #field_column_lit,
                         comparator,
                         first,
-                        #field_name_lit,
+                        #field_column_lit,
                         second,
                         #id_field_name_lit,
                         comparator,
@@ -3015,8 +3072,15 @@ fn resource_impl_tokens(
     };
 
     let get_one_body = quote! {
+        let response_context = match Self::request_response_context(&req) {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
         match Self::fetch_readable_by_id(path.into_inner(), &user, db.get_ref()).await {
-            Ok(Some(item)) => HttpResponse::Ok().json(item),
+            Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
+                Ok(value) => HttpResponse::Ok().json(value),
+                Err(response) => response,
+            },
             Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
         }
@@ -3033,9 +3097,12 @@ fn resource_impl_tokens(
                 )
                 .await
                 {
-                    Ok(Some(item)) => HttpResponse::Created()
-                        .append_header(("Location", Self::created_location(req, id)))
-                        .json(item),
+                    Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
+                        Ok(value) => HttpResponse::Created()
+                            .append_header(("Location", Self::created_location(req, id)))
+                            .json(value),
+                        Err(response) => response,
+                    },
                     Ok(None) => HttpResponse::Created().finish(),
                     Err(response) => response,
                 }
@@ -3327,18 +3394,33 @@ fn resource_impl_tokens(
             .relation
             .as_ref()
             .filter(|relation| relation.nested_route)
-            .map(|relation| (field.ident.clone(), relation.references_table.clone()))
+            .map(|relation| {
+                let parent_api_name = resources
+                    .iter()
+                    .find(|candidate| candidate.table_name == relation.references_table)
+                    .map(|candidate| candidate.api_name.clone())
+                    .unwrap_or_else(|| relation.references_table.clone());
+                (
+                    field.ident.clone(),
+                    relation.references_table.clone(),
+                    parent_api_name,
+                )
+            })
     });
-    let nested_route_registrations = relation_routes.clone().map(|(field_ident, parent_table)| {
+    let nested_route_registrations = relation_routes
+        .clone()
+        .map(|(field_ident, _parent_table, parent_api_name)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
+        let resource_api_name = Literal::string(resource.api_name());
+        let parent_api_name = Literal::string(&parent_api_name);
         quote! {
             cfg.service(
-                web::resource(format!("/{}/{{parent_id}}/{}", #parent_table, #table_name))
+                web::resource(format!("/{}/{{parent_id}}/{}", #parent_api_name, #resource_api_name))
                     .route(web::get().to(Self::#handler_ident))
             );
         }
     });
-    let nested_handlers = relation_routes.map(|(field_ident, _)| {
+    let nested_handlers = relation_routes.map(|(field_ident, _, _)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
         if read_requires_auth {
             if hybrid.map(|config| config.nested_read).unwrap_or(false) {
@@ -3385,7 +3467,10 @@ fn resource_impl_tokens(
                         }
                         match q.fetch_all(db.get_ref()).await {
                             Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                Ok(response) => HttpResponse::Ok().json(response),
+                                Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                    Ok(value) => HttpResponse::Ok().json(value),
+                                    Err(response) => response,
+                                },
                                 Err(response) => response,
                             },
                             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -3431,7 +3516,10 @@ fn resource_impl_tokens(
                         }
                         match q.fetch_all(db.get_ref()).await {
                             Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                Ok(response) => HttpResponse::Ok().json(response),
+                                Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                    Ok(value) => HttpResponse::Ok().json(value),
+                                    Err(response) => response,
+                                },
                                 Err(response) => response,
                             },
                             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -3476,7 +3564,10 @@ fn resource_impl_tokens(
                     }
                     match q.fetch_all(db.get_ref()).await {
                         Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => HttpResponse::Ok().json(response),
+                            Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                Ok(value) => HttpResponse::Ok().json(value),
+                                Err(response) => response,
+                            },
                             Err(response) => response,
                         },
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -3526,7 +3617,10 @@ fn resource_impl_tokens(
                     }
                     match q.fetch_all(db.get_ref()).await {
                         Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => HttpResponse::Ok().json(response),
+                            Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                Ok(value) => HttpResponse::Ok().json(value),
+                                Err(response) => response,
+                            },
                             Err(response) => response,
                         },
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -3565,7 +3659,10 @@ fn resource_impl_tokens(
                     }
                     match q.fetch_all(db.get_ref()).await {
                         Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => HttpResponse::Ok().json(response),
+                            Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                Ok(value) => HttpResponse::Ok().json(value),
+                                Err(response) => response,
+                            },
                             Err(response) => response,
                         },
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -3604,7 +3701,10 @@ fn resource_impl_tokens(
                 }
                 match q.fetch_all(db.get_ref()).await {
                     Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                        Ok(response) => HttpResponse::Ok().json(response),
+                        Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                            Ok(value) => HttpResponse::Ok().json(value),
+                            Err(response) => response,
+                        },
                         Err(response) => response,
                     },
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -3617,14 +3717,22 @@ fn resource_impl_tokens(
             quote! {
                 async fn get_one(
                     path: web::Path<i64>,
+                    req: HttpRequest,
                     user: #runtime_crate::core::auth::UserContext,
                     db: web::Data<DbPool>,
                     runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
                 ) -> impl Responder {
                     #read_check
+                    let response_context = match Self::request_response_context(&req) {
+                        Ok(context) => context,
+                        Err(response) => return response,
+                    };
                     let id = path.into_inner();
                     match Self::fetch_readable_by_id(id, &user, db.get_ref()).await {
-                        Ok(Some(item)) => HttpResponse::Ok().json(item),
+                        Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
+                            Ok(value) => HttpResponse::Ok().json(value),
+                            Err(response) => response,
+                        },
                         Ok(None) => match Self::fetch_runtime_authorized_by_id(
                             id,
                             &user,
@@ -3634,7 +3742,10 @@ fn resource_impl_tokens(
                         )
                         .await
                         {
-                            Ok(Some(item)) => HttpResponse::Ok().json(item),
+                            Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
+                                Ok(value) => HttpResponse::Ok().json(value),
+                                Err(response) => response,
+                            },
                             Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
                             Err(response) => response,
                         },
@@ -3646,6 +3757,7 @@ fn resource_impl_tokens(
             quote! {
                 async fn get_one(
                     path: web::Path<i64>,
+                    req: HttpRequest,
                     user: #runtime_crate::core::auth::UserContext,
                     db: web::Data<DbPool>,
                 ) -> impl Responder {
@@ -3658,6 +3770,7 @@ fn resource_impl_tokens(
         quote! {
             async fn get_one(
                 path: web::Path<i64>,
+                req: HttpRequest,
                 db: web::Data<DbPool>,
             ) -> impl Responder {
                 let user = Self::anonymous_user_context();
@@ -3698,12 +3811,12 @@ fn resource_impl_tokens(
                 #hybrid_configure_app_data
 
                 cfg.service(
-                    web::resource(format!("/{}", #table_name))
+                    web::resource(format!("/{}", #resource_api_name))
                         .route(web::get().to(Self::get_all))
                         .route(web::post().to(Self::create))
                 )
                 .service(
-                    web::resource(format!("/{}/{{id}}", #table_name))
+                    web::resource(format!("/{}/{{id}}", #resource_api_name))
                         .route(web::get().to(Self::get_one))
                         .route(web::put().to(Self::update))
                         .route(web::delete().to(Self::delete))
@@ -3730,6 +3843,88 @@ fn resource_impl_tokens(
                 #fetch_readable_by_id_body
             }
 
+            fn request_response_context(req: &HttpRequest) -> Result<Option<String>, HttpResponse> {
+                #runtime_crate::actix_web::web::Query::<::std::collections::HashMap<String, String>>::from_query(
+                    req.query_string(),
+                )
+                .map(|query| query.get("context").cloned())
+                .map_err(|_| {
+                    #runtime_crate::core::errors::bad_request(
+                        "invalid_context",
+                        "Query parameters are invalid",
+                    )
+                })
+            }
+
+            fn response_context_fields(
+                requested: Option<&str>,
+            ) -> Result<Option<&'static [&'static str]>, HttpResponse> {
+                let context_name = requested.or(#default_response_context_tokens);
+                match context_name {
+                    #(#response_context_match_arms)*
+                    Some(value) => Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_context",
+                        format!("Unknown response context `{}`", value),
+                    )),
+                    None => Ok(None),
+                }
+            }
+
+            fn serialize_item_value(
+                item: &Self,
+                context_fields: Option<&'static [&'static str]>,
+            ) -> Result<#runtime_crate::serde_json::Value, HttpResponse> {
+                let mut value = #runtime_crate::serde_json::to_value(item).map_err(|error| {
+                    #runtime_crate::core::errors::internal_error(error.to_string())
+                })?;
+                if let Some(fields) = context_fields {
+                    let object = value.as_object_mut().ok_or_else(|| {
+                        #runtime_crate::core::errors::internal_error(
+                            "response item must serialize to a JSON object",
+                        )
+                    })?;
+                    object.retain(|key, _| fields.iter().any(|field| *field == key));
+                }
+                Ok(value)
+            }
+
+            fn serialize_item_response(
+                item: &Self,
+                requested: Option<&str>,
+            ) -> Result<#runtime_crate::serde_json::Value, HttpResponse> {
+                let context_fields = Self::response_context_fields(requested)?;
+                Self::serialize_item_value(item, context_fields)
+            }
+
+            fn serialize_list_response(
+                response: #list_response_ty,
+                requested: Option<&str>,
+            ) -> Result<#runtime_crate::serde_json::Value, HttpResponse> {
+                let context_fields = Self::response_context_fields(requested)?;
+                let #list_response_struct_ident {
+                    items,
+                    total,
+                    count,
+                    limit,
+                    offset,
+                    next_offset,
+                    next_cursor,
+                } = response;
+                let items = items
+                    .iter()
+                    .map(|item| Self::serialize_item_value(item, context_fields))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(#runtime_crate::serde_json::json!({
+                    "items": items,
+                    "total": total,
+                    "count": count,
+                    "limit": limit,
+                    "offset": offset,
+                    "next_offset": next_offset,
+                    "next_cursor": next_cursor,
+                }))
+            }
+
             fn created_location(req: &HttpRequest, id: i64) -> String {
                 format!("{}/{}", req.uri().path().trim_end_matches('/'), id)
             }
@@ -3741,10 +3936,17 @@ fn resource_impl_tokens(
                 db: &DbPool,
                 runtime: Option<&#runtime_crate::core::authorization::AuthorizationRuntime>,
             ) -> HttpResponse {
+                let response_context = match Self::request_response_context(req) {
+                    Ok(context) => context,
+                    Err(response) => return response,
+                };
                 match Self::fetch_readable_by_id(id, user, db).await {
-                    Ok(Some(item)) => HttpResponse::Created()
-                        .append_header(("Location", Self::created_location(req, id)))
-                        .json(item),
+                    Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
+                        Ok(value) => HttpResponse::Created()
+                            .append_header(("Location", Self::created_location(req, id)))
+                            .json(value),
+                        Err(response) => response,
+                    },
                     Ok(None) => #created_response_fallback,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
@@ -3957,7 +4159,7 @@ fn resource_impl_tokens(
                 select_sql.push_str(sort.as_sql());
                 select_sql.push(' ');
                 select_sql.push_str(order.as_sql());
-                if sort.as_name() != #id_field_name_lit {
+                if sort.as_name() != #id_field_api_name_lit {
                     select_sql.push_str(", ");
                     select_sql.push_str(#id_field_name_lit);
                     select_sql.push(' ');
@@ -4151,6 +4353,9 @@ fn create_payload_fields<'a>(
         .fields
         .iter()
         .filter_map(|field| {
+            if !field.expose_in_api() {
+                return None;
+            }
             if field.generated.skip_insert() {
                 return None;
             }
@@ -4200,7 +4405,8 @@ fn update_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpe
         .fields
         .iter()
         .filter(|field| {
-            !field.is_id
+            field.expose_in_api()
+                && !field.is_id
                 && !field.generated.skip_update_bind()
                 && !controlled_fields.contains(&field.name())
         })
@@ -4291,6 +4497,9 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
         .fields
         .iter()
         .map(|field| {
+            if !field.expose_in_api() {
+                return quote! {};
+            }
             let field_name = Literal::string(&field.name());
             let contains_filter_tokens = if super::model::supports_contains_filters(field) {
                 let contains_ident = format_ident!("filter_{}_contains", field.ident);
@@ -4407,8 +4616,27 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                                 filter_binds.push(#bind_ident::Real(value));
                             }
                         },
-                        _ => quote! {
+                        _ => {
+                            let enum_check = if let Some(enum_values) = field.enum_values() {
+                                let enum_values =
+                                    enum_values
+                                        .iter()
+                                        .map(|value| Literal::string(value.as_str()))
+                                        .collect::<Vec<_>>();
+                                quote! {
+                                    if ![#(#enum_values),*].iter().any(|candidate| *candidate == value.as_str()) {
+                                        return Err(#runtime_crate::core::errors::bad_request(
+                                            "invalid_query",
+                                            "Query parameters are invalid",
+                                        ));
+                                    }
+                                }
+                            } else {
+                                quote! {}
+                            };
+                            quote! {
                             if let Some(value) = &query.#filter_ident {
+                                #enum_check
                                 conditions.push(format!(
                                     "{} = {}",
                                     #field_name,
@@ -4416,6 +4644,7 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                                 ));
                                 filter_binds.push(#bind_ident::Text(value.clone()));
                             }
+                        }
                         },
                     }
                 }
@@ -4488,11 +4717,12 @@ fn validation_tokens(
     optional: bool,
     runtime_crate: &Path,
 ) -> Option<TokenStream> {
-    if field.validation.is_empty() && field.object_fields.is_none() {
+    if field.validation.is_empty() && field.object_fields.is_none() && field.enum_values().is_none()
+    {
         return None;
     }
 
-    let field_name = Literal::string(&field.name());
+    let field_name = Literal::string(field.api_name());
     let checks = validation_checks(field, &field_name, runtime_crate);
     let object_checks = typed_object_payload_validation_tokens(resource, field, runtime_crate);
     if checks.is_empty() && object_checks.is_none() {
@@ -4524,9 +4754,9 @@ fn typed_object_payload_validation_tokens(
         return None;
     }
 
-    let field_name = field.name();
+    let field_name = field.api_name().to_owned();
     let field_name_lit = Literal::string(&field_name);
-    let validator_ident = typed_object_validator_ident(resource, &[field_name]);
+    let validator_ident = typed_object_validator_ident(resource, &[field.name()]);
 
     Some(quote! {
         let parsed: #validator_ident = match #runtime_crate::serde_json::from_value(value.clone()) {
@@ -4544,12 +4774,35 @@ fn typed_object_payload_validation_tokens(
     })
 }
 
+fn enum_values_as_message(field: &super::model::FieldSpec) -> String {
+    field
+        .enum_values()
+        .expect("enum-backed field should define enum values")
+        .join(", ")
+}
+
 fn validation_checks(
     field: &super::model::FieldSpec,
     field_name: &Literal,
     runtime_crate: &Path,
 ) -> Vec<TokenStream> {
     let mut checks = Vec::new();
+
+    if let Some(enum_values) = field.enum_values() {
+        let enum_values = enum_values
+            .iter()
+            .map(|value| Literal::string(value.as_str()))
+            .collect::<Vec<_>>();
+        let enum_values_message = Literal::string(&enum_values_as_message(field));
+        checks.push(quote! {
+            if ![#(#enum_values),*].iter().any(|candidate| *candidate == value.as_str()) {
+                return #runtime_crate::core::errors::validation_error(
+                    #field_name,
+                    format!("Field `{}` must be one of: {}", #field_name, #enum_values_message),
+                );
+            }
+        });
+    }
 
     if let Some(min_length) = field.validation.min_length {
         checks.push(quote! {
@@ -4632,7 +4885,15 @@ fn insert_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
     resource
         .fields
         .iter()
-        .filter(|field| !field.generated.skip_insert())
+        .filter(|field| {
+            if field.generated.skip_insert() {
+                return false;
+            }
+            if field.expose_in_api() {
+                return true;
+            }
+            create_assignment_source(resource, &field.name()).is_some()
+        })
         .collect()
 }
 
@@ -5398,7 +5659,7 @@ fn create_effective_field_value_tokens(
     runtime_crate: &Path,
 ) -> TokenStream {
     let field_name = field.name();
-    let field_name_lit = Literal::string(&field_name);
+    let field_name_lit = Literal::string(field.api_name());
     let ident = &field.ident;
     let is_admin = quote!(user.roles.iter().any(|candidate| candidate == "admin"));
     let hybrid_create_scope_field = hybrid_resource_enforcement(resource, authorization)
@@ -5570,7 +5831,7 @@ fn create_raw_input_field_value_tokens(
     runtime_crate: &Path,
 ) -> TokenStream {
     let field_name = field.name();
-    let field_name_lit = Literal::string(&field_name);
+    let field_name_lit = Literal::string(field.api_name());
     let ident = &field.ident;
     let payload_field = create_payload_fields(resource, authorization)
         .into_iter()
@@ -5901,7 +6162,7 @@ fn build_update_plan(resource: &ResourceSpec) -> UpdatePlan {
     let controlled_fields = policy_controlled_fields(resource);
 
     for field in &resource.fields {
-        if field.is_id || controlled_fields.contains(&field.name()) {
+        if !field.expose_in_api() || field.is_id || controlled_fields.contains(&field.name()) {
             continue;
         }
 

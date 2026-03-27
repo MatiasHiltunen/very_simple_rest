@@ -13,16 +13,18 @@ use syn::{DeriveInput, LitStr, Path};
 
 pub use authorization::{compile_resource_authorization, compile_service_authorization};
 pub use model::{
-    DbBackend, FieldSpec, FieldValidation, GeneratedTemporalKind, GeneratedValue, NumericBound,
-    PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
-    PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource, ReferentialAction,
-    RelationSpec, ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec, StaticCacheProfile,
-    StaticMode, StaticMountSpec, StructuredScalarKind, default_service_database_url, is_date_type,
-    infer_sql_type, is_datetime_type, is_decimal_type, is_json_array_type, is_json_object_type,
-    is_json_type, is_list_field, is_optional_type, is_structured_scalar_type,
-    is_typed_object_field, is_time_type, is_uuid_type, list_item_type, object_fields,
-    structured_scalar_kind, supports_exact_filters, supports_field_sort, supports_range_filters,
-    supports_sort, temporal_scalar_kind,
+    DbBackend, EnumSpec, FieldSpec, FieldValidation, GeneratedTemporalKind, GeneratedValue,
+    IndexSpec, NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter,
+    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
+    ReferentialAction, RelationSpec, ResourceSpec, ResponseContextSpec, RoleRequirements,
+    RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
+    StructuredScalarKind,
+    default_service_database_url, infer_sql_type, is_date_type, is_datetime_type,
+    is_decimal_type, is_enum_field, is_json_array_type, is_json_object_type, is_json_type,
+    is_list_field, is_optional_type, is_structured_scalar_type, is_time_type,
+    is_typed_object_field, is_uuid_type, list_item_type, object_fields,
+    structured_scalar_kind, supports_declared_index, supports_exact_filters,
+    supports_field_sort, supports_range_filters, supports_sort, temporal_scalar_kind,
 };
 pub use openapi::OpenApiSpecOptions;
 

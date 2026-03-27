@@ -11,15 +11,17 @@ use serde::de::{self, Deserializer, Error as _, MapAccess, Visitor};
 use syn::{LitStr, Type};
 
 use super::model::{
-    DbBackend, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
-    GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS, GENERATED_JSON_ARRAY_ALIAS,
-    GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
-    ListConfig, NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter,
-    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
-    ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
-    StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
+    DbBackend, EnumSpec, FieldSpec, FieldValidation, GENERATED_DATE_ALIAS,
+    GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
+    GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
+    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound,
+    PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
+    PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource, ReferentialAction,
+    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind,
+    ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
     default_resource_module_ident, infer_generated_value, infer_sql_type, sanitize_module_ident,
-    sanitize_struct_ident, validate_authorization_contract, validate_field_validations,
+    sanitize_struct_ident, supports_declared_index, validate_authorization_contract,
+    validate_field_validations, is_optional_type,
     validate_list_config, validate_logging_config, validate_policy_claim_sources,
     validate_relations, validate_row_policies, validate_runtime_config, validate_security_config,
     validate_sql_identifier, validate_tls_config,
@@ -62,6 +64,8 @@ pub struct LoadedService {
 struct ServiceDocument {
     #[serde(default)]
     module: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_enum_documents")]
+    enums: Vec<EnumDocument>,
     #[serde(default)]
     db: DbBackend,
     #[serde(default)]
@@ -479,6 +483,8 @@ struct ResourceDocument {
     #[serde(default)]
     table: Option<String>,
     #[serde(default)]
+    api_name: Option<String>,
+    #[serde(default)]
     id_field: Option<String>,
     #[serde(default)]
     roles: RoleRequirements,
@@ -486,8 +492,22 @@ struct ResourceDocument {
     policies: RowPoliciesDocument,
     #[serde(default)]
     list: ListConfigDocument,
+    #[serde(default)]
+    api: Option<ResourceApiDocument>,
+    #[serde(default)]
+    indexes: Vec<IndexDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ResourceApiDocument {
+    #[serde(default, deserialize_with = "deserialize_api_field_projection_documents")]
+    fields: Vec<ApiFieldProjectionDocument>,
+    #[serde(default)]
+    default_context: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_response_context_documents")]
+    contexts: Vec<ResponseContextDocument>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -637,6 +657,8 @@ struct ExistsPolicyRuleDocument {
 #[derive(serde::Deserialize)]
 struct FieldDocument {
     name: String,
+    #[serde(default)]
+    api_name: Option<String>,
     #[serde(rename = "type")]
     ty: FieldTypeDocument,
     #[serde(default)]
@@ -650,9 +672,25 @@ struct FieldDocument {
     #[serde(default)]
     generated: GeneratedValue,
     #[serde(default)]
+    unique: bool,
+    #[serde(default)]
     relation: Option<RelationDocument>,
     #[serde(default)]
     validate: Option<FieldValidationDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexDocument {
+    fields: Vec<String>,
+    #[serde(default)]
+    unique: bool,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct EnumDocument {
+    name: String,
+    values: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -717,6 +755,8 @@ struct ResourceMapValueDocument {
     #[serde(default)]
     table: Option<String>,
     #[serde(default)]
+    api_name: Option<String>,
+    #[serde(default)]
     id_field: Option<String>,
     #[serde(default)]
     roles: RoleRequirements,
@@ -724,6 +764,10 @@ struct ResourceMapValueDocument {
     policies: RowPoliciesDocument,
     #[serde(default)]
     list: ListConfigDocument,
+    #[serde(default)]
+    api: Option<ResourceApiDocument>,
+    #[serde(default)]
+    indexes: Vec<IndexDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
@@ -739,6 +783,8 @@ enum FieldMapValueDocument {
 struct FieldMapConfigDocument {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    api_name: Option<String>,
     #[serde(rename = "type")]
     ty: FieldTypeDocument,
     #[serde(default)]
@@ -752,9 +798,76 @@ struct FieldMapConfigDocument {
     #[serde(default)]
     generated: GeneratedValue,
     #[serde(default)]
+    unique: bool,
+    #[serde(default)]
     relation: Option<RelationDocument>,
     #[serde(default)]
     validate: Option<FieldValidationDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct ApiFieldProjectionDocument {
+    name: String,
+    from: String,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct ResponseContextDocument {
+    name: String,
+    #[serde(default)]
+    fields: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum EnumMapValueDocument {
+    Values(Vec<String>),
+    Config(EnumConfigDocument),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ApiFieldProjectionMapValueDocument {
+    From(String),
+    Config(ApiFieldProjectionConfigDocument),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ResponseContextMapValueDocument {
+    Fields(Vec<String>),
+    Config(ResponseContextConfigDocument),
+}
+
+#[derive(serde::Deserialize)]
+struct ApiFieldProjectionConfigDocument {
+    #[serde(default)]
+    name: Option<String>,
+    from: String,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseContextConfigDocument {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    fields: Vec<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnumConfigDocument {
+    #[serde(default)]
+    name: Option<String>,
+    values: Vec<String>,
+}
+
+fn deserialize_enum_documents<'de, D>(deserializer: D) -> Result<Vec<EnumDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(EnumDocumentsVisitor)
 }
 
 fn deserialize_resource_documents<'de, D>(
@@ -773,6 +886,24 @@ where
     deserializer.deserialize_any(FieldDocumentsVisitor)
 }
 
+fn deserialize_api_field_projection_documents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ApiFieldProjectionDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(ApiFieldProjectionDocumentsVisitor)
+}
+
+fn deserialize_response_context_documents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ResponseContextDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(ResponseContextDocumentsVisitor)
+}
+
 impl ResourceMapValueDocument {
     fn into_document<E>(self, key: String) -> Result<ResourceDocument, E>
     where
@@ -789,10 +920,13 @@ impl ResourceMapValueDocument {
         Ok(ResourceDocument {
             name: key,
             table: self.table,
+            api_name: self.api_name,
             id_field: self.id_field,
             roles: self.roles,
             policies: self.policies,
             list: self.list,
+            api: self.api,
+            indexes: self.indexes,
             fields: self.fields,
         })
     }
@@ -806,12 +940,14 @@ impl FieldMapValueDocument {
         match self {
             Self::Type(ty) => Ok(FieldDocument {
                 name: key,
+                api_name: None,
                 ty,
                 items: None,
                 fields: Vec::new(),
                 nullable: false,
                 id: false,
                 generated: GeneratedValue::None,
+                unique: false,
                 relation: None,
                 validate: None,
             }),
@@ -835,19 +971,155 @@ impl FieldMapConfigDocument {
 
         Ok(FieldDocument {
             name: key,
+            api_name: self.api_name,
             ty: self.ty,
             items: self.items,
             fields: self.fields,
             nullable: self.nullable,
             id: self.id,
             generated: self.generated,
+            unique: self.unique,
             relation: self.relation,
             validate: self.validate,
         })
     }
 }
 
+impl ApiFieldProjectionMapValueDocument {
+    fn into_document<E>(self, key: String) -> Result<ApiFieldProjectionDocument, E>
+    where
+        E: de::Error,
+    {
+        match self {
+            Self::From(from) => Ok(ApiFieldProjectionDocument { name: key, from }),
+            Self::Config(config) => config.into_document::<E>(key),
+        }
+    }
+}
+
+impl ApiFieldProjectionConfigDocument {
+    fn into_document<E>(self, key: String) -> Result<ApiFieldProjectionDocument, E>
+    where
+        E: de::Error,
+    {
+        if let Some(name) = self.name.as_deref() {
+            if name != key {
+                return Err(E::custom(format!(
+                    "api.fields map entry `{key}` has mismatched `name` value `{name}`"
+                )));
+            }
+        }
+
+        Ok(ApiFieldProjectionDocument {
+            name: key,
+            from: self.from,
+        })
+    }
+}
+
+impl ResponseContextMapValueDocument {
+    fn into_document<E>(self, key: String) -> Result<ResponseContextDocument, E>
+    where
+        E: de::Error,
+    {
+        match self {
+            Self::Fields(fields) => Ok(ResponseContextDocument { name: key, fields }),
+            Self::Config(config) => config.into_document::<E>(key),
+        }
+    }
+}
+
+impl ResponseContextConfigDocument {
+    fn into_document<E>(self, key: String) -> Result<ResponseContextDocument, E>
+    where
+        E: de::Error,
+    {
+        if let Some(name) = self.name.as_deref() {
+            if name != key {
+                return Err(E::custom(format!(
+                    "api.contexts map entry `{key}` has mismatched `name` value `{name}`"
+                )));
+            }
+        }
+
+        Ok(ResponseContextDocument {
+            name: key,
+            fields: self.fields,
+        })
+    }
+}
+
+impl EnumMapValueDocument {
+    fn into_document<E>(self, key: String) -> Result<EnumDocument, E>
+    where
+        E: de::Error,
+    {
+        match self {
+            Self::Values(values) => Ok(EnumDocument { name: key, values }),
+            Self::Config(config) => config.into_document::<E>(key),
+        }
+    }
+}
+
+impl EnumConfigDocument {
+    fn into_document<E>(self, key: String) -> Result<EnumDocument, E>
+    where
+        E: de::Error,
+    {
+        if let Some(name) = self.name.as_deref() {
+            if name != key {
+                return Err(E::custom(format!(
+                    "enums map entry `{key}` has mismatched `name` value `{name}`"
+                )));
+            }
+        }
+
+        Ok(EnumDocument {
+            name: key,
+            values: self.values,
+        })
+    }
+}
+
 struct ResourceDocumentsVisitor;
+
+struct EnumDocumentsVisitor;
+
+impl<'de> Visitor<'de> for EnumDocumentsVisitor {
+    type Value = Vec<EnumDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a list or map of enum definitions")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut enums = Vec::new();
+        while let Some(document) = seq.next_element::<EnumDocument>()? {
+            enums.push(document);
+        }
+        Ok(enums)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = HashSet::new();
+        let mut enums = Vec::new();
+
+        while let Some((key, value)) = map.next_entry::<String, EnumMapValueDocument>()? {
+            if !seen.insert(key.clone()) {
+                return Err(A::Error::custom(format!("duplicate enum `{key}`")));
+            }
+            enums.push(value.into_document::<A::Error>(key)?);
+        }
+
+        Ok(enums)
+    }
+}
 
 impl<'de> Visitor<'de> for ResourceDocumentsVisitor {
     type Value = Vec<ResourceDocument>;
@@ -923,6 +1195,89 @@ impl<'de> Visitor<'de> for FieldDocumentsVisitor {
     }
 }
 
+struct ApiFieldProjectionDocumentsVisitor;
+
+impl<'de> Visitor<'de> for ApiFieldProjectionDocumentsVisitor {
+    type Value = Vec<ApiFieldProjectionDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a list or map of api field projection definitions")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut fields = Vec::new();
+        while let Some(field) = seq.next_element::<ApiFieldProjectionDocument>()? {
+            fields.push(field);
+        }
+        Ok(fields)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = HashSet::new();
+        let mut fields = Vec::new();
+
+        while let Some((key, value)) =
+            map.next_entry::<String, ApiFieldProjectionMapValueDocument>()?
+        {
+            if !seen.insert(key.clone()) {
+                return Err(A::Error::custom(format!(
+                    "duplicate api field projection `{key}`"
+                )));
+            }
+            fields.push(value.into_document::<A::Error>(key)?);
+        }
+
+        Ok(fields)
+    }
+}
+
+struct ResponseContextDocumentsVisitor;
+
+impl<'de> Visitor<'de> for ResponseContextDocumentsVisitor {
+    type Value = Vec<ResponseContextDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a list or map of response context definitions")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut contexts = Vec::new();
+        while let Some(context) = seq.next_element::<ResponseContextDocument>()? {
+            contexts.push(context);
+        }
+        Ok(contexts)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = HashSet::new();
+        let mut contexts = Vec::new();
+
+        while let Some((key, value)) = map.next_entry::<String, ResponseContextMapValueDocument>()?
+        {
+            if !seen.insert(key.clone()) {
+                return Err(A::Error::custom(format!(
+                    "duplicate response context `{key}`"
+                )));
+            }
+            contexts.push(value.into_document::<A::Error>(key)?);
+        }
+
+        Ok(contexts)
+    }
+}
+
 pub fn load_service_from_file(path: LitStr) -> syn::Result<LoadedService> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new(path.span(), "CARGO_MANIFEST_DIR is not available"))?;
@@ -984,8 +1339,9 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     validate_runtime_config(&runtime, span)?;
     validate_tls_config(&tls, span)?;
     validate_security_config(&security, span)?;
+    let enums = build_enums(document.enums)?;
 
-    let resources = build_resources(document.db, document.resources)?;
+    let resources = build_resources_with_enums(document.db, document.resources, enums.as_slice())?;
     if resources.is_empty() {
         return Err(syn::Error::new(
             span,
@@ -998,6 +1354,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     Ok(LoadedService {
         service: ServiceSpec {
             module_ident,
+            enums,
             resources,
             authorization,
             static_mounts,
@@ -1011,11 +1368,62 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     })
 }
 
+#[cfg(test)]
 fn build_resources(
     db: DbBackend,
     resources: Vec<ResourceDocument>,
 ) -> syn::Result<Vec<ResourceSpec>> {
+    build_resources_with_enums(db, resources, &[])
+}
+
+fn build_enums(documents: Vec<EnumDocument>) -> syn::Result<Vec<EnumSpec>> {
     let mut seen_names = HashSet::new();
+    let mut enums = Vec::with_capacity(documents.len());
+
+    for document in documents {
+        if !seen_names.insert(document.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate enum `{}`", document.name),
+            ));
+        }
+        syn::parse_str::<syn::Ident>(&document.name).map_err(|_| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("enum name `{}` is not a valid Rust identifier", document.name),
+            )
+        })?;
+        if document.values.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("enum `{}` must declare at least one value", document.name),
+            ));
+        }
+        let mut seen_values = HashSet::new();
+        for value in &document.values {
+            if !seen_values.insert(value.clone()) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("enum `{}` contains duplicate value `{value}`", document.name),
+                ));
+            }
+        }
+        enums.push(EnumSpec {
+            name: document.name,
+            values: document.values,
+        });
+    }
+
+    Ok(enums)
+}
+
+fn build_resources_with_enums(
+    db: DbBackend,
+    resources: Vec<ResourceDocument>,
+    enums: &[EnumSpec],
+) -> syn::Result<Vec<ResourceSpec>> {
+    let mut seen_names = HashSet::new();
+    let mut seen_api_names = HashSet::new();
     let mut result = Vec::with_capacity(resources.len());
 
     for resource in resources {
@@ -1032,9 +1440,36 @@ fn build_resources(
             .table
             .unwrap_or_else(|| struct_name.to_snake_case());
         validate_sql_identifier(&table_name, Span::call_site(), "table name")?;
+        let api_name = resource.api_name.unwrap_or_else(|| table_name.clone());
+        validate_api_name(
+            api_name.as_str(),
+            format!("resource `{struct_name}` api_name").as_str(),
+        )?;
+        if !seen_api_names.insert(api_name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate resource api_name `{api_name}`"),
+            ));
+        }
         let configured_id = resource.id_field.unwrap_or_else(|| "id".to_owned());
+        let resource_api = resource.api.unwrap_or_default();
+        let has_api_projection_block = !resource_api.fields.is_empty();
+        if has_api_projection_block
+            && resource
+                .fields
+                .iter()
+                .any(|field| field.api_name.is_some())
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{struct_name}` cannot combine resource `api.fields` with per-field `api_name`"
+                ),
+            ));
+        }
 
         let mut seen_fields = HashSet::new();
+        let mut seen_field_api_names = HashSet::new();
         let mut fields = Vec::with_capacity(resource.fields.len());
 
         for field in resource.fields {
@@ -1047,6 +1482,26 @@ fn build_resources(
                     ),
                 ));
             }
+            let (field_api_name, expose_in_api) = if has_api_projection_block {
+                (field.name.clone(), false)
+            } else {
+                let field_api_name = field.api_name.unwrap_or_else(|| field.name.clone());
+                validate_api_name(
+                    field_api_name.as_str(),
+                    format!("field `{}` on resource `{struct_name}` api_name", field.name)
+                        .as_str(),
+                )?;
+                if !seen_field_api_names.insert(field_api_name.clone()) {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!(
+                            "duplicate field api_name `{}` on resource `{struct_name}`",
+                            field_api_name
+                        ),
+                    ));
+                }
+                (field_api_name, true)
+            };
 
             let is_id = field.id || field.name == configured_id;
             let generated = match field.generated {
@@ -1058,6 +1513,7 @@ fn build_resources(
                 &field.ty,
                 field.items.as_ref(),
                 field.nullable || generated != GeneratedValue::None,
+                enums,
             )?;
             let sql_type = infer_sql_type(&parsed_ty.ty, db);
             let object_fields = match &field.ty {
@@ -1102,6 +1558,7 @@ fn build_resources(
                         db,
                         field.fields,
                         format!("resource `{struct_name}` field `{}`", field.name).as_str(),
+                        enums,
                     )?)
                 }
                 _ => {
@@ -1152,6 +1609,11 @@ fn build_resources(
                         format!("field name `{}` is not a valid Rust identifier", field.name),
                     )
                 })?,
+                api_name: field_api_name,
+                expose_in_api,
+                unique: field.unique,
+                enum_name: parsed_ty.enum_name,
+                enum_values: parsed_ty.enum_values,
                 ty: parsed_ty.ty,
                 list_item_ty: parsed_ty.list_item_ty,
                 object_fields,
@@ -1170,22 +1632,43 @@ fn build_resources(
             ));
         }
 
+        if has_api_projection_block {
+            apply_resource_api_projections(
+                &mut fields,
+                resource_api.fields.clone(),
+                struct_name.as_str(),
+                configured_id.as_str(),
+            )?;
+        }
+
         let policies = parse_row_policies(resource.policies).map_err(|error| {
             syn::Error::new(
                 error.span(),
                 format!("failed to parse row policies for `{struct_name}`: {error}"),
             )
         })?;
+        validate_hidden_projection_fields(fields.as_slice(), &policies, struct_name.as_str())?;
+        let (default_response_context, response_contexts) = build_response_contexts(
+            fields.as_slice(),
+            resource_api.default_context,
+            resource_api.contexts,
+            struct_name.as_str(),
+        )?;
+        let indexes = build_index_specs(resource.indexes);
 
         result.push(ResourceSpec {
             struct_ident: struct_ident.clone(),
             impl_module_ident: default_resource_module_ident(&struct_ident),
             table_name,
+            api_name,
+            default_response_context,
+            response_contexts,
             id_field: configured_id,
             db,
             roles: resource.roles.with_legacy_defaults(),
             policies,
             list: parse_list_config(resource.list),
+            indexes,
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
         });
@@ -1196,17 +1679,284 @@ fn build_resources(
         validate_relations(&resource.fields, Span::call_site())?;
         validate_field_validations(&resource.fields, Span::call_site())?;
         validate_list_config(&resource.list, Span::call_site())?;
+        validate_resource_indexes(resource, Span::call_site())?;
     }
 
     Ok(result)
+}
+
+fn apply_resource_api_projections(
+    fields: &mut [FieldSpec],
+    projections: Vec<ApiFieldProjectionDocument>,
+    resource_name: &str,
+    configured_id: &str,
+) -> syn::Result<()> {
+    let mut seen_api_names = HashSet::new();
+    let mut seen_storage_fields = HashSet::new();
+
+    for projection in projections {
+        validate_api_name(
+            projection.name.as_str(),
+            format!("resource `{resource_name}` api.fields `{}`", projection.name).as_str(),
+        )?;
+        if !seen_api_names.insert(projection.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "duplicate api field projection `{}` on resource `{resource_name}`",
+                    projection.name
+                ),
+            ));
+        }
+        if !seen_storage_fields.insert(projection.from.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` maps storage field `{}` more than once in `api.fields`",
+                    projection.from
+                ),
+            ));
+        }
+        let Some(field) = fields.iter_mut().find(|field| field.name() == projection.from) else {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` api field `{}` references unknown storage field `{}`",
+                    projection.name, projection.from
+                ),
+            ));
+        };
+        field.api_name = projection.name;
+        field.expose_in_api = true;
+    }
+
+    if !fields
+        .iter()
+        .any(|field| field.name() == configured_id && field.expose_in_api())
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` must expose configured id field `{configured_id}` in `api.fields`"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_hidden_projection_fields(
+    fields: &[FieldSpec],
+    policies: &RowPolicies,
+    resource_name: &str,
+) -> syn::Result<()> {
+    for field in fields {
+        if field.expose_in_api() || field.is_id || field.generated.skip_insert() {
+            continue;
+        }
+        let assigned_on_create = policies.create.iter().any(|policy| policy.field == field.name());
+        if assigned_on_create || is_optional_type(&field.ty) {
+            continue;
+        }
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "resource `{resource_name}` hides required storage field `{}` from `api.fields`, but it is not nullable, generated, or assigned by create policy",
+                field.name()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_response_contexts(
+    fields: &[FieldSpec],
+    default_context: Option<String>,
+    contexts: Vec<ResponseContextDocument>,
+    resource_name: &str,
+) -> syn::Result<(Option<String>, Vec<ResponseContextSpec>)> {
+    let mut seen_contexts = HashSet::new();
+    let mut parsed_contexts = Vec::with_capacity(contexts.len());
+
+    for context in contexts {
+        validate_api_name(
+            context.name.as_str(),
+            format!("resource `{resource_name}` api.contexts `{}`", context.name).as_str(),
+        )?;
+        if !seen_contexts.insert(context.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "duplicate response context `{}` on resource `{resource_name}`",
+                    context.name
+                ),
+            ));
+        }
+
+        let mut seen_fields = HashSet::new();
+        let mut parsed_fields = Vec::with_capacity(context.fields.len());
+        for field_name in context.fields {
+            if !seen_fields.insert(field_name.clone()) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "response context `{}` on resource `{resource_name}` includes field `{field_name}` more than once",
+                        context.name
+                    ),
+                ));
+            }
+            if !fields
+                .iter()
+                .any(|field| field.expose_in_api() && field.api_name() == field_name)
+            {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "response context `{}` on resource `{resource_name}` references unknown API field `{field_name}`",
+                        context.name
+                    ),
+                ));
+            }
+            parsed_fields.push(field_name);
+        }
+
+        parsed_contexts.push(ResponseContextSpec {
+            name: context.name,
+            fields: parsed_fields,
+        });
+    }
+
+    if let Some(default_context_name) = default_context {
+        validate_api_name(
+            default_context_name.as_str(),
+            format!("resource `{resource_name}` api.default_context").as_str(),
+        )?;
+        if !parsed_contexts
+            .iter()
+            .any(|context| context.name == default_context_name)
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` api.default_context `{default_context_name}` does not match any configured `api.contexts`"
+                ),
+            ));
+        }
+        Ok((Some(default_context_name), parsed_contexts))
+    } else {
+        Ok((None, parsed_contexts))
+    }
+}
+
+fn build_index_specs(indexes: Vec<IndexDocument>) -> Vec<IndexSpec> {
+    indexes
+        .into_iter()
+        .map(|index| IndexSpec {
+            fields: index.fields,
+            unique: index.unique,
+        })
+        .collect()
+}
+
+fn validate_resource_indexes(resource: &ResourceSpec, span: Span) -> syn::Result<()> {
+    for field in &resource.fields {
+        if !field.unique {
+            continue;
+        }
+
+        if field.is_id {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "field `{}` on resource `{}` cannot combine `id` with `unique`",
+                    field.name(),
+                    resource.struct_ident
+                ),
+            ));
+        }
+
+        if !supports_declared_index(field) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "field `{}` on resource `{}` does not support `unique`",
+                    field.name(),
+                    resource.struct_ident
+                ),
+            ));
+        }
+    }
+
+    let mut seen_indexes = HashSet::new();
+    for index in &resource.indexes {
+        if index.fields.is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "resource `{}` index definitions must declare at least one field",
+                    resource.struct_ident
+                ),
+            ));
+        }
+
+        let mut seen_fields = HashSet::new();
+        for field_name in &index.fields {
+            if !seen_fields.insert(field_name.clone()) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "resource `{}` index `{}` lists field `{field_name}` more than once",
+                        resource.struct_ident,
+                        index.name_for_table(resource.table_name.as_str())
+                    ),
+                ));
+            }
+
+            let field = resource.find_field(field_name.as_str()).ok_or_else(|| {
+                syn::Error::new(
+                    span,
+                    format!(
+                        "resource `{}` index references unknown field `{field_name}`",
+                        resource.struct_ident
+                    ),
+                )
+            })?;
+            if !supports_declared_index(field) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "resource `{}` index references unsupported field `{field_name}`",
+                        resource.struct_ident
+                    ),
+                ));
+            }
+        }
+
+        let key = format!("{}:{}", index.unique as u8, index.fields.join("\u{1f}"));
+        if !seen_indexes.insert(key) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "resource `{}` declares duplicate index `{}`",
+                    resource.struct_ident,
+                    index.name_for_table(resource.table_name.as_str())
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn build_object_fields(
     db: DbBackend,
     fields: Vec<FieldDocument>,
     context: &str,
+    enums: &[EnumSpec],
 ) -> syn::Result<Vec<FieldSpec>> {
     let mut seen_fields = HashSet::new();
+    let mut seen_api_names = HashSet::new();
     let mut result = Vec::with_capacity(fields.len());
 
     for field in fields {
@@ -1214,6 +1964,17 @@ fn build_object_fields(
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!("duplicate nested field `{}` in {context}", field.name),
+            ));
+        }
+        let field_api_name = field.api_name.unwrap_or_else(|| field.name.clone());
+        validate_api_name(
+            field_api_name.as_str(),
+            format!("nested field `{}` in {context} api_name", field.name).as_str(),
+        )?;
+        if !seen_api_names.insert(field_api_name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate nested field api_name `{}` in {context}", field_api_name),
             ));
         }
 
@@ -1242,9 +2003,18 @@ fn build_object_fields(
             ));
         }
 
-        let parsed_ty = parse_field_type(&field.ty, field.items.as_ref(), field.nullable)?;
+        let parsed_ty = parse_field_type(&field.ty, field.items.as_ref(), field.nullable, enums)?;
         let sql_type = infer_sql_type(&parsed_ty.ty, db);
         let nested_context = format!("{context}.{}", field.name);
+        if field.unique {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "nested field `{}` in {context} cannot declare `unique`",
+                    field.name
+                ),
+            ));
+        }
         let object_fields = match &field.ty {
             FieldTypeDocument::Scalar(ScalarType::Object) => {
                 if field.fields.is_empty() {
@@ -1265,7 +2035,7 @@ fn build_object_fields(
                         ),
                     ));
                 }
-                Some(build_object_fields(db, field.fields, nested_context.as_str())?)
+                Some(build_object_fields(db, field.fields, nested_context.as_str(), enums)?)
             }
             _ => {
                 if !field.fields.is_empty() {
@@ -1298,6 +2068,11 @@ fn build_object_fields(
                     format!("nested field name `{}` in {context} is not a valid Rust identifier", field.name),
                 )
             })?,
+            api_name: field_api_name,
+            expose_in_api: true,
+            unique: field.unique,
+            enum_name: parsed_ty.enum_name,
+            enum_values: parsed_ty.enum_values,
             ty: parsed_ty.ty,
             list_item_ty: parsed_ty.list_item_ty,
             object_fields,
@@ -2367,9 +3142,32 @@ fn parse_static_cache_profile(value: &str) -> syn::Result<StaticCacheProfile> {
     }
 }
 
+fn validate_api_name(value: &str, label: &str) -> syn::Result<()> {
+    if value.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{label} cannot be empty"),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "{label} `{value}` must use only ASCII letters, digits, `_`, or `-`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 struct ParsedFieldType {
     ty: Type,
     list_item_ty: Option<Type>,
+    enum_name: Option<String>,
+    enum_values: Option<Vec<String>>,
 }
 
 fn parse_list_item_type(item_ty: &FieldTypeDocument) -> syn::Result<Type> {
@@ -2401,8 +3199,9 @@ fn parse_field_type(
     field_ty: &FieldTypeDocument,
     item_ty: Option<&FieldTypeDocument>,
     nullable: bool,
+    enums: &[EnumSpec],
 ) -> syn::Result<ParsedFieldType> {
-    let (base, list_item_ty) = match field_ty {
+    let (base, list_item_ty, enum_name, enum_values) = match field_ty {
         FieldTypeDocument::Scalar(ScalarType::List) => {
             let item_ty = item_ty.ok_or_else(|| {
                 syn::Error::new(
@@ -2414,6 +3213,8 @@ fn parse_field_type(
             (
                 format!("Vec<{}>", parsed_item_ty.to_token_stream()),
                 Some(parsed_item_ty),
+                None,
+                None,
             )
         }
         FieldTypeDocument::Scalar(scalar) => {
@@ -2423,7 +3224,7 @@ fn parse_field_type(
                     "`items` is only supported when `type = List`",
                 ));
             }
-            (scalar.rust_type().to_owned(), None)
+            (scalar.rust_type().to_owned(), None, None, None)
         }
         FieldTypeDocument::Rust(raw) => {
             if item_ty.is_some() {
@@ -2432,7 +3233,16 @@ fn parse_field_type(
                     "`items` is only supported when `type = List`",
                 ));
             }
-            (raw.clone(), None)
+            if let Some(enum_spec) = enums.iter().find(|candidate| candidate.name == *raw) {
+                (
+                    "String".to_owned(),
+                    None,
+                    Some(enum_spec.name.clone()),
+                    Some(enum_spec.values.clone()),
+                )
+            } else {
+                (raw.clone(), None, None, None)
+            }
         }
     };
 
@@ -2449,7 +3259,12 @@ fn parse_field_type(
         )
     })?;
 
-    Ok(ParsedFieldType { ty, list_item_ty })
+    Ok(ParsedFieldType {
+        ty,
+        list_item_ty,
+        enum_name,
+        enum_values,
+    })
 }
 
 impl ScalarType {
@@ -3341,31 +4156,38 @@ mod tests {
             DbBackend::Sqlite,
             vec![ResourceDocument {
                 name: "Event".to_owned(),
+                api_name: None,
                 table: None,
                 id_field: None,
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
+                api: None,
+                indexes: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "starts_at".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::DateTime),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
@@ -3387,64 +4209,77 @@ mod tests {
             DbBackend::Sqlite,
             vec![ResourceDocument {
                 name: "Schedule".to_owned(),
+                api_name: None,
                 table: None,
                 id_field: None,
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
+                api: None,
+                indexes: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "run_on".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Date),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "run_at".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Time),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "external_id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Uuid),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "amount".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Decimal),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
@@ -3482,53 +4317,64 @@ mod tests {
             DbBackend::Sqlite,
             vec![ResourceDocument {
                 name: "BlockDocument".to_owned(),
+                api_name: None,
                 table: None,
                 id_field: None,
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
+                api: None,
+                indexes: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "payload".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Json),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "attributes".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::JsonObject),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "blocks".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::JsonArray),
                         items: None,
                         fields: vec![],
                         nullable: true,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
@@ -3561,42 +4407,51 @@ mod tests {
             DbBackend::Sqlite,
             vec![ResourceDocument {
                 name: "Entry".to_owned(),
+                api_name: None,
                 table: None,
                 id_field: None,
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
+                api: None,
+                indexes: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "categories".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::List),
                         items: Some(FieldTypeDocument::Scalar(ScalarType::I64)),
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "blocks".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::List),
                         items: Some(FieldTypeDocument::Scalar(ScalarType::JsonObject)),
                         fields: vec![],
                         nullable: true,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
@@ -3638,36 +4493,44 @@ mod tests {
             DbBackend::Sqlite,
             vec![ResourceDocument {
                 name: "Entry".to_owned(),
+                api_name: None,
                 table: None,
                 id_field: None,
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
+                api: None,
+                indexes: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "title".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Object),
                         items: None,
                         fields: vec![
                             FieldDocument {
                                 name: "raw".to_owned(),
+                                api_name: None,
                                 ty: FieldTypeDocument::Scalar(ScalarType::String),
                                 items: None,
                                 fields: vec![],
                                 nullable: false,
                                 id: false,
                                 generated: GeneratedValue::None,
+                                unique: false,
                                 relation: None,
                                 validate: Some(FieldValidationDocument {
                                     min_length: Some(3),
@@ -3678,12 +4541,14 @@ mod tests {
                             },
                             FieldDocument {
                                 name: "rendered".to_owned(),
+                                api_name: None,
                                 ty: FieldTypeDocument::Scalar(ScalarType::String),
                                 items: None,
                                 fields: vec![],
                                 nullable: true,
                                 id: false,
                                 generated: GeneratedValue::None,
+                                unique: false,
                                 relation: None,
                                 validate: None,
                             },
@@ -3691,33 +4556,39 @@ mod tests {
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "settings".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::Object),
                         items: None,
                         fields: vec![
                             FieldDocument {
                                 name: "featured".to_owned(),
+                                api_name: None,
                                 ty: FieldTypeDocument::Scalar(ScalarType::Bool),
                                 items: None,
                                 fields: vec![],
                                 nullable: false,
                                 id: false,
                                 generated: GeneratedValue::None,
+                                unique: false,
                                 relation: None,
                                 validate: None,
                             },
                             FieldDocument {
                                 name: "categories".to_owned(),
+                                api_name: None,
                                 ty: FieldTypeDocument::Scalar(ScalarType::List),
                                 items: Some(FieldTypeDocument::Scalar(ScalarType::I64)),
                                 fields: vec![],
                                 nullable: true,
                                 id: false,
                                 generated: GeneratedValue::None,
+                                unique: false,
                                 relation: None,
                                 validate: None,
                             },
@@ -3725,6 +4596,7 @@ mod tests {
                         nullable: true,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
@@ -3760,36 +4632,429 @@ mod tests {
     }
 
     #[test]
+    fn parses_resource_and_field_api_names_from_eon() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api_name: "posts"
+        fields: [
+            { name: "id", type: I64, id: true, api_name: "postId" }
+            {
+                name: "title_text"
+                type: String
+                api_name: "title"
+            }
+            {
+                name: "meta"
+                type: Object
+                api_name: "metadata"
+                fields: [
+                    { name: "summary_text", type: String, api_name: "summary", nullable: true }
+                ]
+            }
+        ]
+    }
+]
+"#,
+        );
+        let resources = build_resources(DbBackend::Sqlite, document.resources)
+            .expect("resources should build");
+
+        let resource = &resources[0];
+        let title = resource
+            .find_field("title_text")
+            .expect("title field should exist");
+        let meta = resource.find_field("meta").expect("meta field should exist");
+        let meta_fields = super::super::model::object_fields(meta)
+            .expect("meta should define object fields");
+
+        assert_eq!(resource.api_name(), "posts");
+        assert_eq!(
+            resource.find_field("id").expect("id should exist").api_name(),
+            "postId"
+        );
+        assert_eq!(title.api_name(), "title");
+        assert_eq!(meta.api_name(), "metadata");
+        assert_eq!(meta_fields[0].api_name(), "summary");
+    }
+
+    #[test]
+    fn parses_declared_enums_and_enum_fields() {
+        let document = parse_document(
+            r#"
+enums: {
+    PostStatus: ["draft", "published", "archived"]
+}
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "status", type: PostStatus }
+            {
+                name: "workflow"
+                type: Object
+                nullable: true
+                fields: [
+                    { name: "current", type: PostStatus }
+                ]
+            }
+        ]
+    }
+]
+"#,
+        );
+        let enums = build_enums(document.enums).expect("enums should build");
+        let resources = build_resources_with_enums(DbBackend::Sqlite, document.resources, &enums)
+            .expect("resources should build");
+        let resource = &resources[0];
+        let status = resource
+            .find_field("status")
+            .expect("status field should exist");
+        let workflow = resource
+            .find_field("workflow")
+            .expect("workflow field should exist");
+        let workflow_fields = super::super::model::object_fields(workflow)
+            .expect("workflow should define object fields");
+
+        assert_eq!(enums[0].name, "PostStatus");
+        assert_eq!(enums[0].values, vec!["draft", "published", "archived"]);
+        assert_eq!(status.enum_name(), Some("PostStatus"));
+        assert_eq!(
+            status.enum_values().map(|values| values.to_vec()),
+            Some(vec![
+                "draft".to_owned(),
+                "published".to_owned(),
+                "archived".to_owned()
+            ])
+        );
+        assert_eq!(status.sql_type, "TEXT");
+        assert_eq!(workflow_fields[0].enum_name(), Some("PostStatus"));
+    }
+
+    #[test]
+    fn rejects_validation_constraints_on_enum_fields() {
+        let document = parse_document(
+            r#"
+enums: {
+    PostStatus: ["draft", "published", "archived"]
+}
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "status"
+                type: PostStatus
+                validate: {
+                    min_length: 3
+                }
+            }
+        ]
+    }
+]
+"#,
+        );
+        let enums = build_enums(document.enums).expect("enums should build");
+        let error = build_resources_with_enums(DbBackend::Sqlite, document.resources, &enums)
+            .expect_err("enum field validation constraints should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("enum field `status` does not support validation constraints")
+        );
+    }
+
+    #[test]
+    fn parses_field_unique_and_resource_indexes_from_eon() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        indexes: [
+            { fields: ["workspace_id", "slug"], unique: true }
+            { fields: ["status", "published_at"] }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "workspace_id", type: I64 }
+            { name: "slug", type: String, unique: true }
+            { name: "status", type: String }
+            { name: "published_at", type: DateTime, nullable: true }
+        ]
+    }
+]
+"#,
+        );
+        let resources = build_resources(DbBackend::Sqlite, document.resources)
+            .expect("resources should build");
+        let resource = &resources[0];
+        let slug = resource.find_field("slug").expect("slug field should exist");
+
+        assert!(slug.unique);
+        assert_eq!(resource.indexes.len(), 2);
+        assert_eq!(
+            resource.indexes[0],
+            IndexSpec {
+                fields: vec!["workspace_id".to_owned(), "slug".to_owned()],
+                unique: true,
+            }
+        );
+        assert_eq!(
+            resource.indexes[1],
+            IndexSpec {
+                fields: vec!["status".to_owned(), "published_at".to_owned()],
+                unique: false,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unique_on_object_field() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "title"
+                type: Object
+                unique: true
+                fields: [
+                    { name: "raw", type: String }
+                ]
+            }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("object field unique should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("field `title` on resource `Post` does not support `unique`")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_field_api_names_on_single_resource() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title_text", type: String, api_name: "title" }
+            { name: "headline_text", type: String, api_name: "title" }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("duplicate field api_name should fail");
+        assert!(error.to_string().contains("duplicate field api_name `title`"));
+    }
+
+    #[test]
+    fn parses_resource_api_field_projections() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api: {
+            fields: {
+                id: { from: "id" }
+                title: { from: "title_text" }
+                author: { from: "author_id" }
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title_text", type: String }
+            { name: "author_id", type: I64 }
+            { name: "internal_note", type: String, nullable: true }
+        ]
+    }
+]
+"#,
+        );
+        let resources = build_resources(DbBackend::Sqlite, document.resources)
+            .expect("resources should build");
+        let resource = &resources[0];
+
+        assert_eq!(resource.api_fields().count(), 3);
+        assert_eq!(
+            resource
+                .field_by_api_name("title")
+                .expect("title projection should exist")
+                .name(),
+            "title_text"
+        );
+        assert!(
+            !resource
+                .find_field("internal_note")
+                .expect("hidden field should exist in storage")
+                .expose_in_api()
+        );
+    }
+
+    #[test]
+    fn rejects_hiding_required_storage_fields_in_api_projection() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api: {
+            fields: {
+                id: { from: "id" }
+                title: { from: "title_text" }
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title_text", type: String }
+            { name: "body_text", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("hiding a required storage field should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("hides required storage field `body_text`")
+        );
+    }
+
+    #[test]
+    fn parses_resource_api_response_contexts() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api: {
+            fields: {
+                id: { from: "id" }
+                title: { from: "title_text" }
+                secret: { from: "draft_body" }
+            }
+            default_context: "view"
+            contexts: {
+                view: ["id", "title"]
+                edit: ["id", "title", "secret"]
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title_text", type: String }
+            { name: "draft_body", type: String, nullable: true }
+        ]
+    }
+]
+"#,
+        );
+        let resources = build_resources(DbBackend::Sqlite, document.resources)
+            .expect("resources should build");
+        let resource = &resources[0];
+
+        assert_eq!(
+            resource
+                .default_response_context()
+                .expect("default response context should exist")
+                .name,
+            "view"
+        );
+        assert_eq!(
+            resource
+                .response_context("edit")
+                .expect("edit context should exist")
+                .fields,
+            vec!["id".to_owned(), "title".to_owned(), "secret".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_api_field_in_response_context() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api: {
+            contexts: {
+                view: ["id", "secret"]
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("unknown context field should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("references unknown API field `secret`")
+        );
+    }
+
+    #[test]
     fn rejects_invalid_table_identifier_from_eon() {
         let error = build_resources(
             DbBackend::Sqlite,
             vec![ResourceDocument {
                 name: "Post".to_owned(),
+                api_name: None,
                 table: Some("post; DROP TABLE user;".to_owned()),
                 id_field: None,
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
+                api: None,
+                indexes: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::I64),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: true,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
                     FieldDocument {
                         name: "title".to_owned(),
+                        api_name: None,
                         ty: FieldTypeDocument::Scalar(ScalarType::String),
                         items: None,
                         fields: vec![],
                         nullable: false,
                         id: false,
                         generated: GeneratedValue::None,
+                        unique: false,
                         relation: None,
                         validate: None,
                     },
@@ -3853,6 +5118,7 @@ mod tests {
                 runtime: RuntimeConfig::default(),
                 security: SecurityConfig::default(),
                 tls: TlsConfig::default(),
+                enums: Vec::new(),
             },
             include_path: path.value(),
         };

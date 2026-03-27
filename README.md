@@ -89,6 +89,7 @@ log = "0.4"
 
 - [CLI tool guide](crates/rest_api_cli/README.md)
 - [.eon reference](docs/eon-reference.md)
+- [.eon vNext roadmap](docs/eon-vnext-roadmap.md)
 - [Authorization roadmap](docs/authorization-roadmap.md)
 - [Backup and replication roadmap](docs/backup-replication-roadmap.md)
 
