@@ -189,13 +189,22 @@ Each resource describes one generated REST model and its CRUD surface.
 
 ## Resource API
 
-The optional `api` block lets a resource expose a different public field surface from its storage fields and declare named response contexts over that public surface.
+The optional `api` block lets a resource expose a different public field surface from its storage fields, add response-only computed fields, and declare named response contexts over that public surface.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].api.fields | List<ApiFieldProjection> or Map<ApiFieldName, String \| ApiFieldProjection> | Expose every field by its storage name | No | Projection definitions | When present, only the projected fields are exposed in generated/native JSON payloads, list filters, sort names, and OpenAPI. Each projection maps one API field name to one storage field via `from`. |
+| resources[].api.fields | List<ApiFieldProjection> or Map<ApiFieldName, String \| ApiFieldProjection> | Expose every field by its storage name | No | Projection definitions | When present, only the declared API fields are exposed. Storage-backed entries map one API field name to one storage field via `from`, while computed entries use `template` to interpolate already-exposed scalar API fields at response time. |
 | resources[].api.default_context | String | No default context; responses use the full projected API field set | No | Configured context name | When set, list/get/create responses default to that named context unless a `context` query parameter overrides it. |
 | resources[].api.contexts | List<ResponseContext> or Map<ContextName, ResponseContext \| List<String>> | No named response contexts | No | Named context definitions | Each context is a subset of exposed API field names. Generated handlers and native `vsr serve` apply the selected context at response serialization time. |
+
+## Computed API Fields
+
+Computed API fields are response-only fields declared inside `resources[].api.fields`. They are not writable, sortable, or filterable, and they do not affect migrations.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].api.fields[].from | String | None | No | Storage field name | Maps one public API field name to one storage field. Exactly one of `from` or `template` must be set. |
+| resources[].api.fields[].template | String | None | No | Template string like `/posts/{slug}` | Interpolates already-exposed scalar API fields by name. If any referenced field is nullable and resolves to `null`, the computed field becomes `null`. |
 
 ## Response Contexts
 

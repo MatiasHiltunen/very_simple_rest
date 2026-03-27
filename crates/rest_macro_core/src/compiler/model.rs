@@ -651,6 +651,19 @@ pub struct ManyToManySpec {
     pub target_field: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ComputedFieldPart {
+    Literal(String),
+    Field(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComputedFieldSpec {
+    pub api_name: String,
+    pub optional: bool,
+    pub parts: Vec<ComputedFieldPart>,
+}
+
 impl FieldSpec {
     pub fn name(&self) -> String {
         self.ident.to_string()
@@ -688,6 +701,7 @@ pub struct ResourceSpec {
     pub list: ListConfig,
     pub indexes: Vec<IndexSpec>,
     pub many_to_many: Vec<ManyToManySpec>,
+    pub computed_fields: Vec<ComputedFieldSpec>,
     pub fields: Vec<FieldSpec>,
     pub write_style: WriteModelStyle,
 }
@@ -763,6 +777,16 @@ impl ResourceSpec {
             .map(|context| context.name.as_str())
     }
 
+    pub fn response_field_names(&self) -> impl Iterator<Item = &str> {
+        self.api_fields()
+            .map(|field| field.api_name())
+            .chain(
+                self.computed_fields
+                    .iter()
+                    .map(|field| field.api_name.as_str()),
+            )
+    }
+
     pub fn api_fields(&self) -> impl Iterator<Item = &FieldSpec> {
         self.fields.iter().filter(|field| field.expose_in_api())
     }
@@ -812,6 +836,7 @@ impl std::fmt::Debug for ResourceSpec {
             .field("list", &self.list)
             .field("indexes", &self.indexes)
             .field("many_to_many", &self.many_to_many)
+            .field("computed_fields", &self.computed_fields)
             .field("fields", &self.fields)
             .field("write_style", &self.write_style)
             .finish()

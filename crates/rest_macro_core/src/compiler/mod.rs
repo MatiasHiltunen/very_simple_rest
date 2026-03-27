@@ -13,12 +13,12 @@ use syn::{DeriveInput, LitStr, Path};
 
 pub use authorization::{compile_resource_authorization, compile_service_authorization};
 pub use model::{
-    DbBackend, EnumSpec, FieldSpec, FieldValidation, GeneratedTemporalKind, GeneratedValue,
-    IndexSpec, NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter,
-    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
-    ReferentialAction, RelationSpec, ResourceSpec, ResponseContextSpec, RoleRequirements,
-    RowPolicies, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
-    StructuredScalarKind,
+    ComputedFieldPart, ComputedFieldSpec, DbBackend, EnumSpec, FieldSpec, FieldValidation,
+    GeneratedTemporalKind, GeneratedValue, IndexSpec, NumericBound, PolicyAssignment,
+    PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
+    PolicyFilterOperator, PolicyValueSource, ReferentialAction, RelationSpec, ResourceSpec,
+    ResponseContextSpec, RoleRequirements, RowPolicies, ServiceSpec, StaticCacheProfile,
+    StaticMode, StaticMountSpec, StructuredScalarKind,
     default_service_database_url, infer_sql_type, is_date_type, is_datetime_type,
     is_decimal_type, is_enum_field, is_json_array_type, is_json_object_type, is_json_type,
     is_list_field, is_optional_type, is_structured_scalar_type, is_time_type,

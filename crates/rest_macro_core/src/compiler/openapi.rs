@@ -4,11 +4,10 @@ use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
 use super::model::{
-    FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec, is_list_field,
-    is_optional_type, is_typed_object_field, list_item_type, object_fields, read_requires_auth,
-    structured_scalar_kind,
-    supports_contains_filters, supports_exact_filters, supports_field_sort,
-    supports_range_filters,
+    ComputedFieldSpec, FieldSpec, GeneratedValue, PolicyValueSource, ResourceSpec, ServiceSpec,
+    is_list_field, is_optional_type, is_typed_object_field, list_item_type, object_fields,
+    read_requires_auth, structured_scalar_kind, supports_contains_filters,
+    supports_exact_filters, supports_field_sort, supports_range_filters,
 };
 
 #[derive(Clone, Debug)]
@@ -74,10 +73,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
 
     for resource in &service.resources {
         let name = resource_name(resource);
-        schemas.insert(
-            name.clone(),
-            object_schema(&resource.api_fields().collect::<Vec<_>>()),
-        );
+        schemas.insert(name.clone(), response_object_schema(resource));
         schemas.insert(format!("{name}Create"), create_payload_schema(resource));
         schemas.insert(
             format!("{name}Update"),
@@ -1120,6 +1116,50 @@ fn object_schema(fields: &[&FieldSpec]) -> Value {
     schema
 }
 
+fn response_object_schema(resource: &ResourceSpec) -> Value {
+    let mut schema = object_schema(&resource.api_fields().collect::<Vec<_>>());
+    let Some(properties) = schema["properties"].as_object_mut() else {
+        return schema;
+    };
+
+    for field in &resource.computed_fields {
+        properties.insert(field.api_name.clone(), computed_field_schema(field));
+    }
+
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+        for field in &resource.computed_fields {
+            if !field.optional {
+                required.push(json!(field.api_name));
+            }
+        }
+    } else {
+        let required = resource
+            .computed_fields
+            .iter()
+            .filter(|field| !field.optional)
+            .map(|field| json!(field.api_name))
+            .collect::<Vec<_>>();
+        if !required.is_empty() {
+            schema["required"] = Value::Array(required);
+        }
+    }
+
+    schema
+}
+
+fn computed_field_schema(field: &ComputedFieldSpec) -> Value {
+    if field.optional {
+        json!({
+            "type": "string",
+            "nullable": true,
+        })
+    } else {
+        json!({
+            "type": "string",
+        })
+    }
+}
+
 fn typed_object_schema(fields: &[FieldSpec]) -> Value {
     let mut schema = object_schema(&fields.iter().collect::<Vec<_>>());
     schema["additionalProperties"] = json!(false);
@@ -1958,6 +1998,39 @@ mod tests {
         assert_eq!(
             document["paths"]["/posts"]["get"]["parameters"][3]["schema"]["enum"],
             json!(["id", "title", "author"])
+        );
+    }
+
+    #[test]
+    fn renders_openapi_computed_api_fields_only_in_response_schema() {
+        let service = load_service_from_path(&fixture_path("api_computed_fields_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Computed API Fields", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["permalink"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["preview"]["nullable"],
+            json!(true)
+        );
+        assert!(
+            document["components"]["schemas"]["PostCreate"]["properties"]
+                .get("permalink")
+                .is_none()
+        );
+        assert!(
+            document["paths"]["/posts"]["get"]["parameters"]
+                .as_array()
+                .expect("list parameters should exist")
+                .iter()
+                .all(|parameter| parameter["name"] != "filter_permalink")
         );
     }
 

@@ -1,0 +1,30 @@
+module: "api_computed_fields_api"
+resources: [
+    {
+        name: "Post"
+        api_name: "posts"
+        api: {
+            fields: {
+                id: "id"
+                slug: "slug"
+                title: "title"
+                summary: "summary"
+                permalink: {
+                    template: "/posts/{slug}"
+                }
+                preview: {
+                    template: "{slug}:{summary}"
+                }
+            }
+            contexts: {
+                compact: ["id", "permalink"]
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "slug", type: String }
+            { name: "title", type: String }
+            { name: "summary", type: String, nullable: true }
+        ]
+    }
+]

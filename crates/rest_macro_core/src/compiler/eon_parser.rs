@@ -844,7 +844,10 @@ struct FieldMapConfigDocument {
 #[derive(Clone, serde::Deserialize)]
 struct ApiFieldProjectionDocument {
     name: String,
-    from: String,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    template: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -879,7 +882,10 @@ enum ResponseContextMapValueDocument {
 struct ApiFieldProjectionConfigDocument {
     #[serde(default)]
     name: Option<String>,
-    from: String,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    template: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -1084,7 +1090,11 @@ impl ApiFieldProjectionMapValueDocument {
         E: de::Error,
     {
         match self {
-            Self::From(from) => Ok(ApiFieldProjectionDocument { name: key, from }),
+            Self::From(from) => Ok(ApiFieldProjectionDocument {
+                name: key,
+                from: Some(from),
+                template: None,
+            }),
             Self::Config(config) => config.into_document::<E>(key),
         }
     }
@@ -1106,6 +1116,7 @@ impl ApiFieldProjectionConfigDocument {
         Ok(ApiFieldProjectionDocument {
             name: key,
             from: self.from,
+            template: self.template,
         })
     }
 }
@@ -1893,14 +1904,16 @@ fn build_resources_with_enums(
             ));
         }
 
-        if has_api_projection_block {
+        let computed_fields = if has_api_projection_block {
             apply_resource_api_projections(
                 &mut fields,
                 resource_api.fields.clone(),
                 struct_name.as_str(),
                 configured_id.as_str(),
-            )?;
-        }
+            )?
+        } else {
+            Vec::new()
+        };
 
         let policies = parse_row_policies(resource.policies).map_err(|error| {
             syn::Error::new(
@@ -1911,6 +1924,7 @@ fn build_resources_with_enums(
         validate_hidden_projection_fields(fields.as_slice(), &policies, struct_name.as_str())?;
         let (default_response_context, response_contexts) = build_response_contexts(
             fields.as_slice(),
+            computed_fields.as_slice(),
             resource_api.default_context,
             resource_api.contexts,
             struct_name.as_str(),
@@ -1932,6 +1946,7 @@ fn build_resources_with_enums(
             list: parse_list_config(resource.list),
             indexes,
             many_to_many: Vec::new(),
+            computed_fields,
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
         });
@@ -2120,16 +2135,126 @@ fn resolve_resource_selector<'a>(
         })
 }
 
+fn build_computed_field_spec(
+    api_name: &str,
+    template: &str,
+    available_fields: &[&FieldSpec],
+    resource_name: &str,
+) -> syn::Result<super::model::ComputedFieldSpec> {
+    use super::model::{ComputedFieldPart, ComputedFieldSpec};
+
+    let mut parts = Vec::new();
+    let mut optional = false;
+    let mut cursor = 0;
+
+    while let Some(start_offset) = template[cursor..].find('{') {
+        let start = cursor + start_offset;
+        if start > cursor {
+            parts.push(ComputedFieldPart::Literal(template[cursor..start].to_owned()));
+        }
+        let placeholder_start = start + 1;
+        let Some(end_offset) = template[placeholder_start..].find('}') else {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` computed api field `{api_name}` has an unterminated template placeholder"
+                ),
+            ));
+        };
+        let end = placeholder_start + end_offset;
+        let field_name = template[placeholder_start..end].trim();
+        if field_name.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` computed api field `{api_name}` has an empty template placeholder"
+                ),
+            ));
+        }
+        let Some(field) = available_fields
+            .iter()
+            .find(|field| field.api_name() == field_name)
+        else {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` computed api field `{api_name}` references unknown API field `{field_name}`"
+                ),
+            ));
+        };
+        if !supports_computed_template_field(field) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "resource `{resource_name}` computed api field `{api_name}` cannot interpolate non-scalar API field `{field_name}`"
+                ),
+            ));
+        }
+        optional |= super::model::is_optional_type(&field.ty);
+        parts.push(ComputedFieldPart::Field(field_name.to_owned()));
+        cursor = end + 1;
+    }
+
+    if cursor < template.len() {
+        parts.push(ComputedFieldPart::Literal(template[cursor..].to_owned()));
+    }
+
+    if parts.is_empty() {
+        parts.push(ComputedFieldPart::Literal(String::new()));
+    }
+
+    Ok(ComputedFieldSpec {
+        api_name: api_name.to_owned(),
+        optional,
+        parts,
+    })
+}
+
+fn supports_computed_template_field(field: &FieldSpec) -> bool {
+    field.list_item_ty.is_none()
+        && field.object_fields.is_none()
+        && !super::model::is_json_type(&field.ty)
+        && !super::model::is_json_object_type(&field.ty)
+        && !super::model::is_json_array_type(&field.ty)
+}
+
 fn apply_resource_api_projections(
     fields: &mut [FieldSpec],
     projections: Vec<ApiFieldProjectionDocument>,
     resource_name: &str,
     configured_id: &str,
-) -> syn::Result<()> {
+) -> syn::Result<Vec<super::model::ComputedFieldSpec>> {
     let mut seen_api_names = HashSet::new();
     let mut seen_storage_fields = HashSet::new();
 
-    for projection in projections {
+    for projection in &projections {
+        match (&projection.from, &projection.template) {
+            (Some(_), None) | (None, Some(_)) => {}
+            (Some(_), Some(_)) => {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "resource `{resource_name}` api field `{}` cannot set both `from` and `template`",
+                        projection.name
+                    ),
+                ));
+            }
+            (None, None) => {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "resource `{resource_name}` api field `{}` must set either `from` or `template`",
+                        projection.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    for projection in projections
+        .iter()
+        .filter(|projection| projection.from.is_some())
+    {
         validate_api_name(
             projection.name.as_str(),
             format!("resource `{resource_name}` api.fields `{}`", projection.name).as_str(),
@@ -2143,26 +2268,64 @@ fn apply_resource_api_projections(
                 ),
             ));
         }
-        if !seen_storage_fields.insert(projection.from.clone()) {
+        let storage_field_name = projection
+            .from
+            .as_ref()
+            .expect("projection storage field should exist");
+        if !seen_storage_fields.insert(storage_field_name.clone()) {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!(
                     "resource `{resource_name}` maps storage field `{}` more than once in `api.fields`",
-                    projection.from
+                    storage_field_name
                 ),
             ));
         }
-        let Some(field) = fields.iter_mut().find(|field| field.name() == projection.from) else {
+        let Some(field) = fields.iter_mut().find(|field| field.name() == *storage_field_name) else {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!(
                     "resource `{resource_name}` api field `{}` references unknown storage field `{}`",
-                    projection.name, projection.from
+                    projection.name, storage_field_name
                 ),
             ));
         };
-        field.api_name = projection.name;
+        field.api_name = projection.name.clone();
         field.expose_in_api = true;
+    }
+
+    let mut computed_fields = Vec::new();
+    let available_fields = fields
+        .iter()
+        .filter(|field| field.expose_in_api())
+        .collect::<Vec<_>>();
+    for projection in projections
+        .into_iter()
+        .filter(|projection| projection.template.is_some())
+    {
+        validate_api_name(
+            projection.name.as_str(),
+            format!("resource `{resource_name}` api.fields `{}`", projection.name).as_str(),
+        )?;
+        if !seen_api_names.insert(projection.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "duplicate api field projection `{}` on resource `{resource_name}`",
+                    projection.name
+                ),
+            ));
+        }
+        let template = projection
+            .template
+            .as_deref()
+            .expect("computed template should exist");
+        computed_fields.push(build_computed_field_spec(
+            projection.name.as_str(),
+            template,
+            available_fields.as_slice(),
+            resource_name,
+        )?);
     }
 
     if !fields
@@ -2177,7 +2340,7 @@ fn apply_resource_api_projections(
         ));
     }
 
-    Ok(())
+    Ok(computed_fields)
 }
 
 fn validate_hidden_projection_fields(
@@ -2207,6 +2370,7 @@ fn validate_hidden_projection_fields(
 
 fn build_response_contexts(
     fields: &[FieldSpec],
+    computed_fields: &[super::model::ComputedFieldSpec],
     default_context: Option<String>,
     contexts: Vec<ResponseContextDocument>,
     resource_name: &str,
@@ -2244,6 +2408,9 @@ fn build_response_contexts(
             if !fields
                 .iter()
                 .any(|field| field.expose_in_api() && field.api_name() == field_name)
+                && !computed_fields
+                    .iter()
+                    .any(|field| field.api_name == field_name)
             {
                 return Err(syn::Error::new(
                     Span::call_site(),
@@ -5580,6 +5747,79 @@ resources: [
                 .find_field("internal_note")
                 .expect("hidden field should exist in storage")
                 .expose_in_api()
+        );
+    }
+
+    #[test]
+    fn parses_resource_api_computed_fields() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api: {
+            fields: {
+                id: { from: "id" }
+                slug: { from: "slug" }
+                summary: { from: "summary" }
+                permalink: { template: "/posts/{slug}" }
+                preview: { template: "{slug}:{summary}" }
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "slug", type: String }
+            { name: "summary", type: String, nullable: true }
+        ]
+    }
+]
+"#,
+        );
+        let resources = build_resources(DbBackend::Sqlite, document.resources)
+            .expect("resources should build");
+        let resource = &resources[0];
+
+        assert_eq!(resource.computed_fields.len(), 2);
+        assert_eq!(resource.computed_fields[0].api_name, "permalink");
+        assert!(!resource.computed_fields[0].optional);
+        assert_eq!(resource.computed_fields[1].api_name, "preview");
+        assert!(resource.computed_fields[1].optional);
+    }
+
+    #[test]
+    fn rejects_computed_api_fields_referencing_non_scalar_values() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        api: {
+            fields: {
+                id: { from: "id" }
+                title: { from: "title" }
+                permalink: { template: "{title}" }
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "title"
+                type: Object
+                fields: [
+                    { name: "raw", type: String }
+                ]
+            }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("computed field over object api field should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot interpolate non-scalar API field `title`")
         );
     }
 

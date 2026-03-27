@@ -2290,6 +2290,60 @@ fn resource_impl_tokens(
             Some(#name) => Ok(Some(&[#(#fields),*])),
         }
     });
+    let computed_field_insertions = resource.computed_fields.iter().map(|field| {
+        let api_name = Literal::string(&field.api_name);
+        let parts = field.parts.iter().map(|part| match part {
+            super::model::ComputedFieldPart::Literal(value) => {
+                let value = Literal::string(value);
+                quote! {
+                    rendered.push_str(#value);
+                }
+            }
+            super::model::ComputedFieldPart::Field(name) => {
+                let name = Literal::string(name);
+                quote! {
+                    match object.get(#name) {
+                        Some(#runtime_crate::serde_json::Value::Null) | None => {
+                            missing = true;
+                        }
+                        Some(#runtime_crate::serde_json::Value::String(value)) => {
+                            rendered.push_str(value);
+                        }
+                        Some(#runtime_crate::serde_json::Value::Number(value)) => {
+                            rendered.push_str(&value.to_string());
+                        }
+                        Some(#runtime_crate::serde_json::Value::Bool(value)) => {
+                            rendered.push_str(&value.to_string());
+                        }
+                        Some(_) => {
+                            missing = true;
+                        }
+                    }
+                    if missing {
+                        break;
+                    }
+                }
+            }
+        });
+        quote! {
+            {
+                let mut rendered = String::new();
+                let mut missing = false;
+                loop {
+                    #(#parts)*
+                    break;
+                }
+                object.insert(
+                    #api_name.to_owned(),
+                    if missing {
+                        #runtime_crate::serde_json::Value::Null
+                    } else {
+                        #runtime_crate::serde_json::Value::String(rendered)
+                    },
+                );
+            }
+        }
+    });
     let create_check = role_guard(runtime_crate, resource.roles.create.as_deref());
     let read_check = role_guard(runtime_crate, resource.roles.read.as_deref());
     let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
@@ -4127,12 +4181,13 @@ fn resource_impl_tokens(
                 let mut value = #runtime_crate::serde_json::to_value(item).map_err(|error| {
                     #runtime_crate::core::errors::internal_error(error.to_string())
                 })?;
+                let object = value.as_object_mut().ok_or_else(|| {
+                    #runtime_crate::core::errors::internal_error(
+                        "response item must serialize to a JSON object",
+                    )
+                })?;
+                #(#computed_field_insertions)*
                 if let Some(fields) = context_fields {
-                    let object = value.as_object_mut().ok_or_else(|| {
-                        #runtime_crate::core::errors::internal_error(
-                            "response item must serialize to a JSON object",
-                        )
-                    })?;
                     object.retain(|key, _| fields.iter().any(|field| *field == key));
                 }
                 Ok(value)

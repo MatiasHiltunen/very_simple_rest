@@ -17,6 +17,7 @@ rest_api_from_eon!("tests/fixtures/auth_claims_api.eon");
 rest_api_from_eon!("tests/fixtures/authorization_contract_api.eon");
 rest_api_from_eon!("tests/fixtures/hybrid_runtime_api.eon");
 rest_api_from_eon!("tests/fixtures/mixin_fields_api.eon");
+rest_api_from_eon!("tests/fixtures/api_computed_fields_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {

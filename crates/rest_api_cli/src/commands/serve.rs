@@ -249,6 +249,7 @@ struct DynamicResource {
     field_index: HashMap<String, usize>,
     api_field_index: HashMap<String, usize>,
     response_contexts: HashMap<String, Vec<String>>,
+    computed_fields: Vec<compiler::ComputedFieldSpec>,
     create_fields: Vec<CreateFieldRule>,
     update_field_names: Vec<String>,
     read_requires_auth: bool,
@@ -287,6 +288,7 @@ impl DynamicResource {
             .iter()
             .map(|context| (context.name.clone(), context.fields.clone()))
             .collect::<HashMap<_, _>>();
+        let computed_fields = spec.computed_fields.clone();
         let controlled_fields = policy_controlled_fields(&spec);
         let create_fields = build_create_field_rules(&spec, service)?;
         let create_assignment_sources = spec
@@ -366,6 +368,7 @@ impl DynamicResource {
             field_index,
             api_field_index,
             response_contexts,
+            computed_fields,
             create_fields,
             update_field_names,
             hybrid,
@@ -2014,7 +2017,44 @@ fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Va
         };
         map.insert(field.api_name.clone(), value);
     }
+    apply_computed_fields_to_map(resource.computed_fields.as_slice(), &mut map);
     Ok(Value::Object(map))
+}
+
+fn apply_computed_fields_to_map(
+    computed_fields: &[compiler::ComputedFieldSpec],
+    map: &mut Map<String, Value>,
+) {
+    for field in computed_fields {
+        let mut rendered = String::new();
+        let mut missing = false;
+        for part in &field.parts {
+            match part {
+                compiler::ComputedFieldPart::Literal(value) => rendered.push_str(value),
+                compiler::ComputedFieldPart::Field(name) => match map.get(name.as_str()) {
+                    Some(Value::Null) | None => {
+                        missing = true;
+                        break;
+                    }
+                    Some(Value::String(value)) => rendered.push_str(value),
+                    Some(Value::Number(value)) => rendered.push_str(&value.to_string()),
+                    Some(Value::Bool(value)) => rendered.push_str(&value.to_string()),
+                    Some(_) => {
+                        missing = true;
+                        break;
+                    }
+                },
+            }
+        }
+        map.insert(
+            field.api_name.clone(),
+            if missing {
+                Value::Null
+            } else {
+                Value::String(rendered)
+            },
+        );
+    }
 }
 
 fn request_response_context(req: &HttpRequest) -> Option<String> {
@@ -4455,6 +4495,61 @@ mod tests {
         assert_eq!(list_body["items"][1]["title"], "Gamma");
         assert!(list_body["items"][0].get("draft_body").is_none());
         assert!(list_body["items"][0].get("internal_note").is_none());
+    }
+
+    #[actix_web::test]
+    async fn native_serve_serializes_computed_api_fields() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("api_computed_fields_api.eon", false).await;
+        query("INSERT INTO post (id, slug, title, summary) VALUES (?, ?, ?, ?)")
+            .bind(1_i64)
+            .bind("alpha")
+            .bind("Alpha")
+            .bind("Intro")
+            .execute(&state.pool)
+            .await
+            .expect("seed row should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let get_request = test::TestRequest::get().uri("/api/posts/1").to_request();
+        let get_response = test::call_service(&app, get_request).await;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body: Value = test::read_body_json(get_response).await;
+        assert_eq!(get_body["permalink"], "/posts/alpha");
+        assert_eq!(get_body["preview"], "alpha:Intro");
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "slug": "beta",
+                "title": "Beta"
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body: Value = test::read_body_json(create_response).await;
+        assert_eq!(create_body["permalink"], "/posts/beta");
+        assert!(create_body["preview"].is_null());
+
+        let compact_request = test::TestRequest::get()
+            .uri("/api/posts?context=compact")
+            .to_request();
+        let compact_response = test::call_service(&app, compact_request).await;
+        assert_eq!(compact_response.status(), StatusCode::OK);
+        let compact_body: Value = test::read_body_json(compact_response).await;
+        assert_eq!(compact_body["items"][0]["id"], 1);
+        assert_eq!(compact_body["items"][0]["permalink"], "/posts/alpha");
+        assert!(compact_body["items"][0].get("title").is_none());
     }
 
     #[actix_web::test]
