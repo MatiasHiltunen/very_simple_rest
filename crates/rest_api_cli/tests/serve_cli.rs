@@ -590,6 +590,127 @@ fn vsr_serve_applies_field_transforms_in_spawned_process() {
 }
 
 #[test]
+fn vsr_setup_bootstraps_env_and_tls_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("setup_api.eon");
+    fs::write(
+        &config,
+        r#"
+        module: "setup_api"
+        database: {
+            engine: {
+                kind: TursoLocal
+                path: "var/data/setup_api.db"
+                encryption_key_env: "TURSO_ENCRYPTION_KEY"
+            }
+        }
+        tls: {}
+        resources: [
+            {
+                name: "Note"
+                fields: [
+                    { name: "id", type: I64, id: true }
+                    { name: "title", type: String }
+                ]
+            }
+        ]
+        "#,
+    )
+    .expect("setup fixture should write");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("--config")
+        .arg(&config)
+        .arg("setup")
+        .arg("--non-interactive")
+        .env_remove("DATABASE_URL")
+        .env_remove("TURSO_ENCRYPTION_KEY")
+        .env_remove("JWT_SECRET")
+        .env_remove("TLS_CERT_PATH")
+        .env_remove("TLS_KEY_PATH")
+        .env_remove("ADMIN_EMAIL")
+        .env_remove("ADMIN_PASSWORD")
+        .output()
+        .expect("vsr setup should run");
+
+    if !output.status.success() {
+        panic!(
+            "vsr setup should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let env_path = root.join(".env");
+    let cert_path = root.join("certs/dev-cert.pem");
+    let key_path = root.join("certs/dev-key.pem");
+    let database_path = root.join("var/data/setup_api.db");
+
+    let env_contents = fs::read_to_string(&env_path).expect(".env should exist");
+    let turso_line = env_contents
+        .lines()
+        .find(|line| line.starts_with("TURSO_ENCRYPTION_KEY="))
+        .expect("turso encryption key should be written");
+    let turso_key = turso_line
+        .split_once('=')
+        .map(|(_, value)| value)
+        .expect("turso key line should split");
+
+    assert!(env_contents.contains("JWT_SECRET="));
+    assert_eq!(turso_key.len(), 64);
+    assert!(turso_key.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert!(cert_path.exists(), "setup should create a TLS certificate");
+    assert!(key_path.exists(), "setup should create a TLS private key");
+    assert!(
+        database_path.exists(),
+        "setup should create the config-relative Turso database"
+    );
+
+    assert!(
+        stdout.contains("Generated environment file:"),
+        "setup output should mention env generation: {stdout}"
+    );
+    assert!(
+        stdout.contains("Generated local Turso encryption key:"),
+        "setup output should mention Turso key generation: {stdout}"
+    );
+    assert!(
+        stdout.contains("Loaded environment file for this setup run:"),
+        "setup output should mention env loading: {stdout}"
+    );
+    assert!(
+        stdout.contains("Setup summary"),
+        "setup output should include the summary: {stdout}"
+    );
+    assert!(
+        stdout.contains("Generated TLS certificate:"),
+        "setup output should mention TLS certificate generation: {stdout}"
+    );
+    assert!(
+        stdout.contains("Generated TLS private key:"),
+        "setup output should mention TLS private key generation: {stdout}"
+    );
+    assert!(
+        stdout.contains(&env_path.display().to_string()),
+        "setup output should include the env path: {stdout}"
+    );
+    assert!(
+        stdout.contains(&cert_path.display().to_string()),
+        "setup output should include the TLS certificate path: {stdout}"
+    );
+    assert!(
+        stdout.contains(&key_path.display().to_string()),
+        "setup output should include the TLS private key path: {stdout}"
+    );
+}
+
+#[test]
 fn vsr_serve_applies_resource_actions_in_spawned_process() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {

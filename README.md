@@ -308,6 +308,11 @@ When you run `vsr` from a directory containing exactly one `.eon` file, commands
 `create-admin`, `check-db`, and `gen-env` now auto-discover that service and derive the default
 database URL from it.
 
+For `.eon` services, `vsr gen-env` now writes a real local Turso encryption key when
+`database.engine = TursoLocal` is in use, and `vsr setup` now bootstraps local runtime inputs
+before database work: it generates or loads `.env`, can create self-signed dev TLS certs from the
+service `tls` config, and prints the exact paths it generated or reused.
+
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 
 ## Server Generation

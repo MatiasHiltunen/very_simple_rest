@@ -93,10 +93,15 @@ vsr setup
 ```
 
 This command will:
-1. Check your database connection
-2. Create necessary tables if they don't exist
-3. Help you create an admin user
-4. Generate a `.env` template file
+1. Generate or load `.env` before any database work when a `.eon` service is in use
+2. Generate local self-signed TLS certs when the service enables `tls` and dev cert files are missing
+3. Check your database connection and apply setup migrations
+4. Help you create or verify an admin user
+
+When `setup` generates or refreshes `.env`, it writes the file next to the selected `.eon`
+service, loads it into the current setup process immediately, and prints a summary with the exact
+paths it touched. If it refreshes an existing file, the previous contents are backed up to
+`.env.backup`.
 
 For non-interactive setup (e.g., in CI/CD pipelines):
 
@@ -123,6 +128,11 @@ the CLI uses the service’s compiled default database URL. For SQLite services,
 to encrypted `database.engine = TursoLocal`, which resolves to the matching SQLite-compatible file
 URL and the default `TURSO_ENCRYPTION_KEY` env var.
 
+In non-interactive mode, `setup` will bootstrap `.env` automatically when it is missing or when a
+required local Turso encryption key is absent. If the service also enables `tls: {}` with the
+default dev cert paths, `setup --non-interactive` generates those PEM files before the database
+connection step so HTTPS can work immediately.
+
 ### Env Generation
 
 Generate a `.env` file directly:
@@ -135,7 +145,9 @@ vsr --config api.eon gen-env --path .env.local
 When `--config` points to a `.eon` service, the generated file mirrors the compiled default
 database URL plus the required/default Turso and security env vars such as
 `TURSO_ENCRYPTION_KEY`, `CORS_ORIGINS`, `TRUSTED_PROXIES`, and the configured logging filter env
-var when those are referenced by the service.
+var when those are referenced by the service. For `database.engine = TursoLocal`, `vsr gen-env`
+now writes a real 64-hex-character local encryption key instead of a placeholder. By default, the
+generated `.env` is written next to the `.eon` file when `--config` is used.
 
 ### Serve, Emit, and Build
 
