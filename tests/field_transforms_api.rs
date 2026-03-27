@@ -42,9 +42,9 @@ async fn generated_handlers_apply_text_transforms_on_create_and_update() {
     .await
     .expect("schema should apply");
 
-    let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| field_transforms_api::configure(cfg, pool.clone()))),
-    )
+    let app = test::init_service(App::new().service(
+        scope("/api").configure(|cfg| field_transforms_api::configure(cfg, pool.clone())),
+    ))
     .await;
     let token = issue_token(1, &["user"]);
 
@@ -52,10 +52,10 @@ async fn generated_handlers_apply_text_transforms_on_create_and_update() {
         .uri("/api/posts")
         .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
         .set_json(json!({
-            "slug": "  HeLLo-World  ",
+            "slug": "  Hello,   World!  ",
             "status": " DRAFT ",
             "title": {
-                "raw": "  Hello world  ",
+                "raw": "  Hello   world \n again  ",
                 "rendered": "  <p>Hello world</p>  "
             }
         }))
@@ -65,17 +65,17 @@ async fn generated_handlers_apply_text_transforms_on_create_and_update() {
     let created: field_transforms_api::Post = test::read_body_json(create_response).await;
     assert_eq!(created.slug, "hello-world");
     assert_eq!(created.status, "draft");
-    assert_eq!(created.title["raw"], "Hello world");
+    assert_eq!(created.title["raw"], "Hello world again");
     assert_eq!(created.title["rendered"], "<p>Hello world</p>");
 
     let update_request = test::TestRequest::put()
         .uri("/api/posts/1")
         .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
         .set_json(json!({
-            "slug": "  NeXt-Post  ",
+            "slug": "  Next__Post!!!  ",
             "status": " PUBLISHED ",
             "title": {
-                "raw": "  Updated title  ",
+                "raw": "  Updated   title\t\tagain  ",
                 "rendered": "  <p>Updated title</p>  "
             }
         }))
@@ -89,7 +89,7 @@ async fn generated_handlers_apply_text_transforms_on_create_and_update() {
     let updated: Value = test::read_body_json(get_response).await;
     assert_eq!(updated["slug"], "next-post");
     assert_eq!(updated["status"], "published");
-    assert_eq!(updated["title"]["raw"], "Updated title");
+    assert_eq!(updated["title"]["raw"], "Updated title again");
     assert_eq!(updated["title"]["rendered"], "<p>Updated title</p>");
 }
 

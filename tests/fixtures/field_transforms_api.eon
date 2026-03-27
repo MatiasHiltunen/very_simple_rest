@@ -19,7 +19,7 @@ resources: [
             {
                 name: "slug"
                 type: String
-                transforms: [Trim, Lowercase]
+                transforms: [Slugify]
                 validate: { min_length: 3 }
             }
             {
@@ -34,7 +34,7 @@ resources: [
                     {
                         name: "raw"
                         type: String
-                        transforms: [Trim]
+                        transforms: [CollapseWhitespace]
                         validate: { min_length: 3 }
                     }
                     {
