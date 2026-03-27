@@ -21,7 +21,13 @@ use std::fmt;
 #[cfg(feature = "turso-local")]
 use std::sync::Arc;
 #[cfg(feature = "turso-local")]
+use std::sync::Mutex as StdMutex;
+#[cfg(feature = "turso-local")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "turso-local")]
 use std::time::Duration;
+#[cfg(feature = "turso-local")]
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 #[cfg(feature = "turso-local")]
@@ -60,7 +66,34 @@ pub enum SqlxBackend {
 #[cfg(feature = "turso-local")]
 #[derive(Clone)]
 pub struct TursoLocalPool {
+    state: Arc<TursoLocalPoolState>,
+}
+
+#[cfg(feature = "turso-local")]
+struct TursoLocalPoolState {
     database: turso::Database,
+    idle_connections: StdMutex<Vec<turso::Connection>>,
+    total_connections: AtomicUsize,
+    max_connections: usize,
+    waiters: Notify,
+}
+
+#[cfg(feature = "turso-local")]
+struct TursoConnectionLease {
+    state: Arc<TursoLocalPoolState>,
+    connection: Option<turso::Connection>,
+    reusable: bool,
+}
+
+#[cfg(feature = "turso-local")]
+const DEFAULT_TURSO_LOCAL_MAX_CONNECTIONS: usize = 16;
+
+#[cfg(feature = "turso-local")]
+fn default_turso_local_max_connections() -> usize {
+    let suggested = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().saturating_mul(2))
+        .unwrap_or(DEFAULT_TURSO_LOCAL_MAX_CONNECTIONS);
+    suggested.clamp(4, DEFAULT_TURSO_LOCAL_MAX_CONNECTIONS)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -276,12 +309,15 @@ impl DbPool {
             }
             #[cfg(feature = "turso-local")]
             Self::TursoLocal(pool) => {
-                let conn = pool.connect().await?;
-                conn.execute("BEGIN", ()).await.map_err(map_turso_error)?;
+                let mut conn = pool.acquire().await?;
+                if let Err(error) = conn.connection().execute("BEGIN", ()).await {
+                    conn.discard();
+                    return Err(map_turso_error(error));
+                }
                 Ok(DbTransaction {
                     inner: DbTransactionInner::TursoLocal(tokio::sync::Mutex::new(
                         TursoTransactionState {
-                            connection: conn,
+                            connection: Some(conn),
                             finished: false,
                         },
                     )),
@@ -317,8 +353,29 @@ enum DbTransactionInner {
 
 #[cfg(feature = "turso-local")]
 struct TursoTransactionState {
-    connection: turso::Connection,
+    connection: Option<TursoConnectionLease>,
     finished: bool,
+}
+
+#[cfg(feature = "turso-local")]
+impl TursoTransactionState {
+    fn connection(&self) -> Result<&turso::Connection, sqlx::Error> {
+        self.connection
+            .as_ref()
+            .map(TursoConnectionLease::connection)
+            .ok_or_else(|| sqlx::Error::Protocol("transaction already finished".to_owned()))
+    }
+}
+
+#[cfg(feature = "turso-local")]
+impl Drop for TursoTransactionState {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Some(connection) = self.connection.as_mut()
+        {
+            connection.discard();
+        }
+    }
 }
 
 impl DbTransaction {
@@ -339,12 +396,16 @@ impl DbTransaction {
                         "transaction already finished".to_owned(),
                     ));
                 }
-                guard
-                    .connection
-                    .execute("COMMIT", ())
-                    .await
-                    .map_err(map_turso_error)?;
+                let mut connection = guard.connection.take().ok_or_else(|| {
+                    sqlx::Error::Protocol("transaction already finished".to_owned())
+                })?;
+                if let Err(error) = connection.connection().execute("COMMIT", ()).await {
+                    connection.discard();
+                    return Err(map_turso_error(error));
+                }
                 guard.finished = true;
+                drop(guard);
+                drop(connection);
                 Ok(())
             }
         }
@@ -367,12 +428,16 @@ impl DbTransaction {
                         "transaction already finished".to_owned(),
                     ));
                 }
-                guard
-                    .connection
-                    .execute("ROLLBACK", ())
-                    .await
-                    .map_err(map_turso_error)?;
+                let mut connection = guard.connection.take().ok_or_else(|| {
+                    sqlx::Error::Protocol("transaction already finished".to_owned())
+                })?;
+                if let Err(error) = connection.connection().execute("ROLLBACK", ()).await {
+                    connection.discard();
+                    return Err(map_turso_error(error));
+                }
                 guard.finished = true;
+                drop(guard);
+                drop(connection);
                 Ok(())
             }
         }
@@ -398,7 +463,7 @@ impl DbTransaction {
                     ));
                 }
                 guard
-                    .connection
+                    .connection()?
                     .execute_batch(sql)
                     .await
                     .map_err(map_turso_error)
@@ -678,7 +743,7 @@ impl DbExecutor for DbTransaction {
                             "transaction already finished".to_owned(),
                         ));
                     }
-                    execute_turso_connection(&guard.connection, query).await
+                    execute_turso_connection(guard.connection()?, query).await
                 }
             }
         })
@@ -705,7 +770,7 @@ impl DbExecutor for DbTransaction {
                             "transaction already finished".to_owned(),
                         ));
                     }
-                    fetch_all_turso_connection(&guard.connection, query).await
+                    fetch_all_turso_connection(guard.connection()?, query).await
                 }
             }
         })
@@ -849,12 +914,74 @@ async fn connect_turso_local(
     let database = open_turso_local_database(engine)
         .await
         .map_err(sqlx::Error::Io)?;
-    Ok(DbPool::TursoLocal(TursoLocalPool { database }))
+    Ok(DbPool::TursoLocal(TursoLocalPool {
+        state: Arc::new(TursoLocalPoolState {
+            database,
+            idle_connections: StdMutex::new(Vec::new()),
+            total_connections: AtomicUsize::new(0),
+            max_connections: default_turso_local_max_connections(),
+            waiters: Notify::new(),
+        }),
+    }))
 }
 
 #[cfg(feature = "turso-local")]
 impl TursoLocalPool {
-    async fn connect(&self) -> Result<turso::Connection, sqlx::Error> {
+    async fn acquire(&self) -> Result<TursoConnectionLease, sqlx::Error> {
+        self.state.acquire().await
+    }
+
+    async fn execute(&self, query: BoundQuery<'_>) -> Result<DbQueryResult, sqlx::Error> {
+        let conn = self.acquire().await?;
+        execute_turso_connection(conn.connection(), query).await
+    }
+
+    async fn fetch_all(&self, query: BoundQuery<'_>) -> Result<Vec<AnyRow>, sqlx::Error> {
+        let conn = self.acquire().await?;
+        fetch_all_turso_connection(conn.connection(), query).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> Result<(), sqlx::Error> {
+        let conn = self.acquire().await?;
+        conn.connection()
+            .execute_batch(sql)
+            .await
+            .map_err(map_turso_error)
+    }
+
+    #[cfg(test)]
+    fn stats(&self) -> TursoLocalPoolStats {
+        self.state.stats()
+    }
+}
+
+#[cfg(feature = "turso-local")]
+impl TursoLocalPoolState {
+    async fn acquire(self: &Arc<Self>) -> Result<TursoConnectionLease, sqlx::Error> {
+        loop {
+            let notified = self.waiters.notified();
+
+            if let Some(connection) = self.take_idle_connection() {
+                return Ok(TursoConnectionLease::new(self.clone(), connection));
+            }
+
+            if self.try_reserve_connection_slot() {
+                match self.open_connection().await {
+                    Ok(connection) => {
+                        return Ok(TursoConnectionLease::new(self.clone(), connection));
+                    }
+                    Err(error) => {
+                        self.release_connection_slot();
+                        return Err(error);
+                    }
+                }
+            }
+
+            notified.await;
+        }
+    }
+
+    async fn open_connection(&self) -> Result<turso::Connection, sqlx::Error> {
         let conn = self.database.connect().map_err(map_turso_error)?;
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(map_turso_error)?;
@@ -864,20 +991,100 @@ impl TursoLocalPool {
         Ok(conn)
     }
 
-    async fn execute(&self, query: BoundQuery<'_>) -> Result<DbQueryResult, sqlx::Error> {
-        let conn = self.connect().await?;
-        execute_turso_connection(&conn, query).await
+    fn take_idle_connection(&self) -> Option<turso::Connection> {
+        self.idle_connections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop()
     }
 
-    async fn fetch_all(&self, query: BoundQuery<'_>) -> Result<Vec<AnyRow>, sqlx::Error> {
-        let conn = self.connect().await?;
-        fetch_all_turso_connection(&conn, query).await
+    fn recycle_connection(&self, connection: turso::Connection) {
+        self.idle_connections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(connection);
+        self.waiters.notify_one();
     }
 
-    async fn execute_batch(&self, sql: &str) -> Result<(), sqlx::Error> {
-        let conn = self.connect().await?;
-        conn.execute_batch(sql).await.map_err(map_turso_error)
+    fn try_reserve_connection_slot(&self) -> bool {
+        loop {
+            let current = self.total_connections.load(Ordering::Acquire);
+            if current >= self.max_connections {
+                return false;
+            }
+            if self
+                .total_connections
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
+
+    fn release_connection_slot(&self) {
+        self.total_connections.fetch_sub(1, Ordering::AcqRel);
+        self.waiters.notify_one();
+    }
+
+    #[cfg(test)]
+    fn stats(&self) -> TursoLocalPoolStats {
+        let idle_connections = self
+            .idle_connections
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        TursoLocalPoolStats {
+            idle_connections,
+            total_connections: self.total_connections.load(Ordering::Acquire),
+            max_connections: self.max_connections,
+        }
+    }
+}
+
+#[cfg(feature = "turso-local")]
+impl TursoConnectionLease {
+    fn new(state: Arc<TursoLocalPoolState>, connection: turso::Connection) -> Self {
+        Self {
+            state,
+            connection: Some(connection),
+            reusable: true,
+        }
+    }
+
+    fn connection(&self) -> &turso::Connection {
+        self.connection
+            .as_ref()
+            .expect("lease should hold an active connection")
+    }
+
+    fn discard(&mut self) {
+        self.reusable = false;
+    }
+}
+
+#[cfg(feature = "turso-local")]
+impl Drop for TursoConnectionLease {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+
+        if self.reusable {
+            self.state.recycle_connection(connection);
+        } else {
+            drop(connection);
+            self.state.release_connection_slot();
+        }
+    }
+}
+
+#[cfg(all(feature = "turso-local", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TursoLocalPoolStats {
+    idle_connections: usize,
+    total_connections: usize,
+    max_connections: usize,
 }
 
 #[cfg(feature = "turso-local")]
@@ -1213,8 +1420,6 @@ mod tests {
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     #[cfg(feature = "turso-local")]
-    use sqlx::error::DatabaseError as _;
-    #[cfg(feature = "turso-local")]
     use std::sync::{Mutex, OnceLock};
 
     #[cfg(feature = "turso-local")]
@@ -1316,6 +1521,126 @@ mod tests {
             .await
             .expect("count query should succeed");
         assert_eq!(count, 1);
+        let pooled = match &pool {
+            DbPool::TursoLocal(pool) => pool,
+            _ => unreachable!("expected turso local pool"),
+        };
+        let stats = pooled.stats();
+        assert_eq!(stats.total_connections, 1);
+        assert_eq!(stats.idle_connections, 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[actix_web::test]
+    async fn turso_local_pool_reuses_single_connection_for_sequential_queries() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vsr_turso_local_reuse_{stamp}.db"));
+        let config = DatabaseConfig {
+            engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: path.to_string_lossy().into_owned(),
+                encryption_key_env: None,
+            }),
+            resilience: None,
+        };
+
+        let pool = connect_with_config("sqlite:ignored.db?mode=rwc", &config)
+            .await
+            .expect("turso local pool should connect");
+        let pooled = match &pool {
+            DbPool::TursoLocal(pool) => pool,
+            _ => unreachable!("expected turso local pool"),
+        };
+
+        query("CREATE TABLE note (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create table should succeed");
+        query("INSERT INTO note (title) VALUES (?)")
+            .bind("one")
+            .execute(&pool)
+            .await
+            .expect("first insert should succeed");
+        query("INSERT INTO note (title) VALUES (?)")
+            .bind("two")
+            .execute(&pool)
+            .await
+            .expect("second insert should succeed");
+
+        let count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM note")
+            .fetch_one(&pool)
+            .await
+            .expect("count query should succeed");
+        assert_eq!(count, 2);
+
+        let stats = pooled.stats();
+        assert_eq!(stats.total_connections, 1);
+        assert_eq!(stats.idle_connections, 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "turso-local")]
+    #[actix_web::test]
+    async fn turso_local_pool_discards_dropped_transaction_connections() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vsr_turso_local_dropped_tx_{stamp}.db"));
+        let config = DatabaseConfig {
+            engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: path.to_string_lossy().into_owned(),
+                encryption_key_env: None,
+            }),
+            resilience: None,
+        };
+
+        let pool = connect_with_config("sqlite:ignored.db?mode=rwc", &config)
+            .await
+            .expect("turso local pool should connect");
+        let pooled = match &pool {
+            DbPool::TursoLocal(pool) => pool,
+            _ => unreachable!("expected turso local pool"),
+        };
+
+        query("CREATE TABLE note (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create table should succeed");
+        assert_eq!(pooled.stats().total_connections, 1);
+
+        let tx = pool.begin().await.expect("transaction should start");
+        query("INSERT INTO note (title) VALUES (?)")
+            .bind("discarded")
+            .execute(&tx)
+            .await
+            .expect("transaction insert should succeed");
+        drop(tx);
+
+        let stats = pooled.stats();
+        assert_eq!(stats.total_connections, 0);
+        assert_eq!(stats.idle_connections, 0);
+
+        query("INSERT INTO note (title) VALUES (?)")
+            .bind("committed")
+            .execute(&pool)
+            .await
+            .expect("standalone insert should succeed");
+
+        let count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM note")
+            .fetch_one(&pool)
+            .await
+            .expect("count query should succeed");
+        assert_eq!(count, 1);
+
+        let stats = pooled.stats();
+        assert_eq!(stats.total_connections, 1);
+        assert_eq!(stats.idle_connections, 1);
 
         let _ = std::fs::remove_file(path);
     }
