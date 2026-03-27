@@ -16,6 +16,7 @@ The published crate is `vsra`; the installed binary is `vsr`.
 cargo install vsra --locked
 
 vsr init my-api
+vsr init my-api --starter minimal
 vsr serve api.eon
 vsr server emit --input api.eon --output-dir generated-api
 vsr build api.eon --release
@@ -59,14 +60,29 @@ cargo install --path crates/rest_api_cli
 
 ### Init
 
-Scaffold a starter project from the bundled template:
+Generate a local starter project:
 
 ```bash
 vsr init my-api
+vsr init my-api --starter minimal
 ```
 
-The starter template now uses local Turso by default and wires in the shared runtime security
-helpers for request limits, CORS, trusted proxies, auth rate limits, and response headers.
+By default, `vsr init` prompts in a terminal and falls back to the recommended comment-rich
+starter in non-interactive use. The generated project is local-only and does not copy app code
+from `examples/` or fetch from GitHub.
+
+The generated project includes:
+
+- `api.eon`
+- `.env.example`
+- `README.md`
+- `.gitignore`
+- `migrations/`
+- `var/data/`
+
+The default commented starter uses local Turso/SQLite defaults and includes commented examples for
+current `.eon` features such as typed `Object` / `List` / JSON fields, API projections and
+contexts, enums, indexes, many-to-many join resources, transforms, and declarative actions.
 
 ### Setup
 

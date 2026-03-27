@@ -1,21 +1,38 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
+use clap::ValueEnum;
 use colored::Colorize;
-use reqwest;
+use dialoguer::{Select, theme::ColorfulTheme};
 use std::fs::{File, create_dir_all};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{IsTerminal, Write};
+use std::path::Path;
 
-// Base URL for raw content (not the HTML view)
-const TEMPLATE_DIR_URL: &str = "https://raw.githubusercontent.com/MatiasHiltunen/very_simple_rest/refs/heads/main/examples/template";
-const LOCAL_TEMPLATE_DIR: &str = "../../examples/template";
-const TEMPLATE_MAIN_RS: &str = "src/main.rs";
-const TEMPLATE_CARGO_TOML: &str = "Cargo.toml";
-const TEMPLATE_ENV_EXAMPLE: &str = ".env.example";
-const TEMPLATE_README_MD: &str = "README.md";
-const TEMPLATE_PUBLIC_INDEX: &str = "public/index.html";
-const TEMPLATE_PUBLIC_APP_JS: &str = "public/app.js";
+const DEFAULT_DB_URL: &str = "sqlite:var/data/app.db?mode=rwc";
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 
-/// Create a new project from the template
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum StarterKind {
+    Commented,
+    Minimal,
+}
+
+impl StarterKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Commented => "Commented starter (Recommended)",
+            Self::Minimal => "Minimal CRUD starter",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Commented => {
+                "A starter `api.eon` with commented examples of current VSR features."
+            }
+            Self::Minimal => "A lean `api.eon` with one resource and the smallest runnable shape.",
+        }
+    }
+}
+
 pub fn create_project(
     name: &str,
     description: String,
@@ -23,196 +40,479 @@ pub fn create_project(
     license: &str,
     output_dir: String,
     repository: Option<String>,
+    starter: Option<StarterKind>,
 ) -> Result<()> {
-    // Create project directory
     let project_dir = Path::new(&output_dir).join(name);
     if project_dir.exists() {
-        return Err(crate::error::Error::Config(format!(
+        return Err(Error::Config(format!(
             "Directory already exists: {}",
             project_dir.display()
         )));
     }
 
     create_dir_all(&project_dir)?;
+    create_dir_all(project_dir.join("migrations"))?;
+    create_dir_all(project_dir.join("var/data"))?;
     println!(
         "{} {}",
         "Created project directory:".green(),
         project_dir.display()
     );
 
-    // Create src directory
-    create_dir_all(project_dir.join("src"))?;
+    let starter = resolve_starter_kind(starter)?;
+    let module_name = sanitize_module_name(name);
 
-    // Create public directory
-    create_dir_all(project_dir.join("public"))?;
-
-    let template_root = bundled_template_root();
-    let client = template_root.is_none().then(reqwest::blocking::Client::new);
-
-    if let Some(root) = template_root.as_deref() {
-        println!(
-            "{} {}",
-            "Using bundled template files from".green(),
-            root.display()
-        );
-    } else {
-        println!("Downloading template files from GitHub...");
-    }
-
-    // Main source file
-    load_and_process_file(
-        template_root.as_deref(),
-        client.as_ref(),
-        TEMPLATE_MAIN_RS,
-        &project_dir.join(TEMPLATE_MAIN_RS),
-        &[
-            ("{{project_name}}", name),
-            ("{{description}}", &description),
-            ("{{author}}", &author),
-        ],
+    write_file(
+        &project_dir.join("api.eon"),
+        &match starter {
+            StarterKind::Commented => {
+                commented_service_template(module_name.as_str(), name, description.as_str())
+            }
+            StarterKind::Minimal => minimal_service_template(module_name.as_str()),
+        },
     )?;
-
-    // Cargo.toml
-    load_and_process_file(
-        template_root.as_deref(),
-        client.as_ref(),
-        TEMPLATE_CARGO_TOML,
-        &project_dir.join(TEMPLATE_CARGO_TOML),
-        &[
-            ("{{project_name}}", name),
-            ("{{description}}", &description),
-            ("{{author}}", &author),
-            ("{{license}}", license),
-            ("{{repository_url}}", repository.as_deref().unwrap_or("")),
-        ],
+    write_file(&project_dir.join(".env.example"), &env_example())?;
+    write_file(
+        &project_dir.join("README.md"),
+        &readme_template(
+            name,
+            description.as_str(),
+            author.as_str(),
+            license,
+            repository,
+        ),
     )?;
-
-    // .env.example
-    load_and_process_file(
-        template_root.as_deref(),
-        client.as_ref(),
-        TEMPLATE_ENV_EXAMPLE,
-        &project_dir.join(TEMPLATE_ENV_EXAMPLE),
-        &[],
-    )?;
-
-    // README.md
-    load_and_process_file(
-        template_root.as_deref(),
-        client.as_ref(),
-        TEMPLATE_README_MD,
-        &project_dir.join(TEMPLATE_README_MD),
-        &[
-            ("{{project_name}}", name),
-            ("{{description}}", &description),
-            ("{{author}}", &author),
-            ("{{license}}", license),
-        ],
-    )?;
-
-    // public/index.html
-    load_and_process_file(
-        template_root.as_deref(),
-        client.as_ref(),
-        TEMPLATE_PUBLIC_INDEX,
-        &project_dir.join(TEMPLATE_PUBLIC_INDEX),
-        &[("{{project_name}}", name)],
-    )?;
-
-    // public/app.js
-    load_and_process_file(
-        template_root.as_deref(),
-        client.as_ref(),
-        TEMPLATE_PUBLIC_APP_JS,
-        &project_dir.join(TEMPLATE_PUBLIC_APP_JS),
-        &[],
-    )?;
+    write_file(&project_dir.join(".gitignore"), gitignore_template())?;
+    write_file(&project_dir.join("var/data/.gitkeep"), "")?;
 
     println!(
         "\n{} {}",
         "Project created successfully at:".green().bold(),
         project_dir.display()
     );
+    println!("\nStarter kind: {}", starter.label());
     println!("\nTo get started:");
     println!("  cd {}", name);
-    println!("  cp .env.example .env  # Configure your environment");
-    println!("  cargo run             # Start the server");
+    println!("  cp .env.example .env");
+    println!("  vsr migrate generate --input api.eon --output migrations/0001_init.sql");
+    println!("  vsr serve api.eon");
 
     Ok(())
 }
 
-fn bundled_template_root() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(LOCAL_TEMPLATE_DIR);
-    root.exists().then_some(root)
+fn resolve_starter_kind(starter: Option<StarterKind>) -> Result<StarterKind> {
+    if let Some(starter) = starter {
+        return Ok(starter);
+    }
+
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(StarterKind::Commented);
+    }
+
+    let options = [StarterKind::Commented, StarterKind::Minimal];
+    let labels = options
+        .iter()
+        .map(|starter| format!("{} - {}", starter.label(), starter.description()))
+        .collect::<Vec<_>>();
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Choose a VSR starter")
+        .default(0)
+        .items(&labels)
+        .interact()
+        .map_err(|error| Error::Config(format!("Failed to read init selection: {error}")))?;
+
+    Ok(options[selection])
 }
 
-/// Load a template file from the bundled checkout when available, otherwise fetch it remotely.
-fn load_and_process_file(
-    template_root: Option<&Path>,
-    client: Option<&reqwest::blocking::Client>,
-    relative_path: &str,
-    destination: &Path,
-    replacements: &[(&str, &str)],
-) -> Result<()> {
-    let content = if let Some(root) = template_root {
-        let source = root.join(relative_path);
-        println!("Reading: {}", source.display());
-        std::fs::read_to_string(&source).map_err(|error| {
-            crate::error::Error::Config(format!(
-                "Failed to read bundled template file `{}`: {error}",
-                source.display()
-            ))
-        })?
-    } else {
-        let client = client.expect("remote template loading requires a reqwest client");
-        let url = format!("{}/{}", TEMPLATE_DIR_URL, relative_path);
-        println!("Fetching: {}", url);
+fn sanitize_module_name(name: &str) -> String {
+    let mut module = String::new();
+    let mut last_was_separator = false;
 
-        let response = client.get(&url).send().map_err(|e| {
-            crate::error::Error::Config(format!("Failed to fetch template file: {}", e))
-        })?;
-
-        if !response.status().is_success() {
-            return Err(crate::error::Error::Config(format!(
-                "Failed to fetch template file: HTTP status {}",
-                response.status()
-            )));
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if last_was_separator && !module.is_empty() {
+                module.push('_');
+            }
+            last_was_separator = false;
+            module.push(ch.to_ascii_lowercase());
+        } else {
+            last_was_separator = true;
         }
+    }
 
-        response.text().map_err(|e| {
-            crate::error::Error::Config(format!("Failed to read template content: {}", e))
-        })?
-    };
+    if module.is_empty() {
+        "app".to_owned()
+    } else if module
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        format!("app_{module}")
+    } else {
+        module
+    }
+}
 
-    // Create parent directories if needed
-    if let Some(parent) = destination.parent() {
+fn write_file(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
         create_dir_all(parent)?;
     }
-
-    // Process content with replacements
-    let mut processed_content = content;
-    for (placeholder, value) in replacements {
-        processed_content = processed_content.replace(placeholder, value);
-    }
-
-    // Write to destination file
-    let mut file = File::create(destination)?;
-    file.write_all(processed_content.as_bytes())?;
-
-    println!("{} {}", "Created:".green(), destination.display());
-
+    let mut file = File::create(path)?;
+    file.write_all(content.as_bytes())?;
+    println!("{} {}", "Created:".green(), path.display());
     Ok(())
+}
+
+fn env_example() -> String {
+    format!(
+        r#"# Copy this file to `.env` and adjust values for your environment.
+DATABASE_URL={DEFAULT_DB_URL}
+TURSO_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BIND_ADDR={DEFAULT_BIND_ADDR}
+
+# Only required when you enable built-in auth or auth-managed routes.
+JWT_SECRET=change-me-in-development
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=change-me
+"#
+    )
+}
+
+fn gitignore_template() -> &'static str {
+    r#".env
+target/
+.vsr-build/
+*.bundle/
+var/data/*.db
+var/data/*.sqlite
+var/data/*.sqlite3
+"#
+}
+
+fn readme_template(
+    project_name: &str,
+    description: &str,
+    author: &str,
+    license: &str,
+    repository: Option<String>,
+) -> String {
+    let repository_line = repository
+        .map(|value| format!("- Repository: {value}\n"))
+        .unwrap_or_default();
+
+    format!(
+        r#"# {project_name}
+
+{description}
+
+## Project
+
+- Author: {author}
+- License: {license}
+{repository_line}
+## Files
+
+- `api.eon`: VSR service contract
+- `.env.example`: local environment template
+- `migrations/`: generated SQL migrations
+
+## First Run
+
+```bash
+cp .env.example .env
+vsr migrate generate --input api.eon --output migrations/0001_init.sql
+vsr serve api.eon
+```
+
+## Next Steps
+
+- Edit `api.eon` to match your resources and policies
+- Run `vsr docs --output docs/eon-reference.md` for a local reference snapshot
+- Use `vsr build api.eon --release` when you want a standalone binary
+"#
+    )
+}
+
+fn minimal_service_template(module_name: &str) -> String {
+    format!(
+        r#"module: "{module_name}"
+
+resources: [
+    {{
+        name: "Post"
+        api_name: "posts"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "title", type: String }}
+            {{ name: "body", type: String, nullable: true }}
+            {{ name: "created_at", type: DateTime, generated: CreatedAt }}
+            {{ name: "updated_at", type: DateTime, generated: UpdatedAt }}
+        ]
+    }}
+]
+"#
+    )
+}
+
+fn commented_service_template(module_name: &str, project_name: &str, description: &str) -> String {
+    format!(
+        r#"// {project_name}
+// {description}
+//
+// This starter is intentionally comment-heavy so `vsr init` gives you a current
+// `.eon` contract to edit directly instead of copying a fragile example app.
+//
+// Common commands:
+//   vsr serve api.eon
+//   vsr migrate generate --input api.eon --output migrations/0001_init.sql
+//   vsr build api.eon --release
+//   vsr docs --output docs/eon-reference.md
+
+module: "{module_name}"
+
+// Service-level defaults. These are optional.
+database: {{
+    // The native `vsr serve` path defaults well for local SQLite development.
+    // For local encrypted SQLite compatibility, keep `database.engine = TursoLocal`.
+    engine: TursoLocal {{
+        path: "var/data/app.db"
+    }}
+}}
+
+// Optional runtime knobs:
+// logging: {{
+//     level: "info"
+// }}
+// runtime: {{
+//     gzip: true
+//     brotli: true
+// }}
+// tls: {{
+//     cert_file: "certs/dev.pem"
+//     key_file: "certs/dev-key.pem"
+// }}
+// static_mounts: [
+//     {{
+//         mount_path: "/"
+//         source_dir: "public"
+//         mode: "Spa"
+//         fallback_file: "index.html"
+//     }}
+// ]
+// security: {{
+//     cors: {{
+//         origins: ["http://localhost:3000"]
+//     }}
+//     // Uncomment when you want built-in auth and account flows.
+//     // auth: {{
+//     //     ui_pages: {{
+//     //         login_path: "/login"
+//     //         register_path: "/register"
+//     //     }}
+//     // }}
+// }}
+
+// Optional reusable pieces:
+// enums: {{
+//     PostStatus: ["draft", "review", "published"]
+// }}
+// mixins: {{
+//     Timestamps: {{
+//         fields: {{
+//             created_at: {{ type: DateTime, generated: CreatedAt }}
+//             updated_at: {{ type: DateTime, generated: UpdatedAt }}
+//         }}
+//     }}
+// }}
+
+resources: [
+    {{
+        name: "Post"
+        table: "post"
+        api_name: "posts"
+
+        // Resource-level access rules.
+        roles: {{
+            update: "editor"
+            delete: "editor"
+        }}
+
+        // Optional list tuning.
+        list: {{
+            default_limit: 20
+            max_limit: 100
+        }}
+
+        // Optional API shape controls.
+        // api: {{
+        //     default_context: "view"
+        //     fields: {{
+        //         title: {{ from: "title_text" }}
+        //         permalink: {{ template: "/posts/{{slug}}" }}
+        //     }}
+        //     contexts: {{
+        //         view: ["id", "title", "slug", "status", "created_at", "permalink"]
+        //         edit: ["id", "title", "slug", "status", "body", "meta", "created_at", "updated_at"]
+        //     }}
+        // }}
+
+        // Optional declarative actions.
+        // actions: [
+        //     {{
+        //         name: "publish"
+        //         behavior: {{
+        //             kind: "UpdateFields"
+        //             set: {{
+        //                 status: "published"
+        //             }}
+        //         }}
+        //     }}
+        //     {{
+        //         name: "rename"
+        //         behavior: {{
+        //             kind: "UpdateFields"
+        //             set: {{
+        //                 title: {{ input: "newTitle" }}
+        //                 slug: {{ input: "newSlug" }}
+        //             }}
+        //         }}
+        //     }}
+        //     {{
+        //         name: "purge"
+        //         behavior: {{
+        //             kind: "DeleteResource"
+        //         }}
+        //     }}
+        // ]
+
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+
+            // Scalars, validation, uniqueness, and transforms.
+            {{ name: "title", type: String, validate: {{ min_length: 3, max_length: 120 }} }}
+            {{ name: "slug", type: String, unique: true, transforms: [Slugify] }}
+            {{ name: "status", type: String, transforms: [Trim, Lowercase] }}
+
+            // Typed object, list, and JSON support.
+            {{
+                name: "body"
+                type: Object
+                fields: {{
+                    raw: {{ type: String, transforms: [CollapseWhitespace] }}
+                    rendered: String
+                }}
+            }}
+            {{ name: "tags", type: List, items: String, nullable: true }}
+            {{ name: "meta", type: JsonObject, nullable: true }}
+
+            // Generated timestamps.
+            {{ name: "created_at", type: DateTime, generated: CreatedAt }}
+            {{ name: "updated_at", type: DateTime, generated: UpdatedAt }}
+
+            // Example relation:
+            // {{ name: "author_id", type: I64, relation: {{ references: "user.id" }} }}
+        ]
+
+        indexes: [
+            {{ fields: ["status", "created_at"] }}
+        ]
+    }}
+
+    // Add more resources as needed. Many-to-many uses an explicit join resource today.
+    // {{
+    //     name: "Tag"
+    //     api_name: "tags"
+    //     fields: [
+    //         {{ name: "id", type: I64, id: true }}
+    //         {{ name: "name", type: String, unique: true }}
+    //     ]
+    // }}
+    // {{
+    //     name: "PostTag"
+    //     table: "post_tag"
+    //     fields: [
+    //         {{ name: "post_id", type: I64, relation: {{ references: "post.id" }} }}
+    //         {{ name: "tag_id", type: I64, relation: {{ references: "tag.id" }} }}
+    //     ]
+    // }}
+]
+"#
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::bundled_template_root;
+    use super::{
+        StarterKind, commented_service_template, create_project, env_example, sanitize_module_name,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should advance")
+            .as_nanos();
+        std::env::temp_dir().join(format!("vsr_init_{prefix}_{nanos}"))
+    }
 
     #[test]
-    fn bundled_template_root_exists_in_repo_checkout() {
-        let root = bundled_template_root().expect("bundled template root should exist");
-        assert!(root.join("src/main.rs").exists());
-        assert!(root.join("Cargo.toml").exists());
-        assert!(root.join(".env.example").exists());
+    fn sanitize_module_name_normalizes_project_names() {
+        assert_eq!(sanitize_module_name("My API"), "my_api");
+        assert_eq!(sanitize_module_name("123 project"), "app_123_project");
+        assert_eq!(sanitize_module_name("___"), "app");
+    }
+
+    #[test]
+    fn create_project_writes_local_comment_config_starter() {
+        let root = temp_root("commented");
+        fs::create_dir_all(&root).expect("temp root should exist");
+
+        create_project(
+            "demo-app",
+            "Example API".to_owned(),
+            "Tester".to_owned(),
+            "MIT",
+            root.display().to_string(),
+            None,
+            Some(StarterKind::Commented),
+        )
+        .expect("project should generate");
+
+        let project_root = root.join("demo-app");
+        let api_eon =
+            fs::read_to_string(project_root.join("api.eon")).expect("api.eon should be readable");
+        let readme =
+            fs::read_to_string(project_root.join("README.md")).expect("README should be readable");
+
+        assert!(api_eon.contains(r#"module: "demo_app""#));
+        assert!(api_eon.contains(r#"kind: "DeleteResource""#));
+        assert!(api_eon.contains("// Optional declarative actions."));
+        assert!(readme.contains("vsr serve api.eon"));
+        assert!(project_root.join(".env.example").exists());
+        assert!(project_root.join(".gitignore").exists());
+        assert!(project_root.join("migrations").is_dir());
+        assert!(project_root.join("var/data").is_dir());
+
+        fs::remove_dir_all(root).expect("temp root should clean up");
+    }
+
+    #[test]
+    fn commented_template_is_comment_rich() {
+        let template = commented_service_template("sample_app", "Sample", "Sample API");
+        assert!(template.contains("// Service-level defaults."));
+        assert!(template.contains("// Optional declarative actions."));
+        assert!(template.contains("// Typed object, list, and JSON support."));
+    }
+
+    #[test]
+    fn env_example_uses_dotenv_comments() {
+        let template = env_example();
+        assert!(template.starts_with("# Copy this file"));
+        assert!(template.contains("DATABASE_URL=sqlite:var/data/app.db?mode=rwc"));
+        assert!(!template.contains("// Only required"));
     }
 }

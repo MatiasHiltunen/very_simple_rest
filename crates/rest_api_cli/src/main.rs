@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new starter project with local Turso and shared security defaults
+    /// Initialize a new starter project with a generated `.eon` starter and local defaults
     Init {
         /// Project name
         #[arg(value_name = "NAME")]
@@ -48,6 +48,10 @@ enum Commands {
         /// Git repository URL
         #[arg(short, long)]
         repository: Option<String>,
+
+        /// Starter style; omit this to get an interactive prompt in a terminal
+        #[arg(long, value_enum)]
+        starter: Option<commands::init::StarterKind>,
     },
 
     /// Initialize the API with admin user
@@ -996,6 +1000,7 @@ async fn main() -> Result<()> {
             license,
             output_dir,
             repository,
+            starter,
         } => {
             println!("{}", "Initializing new project...".green().bold());
             commands::init::create_project(
@@ -1007,6 +1012,7 @@ async fn main() -> Result<()> {
                 license,
                 output_dir.clone().unwrap_or_else(|| ".".to_string()),
                 repository.clone(),
+                *starter,
             )?;
         }
 
@@ -1962,6 +1968,11 @@ mod tests {
     #[test]
     fn serve_command_accepts_without_auth_alias() {
         assert!(Cli::try_parse_from(["vsr", "serve", "todo_app.eon", "--no-auth",]).is_ok());
+    }
+
+    #[test]
+    fn init_command_accepts_starter_flag() {
+        assert!(Cli::try_parse_from(["vsr", "init", "demo", "--starter", "minimal"]).is_ok());
     }
 
     #[test]

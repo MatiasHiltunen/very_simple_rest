@@ -14,6 +14,7 @@ The main entry point is the `vsr` command-line tool. The published crate is `vsr
 cargo install vsra --locked
 
 vsr init my-api
+vsr init my-api --starter minimal
 vsr serve api.eon
 vsr server emit --input api.eon --output-dir generated-api
 vsr build api.eon --release
@@ -22,6 +23,7 @@ vsr docs --output docs/eon-reference.md
 
 Core CLI workflows:
 
+- `vsr init my-api` generates a local starter project with `api.eon`, `.env.example`, `migrations/`, and a comment-rich default service contract
 - `vsr serve api.eon` runs a native server directly from `.eon` for the fastest local development loop
 - `vsr server emit ...` exports an inspectable Rust server project
 - `vsr build ...` produces a standalone binary plus a `<binary>.bundle/` runtime bundle
