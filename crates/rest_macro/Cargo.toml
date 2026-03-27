@@ -13,4 +13,4 @@ syn.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
 proc-macro-crate.workspace = true
-rest_macro_core = { path = "../rest_macro_core", features = ["codegen"] }
+rest_macro_core = { workspace = true, features = ["codegen"] }
