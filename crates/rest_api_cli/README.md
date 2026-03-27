@@ -669,6 +669,18 @@ The CLI tool respects the following environment variables:
 
 ## Examples
 
+### Starter Contract Example
+
+The repository starter example now lives at `examples/template` and is contract-first rather than a
+Rust app skeleton:
+
+```bash
+cd examples/template
+cp .env.example .env
+vsr migrate generate --input api.eon --output migrations/0001_init.sql
+vsr serve api.eon
+```
+
 ### Complete Setup Example
 
 ```bash

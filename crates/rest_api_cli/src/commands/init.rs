@@ -247,8 +247,8 @@ resources: [
             {{ name: "id", type: I64, id: true }}
             {{ name: "title", type: String }}
             {{ name: "body", type: String, nullable: true }}
-            {{ name: "created_at", type: DateTime, generated: CreatedAt }}
-            {{ name: "updated_at", type: DateTime, generated: UpdatedAt }}
+            {{ name: "created_at", type: DateTime }}
+            {{ name: "updated_at", type: DateTime }}
         ]
     }}
 ]
@@ -274,50 +274,60 @@ module: "{module_name}"
 
 // Service-level defaults. These are optional.
 database: {{
-    // The native `vsr serve` path defaults well for local SQLite development.
-    // For local encrypted SQLite compatibility, keep `database.engine = TursoLocal`.
-    engine: TursoLocal {{
+    engine: {{
+        kind: TursoLocal
         path: "var/data/app.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
     }}
 }}
 
 // Optional runtime knobs:
 // logging: {{
-//     level: "info"
+//     filter_env: "RUST_LOG"
+//     default_filter: "info"
+//     timestamp: Millis
 // }}
 // runtime: {{
-//     gzip: true
-//     brotli: true
+//     compression: {{
+//         enabled: true
+//         static_precompressed: false
+//     }}
 // }}
 // tls: {{
-//     cert_file: "certs/dev.pem"
-//     key_file: "certs/dev-key.pem"
+//     cert_path: "certs/dev-cert.pem"
+//     key_path: "certs/dev-key.pem"
 // }}
-// static_mounts: [
-//     {{
-//         mount_path: "/"
-//         source_dir: "public"
-//         mode: "Spa"
-//         fallback_file: "index.html"
-//     }}
-// ]
+// static: {{
+//     mounts: [
+//         {{
+//             mount: "/"
+//             dir: "public"
+//             mode: Spa
+//             index_file: "index.html"
+//             fallback_file: "index.html"
+//             cache: NoStore
+//         }}
+//     ]
+// }}
 // security: {{
 //     cors: {{
 //         origins: ["http://localhost:3000"]
 //     }}
 //     // Uncomment when you want built-in auth and account flows.
 //     // auth: {{
-//     //     ui_pages: {{
-//     //         login_path: "/login"
-//     //         register_path: "/register"
+//     //     issuer: "example_api"
+//     //     audience: "example_clients"
+//     //     access_token_ttl_seconds: 3600
+//     //     session_cookie: {{
+//     //         secure: false
 //     //     }}
 //     // }}
 // }}
 
 // Optional reusable pieces:
-// enums: {{
-//     PostStatus: ["draft", "review", "published"]
-// }}
+enums: {{
+    PostStatus: ["draft", "review", "published"]
+}}
 // mixins: {{
 //     Timestamps: {{
 //         fields: {{
@@ -393,7 +403,7 @@ resources: [
             // Scalars, validation, uniqueness, and transforms.
             {{ name: "title", type: String, validate: {{ min_length: 3, max_length: 120 }} }}
             {{ name: "slug", type: String, unique: true, transforms: [Slugify] }}
-            {{ name: "status", type: String, transforms: [Trim, Lowercase] }}
+            {{ name: "status", type: PostStatus }}
 
             // Typed object, list, and JSON support.
             {{
@@ -407,9 +417,9 @@ resources: [
             {{ name: "tags", type: List, items: String, nullable: true }}
             {{ name: "meta", type: JsonObject, nullable: true }}
 
-            // Generated timestamps.
-            {{ name: "created_at", type: DateTime, generated: CreatedAt }}
-            {{ name: "updated_at", type: DateTime, generated: UpdatedAt }}
+            // Generated timestamps are inferred automatically from these field names.
+            {{ name: "created_at", type: DateTime }}
+            {{ name: "updated_at", type: DateTime }}
 
             // Example relation:
             // {{ name: "author_id", type: I64, relation: {{ references: "user.id" }} }}
@@ -447,6 +457,7 @@ mod tests {
     use super::{
         StarterKind, commented_service_template, create_project, env_example, sanitize_module_name,
     };
+    use rest_macro_core::compiler;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -487,9 +498,12 @@ mod tests {
             fs::read_to_string(project_root.join("api.eon")).expect("api.eon should be readable");
         let readme =
             fs::read_to_string(project_root.join("README.md")).expect("README should be readable");
+        compiler::load_service_from_path(&project_root.join("api.eon"))
+            .expect("commented starter should parse as .eon");
 
         assert!(api_eon.contains(r#"module: "demo_app""#));
         assert!(api_eon.contains(r#"kind: "DeleteResource""#));
+        assert!(api_eon.contains(r#"kind: TursoLocal"#));
         assert!(api_eon.contains("// Optional declarative actions."));
         assert!(readme.contains("vsr serve api.eon"));
         assert!(project_root.join(".env.example").exists());

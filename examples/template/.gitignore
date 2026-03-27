@@ -1,0 +1,6 @@
+.env
+.vsr-build/
+*.bundle/
+var/data/*.db
+var/data/*.sqlite
+var/data/*.sqlite3

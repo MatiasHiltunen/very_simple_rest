@@ -1,0 +1,175 @@
+// VSR contract starter example
+// This mirrors the comment-rich `vsr init` starter: edit the contract directly,
+// generate migrations, and run it with `vsr serve`.
+//
+// Common commands:
+//   cp .env.example .env
+//   vsr migrate generate --input api.eon --output migrations/0001_init.sql
+//   vsr serve api.eon
+//   vsr build api.eon --release
+
+module: "template_example"
+
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/app.db"
+        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+    }
+}
+
+// Optional runtime knobs:
+// logging: {
+//     filter_env: "RUST_LOG"
+//     default_filter: "info"
+//     timestamp: Millis
+// }
+// runtime: {
+//     compression: {
+//         enabled: true
+//         static_precompressed: false
+//     }
+// }
+// tls: {
+//     cert_path: "certs/dev-cert.pem"
+//     key_path: "certs/dev-key.pem"
+// }
+// static: {
+//     mounts: [
+//         {
+//             mount: "/"
+//             dir: "public"
+//             mode: Spa
+//             index_file: "index.html"
+//             fallback_file: "index.html"
+//             cache: NoStore
+//         }
+//     ]
+// }
+// security: {
+//     cors: {
+//         origins: ["http://localhost:3000"]
+//     }
+//     auth: {
+//         issuer: "example_api"
+//         audience: "example_clients"
+//         access_token_ttl_seconds: 3600
+//         session_cookie: {
+//             secure: false
+//         }
+//     }
+// }
+
+// Optional reusable pieces:
+enums: {
+    PostStatus: ["draft", "review", "published"]
+}
+// mixins: {
+//     Timestamps: {
+//         fields: {
+//             created_at: { type: DateTime, generated: CreatedAt }
+//             updated_at: { type: DateTime, generated: UpdatedAt }
+//         }
+//     }
+// }
+
+resources: [
+    {
+        name: "Post"
+        table: "post"
+        api_name: "posts"
+        roles: {
+            update: "editor"
+            delete: "editor"
+        }
+        list: {
+            default_limit: 20
+            max_limit: 100
+        }
+
+        // Optional API shape controls.
+        // api: {
+        //     default_context: "view"
+        //     fields: {
+        //         title: { from: "title_text" }
+        //         permalink: { template: "/posts/{slug}" }
+        //     }
+        //     contexts: {
+        //         view: ["id", "title", "slug", "status", "created_at", "permalink"]
+        //         edit: ["id", "title", "slug", "status", "body", "meta", "created_at", "updated_at"]
+        //     }
+        // }
+
+        // Optional declarative actions.
+        // actions: [
+        //     {
+        //         name: "publish"
+        //         behavior: {
+        //             kind: "UpdateFields"
+        //             set: {
+        //                 status: "published"
+        //             }
+        //         }
+        //     }
+        //     {
+        //         name: "rename"
+        //         behavior: {
+        //             kind: "UpdateFields"
+        //             set: {
+        //                 title: { input: "newTitle" }
+        //                 slug: { input: "newSlug" }
+        //             }
+        //         }
+        //     }
+        //     {
+        //         name: "purge"
+        //         behavior: {
+        //             kind: "DeleteResource"
+        //         }
+        //     }
+        // ]
+
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String, validate: { min_length: 3, max_length: 120 } }
+            { name: "slug", type: String, unique: true, transforms: [Slugify] }
+            { name: "status", type: PostStatus }
+            {
+                name: "body"
+                type: Object
+                fields: {
+                    raw: { type: String, transforms: [CollapseWhitespace] }
+                    rendered: String
+                }
+            }
+            { name: "tags", type: List, items: String, nullable: true }
+            { name: "meta", type: JsonObject, nullable: true }
+            { name: "created_at", type: DateTime }
+            { name: "updated_at", type: DateTime }
+            // Example relation:
+            // { name: "author_id", type: I64, relation: { references: "user.id" } }
+        ]
+
+        indexes: [
+            { fields: ["status", "created_at"] }
+        ]
+    }
+
+    // Many-to-many uses an explicit join resource today.
+    // {
+    //     name: "Tag"
+    //     api_name: "tags"
+    //     fields: [
+    //         { name: "id", type: I64, id: true }
+    //         { name: "name", type: String, unique: true }
+    //     ]
+    // }
+    // {
+    //     name: "PostTag"
+    //     table: "post_tag"
+    //     fields: [
+    //         { name: "post_id", type: I64, relation: { references: "post.id" } }
+    //         { name: "tag_id", type: I64, relation: { references: "tag.id" } }
+    //     ]
+    // }
+]

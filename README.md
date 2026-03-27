@@ -97,8 +97,21 @@ log = "0.4"
 
 ## Examples
 
+The repository includes:
 
-The code includes example project `demo`. To run it, clone the repo and run from project's root:
+- `examples/template`: the current `.eon`-first starter example used as the reference shape for `vsr init`
+- `examples/demo`: the older Rust example binary
+
+To run the starter contract example:
+
+```sh
+cd examples/template
+cp .env.example .env
+vsr migrate generate --input api.eon --output migrations/0001_init.sql
+vsr serve api.eon
+```
+
+To run the Rust demo example from the project root:
 
 ```sh
 cargo run --example demo

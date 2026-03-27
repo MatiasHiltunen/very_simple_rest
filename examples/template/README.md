@@ -1,52 +1,36 @@
-# very_simple_rest Starter Template
+# VSR Contract Starter Example
 
-This template keeps the derive-based resource flow, but it now uses the current runtime defaults:
-local Turso bootstrap through `connect_with_config`, built-in auth with explicit auth settings, and
-the shared security middleware for request limits, CORS, trusted proxies, and response headers.
+This example replaces the old Rust app template. It is now a checked-in `.eon`-first starter that
+matches the current `vsr init` direction: edit the contract directly, generate migrations from it,
+and run it with `vsr serve`.
 
-## Included Runtime Defaults
+Files:
 
-- local Turso database bootstrapped at `var/data/app.db`
-- optional encrypted local Turso if `TURSO_ENCRYPTION_KEY` is set before startup
-- built-in auth with JWT issuer/audience/TTL settings
-- rate-limited `/api/auth/register` and `/api/auth/login`
-- CORS origins overridable through `CORS_ORIGINS`
-- trusted proxies overridable through `TRUSTED_PROXIES`
+- `api.eon`: comment-rich starter contract showing current schema/runtime features
+- `.env.example`: local environment defaults
+- `migrations/`: placeholder for generated SQL
+- `var/data/`: local SQLite/TursoLocal data path
 
-## Running The Template
+## Run It
 
 ```bash
-mkdir -p migrations
-mkdir -p var/data
-
-vsr migrate auth --output migrations/0000_auth.sql
-vsr migrate derive --input src --exclude-table user --output migrations/0001_resources.sql
-vsr --database-url sqlite:var/data/app.db?mode=rwc migrate apply --dir migrations
-
+cd examples/template
 cp .env.example .env
-cargo run
+vsr migrate generate --input api.eon --output migrations/0001_init.sql
+vsr serve api.eon
 ```
 
-The `user` table is excluded from the derive migration because the built-in auth migration owns it.
+## What It Shows
 
-## Environment Variables
+- local `TursoLocal` / SQLite defaults
+- typed `Object`, `List`, and `JsonObject` fields
+- API projection and response-context examples
+- enums, indexes, and transforms
+- declarative resource actions
+- explicit join-resource many-to-many example
 
-- `JWT_SECRET` is required because built-in auth will not start without it
-- `BIND_ADDR` changes the listen address, defaulting to `127.0.0.1:8080`
-- `TURSO_ENCRYPTION_KEY` enables encrypted local Turso bootstrap when present
-- `CORS_ORIGINS` appends comma-separated frontend origins to the built-in local default
-- `TRUSTED_PROXIES` adds comma-separated proxy IPs for forwarded client IP handling
+## Notes
 
-## Testing The API
-
-Open the frontend at `http://127.0.0.1:8080`, or call the API directly:
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com", "password": "password123"}'
-
-curl -X POST http://127.0.0.1:8080/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com", "password": "password123"}'
-```
+- This is a reference contract, not a generated app skeleton.
+- `vsr init my-api` now creates the same style of local starter directly, without copying code from
+  `examples/` or fetching from GitHub.
