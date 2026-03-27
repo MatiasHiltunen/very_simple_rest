@@ -254,6 +254,7 @@ struct DynamicResource {
     read_requires_auth: bool,
     hybrid: Option<HybridResourceConfig>,
     nested_relations: Vec<NestedRoute>,
+    many_to_many_routes: Vec<ManyToManyRoute>,
 }
 
 impl DynamicResource {
@@ -325,6 +326,27 @@ impl DynamicResource {
                     })
             })
             .collect();
+        let target_table = spec.table_name.clone();
+        let many_to_many_routes = service
+            .resources
+            .iter()
+            .flat_map(|candidate| {
+                candidate
+                    .many_to_many
+                    .iter()
+                    .filter({
+                        let target_table = target_table.clone();
+                        move |relation| relation.target_table == target_table
+                    })
+                    .map(move |relation| ManyToManyRoute {
+                        relation_name: relation.name.clone(),
+                        parent_api_name: candidate.api_name().to_owned(),
+                        through_table: relation.through_table.clone(),
+                        source_field: relation.source_field.clone(),
+                        target_field: relation.target_field.clone(),
+                    })
+            })
+            .collect();
 
         Ok(Self {
             read_requires_auth: spec.roles.read.is_some() || spec.policies.has_read_filters(),
@@ -348,6 +370,7 @@ impl DynamicResource {
             update_field_names,
             hybrid,
             nested_relations,
+            many_to_many_routes,
         })
     }
 
@@ -543,6 +566,26 @@ struct HybridResourceConfig {
 struct NestedRoute {
     field_name: String,
     parent_api_name: String,
+}
+
+#[derive(Clone)]
+struct ManyToManyRoute {
+    relation_name: String,
+    parent_api_name: String,
+    through_table: String,
+    source_field: String,
+    target_field: String,
+}
+
+#[derive(Clone)]
+enum ListScope {
+    ParentField { field_name: String, value: i64 },
+    ManyToMany {
+        through_table: String,
+        source_field: String,
+        target_field: String,
+        parent_id: i64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -741,7 +784,10 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
                             Some(user),
                             state,
                             resource,
-                            Some((relation_field, path.into_inner())),
+                            Some(ListScope::ParentField {
+                                field_name: relation_field,
+                                value: path.into_inner(),
+                            }),
                         )
                         .await
                     }
@@ -760,7 +806,70 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
                             None,
                             state,
                             resource,
-                            Some((relation_field, path.into_inner())),
+                            Some(ListScope::ParentField {
+                                field_name: relation_field,
+                                value: path.into_inner(),
+                            }),
+                        )
+                        .await
+                    }
+                },
+            )
+        });
+        cfg.service(nested);
+    }
+
+    for relation in &resource.many_to_many_routes {
+        let nested_path = format!(
+            "/{}/{{parent_id}}/{}",
+            relation.parent_api_name, relation.relation_name
+        );
+        let nested_resource = resource.clone();
+        let relation = relation.clone();
+        let nested = web::resource(nested_path).route(if resource.read_requires_auth {
+            web::get().to(
+                move |path: web::Path<i64>,
+                      req: HttpRequest,
+                      user: UserContext,
+                      state: web::Data<NativeServeState>| {
+                    let resource = nested_resource.clone();
+                    let relation = relation.clone();
+                    async move {
+                        list_handler(
+                            req,
+                            Some(user),
+                            state,
+                            resource,
+                            Some(ListScope::ManyToMany {
+                                through_table: relation.through_table,
+                                source_field: relation.source_field,
+                                target_field: relation.target_field,
+                                parent_id: path.into_inner(),
+                            }),
+                        )
+                        .await
+                    }
+                },
+            )
+        } else {
+            web::get().to(
+                move |path: web::Path<i64>,
+                      req: HttpRequest,
+                      state: web::Data<NativeServeState>| {
+                    let resource = nested_resource.clone();
+                    let relation = relation.clone();
+                    async move {
+                        list_handler(
+                            req,
+                            None,
+                            state,
+                            resource,
+                            Some(ListScope::ManyToMany {
+                                through_table: relation.through_table,
+                                source_field: relation.source_field,
+                                target_field: relation.target_field,
+                                parent_id: path.into_inner(),
+                            }),
                         )
                         .await
                     }
@@ -2010,10 +2119,10 @@ fn current_row_scope_binding(
 fn list_scope_binding(
     resource: &DynamicResource,
     query: &HashMap<String, String>,
-    parent_filter: Option<&(String, i64)>,
+    scope: Option<&ListScope>,
 ) -> Option<AuthorizationScopeBinding> {
     let hybrid = resource.hybrid.as_ref()?;
-    if let Some((field_name, value)) = parent_filter
+    if let Some(ListScope::ParentField { field_name, value }) = scope
         && field_name == hybrid.scope_field.as_str()
     {
         return Some(AuthorizationScopeBinding {
@@ -2692,7 +2801,7 @@ fn build_list_plan(
     service: &DynamicService,
     req: &HttpRequest,
     user: &UserContext,
-    parent_filter: Option<&(String, i64)>,
+    scope: Option<&ListScope>,
     skip_static_read_policy: bool,
 ) -> Result<ListQueryPlan, HttpResponse> {
     let mut query = parse_list_query(req);
@@ -2807,9 +2916,26 @@ fn build_list_plan(
     let mut select_only_conditions = Vec::new();
     let mut select_only_binds = Vec::new();
 
-    if let Some((field, value)) = parent_filter {
-        conditions.push(format!("{field} = {}", BIND_MARKER));
-        filter_binds.push(BoundValue::Integer(*value));
+    if let Some(scope) = scope {
+        match scope {
+            ListScope::ParentField { field_name, value } => {
+                conditions.push(format!("{field_name} = {}", BIND_MARKER));
+                filter_binds.push(BoundValue::Integer(*value));
+            }
+            ListScope::ManyToMany {
+                through_table,
+                source_field,
+                target_field,
+                parent_id,
+            } => {
+                conditions.push(format!(
+                    "EXISTS (SELECT 1 FROM {through_table} WHERE {through_table}.{target_field} = {}.{} AND {through_table}.{source_field} = {BIND_MARKER})",
+                    resource.table_name,
+                    resource.id_field
+                ));
+                filter_binds.push(BoundValue::Integer(*parent_id));
+            }
+        }
     }
 
     if resource.policies.has_read_filters()
@@ -3227,7 +3353,7 @@ async fn list_handler(
     user: Option<UserContext>,
     state: web::Data<NativeServeState>,
     resource: Arc<DynamicResource>,
-    parent_filter: Option<(String, i64)>,
+    scope: Option<ListScope>,
 ) -> HttpResponse {
     let dynamic_service = state.dynamic_service.clone();
     let user = user.unwrap_or_else(anonymous_user_context);
@@ -3239,7 +3365,7 @@ async fn list_handler(
     let query_map = parse_list_query(&req);
     let skip_static = match (&resource.hybrid, user.id != 0) {
         (Some(hybrid), true) if hybrid.collection_read || hybrid.nested_read => {
-            match list_scope_binding(&resource, &query_map, parent_filter.as_ref()) {
+            match list_scope_binding(&resource, &query_map, scope.as_ref()) {
                 Some(scope) => match hybrid_runtime_allows(
                     &resource,
                     &user,
@@ -3263,7 +3389,7 @@ async fn list_handler(
         dynamic_service.as_ref(),
         &req,
         &user,
-        parent_filter.as_ref(),
+        scope.as_ref(),
         skip_static,
     ) {
         Ok(plan) => plan,
@@ -4129,6 +4255,67 @@ mod tests {
             .to_request();
         let filter_response = test::call_service(&app, filter_request).await;
         assert_eq!(filter_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_lists_many_to_many_routes_via_join_resources() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("many_to_many_api.eon", false).await;
+        query("INSERT INTO post (id, title) VALUES (?, ?), (?, ?)")
+            .bind(1_i64)
+            .bind("First")
+            .bind(2_i64)
+            .bind("Second")
+            .execute(&state.pool)
+            .await
+            .expect("posts should insert");
+        query("INSERT INTO tag (id, name) VALUES (?, ?), (?, ?), (?, ?)")
+            .bind(1_i64)
+            .bind("alpha")
+            .bind(2_i64)
+            .bind("beta")
+            .bind(3_i64)
+            .bind("gamma")
+            .execute(&state.pool)
+            .await
+            .expect("tags should insert");
+        query("INSERT INTO post_tag (post_id, tag_id) VALUES (?, ?), (?, ?), (?, ?)")
+            .bind(1_i64)
+            .bind(1_i64)
+            .bind(1_i64)
+            .bind(2_i64)
+            .bind(2_i64)
+            .bind(3_i64)
+            .execute(&state.pool)
+            .await
+            .expect("join rows should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+
+        let list_request = test::TestRequest::get()
+            .uri("/api/posts/1/tags?sort=name")
+            .to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value = test::read_body_json(list_response).await;
+        assert_eq!(list_body["total"], 2);
+        assert_eq!(list_body["items"][0]["name"], "alpha");
+        assert_eq!(list_body["items"][1]["name"], "beta");
+
+        let filtered_request = test::TestRequest::get()
+            .uri("/api/posts/1/tags?filter_name=beta")
+            .to_request();
+        let filtered_response = test::call_service(&app, filtered_request).await;
+        assert_eq!(filtered_response.status(), StatusCode::OK);
+        let filtered_body: Value = test::read_body_json(filtered_response).await;
+        assert_eq!(filtered_body["total"], 1);
+        assert_eq!(filtered_body["items"][0]["name"], "beta");
     }
 
     #[actix_web::test]

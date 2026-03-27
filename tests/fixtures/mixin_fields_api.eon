@@ -1,0 +1,28 @@
+module: "mixin_fields_api"
+mixins: {
+    Timestamps: {
+        fields: {
+            created_at: { type: DateTime, generated: CreatedAt }
+            updated_at: { type: DateTime, generated: UpdatedAt }
+        }
+    }
+    TenantSlug: {
+        indexes: [
+            { fields: ["tenant_id", "slug"], unique: true }
+        ]
+        fields: {
+            tenant_id: I64
+            slug: { type: String, unique: true }
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        use: ["Timestamps", "TenantSlug"]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

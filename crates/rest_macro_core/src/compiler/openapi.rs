@@ -119,6 +119,26 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
                 nested_collection_path_item(resource, &parent_api_name, field.api_name()),
             );
         }
+
+        for source_resource in &service.resources {
+            for relation in &source_resource.many_to_many {
+                if relation.target_table != resource.table_name {
+                    continue;
+                }
+                paths.insert(
+                    format!(
+                        "/{}/{{parent_id}}/{}",
+                        source_resource.api_name(),
+                        relation.name
+                    ),
+                    many_to_many_collection_path_item(
+                        resource,
+                        source_resource.api_name(),
+                        relation.name.as_str(),
+                    ),
+                );
+            }
+        }
     }
 
     if options.include_builtin_auth {
@@ -236,6 +256,31 @@ fn nested_collection_path_item(
         "tags": [resource_name(resource)],
         "summary": format!("List {} by {}", resource_name(resource), parent_api_name),
         "operationId": format!("list{}By{}", resource_name(resource), parent_api_name.to_case(CaseKind::Pascal)),
+        "parameters": parameters,
+        "responses": nested_list_responses(resource),
+    });
+    if read_requires_auth(resource) {
+        get["security"] = bearer_security();
+    }
+    json!({ "get": get })
+}
+
+fn many_to_many_collection_path_item(
+    resource: &ResourceSpec,
+    parent_api_name: &str,
+    relation_name: &str,
+) -> Value {
+    let mut parameters = vec![id_parameter("parent_id", relation_name)];
+    parameters.extend(list_query_parameters(resource, None));
+    let mut get = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("List {} by {}", resource_name(resource), parent_api_name),
+        "operationId": format!(
+            "list{}By{}{}",
+            resource_name(resource),
+            parent_api_name.to_case(CaseKind::Pascal),
+            relation_name.to_case(CaseKind::Pascal)
+        ),
         "parameters": parameters,
         "responses": nested_list_responses(resource),
     });
@@ -1485,6 +1530,33 @@ mod tests {
             document["paths"]["/post/{parent_id}/comment"]["get"]["responses"]["400"]["content"]["application/json"]
                 ["schema"]["$ref"],
             "#/components/schemas/ApiErrorResponse"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_many_to_many_collection_paths() {
+        let service = load_service_from_path(&fixture_path("many_to_many_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Many To Many API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert!(document["paths"]["/posts/{parent_id}/tags"]["get"].is_object());
+        assert_eq!(
+            document["paths"]["/posts/{parent_id}/tags"]["get"]["parameters"][0]["name"],
+            "parent_id"
+        );
+        assert_eq!(
+            document["paths"]["/posts/{parent_id}/tags"]["get"]["parameters"][1]["name"],
+            "limit"
+        );
+        assert_eq!(
+            document["paths"]["/posts/{parent_id}/tags"]["get"]["responses"]["200"]["content"]
+                ["application/json"]["schema"]["$ref"],
+            "#/components/schemas/TagListResponse"
         );
     }
 

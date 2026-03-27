@@ -584,6 +584,21 @@ mod tests {
     }
 
     #[test]
+    fn migration_sql_expands_mixin_fields_and_indexes() {
+        let loaded = load_service_from_path(&fixture_path("mixin_fields_api.eon"))
+            .expect("fixture should parse");
+        let sql =
+            render_service_migration_sql(&loaded.service).expect("migration sql should render");
+
+        assert!(sql.contains("created_at TEXT NOT NULL DEFAULT"));
+        assert!(sql.contains("updated_at TEXT NOT NULL DEFAULT"));
+        assert!(sql.contains("tenant_id INTEGER NOT NULL"));
+        assert!(sql.contains("slug TEXT NOT NULL"));
+        assert!(sql.contains("CREATE UNIQUE INDEX uidx_post_slug ON post (slug);"));
+        assert!(sql.contains("CREATE UNIQUE INDEX uidx_post_tenant_id_slug ON post (tenant_id, slug);"));
+    }
+
+    #[test]
     fn migration_sql_renders_on_delete_action_for_relations() {
         let loaded =
             load_service_from_path(&fixture_path("cascade_api.eon")).expect("fixture should parse");

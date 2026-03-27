@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use heck::ToUpperCamelCase;
+use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Path, Type};
@@ -2944,7 +2944,51 @@ fn resource_impl_tokens(
                             }
                         }
                     }
-                    Self::build_list_plan_internal(query, user, parent_filter, skip_static_read_policy)
+                    Self::build_list_plan_internal(
+                        query,
+                        user,
+                        parent_filter,
+                        None,
+                        skip_static_read_policy,
+                    )
+                }
+
+                async fn build_many_to_many_list_plan_with_hybrid_read(
+                    query: &#list_query_ty,
+                    user: &#runtime_crate::core::auth::UserContext,
+                    runtime: &#runtime_crate::core::authorization::AuthorizationRuntime,
+                    through_table: &'static str,
+                    source_field: &'static str,
+                    target_field: &'static str,
+                    parent_id: i64,
+                ) -> Result<#list_plan_ty, HttpResponse> {
+                    let mut skip_static_read_policy = false;
+                    if let Some(scope) = Self::hybrid_scope_binding_for_list_request(query, None) {
+                        match runtime
+                            .evaluate_runtime_access_for_user(
+                                user.id,
+                                #resource_name,
+                                #runtime_crate::core::authorization::AuthorizationAction::Read,
+                                scope,
+                            )
+                            .await
+                        {
+                            Ok(result) if result.allowed => {
+                                skip_static_read_policy = true;
+                            }
+                            Ok(_) => {}
+                            Err(message) => {
+                                return Err(#runtime_crate::core::errors::internal_error(message));
+                            }
+                        }
+                    }
+                    Self::build_list_plan_internal(
+                        query,
+                        user,
+                        None,
+                        Some((through_table, source_field, target_field, parent_id)),
+                        skip_static_read_policy,
+                    )
                 }
             }
         } else {
@@ -3407,6 +3451,29 @@ fn resource_impl_tokens(
                 )
             })
     });
+    let many_to_many_routes = resources
+        .iter()
+        .flat_map(|source_resource| {
+            source_resource
+                .many_to_many
+                .iter()
+                .filter(move |relation| relation.target_table == resource.table_name)
+                .map(move |relation| {
+                    (
+                        format_ident!(
+                            "list_by_{}_{}",
+                            source_resource.struct_ident.to_string().to_snake_case(),
+                            relation.name.to_snake_case()
+                        ),
+                        source_resource.api_name.clone(),
+                        relation.name.clone(),
+                        relation.through_table.clone(),
+                        relation.source_field.clone(),
+                        relation.target_field.clone(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
     let nested_route_registrations = relation_routes
         .clone()
         .map(|(field_ident, _parent_table, parent_api_name)| {
@@ -3420,6 +3487,18 @@ fn resource_impl_tokens(
             );
         }
     });
+    let many_to_many_route_registrations = many_to_many_routes.iter().map(
+        |(handler_ident, parent_api_name, relation_name, _, _, _)| {
+            let parent_api_name = Literal::string(parent_api_name);
+            let relation_name = Literal::string(relation_name);
+            quote! {
+                cfg.service(
+                    web::resource(format!("/{}/{{parent_id}}/{}", #parent_api_name, #relation_name))
+                        .route(web::get().to(Self::#handler_ident))
+                );
+            }
+        },
+    );
     let nested_handlers = relation_routes.map(|(field_ident, _, _)| {
         let handler_ident = format_ident!("get_by_{}", field_ident);
         if read_requires_auth {
@@ -3576,6 +3655,174 @@ fn resource_impl_tokens(
             }
         }
     });
+    let many_to_many_handlers = many_to_many_routes.iter().map(
+        |(handler_ident, _, _, through_table, source_field, target_field)| {
+            let through_table = Literal::string(through_table);
+            let source_field = Literal::string(source_field);
+            let target_field = Literal::string(target_field);
+            if read_requires_auth {
+                if hybrid.map(|config| config.nested_read).unwrap_or(false) {
+                    quote! {
+                        async fn #handler_ident(
+                            path: web::Path<i64>,
+                            query: web::Query<#list_query_ty>,
+                            user: #runtime_crate::core::auth::UserContext,
+                            db: web::Data<DbPool>,
+                            runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
+                        ) -> impl Responder {
+                            #read_check
+
+                            let parent_id = path.into_inner();
+                            let query = query.into_inner();
+                            let plan = match Self::build_many_to_many_list_plan_with_hybrid_read(
+                                &query,
+                                &user,
+                                runtime.get_ref(),
+                                #through_table,
+                                #source_field,
+                                #target_field,
+                                parent_id,
+                            )
+                            .await
+                            {
+                                Ok(parts) => parts,
+                                Err(response) => return response,
+                            };
+                            let mut count_query =
+                                #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                            for bind in &plan.filter_binds {
+                                count_query = match bind.clone() {
+                                    #(#count_bind_matches)*
+                                };
+                            }
+                            let total = match count_query.fetch_one(db.get_ref()).await {
+                                Ok(total) => total,
+                                Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                            };
+                            let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                            for bind in &plan.select_binds {
+                                q = match bind.clone() {
+                                    #(#list_bind_matches)*
+                                };
+                            }
+                            match q.fetch_all(db.get_ref()).await {
+                                Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                                    Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                        Ok(value) => HttpResponse::Ok().json(value),
+                                        Err(response) => response,
+                                    },
+                                    Err(response) => response,
+                                },
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        async fn #handler_ident(
+                            path: web::Path<i64>,
+                            query: web::Query<#list_query_ty>,
+                            user: #runtime_crate::core::auth::UserContext,
+                            db: web::Data<DbPool>,
+                        ) -> impl Responder {
+                            #read_check
+
+                            let parent_id = path.into_inner();
+                            let query = query.into_inner();
+                            let plan = match Self::build_many_to_many_list_plan(
+                                &query,
+                                &user,
+                                #through_table,
+                                #source_field,
+                                #target_field,
+                                parent_id,
+                            ) {
+                                Ok(parts) => parts,
+                                Err(response) => return response,
+                            };
+                            let mut count_query =
+                                #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                            for bind in &plan.filter_binds {
+                                count_query = match bind.clone() {
+                                    #(#count_bind_matches)*
+                                };
+                            }
+                            let total = match count_query.fetch_one(db.get_ref()).await {
+                                Ok(total) => total,
+                                Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                            };
+                            let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                            for bind in &plan.select_binds {
+                                q = match bind.clone() {
+                                    #(#list_bind_matches)*
+                                };
+                            }
+                            match q.fetch_all(db.get_ref()).await {
+                                Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                                    Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                        Ok(value) => HttpResponse::Ok().json(value),
+                                        Err(response) => response,
+                                    },
+                                    Err(response) => response,
+                                },
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        query: web::Query<#list_query_ty>,
+                        db: web::Data<DbPool>,
+                    ) -> impl Responder {
+                        let parent_id = path.into_inner();
+                        let query = query.into_inner();
+                        let user = Self::anonymous_user_context();
+                        let plan = match Self::build_many_to_many_list_plan(
+                            &query,
+                            &user,
+                            #through_table,
+                            #source_field,
+                            #target_field,
+                            parent_id,
+                        ) {
+                            Ok(parts) => parts,
+                            Err(response) => return response,
+                        };
+                        let mut count_query =
+                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                        for bind in &plan.filter_binds {
+                            count_query = match bind.clone() {
+                                #(#count_bind_matches)*
+                            };
+                        }
+                        let total = match count_query.fetch_one(db.get_ref()).await {
+                            Ok(total) => total,
+                            Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
+                        };
+                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
+                        for bind in &plan.select_binds {
+                            q = match bind.clone() {
+                                #(#list_bind_matches)*
+                            };
+                        }
+                        match q.fetch_all(db.get_ref()).await {
+                            Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                                Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
+                                    Ok(value) => HttpResponse::Ok().json(value),
+                                    Err(response) => response,
+                                },
+                                Err(response) => response,
+                            },
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                }
+            }
+        },
+    );
     let get_all_handler = if read_requires_auth {
         if hybrid.map(|config| config.collection_read).unwrap_or(false) {
             quote! {
@@ -3823,11 +4070,14 @@ fn resource_impl_tokens(
                 );
 
                 #(#nested_route_registrations)*
+                #(#many_to_many_route_registrations)*
             }
 
             #anonymous_user_context_fn
 
             #contains_filter_helper
+
+            #(#many_to_many_handlers)*
 
             fn can_read(user: &#runtime_crate::core::auth::UserContext) -> bool {
                 #can_read_body
@@ -4020,6 +4270,7 @@ fn resource_impl_tokens(
                 query: &#list_query_ty,
                 user: &#runtime_crate::core::auth::UserContext,
                 parent_filter: Option<(&'static str, i64)>,
+                many_to_many_scope: Option<(&'static str, &'static str, &'static str, i64)>,
                 skip_static_read_policy: bool,
             ) -> Result<#list_plan_ty, HttpResponse> {
                 let mut select_sql = format!("SELECT * FROM {}", #table_name);
@@ -4123,6 +4374,20 @@ fn resource_impl_tokens(
                     ));
                     filter_binds.push(#list_bind_ty::Integer(value));
                 }
+                if let Some((through_table, source_field, target_field, parent_id)) = many_to_many_scope {
+                    conditions.push(format!(
+                        "EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{} AND {}.{} = {})",
+                        through_table,
+                        through_table,
+                        target_field,
+                        #table_name,
+                        #id_field_name_lit,
+                        through_table,
+                        source_field,
+                        Self::list_placeholder(filter_binds.len() + 1)
+                    ));
+                    filter_binds.push(#list_bind_ty::Integer(parent_id));
+                }
 
                 if !skip_static_read_policy && !(#admin_bypass && is_admin) {
                     #read_policy_list_conditions
@@ -4220,7 +4485,24 @@ fn resource_impl_tokens(
                 user: &#runtime_crate::core::auth::UserContext,
                 parent_filter: Option<(&'static str, i64)>,
             ) -> Result<#list_plan_ty, HttpResponse> {
-                Self::build_list_plan_internal(query, user, parent_filter, false)
+                Self::build_list_plan_internal(query, user, parent_filter, None, false)
+            }
+
+            fn build_many_to_many_list_plan(
+                query: &#list_query_ty,
+                user: &#runtime_crate::core::auth::UserContext,
+                through_table: &'static str,
+                source_field: &'static str,
+                target_field: &'static str,
+                parent_id: i64,
+            ) -> Result<#list_plan_ty, HttpResponse> {
+                Self::build_list_plan_internal(
+                    query,
+                    user,
+                    None,
+                    Some((through_table, source_field, target_field, parent_id)),
+                    false,
+                )
             }
 
             #create_requirement_methods

@@ -50,6 +50,7 @@ These keys are read from the service root.
 | static | Map | No static mounts | No | See Static Mounts | Declares filesystem-backed static directories and SPA mounts. |
 | security | Map | All optional features off / empty | No | See Security | Controls request limits, CORS, trusted proxies, auth settings, headers, and rate limits. |
 | enums | List<Enum> or Map<EnumName, Enum \| List<String>> | None | No | Named enum definitions | Declares reusable string-enum vocabularies that fields can reference by name. |
+| mixins | List<Mixin> or Map<MixinName, Mixin> | None | No | Named local mixin definitions | Declares reusable local field/index bundles that resources can expand with `use`. |
 | resources | List or keyed map | None | Yes | Resource definitions | A service must contain at least one resource. |
 
 ## Enums
@@ -60,6 +61,16 @@ The optional `enums` block declares reusable string-enum vocabularies for field 
 | --- | --- | --- | --- | --- | --- |
 | enums.<enum_name>.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Enum names must be unique and are referenced from `resources[].fields[].type`. |
 | enums.<enum_name>.values | List<String> | Required when the enum exists | Yes | One or more unique string values | Enum values are validated at request time and emitted in OpenAPI schemas and exact-filter parameters. |
+
+## Mixins
+
+The optional `mixins` block declares reusable local field/index bundles. The first slice is intentionally local-only and deterministic: resources expand mixins with `use`, and duplicate fields or indexes after expansion are rejected.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| mixins.<mixin_name>.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Mixin names must be unique within the `.eon` file and are referenced from `resources[].use`. |
+| mixins.<mixin_name>.fields | List<Field> or Map<FieldName, Field \| Type> | [] | No | Field definitions | Expanded into each resource that references the mixin. Resource-local fields are appended after mixin fields. |
+| mixins.<mixin_name>.indexes | List<Index> | [] | No | See Indexes | Expanded into each resource that references the mixin after the mixin fields are added. In the first slice, mixin indexes must reference fields declared by the same mixin. |
 
 ## Authorization Contract
 
@@ -171,7 +182,9 @@ Each resource describes one generated REST model and its CRUD surface.
 | resources[].policies | Map | `admin_bypass = true`; no row policies | No | See Row Policies | Declares row-level filters and assignments using `user.id` or `claim.<name>` sources. |
 | resources[].list | Map | No custom limit caps | No | See List Settings | Controls generated list endpoint defaults and hard caps. |
 | resources[].api | Map | No API projection or response contexts | No | See Resource API | Separates the public API field surface from storage fields and can define named response contexts. |
+| resources[].use | List<String> | [] | No | Declared mixin names | Expands the listed local mixins into the resource before normal field/index validation. Using the same mixin more than once is rejected. |
 | resources[].indexes | List<Index> | No explicit indexes | No | See Indexes | Declares explicit single-field or composite indexes in addition to the automatic relation and policy-derived index hints. |
+| resources[].many_to_many | List<ManyToMany> | No declared many-to-many routes | No | See Many-to-Many | Declares read-side collection routes over an explicit join resource without changing the underlying storage schema. |
 | resources[].fields | List or keyed map | None | Yes | Field definitions | Each resource must define its fields explicitly. |
 
 ## Resource API
@@ -221,6 +234,18 @@ Resources can declare explicit indexes, while generated migrations and live-sche
 | --- | --- | --- | --- | --- | --- |
 | resources[].indexes[].fields | List<String> | Required when the index exists | Yes | One or more storage field names | Field names reference storage columns, not API projection aliases. Composite indexes preserve the configured field order. |
 | resources[].indexes[].unique | Bool | false | No | true, false | When true, generated migrations emit `CREATE UNIQUE INDEX ...` for the configured field list. |
+
+## Many-to-Many
+
+Many-to-many definitions currently describe read-side nested collection routes over an explicit join resource. The join table is still modeled as a normal resource with two FK fields; `many_to_many` adds the higher-level route metadata.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].many_to_many[].name | String | Required | Yes | Valid API path segment | Becomes the trailing nested route segment, for example `/{parent}/{id}/{name}`. |
+| resources[].many_to_many[].target | String | Required | Yes | Existing resource name or table name | Names the target resource returned by the nested collection route. |
+| resources[].many_to_many[].through | String | Required | Yes | Existing join resource name or table name | Names the explicit join resource that connects the source and target resources. |
+| resources[].many_to_many[].source_field | String | Required | Yes | Join resource field name | The named join field must declare a relation back to the source resource ID field. |
+| resources[].many_to_many[].target_field | String | Required | Yes | Join resource field name | The named join field must declare a relation to the target resource ID field. |
 
 ## Row Policies
 

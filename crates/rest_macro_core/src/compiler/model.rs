@@ -642,6 +642,15 @@ pub struct IndexSpec {
     pub unique: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManyToManySpec {
+    pub name: String,
+    pub target_table: String,
+    pub through_table: String,
+    pub source_field: String,
+    pub target_field: String,
+}
+
 impl FieldSpec {
     pub fn name(&self) -> String {
         self.ident.to_string()
@@ -678,6 +687,7 @@ pub struct ResourceSpec {
     pub policies: RowPolicies,
     pub list: ListConfig,
     pub indexes: Vec<IndexSpec>,
+    pub many_to_many: Vec<ManyToManySpec>,
     pub fields: Vec<FieldSpec>,
     pub write_style: WriteModelStyle,
 }
@@ -801,6 +811,7 @@ impl std::fmt::Debug for ResourceSpec {
             .field("policies", &self.policies)
             .field("list", &self.list)
             .field("indexes", &self.indexes)
+            .field("many_to_many", &self.many_to_many)
             .field("fields", &self.fields)
             .field("write_style", &self.write_style)
             .finish()

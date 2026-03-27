@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     path::{Component, Path, PathBuf},
 };
@@ -66,6 +66,8 @@ struct ServiceDocument {
     module: Option<String>,
     #[serde(default, deserialize_with = "deserialize_enum_documents")]
     enums: Vec<EnumDocument>,
+    #[serde(default, deserialize_with = "deserialize_mixin_documents")]
+    mixins: Vec<MixinDocument>,
     #[serde(default)]
     db: DbBackend,
     #[serde(default)]
@@ -494,9 +496,22 @@ struct ResourceDocument {
     list: ListConfigDocument,
     #[serde(default)]
     api: Option<ResourceApiDocument>,
+    #[serde(default, rename = "use")]
+    use_mixins: Vec<String>,
     #[serde(default)]
     indexes: Vec<IndexDocument>,
+    #[serde(default)]
+    many_to_many: Vec<ManyToManyDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
+    fields: Vec<FieldDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct MixinDocument {
+    name: String,
+    #[serde(default)]
+    indexes: Vec<IndexDocument>,
+    #[serde(default, deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
 
@@ -508,6 +523,16 @@ struct ResourceApiDocument {
     default_context: Option<String>,
     #[serde(default, deserialize_with = "deserialize_response_context_documents")]
     contexts: Vec<ResponseContextDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManyToManyDocument {
+    name: String,
+    target: String,
+    through: String,
+    source_field: String,
+    target_field: String,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -654,7 +679,7 @@ struct ExistsPolicyRuleDocument {
     equals_field: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct FieldDocument {
     name: String,
     #[serde(default)]
@@ -693,7 +718,7 @@ struct EnumDocument {
     values: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct RelationDocument {
     references: String,
     #[serde(default)]
@@ -702,7 +727,7 @@ struct RelationDocument {
     nested_route: bool,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 struct FieldValidationDocument {
     #[serde(default)]
     min_length: Option<usize>,
@@ -714,14 +739,14 @@ struct FieldValidationDocument {
     maximum: Option<NumericBoundDocument>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(untagged)]
 enum NumericBoundDocument {
     Integer(i64),
     Float(f64),
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(untagged)]
 enum FieldTypeDocument {
     Scalar(ScalarType),
@@ -766,10 +791,21 @@ struct ResourceMapValueDocument {
     list: ListConfigDocument,
     #[serde(default)]
     api: Option<ResourceApiDocument>,
+    #[serde(default, rename = "use")]
+    use_mixins: Vec<String>,
     #[serde(default)]
     indexes: Vec<IndexDocument>,
+    #[serde(default)]
+    many_to_many: Vec<ManyToManyDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum MixinMapValueDocument {
+    Fields(Vec<FieldDocument>),
+    Config(MixinConfigDocument),
 }
 
 #[derive(serde::Deserialize)]
@@ -848,6 +884,17 @@ struct ApiFieldProjectionConfigDocument {
 
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MixinConfigDocument {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    indexes: Vec<IndexDocument>,
+    #[serde(default, deserialize_with = "deserialize_field_documents")]
+    fields: Vec<FieldDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResponseContextConfigDocument {
     #[serde(default)]
     name: Option<String>,
@@ -868,6 +915,13 @@ where
     D: Deserializer<'de>,
 {
     deserializer.deserialize_any(EnumDocumentsVisitor)
+}
+
+fn deserialize_mixin_documents<'de, D>(deserializer: D) -> Result<Vec<MixinDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(MixinDocumentsVisitor)
 }
 
 fn deserialize_resource_documents<'de, D>(
@@ -926,9 +980,27 @@ impl ResourceMapValueDocument {
             policies: self.policies,
             list: self.list,
             api: self.api,
+            use_mixins: self.use_mixins,
             indexes: self.indexes,
+            many_to_many: self.many_to_many,
             fields: self.fields,
         })
+    }
+}
+
+impl MixinMapValueDocument {
+    fn into_document<E>(self, key: String) -> Result<MixinDocument, E>
+    where
+        E: de::Error,
+    {
+        match self {
+            Self::Fields(fields) => Ok(MixinDocument {
+                name: key,
+                indexes: Vec::new(),
+                fields,
+            }),
+            Self::Config(mixin) => mixin.into_document::<E>(key),
+        }
     }
 }
 
@@ -981,6 +1053,27 @@ impl FieldMapConfigDocument {
             unique: self.unique,
             relation: self.relation,
             validate: self.validate,
+        })
+    }
+}
+
+impl MixinConfigDocument {
+    fn into_document<E>(self, key: String) -> Result<MixinDocument, E>
+    where
+        E: de::Error,
+    {
+        if let Some(name) = self.name.as_deref() {
+            if name != key {
+                return Err(E::custom(format!(
+                    "mixin map entry `{key}` has mismatched `name` value `{name}`"
+                )));
+            }
+        }
+
+        Ok(MixinDocument {
+            name: key,
+            indexes: self.indexes,
+            fields: self.fields,
         })
     }
 }
@@ -1085,6 +1178,8 @@ struct ResourceDocumentsVisitor;
 
 struct EnumDocumentsVisitor;
 
+struct MixinDocumentsVisitor;
+
 impl<'de> Visitor<'de> for EnumDocumentsVisitor {
     type Value = Vec<EnumDocument>;
 
@@ -1118,6 +1213,42 @@ impl<'de> Visitor<'de> for EnumDocumentsVisitor {
         }
 
         Ok(enums)
+    }
+}
+
+impl<'de> Visitor<'de> for MixinDocumentsVisitor {
+    type Value = Vec<MixinDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a list or map of mixin definitions")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut mixins = Vec::new();
+        while let Some(document) = seq.next_element::<MixinDocument>()? {
+            mixins.push(document);
+        }
+        Ok(mixins)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = HashSet::new();
+        let mut mixins = Vec::new();
+
+        while let Some((key, value)) = map.next_entry::<String, MixinMapValueDocument>()? {
+            if !seen.insert(key.clone()) {
+                return Err(A::Error::custom(format!("duplicate mixin `{key}`")));
+            }
+            mixins.push(value.into_document::<A::Error>(key)?);
+        }
+
+        Ok(mixins)
     }
 }
 
@@ -1340,8 +1471,9 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     validate_tls_config(&tls, span)?;
     validate_security_config(&security, span)?;
     let enums = build_enums(document.enums)?;
-
-    let resources = build_resources_with_enums(document.db, document.resources, enums.as_slice())?;
+    let mixins = build_mixins(document.mixins)?;
+    let resources = expand_resource_mixins(document.resources, &mixins)?;
+    let resources = build_resources_with_enums(document.db, resources, enums.as_slice())?;
     if resources.is_empty() {
         return Err(syn::Error::new(
             span,
@@ -1417,6 +1549,133 @@ fn build_enums(documents: Vec<EnumDocument>) -> syn::Result<Vec<EnumSpec>> {
     Ok(enums)
 }
 
+fn build_mixins(documents: Vec<MixinDocument>) -> syn::Result<HashMap<String, MixinDocument>> {
+    let mut seen_names = HashSet::new();
+    let mut mixins = HashMap::with_capacity(documents.len());
+
+    for document in documents {
+        if !seen_names.insert(document.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate mixin `{}`", document.name),
+            ));
+        }
+        syn::parse_str::<syn::Ident>(document.name.as_str()).map_err(|_| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("mixin name `{}` is not a valid Rust identifier", document.name),
+            )
+        })?;
+        validate_mixin_document(&document)?;
+        mixins.insert(document.name.clone(), document);
+    }
+
+    Ok(mixins)
+}
+
+fn validate_mixin_document(mixin: &MixinDocument) -> syn::Result<()> {
+    let mut seen_fields = HashSet::new();
+    let mut seen_api_names = HashSet::new();
+
+    for field in &mixin.fields {
+        if !seen_fields.insert(field.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate field `{}` in mixin `{}`", field.name, mixin.name),
+            ));
+        }
+
+        let field_api_name = field.api_name.as_deref().unwrap_or(field.name.as_str());
+        if !seen_api_names.insert(field_api_name.to_owned()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "duplicate field api_name `{field_api_name}` in mixin `{}`",
+                    mixin.name
+                ),
+            ));
+        }
+
+        if field.id {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("mixin `{}` cannot declare id field `{}`", mixin.name, field.name),
+            ));
+        }
+    }
+
+    let field_names = mixin
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<HashSet<_>>();
+    for index in &mixin.indexes {
+        if index.fields.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("mixin `{}` index definitions must declare at least one field", mixin.name),
+            ));
+        }
+        for field_name in &index.fields {
+            if !field_names.contains(field_name.as_str()) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "mixin `{}` index references unknown mixin field `{field_name}`",
+                        mixin.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn expand_resource_mixins(
+    resources: Vec<ResourceDocument>,
+    mixins: &HashMap<String, MixinDocument>,
+) -> syn::Result<Vec<ResourceDocument>> {
+    let mut expanded = Vec::with_capacity(resources.len());
+
+    for mut resource in resources {
+        let mut seen_mixins = HashSet::new();
+        let mut mixin_fields = Vec::new();
+        let mut mixin_indexes = Vec::new();
+
+        for mixin_name in &resource.use_mixins {
+            if !seen_mixins.insert(mixin_name.clone()) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "resource `{}` uses mixin `{mixin_name}` more than once",
+                        resource.name
+                    ),
+                ));
+            }
+            let mixin = mixins.get(mixin_name).ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "resource `{}` references unknown mixin `{mixin_name}`",
+                        resource.name
+                    ),
+                )
+            })?;
+            mixin_fields.extend(mixin.fields.clone());
+            mixin_indexes.extend(mixin.indexes.clone());
+        }
+
+        mixin_fields.extend(resource.fields);
+        mixin_indexes.extend(resource.indexes);
+        resource.fields = mixin_fields;
+        resource.indexes = mixin_indexes;
+        expanded.push(resource);
+    }
+
+    Ok(expanded)
+}
+
 fn build_resources_with_enums(
     db: DbBackend,
     resources: Vec<ResourceDocument>,
@@ -1424,6 +1683,7 @@ fn build_resources_with_enums(
 ) -> syn::Result<Vec<ResourceSpec>> {
     let mut seen_names = HashSet::new();
     let mut seen_api_names = HashSet::new();
+    let mut pending_many_to_many = Vec::with_capacity(resources.len());
     let mut result = Vec::with_capacity(resources.len());
 
     for resource in resources {
@@ -1453,6 +1713,7 @@ fn build_resources_with_enums(
         }
         let configured_id = resource.id_field.unwrap_or_else(|| "id".to_owned());
         let resource_api = resource.api.unwrap_or_default();
+        let resource_many_to_many = resource.many_to_many;
         let has_api_projection_block = !resource_api.fields.is_empty();
         if has_api_projection_block
             && resource
@@ -1655,6 +1916,7 @@ fn build_resources_with_enums(
             struct_name.as_str(),
         )?;
         let indexes = build_index_specs(resource.indexes);
+        pending_many_to_many.push((struct_name.clone(), resource_many_to_many));
 
         result.push(ResourceSpec {
             struct_ident: struct_ident.clone(),
@@ -1669,9 +1931,22 @@ fn build_resources_with_enums(
             policies,
             list: parse_list_config(resource.list),
             indexes,
+            many_to_many: Vec::new(),
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
         });
+    }
+
+    let resolved_many_to_many = result
+        .iter()
+        .zip(pending_many_to_many.iter())
+        .map(|(resource, (resource_name, documents))| {
+            resolve_many_to_many_specs(resource, resource_name.as_str(), documents, &result)
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    for (resource, many_to_many) in result.iter_mut().zip(resolved_many_to_many) {
+        resource.many_to_many = many_to_many;
     }
 
     for resource in &result {
@@ -1683,6 +1958,166 @@ fn build_resources_with_enums(
     }
 
     Ok(result)
+}
+
+fn resolve_many_to_many_specs(
+    source_resource: &ResourceSpec,
+    source_resource_name: &str,
+    documents: &[ManyToManyDocument],
+    resources: &[ResourceSpec],
+) -> syn::Result<Vec<super::model::ManyToManySpec>> {
+    let mut seen_names = HashSet::new();
+    let mut relations = Vec::with_capacity(documents.len());
+
+    for document in documents {
+        validate_api_name(
+            document.name.as_str(),
+            format!(
+                "many_to_many `{}` on resource `{source_resource_name}`",
+                document.name
+            )
+            .as_str(),
+        )?;
+        if !seen_names.insert(document.name.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "duplicate many_to_many `{}` on resource `{source_resource_name}`",
+                    document.name
+                ),
+            ));
+        }
+        validate_sql_identifier(
+            document.source_field.as_str(),
+            Span::call_site(),
+            "many_to_many source_field",
+        )?;
+        validate_sql_identifier(
+            document.target_field.as_str(),
+            Span::call_site(),
+            "many_to_many target_field",
+        )?;
+
+        let target_resource = resolve_resource_selector(
+            resources,
+            document.target.as_str(),
+            format!(
+                "many_to_many `{}` on resource `{source_resource_name}` target",
+                document.name
+            )
+            .as_str(),
+        )?;
+        let through_resource = resolve_resource_selector(
+            resources,
+            document.through.as_str(),
+            format!(
+                "many_to_many `{}` on resource `{source_resource_name}` through",
+                document.name
+            )
+            .as_str(),
+        )?;
+
+        let source_field = through_resource
+            .find_field(document.source_field.as_str())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "many_to_many `{}` on resource `{source_resource_name}` references unknown through field `{}` on `{}`",
+                        document.name, document.source_field, through_resource.table_name
+                    ),
+                )
+            })?;
+        let source_relation = source_field.relation.as_ref().ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "many_to_many `{}` on resource `{source_resource_name}` requires through field `{}` on `{}` to declare a relation",
+                    document.name, document.source_field, through_resource.table_name
+                ),
+            )
+        })?;
+        if source_relation.references_table != source_resource.table_name
+            || source_relation.references_field != source_resource.id_field
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "many_to_many `{}` on resource `{source_resource_name}` requires through field `{}` on `{}` to reference `{}.{}`",
+                    document.name,
+                    document.source_field,
+                    through_resource.table_name,
+                    source_resource.table_name,
+                    source_resource.id_field
+                ),
+            ));
+        }
+
+        let target_field = through_resource
+            .find_field(document.target_field.as_str())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "many_to_many `{}` on resource `{source_resource_name}` references unknown through field `{}` on `{}`",
+                        document.name, document.target_field, through_resource.table_name
+                    ),
+                )
+            })?;
+        let target_relation = target_field.relation.as_ref().ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "many_to_many `{}` on resource `{source_resource_name}` requires through field `{}` on `{}` to declare a relation",
+                    document.name, document.target_field, through_resource.table_name
+                ),
+            )
+        })?;
+        if target_relation.references_table != target_resource.table_name
+            || target_relation.references_field != target_resource.id_field
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "many_to_many `{}` on resource `{source_resource_name}` requires through field `{}` on `{}` to reference `{}.{}`",
+                    document.name,
+                    document.target_field,
+                    through_resource.table_name,
+                    target_resource.table_name,
+                    target_resource.id_field
+                ),
+            ));
+        }
+
+        relations.push(super::model::ManyToManySpec {
+            name: document.name.clone(),
+            target_table: target_resource.table_name.clone(),
+            through_table: through_resource.table_name.clone(),
+            source_field: document.source_field.clone(),
+            target_field: document.target_field.clone(),
+        });
+    }
+
+    Ok(relations)
+}
+
+fn resolve_resource_selector<'a>(
+    resources: &'a [ResourceSpec],
+    selector: &str,
+    context: &str,
+) -> syn::Result<&'a ResourceSpec> {
+    resources
+        .iter()
+        .find(|resource| {
+            resource.struct_ident == sanitize_struct_ident(selector, Span::call_site())
+                || resource.table_name == selector
+        })
+        .ok_or_else(|| {
+            syn::Error::new(
+                Span::call_site(),
+                format!("{context} references unknown resource `{selector}`"),
+            )
+        })
 }
 
 fn apply_resource_api_projections(
@@ -4163,7 +4598,9 @@ mod tests {
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
                 api: None,
+                use_mixins: Vec::new(),
                 indexes: Vec::new(),
+                many_to_many: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4216,7 +4653,9 @@ mod tests {
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
                 api: None,
+                use_mixins: Vec::new(),
                 indexes: Vec::new(),
+                many_to_many: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4324,7 +4763,9 @@ mod tests {
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
                 api: None,
+                use_mixins: Vec::new(),
                 indexes: Vec::new(),
+                many_to_many: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4414,7 +4855,9 @@ mod tests {
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
                 api: None,
+                use_mixins: Vec::new(),
                 indexes: Vec::new(),
+                many_to_many: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4500,7 +4943,9 @@ mod tests {
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
                 api: None,
+                use_mixins: Vec::new(),
                 indexes: Vec::new(),
+                many_to_many: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -4845,6 +5290,235 @@ resources: [
     }
 
     #[test]
+    fn parses_resource_many_to_many_definitions() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        many_to_many: [
+            {
+                name: "tags"
+                target: "Tag"
+                through: "PostTag"
+                source_field: "post_id"
+                target_field: "tag_id"
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "Tag"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "name", type: String }
+        ]
+    }
+    {
+        name: "PostTag"
+        table: "post_tag"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "post_id", type: I64, relation: { references: "post.id" } }
+            { name: "tag_id", type: I64, relation: { references: "tag.id" } }
+        ]
+    }
+]
+"#,
+        );
+        let resources = build_resources(DbBackend::Sqlite, document.resources)
+            .expect("resources should build");
+        let post = resources
+            .iter()
+            .find(|resource| resource.table_name == "post")
+            .expect("post resource should exist");
+
+        assert_eq!(post.many_to_many.len(), 1);
+        assert_eq!(
+            post.many_to_many[0],
+            super::super::model::ManyToManySpec {
+                name: "tags".to_owned(),
+                target_table: "tag".to_owned(),
+                through_table: "post_tag".to_owned(),
+                source_field: "post_id".to_owned(),
+                target_field: "tag_id".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_many_to_many_with_wrong_join_relation() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        many_to_many: [
+            {
+                name: "tags"
+                target: "Tag"
+                through: "PostTag"
+                source_field: "post_id"
+                target_field: "tag_id"
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "Tag"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "name", type: String }
+        ]
+    }
+    {
+        name: "PostTag"
+        table: "post_tag"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "post_id", type: I64, relation: { references: "tag.id" } }
+            { name: "tag_id", type: I64, relation: { references: "tag.id" } }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("many_to_many with wrong join relation should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires through field `post_id` on `post_tag` to reference `post.id`")
+        );
+    }
+
+    #[test]
+    fn expands_local_mixins_into_resource_fields_and_indexes() {
+        let document = parse_document(
+            r#"
+mixins: {
+    Timestamps: {
+        fields: {
+            created_at: { type: DateTime, generated: CreatedAt }
+            updated_at: { type: DateTime, generated: UpdatedAt }
+        }
+    }
+    TenantSlug: {
+        indexes: [
+            { fields: ["tenant_id", "slug"], unique: true }
+        ]
+        fields: {
+            tenant_id: I64
+            slug: { type: String, unique: true }
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        use: ["Timestamps", "TenantSlug"]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let mixins = build_mixins(document.mixins).expect("mixins should build");
+        let expanded_resources =
+            expand_resource_mixins(document.resources, &mixins).expect("resources should expand");
+        let resources =
+            build_resources_with_enums(DbBackend::Sqlite, expanded_resources, &[])
+                .expect("resources should build");
+        let resource = &resources[0];
+
+        assert!(resource.find_field("tenant_id").is_some());
+        assert!(resource.find_field("slug").is_some());
+        assert!(resource.find_field("created_at").is_some());
+        assert!(resource.find_field("updated_at").is_some());
+        assert!(
+            resource
+                .find_field("slug")
+                .expect("slug field should exist")
+                .unique
+        );
+        assert_eq!(
+            resource.indexes,
+            vec![IndexSpec {
+                fields: vec!["tenant_id".to_owned(), "slug".to_owned()],
+                unique: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_mixin_reference() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        use: ["MissingMixin"]
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        );
+        let mixins = build_mixins(document.mixins).expect("mixins should build");
+        let error = match expand_resource_mixins(document.resources, &mixins) {
+            Ok(_) => panic!("unknown mixin should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("references unknown mixin `MissingMixin`"));
+    }
+
+    #[test]
+    fn rejects_mixin_index_referencing_resource_local_field() {
+        let document = parse_document(
+            r#"
+mixins: {
+    TenantSlug: {
+        indexes: [
+            { fields: ["tenant_id", "slug"], unique: true }
+        ]
+        fields: {
+            slug: String
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        use: ["TenantSlug"]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "tenant_id", type: I64 }
+        ]
+    }
+]
+"#,
+        );
+        let error = match build_mixins(document.mixins) {
+            Ok(_) => panic!("mixin index should be local-only"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("mixin `TenantSlug` index references unknown mixin field `tenant_id`")
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_field_api_names_on_single_resource() {
         let document = parse_document(
             r#"
@@ -5030,7 +5704,9 @@ resources: [
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
                 api: None,
+                use_mixins: Vec::new(),
                 indexes: Vec::new(),
+                many_to_many: Vec::new(),
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),

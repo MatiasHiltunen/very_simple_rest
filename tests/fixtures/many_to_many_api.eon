@@ -1,0 +1,54 @@
+module: "many_to_many_api"
+resources: [
+    {
+        name: "Post"
+        api_name: "posts"
+        many_to_many: [
+            {
+                name: "tags"
+                target: "Tag"
+                through: "PostTag"
+                source_field: "post_id"
+                target_field: "tag_id"
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "Tag"
+        api_name: "tags"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "name", type: String }
+        ]
+    }
+    {
+        name: "PostTag"
+        table: "post_tag"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "post_id"
+                type: I64
+                relation: {
+                    references: "post.id"
+                    on_delete: Cascade
+                }
+            }
+            {
+                name: "tag_id"
+                type: I64
+                relation: {
+                    references: "tag.id"
+                    on_delete: Cascade
+                }
+            }
+        ]
+        indexes: [
+            { fields: ["post_id", "tag_id"], unique: true }
+        ]
+    }
+]

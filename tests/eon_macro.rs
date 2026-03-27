@@ -16,6 +16,7 @@ rest_api_from_eon!("tests/fixtures/runtime_api.eon");
 rest_api_from_eon!("tests/fixtures/auth_claims_api.eon");
 rest_api_from_eon!("tests/fixtures/authorization_contract_api.eon");
 rest_api_from_eon!("tests/fixtures/hybrid_runtime_api.eon");
+rest_api_from_eon!("tests/fixtures/mixin_fields_api.eon");
 
 #[test]
 fn eon_macro_generates_models_dtos_and_configure_functions() {
@@ -379,6 +380,38 @@ fn eon_macro_supports_resource_and_field_map_definitions() {
     };
 
     let _ = (post, create, query, response);
+}
+
+#[test]
+fn eon_macro_expands_local_mixins_into_generated_types() {
+    let post = mixin_fields_api::Post {
+        id: Some(1),
+        title: "Mixed".to_owned(),
+        tenant_id: 42,
+        slug: "mixed".to_owned(),
+        created_at: Some(
+            "2026-03-27T10:00:00Z"
+                .parse::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>()
+                .expect("datetime should parse"),
+        ),
+        updated_at: Some(
+            "2026-03-27T10:30:00Z"
+                .parse::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>()
+                .expect("datetime should parse"),
+        ),
+    };
+    let create = mixin_fields_api::PostCreate {
+        title: "Mixed".to_owned(),
+        tenant_id: 42,
+        slug: "mixed".to_owned(),
+    };
+    let update = mixin_fields_api::PostUpdate {
+        title: "Updated".to_owned(),
+        tenant_id: 42,
+        slug: "updated".to_owned(),
+    };
+
+    let _ = (post, create, update);
 }
 
 #[test]
