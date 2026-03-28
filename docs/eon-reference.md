@@ -412,7 +412,7 @@ Static mounts are resolved relative to the `.eon` file and must stay inside the 
 
 ## Storage
 
-The optional `storage` block declares named object-storage backends and public read-only mounts. The current runtime supports a local filesystem backend, backed internally by the shared storage runtime, and can expose those objects under explicit public URL prefixes.
+The optional `storage` block declares named object-storage backends, public read-only mounts, and upload endpoints. The current runtime supports a local filesystem backend, backed internally by the shared storage runtime, can expose those objects under explicit public URL prefixes, and can accept multipart uploads into declared backends.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -425,6 +425,14 @@ The optional `storage` block declares named object-storage backends and public r
 | storage.public_mounts[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
 | storage.public_mounts[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix inside the selected backend before mapping requests to objects. |
 | storage.public_mounts[].cache | Enum | Revalidate | No | NoStore, Revalidate, Immutable | Uses the same cache semantics as static mounts. |
+| storage.uploads | List<Upload> | No upload endpoints | No | Upload endpoint objects | Upload paths live under `/api` and cannot collide with resource route segments or the built-in `/api/auth` namespace. |
+| storage.uploads[].name | String | None | Yes | Upload endpoint name | Used for docs/OpenAPI metadata and must be unique. |
+| storage.uploads[].path | String | None | Yes | Relative API path segment | Mounted as `POST /api/<path>` and must stay within the API scope. |
+| storage.uploads[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
+| storage.uploads[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix before writing uploaded objects into the backend. |
+| storage.uploads[].max_bytes | Integer | 26214400 | No | Positive integer | Maximum accepted multipart file size in bytes. |
+| storage.uploads[].require_auth | Bool | true | No | true, false | When `true`, the upload route requires a valid bearer token even if no roles are listed. |
+| storage.uploads[].roles | List<String> | No role restriction | No | Role names | If present, the authenticated user must have at least one matching role. |
 
 ## Database Engine
 

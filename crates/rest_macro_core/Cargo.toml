@@ -21,6 +21,7 @@ mysql = ["sqlx/mysql"]
 actix-cors.workspace = true
 actix-web.workspace = true
 actix-files.workspace = true
+actix-multipart = "0.7"
 serde.workspace = true
 sqlx.workspace = true
 sqlx-core = "0.8.6"

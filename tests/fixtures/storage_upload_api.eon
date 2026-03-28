@@ -1,0 +1,34 @@
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: Local
+            dir: "var/uploads"
+        }
+    ]
+    public_mounts: [
+        {
+            mount: "/uploads"
+            backend: "uploads"
+            cache: Revalidate
+        }
+    ]
+    uploads: [
+        {
+            name: "asset_upload"
+            path: "uploads"
+            backend: "uploads"
+            max_bytes: 1048576
+            roles: ["user"]
+        }
+    ]
+}
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

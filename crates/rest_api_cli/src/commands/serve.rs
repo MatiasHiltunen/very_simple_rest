@@ -27,7 +27,8 @@ use rest_macro_core::db::{DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
 use rest_macro_core::storage::{
-    StoragePublicMount, StorageRegistry, configure_public_mounts_with_runtime,
+    StoragePublicMount, StorageRegistry, StorageUploadEndpoint,
+    configure_public_mounts_with_runtime, configure_upload_endpoints_with_runtime,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -210,6 +211,7 @@ struct DynamicService {
     static_mounts: Arc<Vec<StaticMount>>,
     storage_registry: Arc<StorageRegistry>,
     storage_public_mounts: Arc<Vec<StoragePublicMount>>,
+    storage_uploads: Arc<Vec<StorageUploadEndpoint>>,
 }
 
 impl DynamicService {
@@ -233,6 +235,7 @@ impl DynamicService {
                 .map_err(|error| anyhow!("storage configuration error: {error}"))?,
         );
         let storage_public_mounts = Arc::new(service.storage.public_mounts.clone());
+        let storage_uploads = Arc::new(service.storage.uploads.clone());
 
         Ok(Self {
             runtime: service.runtime.clone(),
@@ -247,6 +250,7 @@ impl DynamicService {
             static_mounts,
             storage_registry,
             storage_public_mounts,
+            storage_uploads,
         })
     }
 }
@@ -777,10 +781,20 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
     let security = dynamic_service.security.clone();
     let pool = state.pool.clone();
     let authorization_runtime = state.authorization_runtime.clone();
+    let storage_registry = dynamic_service.storage_registry.clone();
+    let storage_public_mounts = dynamic_service.storage_public_mounts.clone();
+    let storage_uploads = dynamic_service.storage_uploads.clone();
     scope = scope.configure(move |cfg| {
         rest_macro_core::security::configure_scope_security(cfg, &security);
         cfg.app_data(web::Data::new(state.clone()));
         cfg.app_data(web::Data::new(authorization_runtime.clone()));
+        configure_upload_endpoints_with_runtime(
+            cfg,
+            storage_registry.as_ref(),
+            storage_public_mounts.as_slice(),
+            storage_uploads.as_slice(),
+            &dynamic_service.runtime,
+        );
         if dynamic_service.include_builtin_auth {
             auth::auth_routes_with_settings(
                 cfg,
@@ -5657,5 +5671,54 @@ mod tests {
         assert_eq!(body.as_ref(), b"hello native storage");
 
         let _ = fs::remove_file(file_path);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_accepts_storage_uploads() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+
+        let uploads_dir = fixture_path("var/uploads");
+        fs::create_dir_all(&uploads_dir).expect("uploads dir should exist");
+
+        let (dynamic_service, state) = build_test_state("storage_upload_api.eon", false).await;
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+
+        let boundary = "----vsr-native-upload";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"native.txt\"\r\nContent-Type: text/plain\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        payload.extend_from_slice(b"hello native upload");
+        payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let request = test::TestRequest::post()
+            .uri("/api/uploads")
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", issue_token(1, &["user"]).as_str()),
+            ))
+            .insert_header(("Content-Type", format!("multipart/form-data; boundary={boundary}")))
+            .set_payload(payload)
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: rest_macro_core::storage::StorageUploadResponse =
+            test::read_body_json(response).await;
+        assert_eq!(body.backend, "uploads");
+        assert_eq!(body.file_name, "native.txt");
+        assert_eq!(body.size_bytes, 19);
+        let stored_path = uploads_dir.join(&body.object_key);
+        assert!(stored_path.is_file(), "uploaded object should exist on disk");
+        let _ = fs::remove_file(stored_path);
     }
 }

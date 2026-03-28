@@ -213,6 +213,24 @@ pub fn expand_service_module(
             );
         }
     };
+    let configure_storage_uploads = if service.storage.uploads.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            let storage = storage();
+            let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
+                &storage,
+            )
+            .expect("generated storage config should be valid");
+            #runtime_crate::core::storage::configure_upload_endpoints_with_runtime(
+                cfg,
+                &storage_registry,
+                storage.public_mounts.as_slice(),
+                storage.uploads.as_slice(),
+                &runtime(),
+            );
+        }
+    };
     let configure_static_mounts = if service.static_mounts.is_empty() {
         quote! {}
     } else {
@@ -264,6 +282,7 @@ pub fn expand_service_module(
             pub fn configure(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
                 let db = db.into();
                 cfg.app_data(web::Data::new(authorization_runtime(db.clone())));
+                #configure_storage_uploads
                 #(#configure_calls)*
                 configure_security(cfg);
                 if #authorization_management_enabled {
@@ -1077,11 +1096,36 @@ fn storage_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
             }
         }
     });
+    let uploads = service.storage.uploads.iter().map(|upload| {
+        let name = Literal::string(&upload.name);
+        let path = Literal::string(&upload.path);
+        let backend = Literal::string(&upload.backend);
+        let key_prefix = Literal::string(&upload.key_prefix);
+        let max_bytes = upload.max_bytes;
+        let require_auth = upload.require_auth;
+        let roles = upload.roles.iter().map(|role| {
+            let role = Literal::string(role);
+            quote!(#role.to_owned())
+        });
+
+        quote! {
+            #runtime_crate::core::storage::StorageUploadEndpoint {
+                name: #name.to_owned(),
+                path: #path.to_owned(),
+                backend: #backend.to_owned(),
+                key_prefix: #key_prefix.to_owned(),
+                max_bytes: #max_bytes,
+                require_auth: #require_auth,
+                roles: vec![#(#roles),*],
+            }
+        }
+    });
 
     quote! {
         #runtime_crate::core::storage::StorageConfig {
             backends: vec![#(#backends),*],
             public_mounts: vec![#(#public_mounts),*],
+            uploads: vec![#(#uploads),*],
         }
     }
 }

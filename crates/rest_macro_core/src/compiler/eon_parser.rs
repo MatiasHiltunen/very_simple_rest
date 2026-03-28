@@ -56,7 +56,10 @@ use crate::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
     },
-    storage::{StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount},
+    storage::{
+        StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
+        StorageUploadEndpoint,
+    },
     tls::{
         DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
         DEFAULT_TLS_KEY_PATH_ENV, TlsConfig,
@@ -463,6 +466,8 @@ struct StorageDocument {
     backends: Vec<StorageBackendDocument>,
     #[serde(default)]
     public_mounts: Vec<StoragePublicMountDocument>,
+    #[serde(default)]
+    uploads: Vec<StorageUploadDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -480,6 +485,21 @@ struct StoragePublicMountDocument {
     prefix: Option<String>,
     #[serde(default)]
     cache: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct StorageUploadDocument {
+    name: String,
+    path: String,
+    backend: String,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    max_bytes: Option<usize>,
+    #[serde(default)]
+    require_auth: Option<bool>,
+    #[serde(default)]
+    roles: Vec<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -1577,6 +1597,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             "service config must contain at least one resource",
         ));
     }
+    validate_storage_upload_routes(&storage, &resources)?;
     validate_policy_claim_sources(&resources, &security, span)?;
     validate_authorization_contract(&authorization, &resources, span)?;
 
@@ -4238,6 +4259,7 @@ fn parse_storage_document(
     service_root: &Path,
     storage: Option<StorageDocument>,
 ) -> syn::Result<StorageConfig> {
+    const DEFAULT_STORAGE_UPLOAD_MAX_BYTES: usize = 25 * 1024 * 1024;
     let service_root = service_root
         .canonicalize()
         .unwrap_or_else(|_| service_root.to_path_buf());
@@ -4311,9 +4333,67 @@ fn parse_storage_document(
         });
     }
 
+    let mut uploads = Vec::with_capacity(storage.uploads.len());
+    let mut seen_upload_names = HashSet::new();
+    let mut seen_upload_paths = HashSet::new();
+    for upload in storage.uploads {
+        let upload_name = upload.name.trim();
+        if upload_name.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "storage upload name cannot be empty",
+            ));
+        }
+        if !seen_upload_names.insert(upload_name.to_owned()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate storage upload `{upload_name}`"),
+            ));
+        }
+        let path = normalize_storage_upload_path(&upload.path)?;
+        if !seen_upload_paths.insert(path.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate storage upload path `{path}`"),
+            ));
+        }
+
+        let backend = upload.backend.trim();
+        if backend.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("storage upload `{upload_name}` must reference a backend"),
+            ));
+        }
+        if !seen_backend_names.contains(backend) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("storage upload `{upload_name}` references unknown backend `{backend}`"),
+            ));
+        }
+        let max_bytes = upload.max_bytes.unwrap_or(DEFAULT_STORAGE_UPLOAD_MAX_BYTES);
+        if max_bytes == 0 {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("storage upload `{upload_name}` must allow at least 1 byte"),
+            ));
+        }
+
+        uploads.push(StorageUploadEndpoint {
+            name: upload_name.to_owned(),
+            path,
+            backend: backend.to_owned(),
+            key_prefix: validate_storage_key_prefix(upload.prefix.as_deref())?,
+            max_bytes,
+            require_auth: upload.require_auth.unwrap_or(true),
+            roles: upload.roles,
+        });
+    }
+
     Ok(StorageConfig {
         backends,
         public_mounts,
+        uploads,
     })
 }
 
@@ -4380,6 +4460,38 @@ fn validate_storage_mount_path(mount_path: &str) -> syn::Result<()> {
     }
 
     Ok(())
+}
+
+fn normalize_storage_upload_path(value: &str) -> syn::Result<String> {
+    let trimmed = value.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "storage upload path cannot be empty",
+        ));
+    }
+
+    let path = Path::new(trimmed);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "storage upload path must stay within the API scope",
+        ));
+    }
+
+    if trimmed.contains("//") {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "storage upload path cannot contain `//`",
+        ));
+    }
+
+    Ok(trimmed.to_owned())
 }
 
 fn validate_relative_path(value: &str, label: &str) -> syn::Result<String> {
@@ -4527,6 +4639,35 @@ fn validate_distinct_public_mounts(
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_storage_upload_routes(
+    storage: &StorageConfig,
+    resources: &[ResourceSpec],
+) -> syn::Result<()> {
+    let mut reserved = HashSet::new();
+    reserved.insert("auth".to_owned());
+    for resource in resources {
+        reserved.insert(resource.api_name().to_owned());
+        for relation in &resource.many_to_many {
+            reserved.insert(relation.name.clone());
+        }
+    }
+
+    for upload in &storage.uploads {
+        let first_segment = upload.path.split('/').next().unwrap_or(upload.path.as_str());
+        if reserved.contains(first_segment) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "storage upload path `{}` conflicts with an existing API route segment",
+                    upload.path
+                ),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -9357,6 +9498,105 @@ resources: [
             .expect_err("conflicting mount paths should fail");
         assert!(
             error.to_string().contains("already declared by a static mount"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parses_storage_uploads_from_eon() {
+        let root = temp_root("eon_storage_uploads");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let document = parse_document(
+            r#"
+            storage: {
+                backends: [
+                    {
+                        name: "uploads"
+                        kind: Local
+                        dir: "var/uploads"
+                    }
+                ]
+                uploads: [
+                    {
+                        name: "asset_upload"
+                        path: "uploads"
+                        backend: "uploads"
+                        prefix: "assets"
+                        max_bytes: 4096
+                        require_auth: false
+                        roles: ["editor"]
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    api_name: "posts"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let storage =
+            parse_storage_document(&root, document.storage).expect("storage should parse");
+        assert_eq!(storage.uploads.len(), 1);
+        assert_eq!(storage.uploads[0].name, "asset_upload");
+        assert_eq!(storage.uploads[0].path, "uploads");
+        assert_eq!(storage.uploads[0].backend, "uploads");
+        assert_eq!(storage.uploads[0].key_prefix, "assets");
+        assert_eq!(storage.uploads[0].max_bytes, 4096);
+        assert!(!storage.uploads[0].require_auth);
+        assert_eq!(storage.uploads[0].roles, vec!["editor"]);
+    }
+
+    #[test]
+    fn rejects_storage_upload_paths_that_conflict_with_resource_routes() {
+        let root = temp_root("eon_storage_upload_conflict");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let document = parse_document(
+            r#"
+            storage: {
+                backends: [
+                    {
+                        name: "uploads"
+                        kind: Local
+                        dir: "var/uploads"
+                    }
+                ]
+                uploads: [
+                    {
+                        name: "asset_upload"
+                        path: "posts"
+                        backend: "uploads"
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    api_name: "posts"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let storage =
+            parse_storage_document(&root, document.storage).expect("storage should parse");
+        let resources = build_resources(document.db, document.resources).expect("resources should build");
+        let error = validate_storage_upload_routes(&storage, &resources)
+            .expect_err("conflicting upload route should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with an existing API route segment"),
             "unexpected error: {error}"
         );
     }

@@ -71,6 +71,10 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         .collect::<Vec<_>>();
 
     schemas.insert("ApiErrorResponse".to_owned(), api_error_schema());
+    if !service.storage.uploads.is_empty() {
+        schemas.insert("StorageUploadResponse".to_owned(), storage_upload_response_schema());
+        tags.push(json!({ "name": "Storage" }));
+    }
 
     for resource in &service.resources {
         let name = resource_name(resource);
@@ -151,6 +155,10 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         }
     }
 
+    for upload in &service.storage.uploads {
+        paths.insert(format!("/{}", upload.path), storage_upload_path_item(upload));
+    }
+
     if options.include_builtin_auth {
         tags.push(json!({ "name": "Auth" }));
         tags.push(json!({ "name": "Account" }));
@@ -180,6 +188,55 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
             "schemas": schemas,
         },
         "paths": paths,
+    })
+}
+
+fn storage_upload_path_item(upload: &crate::storage::StorageUploadEndpoint) -> Value {
+    let mut post = json!({
+        "tags": ["Storage"],
+        "summary": format!("Upload file to {}", upload.name),
+        "operationId": format!("upload{}", pascal_case(upload.name.as_str())),
+        "requestBody": {
+            "required": true,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "format": "binary"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "201": {
+                "description": "Upload created",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/StorageUploadResponse"
+                        }
+                    }
+                }
+            },
+            "400": api_error_response("Invalid multipart upload"),
+            "401": api_error_response("Missing or invalid bearer token"),
+            "403": api_error_response("Upload is not allowed for the current user"),
+            "413": api_error_response("Uploaded file exceeds the configured limit"),
+            "500": api_error_response("Unexpected server error"),
+        }
+    });
+    if upload.require_auth || !upload.roles.is_empty() {
+        post["security"] = bearer_security();
+    }
+
+    json!({
+        "post": post,
     })
 }
 
@@ -950,6 +1007,35 @@ fn api_error_schema() -> Value {
         },
         "required": ["code", "message"]
     })
+}
+
+fn storage_upload_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["backend", "object_key", "file_name", "size_bytes"],
+        "properties": {
+            "backend": { "type": "string" },
+            "object_key": { "type": "string" },
+            "public_url": { "type": "string", "nullable": true },
+            "file_name": { "type": "string" },
+            "content_type": { "type": "string", "nullable": true },
+            "size_bytes": { "type": "integer", "format": "int64", "minimum": 0 }
+        }
+    })
+}
+
+fn pascal_case(value: &str) -> String {
+    value
+        .split(['-', '_', '/'])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<String>()
 }
 
 fn bearer_security() -> Value {
@@ -2220,6 +2306,37 @@ mod tests {
         );
         assert_eq!(post_parameters[0]["name"], "context");
         assert_eq!(post_parameters[0]["schema"]["default"], json!("view"));
+    }
+
+    #[test]
+    fn renders_openapi_storage_upload_paths() {
+        let service = load_service_from_path(&fixture_path("storage_upload_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Storage Upload API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["paths"]["/uploads"]["post"]["requestBody"]["content"]["multipart/form-data"]
+                ["schema"]["required"],
+            json!(["file"])
+        );
+        assert_eq!(
+            document["paths"]["/uploads"]["post"]["responses"]["201"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/StorageUploadResponse"
+        );
+        assert_eq!(
+            document["paths"]["/uploads"]["post"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["StorageUploadResponse"]["properties"]["public_url"]["nullable"],
+            json!(true)
+        );
     }
 
     #[test]
