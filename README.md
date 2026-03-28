@@ -100,6 +100,7 @@ log = "0.4"
 The repository includes:
 
 - `examples/template`: the current `.eon`-first starter example used as the reference shape for `vsr init`
+- `examples/cms`: a full contract-first CMS example with a Material studio client and local S3-compatible storage
 - `examples/demo`: the older Rust example binary
 
 To run the starter contract example:
@@ -108,6 +109,17 @@ To run the starter contract example:
 cd examples/template
 cp .env.example .env
 vsr migrate generate --input api.eon --output migrations/0001_init.sql
+vsr serve api.eon
+```
+
+To run the CMS example:
+
+```sh
+cd examples/cms/web
+npm install
+npm run build
+cd ..
+vsr setup
 vsr serve api.eon
 ```
 
@@ -946,6 +958,9 @@ rows, and a static browser client, see `examples/todo_app/`.
 For a real-world single-`.eon` example with public catalog discovery, built-in account
 management, admin-curated thesis topics, owner-scoped collaboration requests, and a same-origin
 browser client, see `examples/bridgeboard/`.
+
+For a larger editorial example with a Material studio client, built-in auth, local object storage,
+and a local S3-compatible upload workflow, see `examples/cms/`.
 
 ## RBAC Attributes
 

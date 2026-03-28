@@ -693,6 +693,19 @@ vsr migrate generate --input api.eon --output migrations/0001_init.sql
 vsr serve api.eon
 ```
 
+### CMS Example
+
+For a larger `.eon`-driven example with a Material studio client and local S3-compatible storage:
+
+```bash
+cd examples/cms/web
+npm install
+npm run build
+cd ..
+vsr setup
+vsr serve api.eon
+```
+
 ### Complete Setup Example
 
 ```bash

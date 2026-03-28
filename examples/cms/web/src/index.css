@@ -1,0 +1,32 @@
+:root {
+  font-family: Roboto, system-ui, sans-serif;
+  color: #102027;
+  background: #f4f7f8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(0, 121, 107, 0.08), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(255, 179, 0, 0.1), transparent 28%),
+    #f4f7f8;
+}
+
+a {
+  color: inherit;
+}
