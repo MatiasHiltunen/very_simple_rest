@@ -44,6 +44,7 @@ These keys are read from the service root.
 | db | Enum | Sqlite | No | Sqlite, Postgres, Mysql | Selects the SQL dialect and resource backend used for generated SQL and handlers. |
 | database | Map | Backend-dependent runtime engine defaults | No | See Database Engine and Resilience | Overrides the runtime database engine and can declare backup/replication posture without changing the resource SQL dialect. |
 | logging | Map | Enabled with built-in defaults | No | See Logging | Controls the emitted server logger configuration. |
+| build | Map | No emitted build-profile overrides | No | See Build | Controls generated release build profile settings and optional local-machine CPU tuning for emitted server projects. |
 | runtime | Map | Compression disabled | No | See Runtime | Controls runtime-only behavior such as HTTP compression. |
 | authorization | Map | No static authorization contract | No | See Authorization Contract | Declares optional static scopes, permissions, and templates for the compiled authorization model. |
 | tls | Map | Disabled unless the block is present | No | See TLS | Any configured TLS field enables HTTPS/Rustls handling in emitted servers. |
@@ -497,6 +498,17 @@ Logging settings are carried into emitted servers and generated projects.
 | logging.filter_env | String | RUST_LOG | No | Environment variable name | Used with `env_logger::Env::filter_or`. |
 | logging.default_filter | String | info | No | Any env_logger filter string | Fallback when the filter env var is absent. |
 | logging.timestamp | Enum | Seconds | No | None, Seconds, Millis, Micros, Nanos | Aliases such as `off`, `sec`, `ms`, `us`, and `ns` are also accepted case-insensitively. |
+
+## Build
+
+Build settings affect generated server projects and `vsr build` output without changing the API contract.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| build.target_cpu_native | Bool | false | No | true, false | When true, emitted projects include `.cargo/config.toml` with `target-cpu=native`. Use only when building and running on the same machine class. |
+| build.release.lto | Bool or Enum | None | No | true, false, Thin, Fat | `true` maps to thin LTO. `false` disables emitted release-profile LTO overrides. |
+| build.release.codegen_units | u32 | None | No | Positive integer | Emits `codegen-units` in `[profile.release]`. Values must be greater than zero. |
+| build.release.strip_debug_symbols | Bool | false | No | true, false | Emits `strip = "debuginfo"` in `[profile.release]` for generated server projects. |
 
 ## Runtime
 

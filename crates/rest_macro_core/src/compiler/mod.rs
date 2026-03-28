@@ -11,13 +11,16 @@ use proc_macro2::TokenStream;
 use std::path::Path as FsPath;
 use syn::{DeriveInput, LitStr, Path};
 
+pub use crate::storage::{
+    StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
+};
 pub use authorization::{compile_resource_authorization, compile_service_authorization};
 pub use model::{
-    ComputedFieldPart, ComputedFieldSpec, DbBackend, EnumSpec, FieldSpec, FieldTransform,
-    FieldValidation, GeneratedTemporalKind, GeneratedValue, IndexSpec, NumericBound,
-    PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
+    BuildConfig, BuildLtoMode, ComputedFieldPart, ComputedFieldSpec, DbBackend, EnumSpec,
+    FieldSpec, FieldTransform, FieldValidation, GeneratedTemporalKind, GeneratedValue, IndexSpec,
+    NumericBound, PolicyAssignment, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
     PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource, ReferentialAction,
-    RelationSpec, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
+    RelationSpec, ReleaseBuildConfig, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
     ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec, ResourceActionTarget,
     ResourceActionValueSpec, ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies,
     ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec, StructuredScalarKind,
@@ -29,9 +32,6 @@ pub use model::{
     supports_sort, temporal_scalar_kind, validate_field_transforms,
 };
 pub use openapi::OpenApiSpecOptions;
-pub use crate::storage::{
-    StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
-};
 
 pub fn expand_derive(input: DeriveInput, runtime_crate: Path) -> syn::Result<TokenStream> {
     let resource = derive_parser::parse_derive_input(input)?;

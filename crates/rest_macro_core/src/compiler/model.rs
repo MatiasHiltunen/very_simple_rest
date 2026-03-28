@@ -612,6 +612,25 @@ pub enum FieldTransform {
     Slugify,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildLtoMode {
+    Thin,
+    Fat,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReleaseBuildConfig {
+    pub lto: Option<BuildLtoMode>,
+    pub codegen_units: Option<u32>,
+    pub strip_debug_symbols: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildConfig {
+    pub target_cpu_native: bool,
+    pub release: ReleaseBuildConfig,
+}
+
 #[derive(Clone)]
 pub struct FieldSpec {
     pub ident: Ident,
@@ -797,6 +816,7 @@ pub struct ServiceSpec {
     pub static_mounts: Vec<StaticMountSpec>,
     pub storage: StorageConfig,
     pub database: DatabaseConfig,
+    pub build: BuildConfig,
     pub logging: LoggingConfig,
     pub runtime: RuntimeConfig,
     pub security: SecurityConfig,
@@ -912,6 +932,7 @@ impl std::fmt::Debug for ServiceSpec {
             .field("static_mounts", &self.static_mounts)
             .field("storage", &self.storage)
             .field("database", &self.database)
+            .field("build", &self.build)
             .field("logging", &self.logging)
             .field("runtime", &self.runtime)
             .field("security", &self.security)
@@ -2549,6 +2570,17 @@ fn auth_claim_type_label(ty: AuthClaimType) -> &'static str {
 }
 
 pub fn validate_runtime_config(_runtime: &RuntimeConfig, _span: Span) -> syn::Result<()> {
+    Ok(())
+}
+
+pub fn validate_build_config(build: &BuildConfig, span: Span) -> syn::Result<()> {
+    if build.release.codegen_units == Some(0) {
+        return Err(syn::Error::new(
+            span,
+            "`build.release.codegen_units` must be greater than zero",
+        ));
+    }
+
     Ok(())
 }
 

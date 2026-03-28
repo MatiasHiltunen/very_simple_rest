@@ -15,23 +15,24 @@ use syn::{LitStr, Type};
 use uuid::Uuid;
 
 use super::model::{
-    DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation, GENERATED_DATE_ALIAS,
-    GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
+    BuildConfig, BuildLtoMode, DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation,
+    GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
     GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
     GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
     PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyValueSource, ReferentialAction, ResourceActionAssignmentSpec,
-    ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
-    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceSpec,
-    ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    PolicyFilterOperator, PolicyValueSource, ReferentialAction, ReleaseBuildConfig,
+    ResourceActionAssignmentSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
+    ResourceActionMethod, ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec,
+    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
     StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
     default_resource_module_ident, infer_generated_value, infer_sql_type, is_json_array_type,
     is_json_object_type, is_json_type, is_list_field, is_optional_type, is_typed_object_field,
     sanitize_module_ident, sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
-    validate_authorization_contract, validate_field_transforms, validate_field_validations,
-    validate_list_config, validate_logging_config, validate_policy_claim_sources,
-    validate_relations, validate_row_policies, validate_runtime_config, validate_security_config,
-    validate_sql_identifier, validate_tls_config,
+    validate_authorization_contract, validate_build_config, validate_field_transforms,
+    validate_field_validations, validate_list_config, validate_logging_config,
+    validate_policy_claim_sources, validate_relations, validate_row_policies,
+    validate_runtime_config, validate_security_config, validate_sql_identifier,
+    validate_tls_config,
 };
 use crate::{
     auth::{
@@ -83,6 +84,8 @@ struct ServiceDocument {
     db: DbBackend,
     #[serde(default)]
     database: Option<DatabaseDocument>,
+    #[serde(default)]
+    build: Option<BuildDocument>,
     #[serde(default)]
     logging: Option<LoggingDocument>,
     #[serde(default)]
@@ -354,6 +357,37 @@ struct LoggingDocument {
     default_filter: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct BuildDocument {
+    #[serde(default)]
+    target_cpu_native: Option<bool>,
+    #[serde(default)]
+    release: Option<ReleaseBuildDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ReleaseBuildDocument {
+    #[serde(default)]
+    lto: Option<BuildLtoDocument>,
+    #[serde(default)]
+    codegen_units: Option<u32>,
+    #[serde(default)]
+    strip_debug_symbols: Option<bool>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(untagged)]
+enum BuildLtoDocument {
+    Bool(bool),
+    Mode(BuildLtoModeDocument),
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+enum BuildLtoModeDocument {
+    Thin,
+    Fat,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -1596,11 +1630,13 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         &module_ident.to_string(),
         span,
     )?;
+    let build = parse_build_document(document.build)?;
     let logging = parse_logging_document(document.logging)?;
     let runtime = parse_runtime_document(document.runtime);
     let authorization = parse_authorization_document(document.authorization)?;
     let tls = parse_tls_document(document.tls)?;
     let security = parse_security_document(document.security, span)?;
+    validate_build_config(&build, span)?;
     validate_logging_config(&logging, span)?;
     validate_runtime_config(&runtime, span)?;
     validate_tls_config(&tls, span)?;
@@ -1628,6 +1664,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             static_mounts,
             storage,
             database,
+            build,
             logging,
             runtime,
             security,
@@ -3508,6 +3545,30 @@ fn parse_logging_document(document: Option<LoggingDocument>) -> syn::Result<Logg
     })
 }
 
+fn parse_build_document(document: Option<BuildDocument>) -> syn::Result<BuildConfig> {
+    let Some(document) = document else {
+        return Ok(BuildConfig::default());
+    };
+
+    let release = document.release.unwrap_or_default();
+    let lto = match release.lto {
+        None => None,
+        Some(BuildLtoDocument::Bool(false)) => None,
+        Some(BuildLtoDocument::Bool(true)) => Some(BuildLtoMode::Thin),
+        Some(BuildLtoDocument::Mode(BuildLtoModeDocument::Thin)) => Some(BuildLtoMode::Thin),
+        Some(BuildLtoDocument::Mode(BuildLtoModeDocument::Fat)) => Some(BuildLtoMode::Fat),
+    };
+
+    Ok(BuildConfig {
+        target_cpu_native: document.target_cpu_native.unwrap_or(false),
+        release: ReleaseBuildConfig {
+            lto,
+            codegen_units: release.codegen_units,
+            strip_debug_symbols: release.strip_debug_symbols.unwrap_or(false),
+        },
+    })
+}
+
 fn parse_runtime_document(document: Option<RuntimeDocument>) -> RuntimeConfig {
     let Some(document) = document else {
         return RuntimeConfig::default();
@@ -4449,7 +4510,10 @@ fn parse_storage_document(
             });
         }
 
-        Some(StorageS3CompatConfig { mount_path, buckets })
+        Some(StorageS3CompatConfig {
+            mount_path,
+            buckets,
+        })
     } else {
         None
     };
@@ -4729,7 +4793,8 @@ fn validate_distinct_public_mounts(
         }
     }
     if let Some(s3_compat) = &storage.s3_compat {
-        if let Some(existing) = mounts.insert(s3_compat.mount_path.as_str(), "storage s3_compat mount")
+        if let Some(existing) =
+            mounts.insert(s3_compat.mount_path.as_str(), "storage s3_compat mount")
         {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -4757,7 +4822,11 @@ fn validate_storage_upload_routes(
     }
 
     for upload in &storage.uploads {
-        let first_segment = upload.path.split('/').next().unwrap_or(upload.path.as_str());
+        let first_segment = upload
+            .path
+            .split('/')
+            .next()
+            .unwrap_or(upload.path.as_str());
         if reserved.contains(first_segment) {
             return Err(syn::Error::new(
                 Span::call_site(),
@@ -7519,6 +7588,7 @@ resources: [
                     Span::call_site(),
                 )
                 .expect("database config should parse"),
+                build: BuildConfig::default(),
                 logging: LoggingConfig::default(),
                 runtime: RuntimeConfig::default(),
                 security: SecurityConfig::default(),
@@ -8209,6 +8279,62 @@ resources: [
         let runtime = parse_runtime_document(document.runtime);
         assert!(runtime.compression.enabled);
         assert!(runtime.compression.static_precompressed);
+    }
+
+    #[test]
+    fn parses_build_config_from_eon() {
+        let document = parse_document(
+            r#"
+            build: {
+                target_cpu_native: true
+                release: {
+                    lto: Thin
+                    codegen_units: 1
+                    strip_debug_symbols: true
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let build = parse_build_document(document.build).expect("build config should parse");
+        assert!(build.target_cpu_native);
+        assert_eq!(build.release.lto, Some(BuildLtoMode::Thin));
+        assert_eq!(build.release.codegen_units, Some(1));
+        assert!(build.release.strip_debug_symbols);
+    }
+
+    #[test]
+    fn rejects_zero_codegen_units_in_build_config() {
+        let document = parse_document(
+            r#"
+            build: {
+                release: {
+                    codegen_units: 0
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+        let build = parse_build_document(document.build).expect("build config should parse");
+        let error = validate_build_config(&build, Span::call_site())
+            .expect_err("zero codegen units should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("`build.release.codegen_units` must be greater than zero")
+        );
     }
 
     #[test]
@@ -9545,7 +9671,9 @@ resources: [
         let error = parse_storage_document(&root, document.storage)
             .expect_err("unknown storage backend should fail");
         assert!(
-            error.to_string().contains("references unknown backend `missing`"),
+            error
+                .to_string()
+                .contains("references unknown backend `missing`"),
             "unexpected error: {error}"
         );
     }
@@ -9598,7 +9726,9 @@ resources: [
         let error = validate_distinct_public_mounts(static_mounts.as_slice(), &storage)
             .expect_err("conflicting mount paths should fail");
         assert!(
-            error.to_string().contains("already declared by a static mount"),
+            error
+                .to_string()
+                .contains("already declared by a static mount"),
             "unexpected error: {error}"
         );
     }
@@ -9691,7 +9821,8 @@ resources: [
 
         let storage =
             parse_storage_document(&root, document.storage).expect("storage should parse");
-        let resources = build_resources(document.db, document.resources).expect("resources should build");
+        let resources =
+            build_resources(document.db, document.resources).expect("resources should build");
         let error = validate_storage_upload_routes(&storage, &resources)
             .expect_err("conflicting upload route should fail");
         assert!(
@@ -9804,7 +9935,9 @@ resources: [
         let error = validate_distinct_public_mounts(static_mounts.as_slice(), &storage)
             .expect_err("conflicting s3 compat mount should fail");
         assert!(
-            error.to_string().contains("mount path `/studio` is already declared"),
+            error
+                .to_string()
+                .contains("mount path `/studio` is already declared"),
             "unexpected error: {error}"
         );
     }

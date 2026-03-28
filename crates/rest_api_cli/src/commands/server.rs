@@ -11,7 +11,7 @@ use flate2::{Compression, write::GzEncoder};
 use rest_macro_core::auth::{
     AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
 };
-use rest_macro_core::compiler::{self, DbBackend, OpenApiSpecOptions, ServiceSpec};
+use rest_macro_core::compiler::{self, BuildLtoMode, DbBackend, OpenApiSpecOptions, ServiceSpec};
 use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
@@ -319,6 +319,7 @@ fn emit_server_project_inner(
         &output_dir.join("Cargo.toml"),
         &render_cargo_toml(&package_name, &service, backend)?,
     )?;
+    write_generated_cargo_config(output_dir, &service)?;
     write_file_if_changed(
         &output_dir.join("src/main.rs"),
         &render_main_rs(&service, &module_name, &eon_file_name, include_builtin_auth),
@@ -373,6 +374,32 @@ fn write_file_if_changed(path: &Path, contents: &str) -> Result<()> {
         return Ok(());
     }
     write_file(path, contents)
+}
+
+fn write_generated_cargo_config(output_dir: &Path, service: &ServiceSpec) -> Result<()> {
+    let config_path = output_dir.join(".cargo/config.toml");
+    if let Some(config) = render_cargo_config_toml(service) {
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent).map_err(Error::Io)?;
+        }
+        write_file_if_changed(&config_path, &config)?;
+    } else if config_path.exists() {
+        fs::remove_file(&config_path).map_err(Error::Io)?;
+    }
+
+    let cargo_dir = output_dir.join(".cargo");
+    if cargo_dir.exists()
+        && fs::read_dir(&cargo_dir)
+            .map_err(Error::Io)?
+            .next()
+            .transpose()
+            .map_err(Error::Io)?
+            .is_none()
+    {
+        fs::remove_dir(&cargo_dir).map_err(Error::Io)?;
+    }
+
+    Ok(())
 }
 
 fn export_generated_runtime_artifacts(
@@ -1096,6 +1123,7 @@ fn render_cargo_toml(
     } else {
         "actix-web = \"4\""
     };
+    let release_profile = render_release_profile_toml(service);
     Ok(format!(
         r#"[package]
 name = "{package_name}"
@@ -1112,8 +1140,45 @@ log = "0.4"
 serde = {{ version = "1", features = ["derive"] }}
 sqlx = {{ version = "0.8.3", features = ["runtime-tokio-native-tls", "any", "macros", "chrono", "{backend_feature}"] }}
 {dependency}
+{release_profile}
 "#
     ))
+}
+
+fn render_release_profile_toml(service: &ServiceSpec) -> String {
+    let release = &service.build.release;
+    if release.lto.is_none() && release.codegen_units.is_none() && !release.strip_debug_symbols {
+        return String::new();
+    }
+
+    let mut profile = String::from("\n[profile.release]\n");
+    if let Some(lto) = release.lto {
+        let value = match lto {
+            BuildLtoMode::Thin => "thin",
+            BuildLtoMode::Fat => "fat",
+        };
+        profile.push_str(&format!("lto = \"{value}\"\n"));
+    }
+    if let Some(codegen_units) = release.codegen_units {
+        profile.push_str(&format!("codegen-units = {codegen_units}\n"));
+    }
+    if release.strip_debug_symbols {
+        profile.push_str("strip = \"debuginfo\"\n");
+    }
+    profile
+}
+
+fn render_cargo_config_toml(service: &ServiceSpec) -> Option<String> {
+    if !service.build.target_cpu_native {
+        return None;
+    }
+
+    Some(
+        r#"[build]
+rustflags = ["-C", "target-cpu=native"]
+"#
+        .to_owned(),
+    )
 }
 
 fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Result<String> {
@@ -1427,6 +1492,7 @@ fn render_project_readme(
         }
     };
     let tls_note = render_project_tls_note(service);
+    let build_note = render_project_build_note(service);
     let security_note = render_project_security_note(service);
     let logging_note = render_project_logging_note(service);
     let run_hint = if service.tls.is_enabled() {
@@ -1442,6 +1508,7 @@ Backend: `{}`\n\n\
 {}\
 {}\
 {}\
+{}\
 {}\n\
 The generated server serves `openapi.json` at `/openapi.json` and Swagger UI at `/docs`.\n\
 {}\
@@ -1452,6 +1519,7 @@ cp .env.example .env\n\
         backend_feature_name(backend),
         database_note,
         tls_note,
+        build_note,
         logging_note,
         security_note,
         auth_note,
@@ -1580,6 +1648,42 @@ fn render_project_logging_note(service: &ServiceSpec) -> String {
         "Compiled logging defaults: `{}` falls back to `{}` with {}.\n",
         service.logging.filter_env, service.logging.default_filter, timestamp
     )
+}
+
+fn render_project_build_note(service: &ServiceSpec) -> String {
+    let mut features = Vec::new();
+
+    if let Some(lto) = service.build.release.lto {
+        let label = match lto {
+            BuildLtoMode::Thin => "thin LTO",
+            BuildLtoMode::Fat => "fat LTO",
+        };
+        features.push(label.to_owned());
+    }
+    if let Some(codegen_units) = service.build.release.codegen_units {
+        features.push(format!("codegen-units = {codegen_units}"));
+    }
+    if service.build.release.strip_debug_symbols {
+        features.push("strip debug symbols".to_owned());
+    }
+
+    let mut note = String::new();
+    if !features.is_empty() {
+        note.push_str(&format!(
+            "Compiled release build defaults: {}.\n",
+            features.join(", ")
+        ));
+    }
+    if service.build.target_cpu_native {
+        note.push_str(
+            "Compiled build target defaults: local `target-cpu=native` is enabled through `.cargo/config.toml`; use it only when building and running on the same machine class.\n",
+        );
+    }
+    if !note.is_empty() {
+        note.push('\n');
+    }
+
+    note
 }
 
 fn backend_feature_name(backend: DbBackend) -> &'static str {
@@ -2245,6 +2349,34 @@ mod tests {
         let env_example = read_to_string(&root.join(".env.example"));
         assert!(env_example.contains("sqlite:var/data/turso_local.db?mode=rwc"));
         assert!(env_example.contains("Local Turso bootstrap"));
+    }
+
+    #[test]
+    fn emit_server_project_wires_build_profile_overrides_from_eon() {
+        let root = test_root();
+        emit_server_project(
+            &fixture_path("build_config_api.eon"),
+            &root,
+            Some("build-config-server".to_owned()),
+            false,
+            false,
+        )
+        .expect("build-config server project should emit");
+
+        let cargo_toml = read_to_string(&root.join("Cargo.toml"));
+        assert!(cargo_toml.contains("[profile.release]"));
+        assert!(cargo_toml.contains("lto = \"thin\""));
+        assert!(cargo_toml.contains("codegen-units = 1"));
+        assert!(cargo_toml.contains("strip = \"debuginfo\""));
+
+        let cargo_config = read_to_string(&root.join(".cargo/config.toml"));
+        assert!(cargo_config.contains("target-cpu=native"));
+
+        let readme = read_to_string(&root.join("README.md"));
+        assert!(readme.contains(
+            "Compiled release build defaults: thin LTO, codegen-units = 1, strip debug symbols."
+        ));
+        assert!(readme.contains("target-cpu=native"));
     }
 
     #[test]

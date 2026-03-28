@@ -146,6 +146,14 @@ object or just a type such as `title: String`.",
                 "Controls the emitted server logger configuration.",
             ),
             row(
+                "build",
+                "Map",
+                "No emitted build-profile overrides",
+                "No",
+                "See Build",
+                "Controls generated release build profile settings and optional local-machine CPU tuning for emitted server projects.",
+            ),
+            row(
                 "runtime",
                 "Map",
                 "Compression disabled",
@@ -1731,6 +1739,46 @@ referenced by `exists` conditions.\n\n",
 
     push_section(
         &mut markdown,
+        "Build",
+        "Build settings affect generated server projects and `vsr build` output without changing the API contract.",
+        &[
+            row(
+                "build.target_cpu_native",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "When true, emitted projects include `.cargo/config.toml` with `target-cpu=native`. Use only when building and running on the same machine class.",
+            ),
+            row(
+                "build.release.lto",
+                "Bool or Enum",
+                "None",
+                "No",
+                "true, false, Thin, Fat",
+                "`true` maps to thin LTO. `false` disables emitted release-profile LTO overrides.",
+            ),
+            row(
+                "build.release.codegen_units",
+                "u32",
+                "None",
+                "No",
+                "Positive integer",
+                "Emits `codegen-units` in `[profile.release]`. Values must be greater than zero.",
+            ),
+            row(
+                "build.release.strip_debug_symbols",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "Emits `strip = \"debuginfo\"` in `[profile.release]` for generated server projects.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
         "Runtime",
         "Runtime settings affect server behavior without changing the data model.",
         &[
@@ -2764,6 +2812,8 @@ mod tests {
         assert!(markdown.contains("## Auth Claims"));
         assert!(markdown.contains("authorization.permissions.<permission_name>.actions"));
         assert!(markdown.contains("database.resilience.backup.mode"));
+        assert!(markdown.contains("build.release.lto"));
+        assert!(markdown.contains("build.target_cpu_native"));
         assert!(markdown.contains("runtime.compression.static_precompressed"));
         assert!(markdown.contains("security.auth.claims.<claim_name>"));
         assert!(markdown.contains("fields: {"));
@@ -2777,6 +2827,7 @@ mod tests {
         generate_eon_reference(&output, false).expect("docs should generate");
 
         let markdown = read_to_string(&output);
+        assert!(markdown.contains("## Build"));
         assert!(markdown.contains("## Runtime"));
         assert!(markdown.contains("## Auth Email Provider"));
     }

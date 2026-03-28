@@ -1,0 +1,18 @@
+build: {
+    target_cpu_native: true
+    release: {
+        lto: Thin
+        codegen_units: 1
+        strip_debug_symbols: true
+    }
+}
+
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
