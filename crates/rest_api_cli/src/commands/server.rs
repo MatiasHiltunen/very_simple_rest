@@ -1,23 +1,23 @@
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
 use brotli::CompressorWriter;
 use colored::Colorize;
-use flate2::{Compression, write::GzEncoder};
+use flate2::{write::GzEncoder, Compression};
 use rest_macro_core::auth::{
-    AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
+    auth_management_migration_sql, auth_migration_sql, AuthDbBackend, AuthEmailProvider,
 };
 use rest_macro_core::compiler::{self, DbBackend, OpenApiSpecOptions, ServiceSpec};
-use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
+use rest_macro_core::database::{sqlite_url_for_path, DatabaseEngine};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
     DEFAULT_TLS_KEY_PATH_ENV,
 };
-use syn::{parse_str, parse2};
+use syn::{parse2, parse_str};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -31,6 +31,12 @@ const PRECOMPRESSED_GZIP_SUFFIX: &str = ".gz";
 const BROTLI_BUFFER_SIZE: usize = 4096;
 const BROTLI_QUALITY: u32 = 5;
 const BROTLI_LGWIN: u32 = 22;
+
+struct BuildCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
 
 pub fn emit_server_project(
     input: &Path,
@@ -147,10 +153,20 @@ pub fn build_server_binary(
             .join(Uuid::new_v4().to_string()),
     };
 
+    println!(
+        "{} {}",
+        "Generating temporary server project in".cyan().bold(),
+        build_root.display()
+    );
     let emitted =
         emit_server_project_inner(input, &build_root, package_name, include_builtin_auth, true)?;
 
     let target_dir = emitted.project_dir.join("target");
+    println!(
+        "{} {}",
+        "Running cargo build in".cyan().bold(),
+        emitted.project_dir.display()
+    );
     let output_result = run_generated_project_build(
         &emitted.project_dir,
         &target_dir,
@@ -184,7 +200,17 @@ pub fn build_server_binary(
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(Error::Io)?;
     }
+    println!(
+        "{} {}",
+        "Copying built binary to".cyan().bold(),
+        output.display()
+    );
     fs::copy(&binary_path, output).map_err(Error::Io)?;
+    println!(
+        "{} {}",
+        "Exporting runtime artifacts next to".cyan().bold(),
+        output.display()
+    );
     let artifact_dir = export_generated_runtime_artifacts(&emitted.project_dir, output, force)?;
 
     if !keep_build_dir {
@@ -446,7 +472,7 @@ fn run_generated_project_build(
     target_dir: &Path,
     release: bool,
     target: Option<&str>,
-) -> Result<std::process::Output> {
+) -> Result<BuildCommandOutput> {
     for (attempt, delay_ms) in CARGO_BUILD_RETRY_DELAYS_MS
         .iter()
         .copied()
@@ -463,8 +489,33 @@ fn run_generated_project_build(
         }
         command.current_dir(project_dir);
         command.env("CARGO_TARGET_DIR", target_dir);
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
 
-        let output = command.output().map_err(Error::Io)?;
+        let mut child = command.spawn().map_err(Error::Io)?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            Error::Unknown("cargo build child process did not provide stdout".to_owned())
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            Error::Unknown("cargo build child process did not provide stderr".to_owned())
+        })?;
+        let stdout_handle = thread::spawn(move || stream_build_pipe(stdout, false));
+        let stderr_handle = thread::spawn(move || stream_build_pipe(stderr, true));
+
+        let status = child.wait().map_err(Error::Io)?;
+        let stdout = stdout_handle
+            .join()
+            .map_err(|_| Error::Unknown("cargo build stdout reader thread panicked".to_owned()))?
+            .map_err(Error::Io)?;
+        let stderr = stderr_handle
+            .join()
+            .map_err(|_| Error::Unknown("cargo build stderr reader thread panicked".to_owned()))?
+            .map_err(Error::Io)?;
+        let output = BuildCommandOutput {
+            status,
+            stdout,
+            stderr,
+        };
         if output.status.success() {
             return Ok(output);
         }
@@ -484,6 +535,32 @@ fn run_generated_project_build(
     }
 
     unreachable!("retry loop always returns")
+}
+
+fn stream_build_pipe<R: std::io::Read>(reader: R, is_stderr: bool) -> std::io::Result<Vec<u8>> {
+    let mut reader = BufReader::new(reader);
+    let mut captured = Vec::new();
+
+    loop {
+        let mut line = Vec::new();
+        let bytes_read = reader.read_until(b'\n', &mut line)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        captured.extend_from_slice(&line);
+        if is_stderr {
+            let mut stderr = std::io::stderr();
+            stderr.write_all(&line)?;
+            stderr.flush()?;
+        } else {
+            let mut stdout = std::io::stdout();
+            stdout.write_all(&line)?;
+            stdout.flush()?;
+        }
+    }
+
+    Ok(captured)
 }
 
 fn is_text_file_busy_failure(stdout: &str, stderr: &str) -> bool {
@@ -1468,7 +1545,7 @@ mod tests {
     use brotli::Decompressor;
     use flate2::read::GzDecoder;
     use reqwest::blocking::Client;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::fs;
     use std::io::Read;
     use std::net::TcpListener;
@@ -2090,11 +2167,9 @@ mod tests {
         assert!(artifact_dir.join("openapi.json").exists());
         assert!(artifact_dir.join("service.eon").exists());
         assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
-        assert!(
-            artifact_dir
-                .join("migrations/0001_auth_management.sql")
-                .exists()
-        );
+        assert!(artifact_dir
+            .join("migrations/0001_auth_management.sql")
+            .exists());
     }
 
     #[test]
@@ -2573,13 +2648,11 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(
-            output
-                .parent()
-                .expect("binary output should have a parent")
-                .join("blog-server.bundle/.env.example")
-                .exists()
-        );
+        assert!(output
+            .parent()
+            .expect("binary output should have a parent")
+            .join("blog-server.bundle/.env.example")
+            .exists());
     }
 
     #[test]
@@ -2605,12 +2678,10 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(
-            output
-                .parent()
-                .expect("binary output should have a parent")
-                .join("turso-encrypted-server.bundle/.env.example")
-                .exists()
-        );
+        assert!(output
+            .parent()
+            .expect("binary output should have a parent")
+            .join("turso-encrypted-server.bundle/.env.example")
+            .exists());
     }
 }
