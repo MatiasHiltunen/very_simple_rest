@@ -61,6 +61,7 @@ import {
   ApiError,
   clearAuthToken,
   createResource,
+  deleteLocalObject,
   deleteResource,
   getAuthenticatedAccount,
   listResource,
@@ -70,6 +71,7 @@ import {
   readAuthToken,
   runResourceAction,
   setUnauthorizedHandler,
+  updateManagedUser,
   uploadLocalObject,
   updateResource,
   type AuthMeResponse,
@@ -88,7 +90,7 @@ import {
 
 type ResourceRow = Record<string, unknown>;
 type DraftState = Record<string, string>;
-type Notice = { severity: 'success' | 'error'; message: string } | null;
+type Notice = { severity: 'success' | 'error' | 'warning' | 'info'; message: string } | null;
 type FieldErrors = Record<string, string>;
 type RelationOption = { id: string; label: string; description?: string };
 type BlockDraft = {
@@ -312,6 +314,93 @@ function mergeAssetMetadataDraft(
   return currentValue;
 }
 
+function deriveWorkspaceSeed(account: AuthMeResponse): {
+  name: string;
+  slug: string;
+  defaultLocale: string;
+  publicBaseUrl: string;
+} {
+  const localPart = (account.email ?? 'editor')
+    .split('@')[0]
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, ' ')
+    .trim();
+  const normalized = localPart || 'editorial team';
+  const slug = normalized
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  const title = normalized
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+  return {
+    name: `${title} Workspace`,
+    slug: `${slug || 'editorial'}-studio`,
+    defaultLocale: 'en',
+    publicBaseUrl: `https://${slug || 'editorial'}.local`,
+  };
+}
+
+function localStorageObjectForAsset(
+  row: ResourceRow,
+): { bucket: string; objectKey: string; publicUrl?: string } | null {
+  const metadata = row.metadata;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    const metadataRecord = metadata as Record<string, unknown>;
+    const bucket = typeof metadataRecord.storage_bucket === 'string'
+      ? metadataRecord.storage_bucket
+      : typeof metadataRecord.bucket === 'string'
+        ? metadataRecord.bucket
+        : null;
+    const objectKey =
+      typeof metadataRecord.object_key === 'string' ? metadataRecord.object_key : null;
+    if (bucket && objectKey) {
+      return {
+        bucket,
+        objectKey,
+        publicUrl:
+          typeof row.delivery_url === 'string'
+            ? row.delivery_url
+            : typeof row.source_url === 'string'
+              ? row.source_url
+              : undefined,
+      };
+    }
+  }
+
+  const sourceUrl =
+    typeof row.source_url === 'string'
+      ? row.source_url
+      : typeof row.delivery_url === 'string'
+        ? row.delivery_url
+        : null;
+  if (!sourceUrl || !sourceUrl.startsWith('/uploads/assets/')) {
+    return null;
+  }
+
+  return {
+    bucket: 'media',
+    objectKey: sourceUrl.slice('/uploads/assets/'.length),
+    publicUrl: sourceUrl,
+  };
+}
+
+function assetPreviewUrl(row: ResourceRow): string | null {
+  const deliveryUrl = typeof row.delivery_url === 'string' ? row.delivery_url : null;
+  if (deliveryUrl) {
+    return deliveryUrl;
+  }
+  return typeof row.source_url === 'string' ? row.source_url : null;
+}
+
+function assetPreviewEligible(row: ResourceRow): boolean {
+  const kind = typeof row.kind === 'string' ? row.kind : '';
+  const mimeType = typeof row.mime_type === 'string' ? row.mime_type : '';
+  return kind === 'image' || mimeType.startsWith('image/');
+}
+
 function buildRelationOption(row: ResourceRow, relation: RelationConfig): RelationOption {
   const labelValue = row[relation.labelKey];
   const descriptionValue = relation.descriptionKey ? row[relation.descriptionKey] : undefined;
@@ -527,6 +616,13 @@ function App() {
     queryClient.clear();
   };
 
+  const handleReloginRequired = (message: string) => {
+    clearAuthToken();
+    setToken(null);
+    setLoginError(message);
+    queryClient.clear();
+  };
+
   if (!token) {
     return <LoginScreen onLogin={handleLogin} initialError={loginError} />;
   }
@@ -555,7 +651,15 @@ function App() {
   return (
     <Routes>
       <Route element={<StudioLayout account={accountQuery.data} onLogout={handleLogout} />}>
-        <Route index element={<DashboardScreen account={accountQuery.data} />} />
+        <Route
+          index
+          element={
+            <DashboardScreen
+              account={accountQuery.data}
+              onReloginRequired={handleReloginRequired}
+            />
+          }
+        />
         {cmsResources.map((resource) => (
           <Route
             key={resource.key}
@@ -870,7 +974,14 @@ function StudioLayout({
   );
 }
 
-function DashboardScreen({ account }: { account: AuthMeResponse }) {
+function DashboardScreen({
+  account,
+  onReloginRequired,
+}: {
+  account: AuthMeResponse;
+  onReloginRequired: (message: string) => void;
+}) {
+  const workspaceSeed = deriveWorkspaceSeed(account);
   const [entriesQuery, assetsQuery, topicsQuery, menusQuery, workspacesQuery] = useQueries({
     queries: [
       {
@@ -899,7 +1010,60 @@ function DashboardScreen({ account }: { account: AuthMeResponse }) {
   const recentEntries = entriesQuery.data?.items ?? [];
   const publishedCount = recentEntries.filter((entry) => entry.status === 'published').length;
   const reviewCount = recentEntries.filter((entry) => entry.status === 'in_review').length;
-  const workspace = workspacesQuery.data?.items[0];
+  const workspaceRows = workspacesQuery.data?.items ?? [];
+  const claimedWorkspace =
+    typeof account.workspace_id === 'number'
+      ? workspaceRows.find((item) => Number(item.id) === account.workspace_id)
+      : undefined;
+  const workspace = claimedWorkspace ?? workspaceRows[0];
+  const needsWorkspaceBootstrap = typeof account.workspace_id !== 'number' || !claimedWorkspace;
+  const canBootstrapWorkspace = account.roles.includes('admin');
+
+  const bootstrapMutation = useMutation({
+    mutationFn: async () => {
+      let targetWorkspace = workspaceRows[0];
+      if (!targetWorkspace) {
+        targetWorkspace = await createResource<ResourceRow>('workspaces', {
+          name: workspaceSeed.name,
+          slug: workspaceSeed.slug,
+          default_locale: workspaceSeed.defaultLocale,
+          public_base_url: workspaceSeed.publicBaseUrl,
+          theme_settings: {
+            palette: 'editorial',
+            accent: 'teal',
+          },
+          editorial_settings: {
+            review_required: true,
+            created_from: 'studio-bootstrap',
+          },
+        });
+      }
+
+      const workspaceId = Number(targetWorkspace.id);
+      if (Number.isNaN(workspaceId)) {
+        throw new Error('Workspace bootstrap did not return a valid workspace id.');
+      }
+
+      await updateManagedUser(account.id, {
+        claims: {
+          workspace_id: workspaceId,
+        },
+      });
+
+      return {
+        created: !workspaceRows[0],
+        workspaceId,
+        workspaceName: String(targetWorkspace.name ?? workspaceSeed.name),
+      };
+    },
+    onSuccess: ({ created, workspaceId, workspaceName }) => {
+      onReloginRequired(
+        created
+          ? `Workspace “${workspaceName}” was created and your account was assigned to it. Sign in again to refresh the studio claims.`
+          : `Your account was assigned to workspace #${workspaceId}. Sign in again to refresh the studio claims.`,
+      );
+    },
+  });
 
   return (
     <Stack spacing={3}>
@@ -975,6 +1139,61 @@ function DashboardScreen({ account }: { account: AuthMeResponse }) {
         </Grid>
       </Grid>
 
+      {needsWorkspaceBootstrap ? (
+        <Card sx={{ border: '1px solid', borderColor: 'warning.light' }}>
+          <CardContent>
+            <Stack
+              direction={{ xs: 'column', lg: 'row' }}
+              justifyContent="space-between"
+              spacing={2}
+            >
+              <Stack spacing={1}>
+                <Typography variant="h5">Workspace bootstrap</Typography>
+                <Typography color="text.secondary">
+                  This account can sign in, but the workspace-scoped APIs will stay empty until the
+                  user has a valid <code>workspace_id</code> claim and a matching workspace row.
+                </Typography>
+                <Typography color="text.secondary" variant="body2">
+                  {workspaceRows.length > 0
+                    ? `A workspace already exists in the backend. The bootstrap flow will assign your account to “${String(
+                        workspaceRows[0]?.name ?? workspaceRows[0]?.slug ?? 'workspace',
+                      )}”.`
+                    : `No workspace exists yet. The bootstrap flow will create “${workspaceSeed.name}” with slug “${workspaceSeed.slug}”.`}
+                </Typography>
+              </Stack>
+              <Stack spacing={1.25} sx={{ minWidth: { lg: 320 } }}>
+                <Alert severity="warning" variant="outlined">
+                  The studio must issue a fresh login after claim changes so the bearer token picks
+                  up the new workspace scope.
+                </Alert>
+                <Button
+                  disabled={!canBootstrapWorkspace || bootstrapMutation.isPending}
+                  onClick={() => bootstrapMutation.mutate()}
+                  startIcon={<AutoAwesomeRounded />}
+                  variant="contained"
+                >
+                  {bootstrapMutation.isPending
+                    ? 'Preparing workspace…'
+                    : workspaceRows.length > 0
+                      ? 'Assign workspace and refresh session'
+                      : 'Create workspace and refresh session'}
+                </Button>
+                {!canBootstrapWorkspace ? (
+                  <Typography color="text.secondary" variant="body2">
+                    Only admin accounts can bootstrap workspace claims from the studio.
+                  </Typography>
+                ) : null}
+                {bootstrapMutation.error instanceof Error ? (
+                  <Alert severity="error" variant="outlined">
+                    {bootstrapMutation.error.message}
+                  </Alert>
+                ) : null}
+              </Stack>
+            </Stack>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Grid container spacing={3}>
         <Grid size={{ xs: 12, lg: 7 }}>
           <Card>
@@ -1046,8 +1265,8 @@ function DashboardScreen({ account }: { account: AuthMeResponse }) {
                   </Stack>
                 ) : (
                   <Alert severity="info" sx={{ mt: 2 }} variant="outlined">
-                    Workspace details will appear here once the authenticated user can read a
-                    workspace row.
+                    Workspace details will appear here once a workspace has been created or the
+                    current account is assigned to one.
                   </Alert>
                 )}
               </CardContent>
@@ -1057,8 +1276,8 @@ function DashboardScreen({ account }: { account: AuthMeResponse }) {
                 <Typography variant="h5">Suggested next steps</Typography>
                 <Stack spacing={1.5} sx={{ mt: 2 }}>
                   <Typography color="text.secondary">
-                    1. Create one workspace and confirm the authenticated user has the matching
-                    <code> workspace_id </code> auth claim.
+                    1. Make sure the current account has a live workspace claim and a matching
+                    workspace row.
                   </Typography>
                   <Typography color="text.secondary">
                     2. Add topics and assets before publishing entries with workflow actions.
@@ -1273,10 +1492,39 @@ function ResourceScreen({ config }: { config: ResourceConfig }) {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => deleteResource(config.path, id),
-    onSuccess: async () => {
+    mutationFn: async (row: ResourceRow) => {
+      const id = Number(row.id);
+      if (Number.isNaN(id)) {
+        throw new Error(`Unable to delete ${config.shortLabel.toLowerCase()} without a valid id.`);
+      }
+
+      await deleteResource(config.path, id);
+
+      let cleanupWarning: string | null = null;
+      if (config.path === 'assets') {
+        const objectRef = localStorageObjectForAsset(row);
+        if (objectRef) {
+          try {
+            await deleteLocalObject(objectRef.bucket, objectRef.objectKey);
+          } catch (error) {
+            cleanupWarning =
+              error instanceof Error
+                ? error.message
+                : 'The asset row was removed, but the storage object cleanup failed.';
+          }
+        }
+      }
+
+      return { cleanupWarning };
+    },
+    onSuccess: async ({ cleanupWarning }) => {
       await queryClient.invalidateQueries();
-      setNotice({ severity: 'success', message: `${config.shortLabel} deleted.` });
+      setNotice({
+        severity: cleanupWarning ? 'warning' : 'success',
+        message: cleanupWarning
+          ? `${config.shortLabel} deleted, but storage cleanup needs attention: ${cleanupWarning}`
+          : `${config.shortLabel} deleted.`,
+      });
     },
     onError: (error) => {
       setNotice({
@@ -1315,8 +1563,16 @@ function ResourceScreen({ config }: { config: ResourceConfig }) {
       String(row[key] ?? '')
         .toLowerCase()
         .includes(query),
-    );
+      );
   });
+  const assetPreviewSource =
+    draft.source_url || assetPreviewUrl(editingItem ?? {}) || '';
+  const assetPreviewName = draft.file_name || String(editingItem?.file_name ?? 'Unnamed asset');
+  const assetPreviewMime = draft.mime_type || String(editingItem?.mime_type ?? 'unknown');
+  const showAssetPreview =
+    config.path === 'assets' &&
+    Boolean(assetPreviewSource) &&
+    (draft.kind === 'image' || assetPreviewEligible(editingItem ?? {}));
 
   const openCreate = () => {
     setEditingItem(null);
@@ -1482,7 +1738,7 @@ function ResourceScreen({ config }: { config: ResourceConfig }) {
                               color="error"
                               onClick={() => {
                                 if (window.confirm(`Delete this ${config.shortLabel.toLowerCase()}?`)) {
-                                  deleteMutation.mutate(Number(row.id));
+                                  deleteMutation.mutate(row);
                                 }
                               }}
                               size="small"
@@ -1572,6 +1828,54 @@ function ResourceScreen({ config }: { config: ResourceConfig }) {
                   <Alert severity="success" variant="outlined">
                     {assetImportSummary}
                   </Alert>
+                ) : null}
+                {showAssetPreview ? (
+                  <Paper
+                    sx={{
+                      p: 1.5,
+                      borderRadius: 3,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                    }}
+                    variant="outlined"
+                  >
+                    <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+                      <Box
+                        alt={draft.alt_text || 'Asset preview'}
+                        component="img"
+                        src={assetPreviewSource}
+                        sx={{
+                          width: { xs: '100%', md: 220 },
+                          height: { xs: 180, md: 140 },
+                          objectFit: 'cover',
+                          borderRadius: 2,
+                          bgcolor: 'action.hover',
+                        }}
+                      />
+                      <Stack spacing={0.5} sx={{ minWidth: 0 }}>
+                        <Typography variant="subtitle1">Preview</Typography>
+                        <Typography color="text.secondary" variant="body2">
+                          Local uploads are stored through the built-in S3-compatible endpoint and
+                          served back through the public storage mount.
+                        </Typography>
+                        <Typography variant="body2">{assetPreviewName}</Typography>
+                        <Typography color="text.secondary" variant="body2">
+                          {assetPreviewMime}
+                        </Typography>
+                        <Button
+                          component="a"
+                          href={assetPreviewSource}
+                          rel="noreferrer"
+                          size="small"
+                          startIcon={<LaunchRounded />}
+                          target="_blank"
+                          variant="text"
+                        >
+                          Open original
+                        </Button>
+                      </Stack>
+                    </Stack>
+                  </Paper>
                 ) : null}
               </Stack>
             ) : null}

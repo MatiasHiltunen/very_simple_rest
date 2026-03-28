@@ -12,7 +12,7 @@ import {
   SettingsRounded,
   SpaceDashboardRounded,
 } from '@mui/icons-material';
-import { Chip, Link, Stack, Typography } from '@mui/material';
+import { Box, Chip, Link, Stack, Typography } from '@mui/material';
 
 export type FieldKind =
   | 'text'
@@ -172,6 +172,42 @@ function renderLink(value: unknown): ReactNode {
   );
 }
 
+function assetPreviewUrl(row: Record<string, unknown>): string | null {
+  const deliveryUrl = typeof row.delivery_url === 'string' ? row.delivery_url : null;
+  if (deliveryUrl) {
+    return deliveryUrl;
+  }
+  return typeof row.source_url === 'string' ? row.source_url : null;
+}
+
+function renderAssetPreview(_value: unknown, row: Record<string, unknown>): ReactNode {
+  const kind = typeof row.kind === 'string' ? row.kind : '';
+  const mimeType = typeof row.mime_type === 'string' ? row.mime_type : '';
+  const previewUrl = assetPreviewUrl(row);
+  const isImage = kind === 'image' || mimeType.startsWith('image/');
+
+  if (!previewUrl || !isImage) {
+    return <Typography color="text.secondary">-</Typography>;
+  }
+
+  return (
+    <Box
+      alt={typeof row.alt_text === 'string' && row.alt_text ? row.alt_text : 'Asset preview'}
+      component="img"
+      src={previewUrl}
+      sx={{
+        width: 72,
+        height: 48,
+        objectFit: 'cover',
+        borderRadius: 2,
+        border: '1px solid',
+        borderColor: 'divider',
+        bgcolor: 'action.hover',
+      }}
+    />
+  );
+}
+
 function renderJsonSummary(value: unknown): ReactNode {
   if (!value) {
     return <Typography color="text.secondary">-</Typography>;
@@ -327,6 +363,7 @@ export const cmsResources: ResourceConfig[] = [
     listLimit: 100,
     searchKeys: ['file_name', 'mime_type', 'alt_text'],
     columns: [
+      { key: 'delivery_url', label: 'Preview', render: renderAssetPreview },
       { key: 'file_name', label: 'File name' },
       { key: 'kind', label: 'Kind', render: renderEnumChip },
       { key: 'byte_size', label: 'Bytes' },

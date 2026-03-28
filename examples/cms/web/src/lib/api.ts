@@ -44,6 +44,12 @@ export interface LocalObjectUpload {
   size_bytes: number;
 }
 
+export interface ManagedUserUpdateInput {
+  role?: string;
+  email_verified?: boolean;
+  claims?: Record<string, JsonValue>;
+}
+
 const TOKEN_STORAGE_KEY = 'modern-cms-studio.token';
 const EMAIL_STORAGE_KEY = 'modern-cms-studio.email';
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -142,7 +148,7 @@ export async function login(email: string, password: string): Promise<AuthTokenR
 }
 
 export async function getAuthenticatedAccount(): Promise<AuthMeResponse> {
-  return request<AuthMeResponse>('/api/auth/me');
+  return request<AuthMeResponse>('/api/auth/account');
 }
 
 export async function listResource<T>(
@@ -195,6 +201,16 @@ export async function runResourceAction(
   });
 }
 
+export async function updateManagedUser(
+  id: number,
+  body: ManagedUserUpdateInput,
+): Promise<AuthMeResponse> {
+  return request<AuthMeResponse>(`/api/auth/admin/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
 function sanitizeObjectName(value: string): string {
   const trimmed = value.trim();
   const normalized = trimmed
@@ -204,13 +220,20 @@ function sanitizeObjectName(value: string): string {
   return normalized || 'upload.bin';
 }
 
-function localS3ObjectUrl(key: string): string {
-  return apiUrl(`/_s3/media/${key}`);
+function encodeObjectPath(key: string): string {
+  return key
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+function localS3ObjectUrl(bucket: string, key: string): string {
+  return apiUrl(`/_s3/${encodeURIComponent(bucket)}/${encodeObjectPath(key)}`);
 }
 
 export async function uploadLocalObject(file: File): Promise<LocalObjectUpload> {
   const objectKey = `studio/${crypto.randomUUID()}-${sanitizeObjectName(file.name)}`;
-  const response = await fetch(localS3ObjectUrl(objectKey), {
+  const response = await fetch(localS3ObjectUrl('media', objectKey), {
     method: 'PUT',
     headers: {
       'Content-Type': file.type || 'application/octet-stream',
@@ -231,4 +254,15 @@ export async function uploadLocalObject(file: File): Promise<LocalObjectUpload> 
     content_type: file.type || 'application/octet-stream',
     size_bytes: file.size,
   };
+}
+
+export async function deleteLocalObject(bucket: string, objectKey: string): Promise<void> {
+  const response = await fetch(localS3ObjectUrl(bucket, objectKey), {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (response.ok || response.status === 404) {
+    return;
+  }
+  throw new ApiError(response.status, null, `Object delete failed with status ${response.status}`);
 }

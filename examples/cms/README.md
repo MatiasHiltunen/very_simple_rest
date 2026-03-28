@@ -38,7 +38,7 @@ The seed script uses the supported CLI path:
 1. `vsr setup --non-interactive`
 2. `vsr create-admin`
 3. temporary `vsr serve api.eon`
-4. real login and API writes for the workspace, profile, asset, topic, entry, menu, and menu item
+4. real login, workspace creation or lookup, auth-claim sync, token refresh, and API writes for the workspace, profile, asset, topic, entry, menu, and menu item
 
 Override any of these when needed:
 
@@ -56,6 +56,7 @@ This example does not rely on S3 or another object-storage service in local deve
 - `/_s3/media/...` exposes the same backend through a narrow path-style S3-compatible local mount
 - the studio and helper script upload files through that S3-compatible endpoint, then create asset rows through `/api/assets`
 - asset rows point `delivery_url` at that local path
+- the studio also deletes the backing local object when an uploaded asset row is removed
 
 Import a local file into development storage and create the matching asset row:
 

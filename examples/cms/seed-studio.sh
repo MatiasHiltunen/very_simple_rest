@@ -176,6 +176,8 @@ LOGIN_RESPONSE=$(curl -ksS \
   -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
 TOKEN=$(printf '%s' "$LOGIN_RESPONSE" | json_get token)
 AUTH_HEADER="Authorization: Bearer $TOKEN"
+ACCOUNT_RESPONSE=$(curl -ksS -H "$AUTH_HEADER" "$BASE_URL/api/auth/account")
+SELF_USER_ID=$(printf '%s' "$ACCOUNT_RESPONSE" | json_get id)
 
 printf 'Seeding workspace-aware studio data...\n'
 WORKSPACE_ID=$(ensure_resource \
@@ -186,10 +188,20 @@ WORKSPACE_ID=$(ensure_resource \
   'workspaces' \
   '{"name":"Northstar Studio","slug":"northstar","default_locale":"en","public_base_url":"https://northstar.example","theme_settings":{"palette":"editorial","accent":"teal"},"editorial_settings":{"review_required":true,"homepage_entry_slug":"welcome-to-northstar"}}')
 
-if [ "$WORKSPACE_ID" != "$ADMIN_WORKSPACE_ID" ]; then
-  echo "Warning: workspace id is $WORKSPACE_ID but ADMIN_WORKSPACE_ID is $ADMIN_WORKSPACE_ID." >&2
-  echo "The studio will work best when those values match on a fresh database." >&2
-fi
+curl -ksS \
+  -X PATCH \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  "$BASE_URL/api/auth/admin/users/$SELF_USER_ID" \
+  -d "{\"claims\":{\"workspace_id\":$WORKSPACE_ID}}" >/dev/null
+
+LOGIN_RESPONSE=$(curl -ksS \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  "$BASE_URL/api/auth/login" \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+TOKEN=$(printf '%s' "$LOGIN_RESPONSE" | json_get token)
+AUTH_HEADER="Authorization: Bearer $TOKEN"
 
 PROFILE_ID=$(ensure_resource \
   'profiles' \
@@ -258,7 +270,7 @@ api_action 'entries' "$ENTRY_ID" 'publish' >/dev/null
 printf '\nSeed complete.\n'
 printf 'Admin email: %s\n' "$ADMIN_EMAIL"
 printf 'Admin password: %s\n' "$ADMIN_PASSWORD"
-printf 'Workspace id claim: %s\n' "$ADMIN_WORKSPACE_ID"
+printf 'Workspace id claim: %s\n' "$WORKSPACE_ID"
 printf 'Workspace row id: %s\n' "$WORKSPACE_ID"
 printf 'Profile id: %s\n' "$PROFILE_ID"
 printf 'Topic id: %s\n' "$TOPIC_ID"

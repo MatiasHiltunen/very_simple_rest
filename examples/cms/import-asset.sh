@@ -131,6 +131,8 @@ LOGIN_RESPONSE=$(curl -ksS \
   -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
 TOKEN=$(printf '%s' "$LOGIN_RESPONSE" | json_get token)
 AUTH_HEADER="Authorization: Bearer $TOKEN"
+ACCOUNT_RESPONSE=$(curl -ksS -H "$AUTH_HEADER" "$BASE_URL/api/auth/account")
+SELF_USER_ID=$(printf '%s' "$ACCOUNT_RESPONSE" | json_get id)
 
 WORKSPACES_RESPONSE=$(curl -ksS -H "$AUTH_HEADER" "$BASE_URL/api/workspaces?limit=50&context=admin")
 WORKSPACE_ID=$(printf '%s' "$WORKSPACES_RESPONSE" | list_find_id slug northstar || true)
@@ -143,6 +145,21 @@ if [ -z "${WORKSPACE_ID:-}" ]; then
     -d '{"name":"Northstar Studio","slug":"northstar","default_locale":"en","public_base_url":"https://northstar.example","theme_settings":{"palette":"editorial","accent":"teal"},"editorial_settings":{"review_required":true,"homepage_entry_slug":"welcome-to-northstar"}}')
   WORKSPACE_ID=$(printf '%s' "$WORKSPACE_CREATE_RESPONSE" | json_get id)
 fi
+
+curl -ksS \
+  -X PATCH \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  "$BASE_URL/api/auth/admin/users/$SELF_USER_ID" \
+  -d "{\"claims\":{\"workspace_id\":$WORKSPACE_ID}}" >/dev/null
+
+LOGIN_RESPONSE=$(curl -ksS \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  "$BASE_URL/api/auth/login" \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+TOKEN=$(printf '%s' "$LOGIN_RESPONSE" | json_get token)
+AUTH_HEADER="Authorization: Bearer $TOKEN"
 
 ALT_TEXT_JSON=$(escape_json "$ALT_TEXT")
 FILE_NAME_JSON=$(escape_json "$SAFE_NAME")
