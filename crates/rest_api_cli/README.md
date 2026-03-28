@@ -18,6 +18,7 @@ cargo install vsra --locked
 vsr init my-api
 vsr init my-api --starter minimal
 vsr serve api.eon
+vsr server expand --input api.eon --output api.expanded.rs
 vsr server emit --input api.eon --output-dir generated-api
 vsr build api.eon --release
 vsr openapi --input api.eon --output openapi.json
@@ -174,6 +175,17 @@ If you want a runnable Rust project you can inspect or modify, emit one instead:
 ```bash
 vsr server emit --input api.eon --output-dir generated-api
 ```
+
+If you want to inspect the full macro-expanded Rust module directly without creating a Cargo
+project first, expand it to a single source file:
+
+```bash
+vsr server expand --input api.eon --output api.expanded.rs
+```
+
+When `--output` is omitted, `vsr server expand` writes `<input-stem>.expanded.rs` next to the
+`.eon` file. `--output-dir generated-api` is also accepted as a compatibility alias and writes
+`generated-api/<input-stem>.expanded.rs`.
 
 This emits:
 

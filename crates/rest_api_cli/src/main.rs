@@ -1,5 +1,7 @@
+#[cfg(not(test))]
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(not(test))]
 use colored::Colorize;
 use std::path::PathBuf;
 use vsra::commands;
@@ -561,6 +563,25 @@ enum ServerCommand {
         force: bool,
     },
 
+    /// Expand a `.eon` service into the full generated Rust module source
+    Expand {
+        /// Path to the `.eon` service file
+        #[arg(short, long, value_name = "FILE")]
+        input: PathBuf,
+
+        /// Output Rust source path; defaults to `<input-stem>.expanded.rs`
+        #[arg(short, long, value_name = "FILE", conflicts_with = "output_dir")]
+        output: Option<PathBuf>,
+
+        /// Deprecated compatibility flag to place the expanded file inside a directory
+        #[arg(long, value_name = "DIR", conflicts_with = "output")]
+        output_dir: Option<PathBuf>,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Build a server binary from a `.eon` service
     Build {
         /// Path to the `.eon` service file
@@ -970,8 +991,8 @@ enum AuthzHybridSourceArg {
     CreatePayload,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(not(test))]
+async fn run_cli() -> Result<()> {
     // Load .env file if present
     let _ = dotenv::dotenv();
 
@@ -1192,6 +1213,25 @@ async fn main() -> Result<()> {
                     include_builtin_auth,
                     *force,
                 )?;
+            }
+            ServerCommand::Expand {
+                input,
+                output,
+                output_dir,
+                force,
+            } => {
+                println!("{}", "Expanding generated server code...".green().bold());
+                let resolved_output = output.clone().or_else(|| {
+                    output_dir.as_ref().map(|dir| {
+                        let stem = input
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("service");
+                        dir.join(format!("{stem}.expanded.rs"))
+                    })
+                });
+                commands::server::expand_server_code(input, resolved_output.as_deref(), *force)?;
             }
             ServerCommand::Build {
                 input,
@@ -1849,6 +1889,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(test))]
+#[tokio::main]
+async fn main() -> Result<()> {
+    run_cli().await
+}
+
+#[cfg(not(test))]
 fn authz_action(action: AuthzActionArg) -> rest_macro_core::authorization::AuthorizationAction {
     match action {
         AuthzActionArg::Read => rest_macro_core::authorization::AuthorizationAction::Read,
@@ -1858,6 +1905,7 @@ fn authz_action(action: AuthzActionArg) -> rest_macro_core::authorization::Autho
     }
 }
 
+#[cfg(not(test))]
 fn authz_hybrid_source(
     source: AuthzHybridSourceArg,
 ) -> rest_macro_core::authorization::AuthorizationHybridSource {
@@ -1889,6 +1937,7 @@ fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {
     true
 }
 
+#[cfg(not(test))]
 fn database_url_for_service_input(
     cli_database_url: Option<&String>,
     env_database_url: Option<&String>,
@@ -1908,6 +1957,7 @@ fn database_url_for_service_input(
     Ok(fallback_database_url.to_owned())
 }
 
+#[cfg(not(test))]
 fn resolve_config_path(explicit: Option<&str>) -> Result<Option<PathBuf>> {
     if let Some(path) = explicit {
         return Ok(Some(PathBuf::from(path)));
@@ -1997,6 +2047,45 @@ mod tests {
                 "--no-auth",
             ])
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn server_expand_subcommand_accepts_input_and_output() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "server",
+                "expand",
+                "--input",
+                "todo_app.eon",
+                "--output",
+                "expanded.rs",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn server_expand_subcommand_accepts_output_dir_alias() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "server",
+                "expand",
+                "--input",
+                "todo_app.eon",
+                "--output-dir",
+                "generated-api",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn server_expand_subcommand_accepts_default_output() {
+        assert!(
+            Cli::try_parse_from(["vsr", "server", "expand", "--input", "todo_app.eon"]).is_ok()
         );
     }
 

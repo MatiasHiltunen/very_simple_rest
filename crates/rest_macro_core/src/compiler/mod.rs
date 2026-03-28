@@ -29,6 +29,9 @@ pub use model::{
     supports_sort, temporal_scalar_kind, validate_field_transforms,
 };
 pub use openapi::OpenApiSpecOptions;
+pub use crate::storage::{
+    StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
+};
 
 pub fn expand_derive(input: DeriveInput, runtime_crate: Path) -> syn::Result<TokenStream> {
     let resource = derive_parser::parse_derive_input(input)?;
@@ -37,6 +40,11 @@ pub fn expand_derive(input: DeriveInput, runtime_crate: Path) -> syn::Result<Tok
 
 pub fn expand_eon_file(path: LitStr, runtime_crate: Path) -> syn::Result<TokenStream> {
     let loaded = eon_parser::load_service_from_file(path)?;
+    codegen::expand_service_module(&loaded.service, &runtime_crate, &loaded.include_path)
+}
+
+pub fn expand_service_from_path(path: &FsPath, runtime_crate: Path) -> syn::Result<TokenStream> {
+    let loaded = eon_parser::load_service_from_path(path)?;
     codegen::expand_service_module(&loaded.service, &runtime_crate, &loaded.include_path)
 }
 

@@ -45,6 +45,7 @@ aws-sdk-s3 = "1.84"
 aws-credential-types = "1.2"
 log.workspace = true
 syn.workspace = true
+prettyplease = "0.2"
 url = "2"
 
 [dev-dependencies]

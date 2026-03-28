@@ -17,6 +17,7 @@ use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
     DEFAULT_TLS_KEY_PATH_ENV,
 };
+use syn::{parse_str, parse2};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -46,6 +47,48 @@ pub fn emit_server_project(
         emitted.project_dir.display()
     );
     Ok(())
+}
+
+pub fn expand_server_code(input: &Path, output: Option<&Path>, force: bool) -> Result<PathBuf> {
+    let resolved_output = resolve_expanded_output_path(input, output);
+    let absolute_output = if resolved_output.is_absolute() {
+        resolved_output
+    } else {
+        std::env::current_dir()
+            .map_err(Error::Io)?
+            .join(resolved_output)
+    };
+
+    let absolute_input = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(Error::Io)?.join(input)
+    };
+
+    prepare_output_file(&absolute_output, force)?;
+    let runtime_crate = parse_str("very_simple_rest")
+        .map_err(|error| Error::Unknown(format!("invalid runtime crate path: {error}")))?;
+    let tokens =
+        compiler::expand_service_from_path(&absolute_input, runtime_crate).map_err(|error| {
+            Error::Config(format!(
+                "failed to expand `{}` into generated Rust: {error}",
+                absolute_input.display()
+            ))
+        })?;
+    let parsed = parse2::<syn::File>(tokens).map_err(|error| {
+        Error::Unknown(format!(
+            "compiler expansion for `{}` did not parse as a Rust file: {error}",
+            absolute_input.display()
+        ))
+    })?;
+    let rendered = prettyplease::unparse(&parsed);
+    write_file(&absolute_output, &rendered)?;
+    println!(
+        "{} {}",
+        "Generated expanded server code:".green().bold(),
+        absolute_output.display()
+    );
+    Ok(absolute_output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -707,6 +750,44 @@ fn prepare_output_dir(path: &Path, force: bool) -> Result<()> {
     }
 
     fs::create_dir_all(path).map_err(Error::Io)
+}
+
+fn prepare_output_file(path: &Path, force: bool) -> Result<()> {
+    if path.exists() {
+        if path.is_dir() {
+            return Err(Error::Config(format!(
+                "output path exists and is a directory: {}",
+                path.display()
+            )));
+        }
+        if !force {
+            return Err(Error::Config(format!(
+                "output file already exists: {} (pass --force to overwrite)",
+                path.display()
+            )));
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(Error::Io)?;
+    }
+
+    Ok(())
+}
+
+fn resolve_expanded_output_path(input: &Path, output: Option<&Path>) -> PathBuf {
+    match output {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let parent = input.parent().unwrap_or_else(|| Path::new("."));
+            let stem = input
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("service");
+            parent.join(format!("{stem}.expanded.rs"))
+        }
+    }
 }
 
 fn detect_backend(service: &ServiceSpec) -> Result<DbBackend> {
@@ -1377,8 +1458,9 @@ fn binary_file_name(package_name: &str) -> String {
 mod tests {
     use super::{
         binary_file_name, build_artifact_dir, build_server_binary, emit_server_project,
-        export_generated_runtime_artifacts, is_text_file_busy_failure, resolve_binary_output_path,
-        resolve_generated_package_name, sanitize_package_name,
+        expand_server_code, export_generated_runtime_artifacts, is_text_file_busy_failure,
+        resolve_binary_output_path, resolve_expanded_output_path, resolve_generated_package_name,
+        sanitize_package_name,
     };
     use crate::commands::db::database_url_from_service_config;
     use crate::commands::setup::run_setup;
@@ -1688,6 +1770,55 @@ mod tests {
         assert!(openapi.contains("\"openapi\": \"3.0.3\""));
         assert!(openapi.contains("\"/post\""));
         assert!(!openapi.contains("\"/auth/login\""));
+    }
+
+    #[test]
+    fn expand_server_code_writes_direct_compiler_output() {
+        let output = test_root().join("expanded.rs");
+        expand_server_code(&fixture_path("blog_api.eon"), Some(&output), false)
+            .expect("server expansion should succeed");
+
+        let expanded = read_to_string(&output);
+        assert!(expanded.contains("pub mod blog_api"));
+        assert!(expanded.contains("include_str!"));
+        assert!(expanded.contains("pub fn configure"));
+    }
+
+    #[test]
+    fn expand_server_code_rejects_existing_output_without_force() {
+        let output = test_root().join("expanded.rs");
+        fs::create_dir_all(output.parent().expect("output should have a parent"))
+            .expect("output parent should be creatable");
+        fs::write(&output, "// existing").expect("existing output file should be writable");
+
+        let error = expand_server_code(&fixture_path("blog_api.eon"), Some(&output), false)
+            .expect_err("expansion should reject existing files without --force");
+        assert!(
+            error.to_string().contains("output file already exists"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn expand_server_code_defaults_output_next_to_input() {
+        let root = test_root();
+        fs::create_dir_all(&root).expect("test root should be creatable");
+        let input = root.join("demo-api.eon");
+        fs::copy(fixture_path("blog_api.eon"), &input).expect("fixture should copy");
+
+        let output =
+            expand_server_code(&input, None, false).expect("default expansion should work");
+        assert_eq!(output, root.join("demo-api.expanded.rs"));
+        assert!(output.exists(), "default output file should exist");
+    }
+
+    #[test]
+    fn resolve_expanded_output_path_defaults_to_stem_expanded_rs() {
+        let input = Path::new("configs/api.eon");
+        assert_eq!(
+            resolve_expanded_output_path(input, None),
+            PathBuf::from("configs/api.expanded.rs")
+        );
     }
 
     #[test]

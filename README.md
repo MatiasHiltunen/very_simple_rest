@@ -16,6 +16,7 @@ cargo install vsra --locked
 vsr init my-api
 vsr init my-api --starter minimal
 vsr serve api.eon
+vsr server expand --input api.eon --output api.expanded.rs
 vsr server emit --input api.eon --output-dir generated-api
 vsr build api.eon --release
 vsr docs --output docs/eon-reference.md
@@ -25,6 +26,7 @@ Core CLI workflows:
 
 - `vsr init my-api` generates a local starter project with `api.eon`, `.env.example`, `migrations/`, and a comment-rich default service contract
 - `vsr serve api.eon` runs a native server directly from `.eon` for the fastest local development loop
+- `vsr server expand ...` writes the fully expanded Rust module source so you can inspect the compiler output directly
 - `vsr server emit ...` exports an inspectable Rust server project
 - `vsr build ...` produces a standalone binary plus a `<binary>.bundle/` runtime bundle
 - `vsr openapi ...`, `vsr docs ...`, `vsr authz ...`, and `vsr backup ...` generate docs, diagnostics, and deployment guidance from the same service contract
