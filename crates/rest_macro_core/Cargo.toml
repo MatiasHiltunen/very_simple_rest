@@ -13,7 +13,8 @@ readme = "../../README.md"
 [features]
 default = []
 codegen = ["dep:eon", "dep:heck", "dep:proc-macro2", "dep:quote", "dep:syn"]
-turso-local = ["dep:turso"]
+sqlite = ["sqlx/sqlite"]
+turso-local = ["dep:turso", "sqlite"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
 

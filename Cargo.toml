@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.dependencies]
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "any", "macros", "chrono"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "any", "macros", "chrono"] }
 serde_json = "1.0"
 base64 = "0.22"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
@@ -86,10 +86,10 @@ dotenv.workspace = true
 # Feature configuration for the top-level crate
 [features]
 default = ["sqlite"]
-sqlite = ["sqlx/sqlite"]
+sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
 postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
 mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
-turso-local = ["rest_macro_core/turso-local"]
+turso-local = ["sqlite", "rest_macro_core/turso-local"]
 
 [dev-dependencies]
 jsonwebtoken.workspace = true

@@ -20,12 +20,12 @@ actix-web = { workspace = true, features = ["rustls-0_23"] }
 actix-cors.workspace = true
 actix-files.workspace = true
 base64.workspace = true
-sqlx = { workspace = true, features = ["postgres", "mysql"] }
+sqlx = { workspace = true, features = ["sqlite", "postgres", "mysql"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "2.0"
 dotenv.workspace = true
-rest_macro_core = { workspace = true, features = ["codegen", "turso-local", "postgres", "mysql"] }
+rest_macro_core = { workspace = true, features = ["codegen", "sqlite", "turso-local", "postgres", "mysql"] }
 bcrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
