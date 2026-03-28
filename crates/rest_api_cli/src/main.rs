@@ -103,7 +103,7 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         package_name: Option<String>,
 
-        /// Temporary build directory for the generated Cargo project
+        /// Build cache directory for the generated Cargo project and Cargo target artifacts
         #[arg(long, value_name = "DIR")]
         build_dir: Option<PathBuf>,
 
@@ -123,13 +123,20 @@ enum Commands {
         #[arg(long, value_name = "TARGET")]
         target: Option<String>,
 
-        /// Keep the generated build project after compiling
-        #[arg(long)]
+        /// Deprecated compatibility flag; the reusable build cache is preserved automatically
+        #[arg(long, hide = true)]
         keep_build_dir: bool,
 
         /// Overwrite the output binary if it already exists
         #[arg(long)]
         force: bool,
+    },
+
+    /// Remove cached generated build projects and Cargo build artifacts
+    Clean {
+        /// Build cache directory to remove; defaults to `./.vsr-build`
+        #[arg(long, value_name = "DIR")]
+        build_dir: Option<PathBuf>,
     },
 
     /// Serve a `.eon` service directly without generating or compiling a Rust project
@@ -596,7 +603,7 @@ enum ServerCommand {
         #[arg(long, value_name = "NAME")]
         package_name: Option<String>,
 
-        /// Temporary build directory for the generated Cargo project
+        /// Build cache directory for the generated Cargo project and Cargo target artifacts
         #[arg(long, value_name = "DIR")]
         build_dir: Option<PathBuf>,
 
@@ -616,8 +623,8 @@ enum ServerCommand {
         #[arg(long, value_name = "TARGET")]
         target: Option<String>,
 
-        /// Keep the generated build project after compiling
-        #[arg(long)]
+        /// Deprecated compatibility flag; the reusable build cache is preserved automatically
+        #[arg(long, hide = true)]
         keep_build_dir: bool,
 
         /// Overwrite the output binary if it already exists
@@ -1309,6 +1316,11 @@ async fn run_cli() -> Result<()> {
                 *keep_build_dir,
                 *force,
             )?;
+        }
+
+        Commands::Clean { build_dir } => {
+            println!("{}", "Cleaning build cache...".green().bold());
+            commands::server::clean_build_cache(build_dir.as_deref())?;
         }
 
         Commands::Serve {
@@ -2013,6 +2025,12 @@ mod tests {
     #[test]
     fn build_command_accepts_positional_service_input() {
         assert!(Cli::try_parse_from(["vsr", "build", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn clean_command_accepts_optional_build_dir() {
+        assert!(Cli::try_parse_from(["vsr", "clean"]).is_ok());
+        assert!(Cli::try_parse_from(["vsr", "clean", "--build-dir", ".vsr-build"]).is_ok());
     }
 
     #[test]

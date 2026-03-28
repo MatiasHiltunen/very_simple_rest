@@ -7,17 +7,17 @@ use std::time::Duration;
 
 use brotli::CompressorWriter;
 use colored::Colorize;
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use rest_macro_core::auth::{
-    auth_management_migration_sql, auth_migration_sql, AuthDbBackend, AuthEmailProvider,
+    AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
 };
 use rest_macro_core::compiler::{self, DbBackend, OpenApiSpecOptions, ServiceSpec};
-use rest_macro_core::database::{sqlite_url_for_path, DatabaseEngine};
+use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
     DEFAULT_TLS_KEY_PATH_ENV,
 };
-use syn::{parse2, parse_str};
+use syn::{parse_str, parse2};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -26,6 +26,7 @@ const LOCAL_DEP_PATH_ENV: &str = "VSR_LOCAL_DEP_PATH";
 const REPO_GIT_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest.git";
 const CARGO_BUILD_RETRY_DELAYS_MS: &[u64] = &[200, 500, 1_000];
 const BUILD_ARTIFACT_DIR_SUFFIX: &str = ".bundle";
+const DEFAULT_BUILD_CACHE_DIR: &str = ".vsr-build";
 const PRECOMPRESSED_BROTLI_SUFFIX: &str = ".br";
 const PRECOMPRESSED_GZIP_SUFFIX: &str = ".gz";
 const BROTLI_BUFFER_SIZE: usize = 4096;
@@ -45,8 +46,14 @@ pub fn emit_server_project(
     include_builtin_auth: bool,
     force: bool,
 ) -> Result<()> {
-    let emitted =
-        emit_server_project_inner(input, output_dir, package_name, include_builtin_auth, force)?;
+    let emitted = emit_server_project_inner(
+        input,
+        output_dir,
+        package_name,
+        include_builtin_auth,
+        force,
+        false,
+    )?;
     println!(
         "{} {}",
         "Generated server project:".green().bold(),
@@ -144,24 +151,29 @@ pub fn build_server_binary(
     }
 
     let resolved_package_name = resolve_generated_package_name(input, package_name.as_deref())?;
-    let build_root = match build_dir {
-        Some(dir) => dir,
-        None => std::env::current_dir()
-            .map_err(Error::Io)?
-            .join(".vsr-build")
-            .join(&resolved_package_name)
-            .join(Uuid::new_v4().to_string()),
-    };
+    let build_root = resolve_build_cache_root(input, &resolved_package_name, build_dir.as_deref())?;
+    let project_dir = build_root.join("project");
+    let target_dir = build_root.join("target");
 
     println!(
         "{} {}",
-        "Generating temporary server project in".cyan().bold(),
+        "Using build cache in".cyan().bold(),
         build_root.display()
     );
-    let emitted =
-        emit_server_project_inner(input, &build_root, package_name, include_builtin_auth, true)?;
+    println!(
+        "{} {}",
+        "Generating temporary server project in".cyan().bold(),
+        project_dir.display()
+    );
+    let emitted = emit_server_project_inner(
+        input,
+        &project_dir,
+        package_name,
+        include_builtin_auth,
+        true,
+        true,
+    )?;
 
-    let target_dir = emitted.project_dir.join("target");
     println!(
         "{} {}",
         "Running cargo build in".cyan().bold(),
@@ -213,8 +225,12 @@ pub fn build_server_binary(
     );
     let artifact_dir = export_generated_runtime_artifacts(&emitted.project_dir, output, force)?;
 
-    if !keep_build_dir {
-        let _ = fs::remove_dir_all(&emitted.project_dir);
+    if keep_build_dir {
+        println!(
+            "{} {}",
+            "Preserved generated project cache in".cyan().bold(),
+            project_dir.display()
+        );
     }
 
     println!(
@@ -231,6 +247,26 @@ pub fn build_server_binary(
     Ok(())
 }
 
+pub fn clean_build_cache(build_dir: Option<&Path>) -> Result<PathBuf> {
+    let cache_root = resolve_clean_build_cache_root(build_dir)?;
+    if !cache_root.exists() {
+        println!(
+            "{} {}",
+            "No build cache found at".yellow().bold(),
+            cache_root.display()
+        );
+        return Ok(cache_root);
+    }
+
+    fs::remove_dir_all(&cache_root).map_err(Error::Io)?;
+    println!(
+        "{} {}",
+        "Removed build cache:".green().bold(),
+        cache_root.display()
+    );
+    Ok(cache_root)
+}
+
 struct EmittedProject {
     project_dir: PathBuf,
     package_name: String,
@@ -242,6 +278,7 @@ fn emit_server_project_inner(
     package_name: Option<String>,
     include_builtin_auth: bool,
     force: bool,
+    reuse_existing_project: bool,
 ) -> Result<EmittedProject> {
     let service = compiler::load_service_from_path(input)
         .map_err(|error| Error::Config(format!("failed to load `{}`: {error}", input.display())))?;
@@ -249,14 +286,20 @@ fn emit_server_project_inner(
     ensure_auth_is_compatible(&service, include_builtin_auth)?;
     ensure_database_engine_is_compatible(&service, backend)?;
 
-    prepare_output_dir(output_dir, force)?;
-
     let package_name = resolve_generated_package_name(input, package_name.as_deref())?;
     let eon_file_name = input
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("service.eon")
         .to_owned();
+
+    if reuse_existing_project {
+        prepare_cached_project_dir(output_dir)?;
+        remove_stale_root_eon_files(output_dir, &eon_file_name)?;
+        remove_stale_generated_migrations(output_dir, include_builtin_auth)?;
+    } else {
+        prepare_output_dir(output_dir, force)?;
+    }
 
     let input_content = fs::read_to_string(input).map_err(Error::Io)?;
     let migration_sql = compiler::render_service_migration_sql(&service)
@@ -272,41 +315,41 @@ fn emit_server_project_inner(
     fs::create_dir_all(output_dir.join("src")).map_err(Error::Io)?;
     fs::create_dir_all(output_dir.join("migrations")).map_err(Error::Io)?;
 
-    write_file(
+    write_file_if_changed(
         &output_dir.join("Cargo.toml"),
         &render_cargo_toml(&package_name, &service, backend)?,
     )?;
-    write_file(
+    write_file_if_changed(
         &output_dir.join("src/main.rs"),
         &render_main_rs(&service, &module_name, &eon_file_name, include_builtin_auth),
     )?;
-    write_file(&output_dir.join(&eon_file_name), &input_content)?;
-    write_file(
+    write_file_if_changed(&output_dir.join(&eon_file_name), &input_content)?;
+    write_file_if_changed(
         &output_dir.join(".env.example"),
         &render_env_example(&service, backend, include_builtin_auth),
     )?;
-    write_file(
+    write_file_if_changed(
         &output_dir.join(".gitignore"),
         "target/\n.env\ncerts/\n*.db\n*.db-shm\n*.db-wal\n",
     )?;
-    write_file(
+    write_file_if_changed(
         &output_dir.join("README.md"),
         &render_project_readme(&package_name, &service, backend, include_builtin_auth),
     )?;
-    write_file(&output_dir.join("openapi.json"), &openapi_json)?;
+    write_file_if_changed(&output_dir.join("openapi.json"), &openapi_json)?;
     copy_configured_static_dirs(input, output_dir, &service)?;
     copy_configured_tls_files(input, output_dir, &service)?;
     if include_builtin_auth {
-        write_file(
+        write_file_if_changed(
             &output_dir.join("migrations/0000_auth.sql"),
             &auth_migration_sql(auth_backend(backend)),
         )?;
-        write_file(
+        write_file_if_changed(
             &output_dir.join("migrations/0001_auth_management.sql"),
             &auth_management_migration_sql(auth_backend(backend)),
         )?;
     }
-    write_file(
+    write_file_if_changed(
         &output_dir.join(if include_builtin_auth {
             "migrations/0002_service.sql"
         } else {
@@ -323,6 +366,13 @@ fn emit_server_project_inner(
 
 fn write_file(path: &Path, contents: &str) -> Result<()> {
     fs::write(path, contents).map_err(Error::Io)
+}
+
+fn write_file_if_changed(path: &Path, contents: &str) -> Result<()> {
+    if matches!(fs::read_to_string(path), Ok(existing) if existing == contents) {
+        return Ok(());
+    }
+    write_file(path, contents)
 }
 
 fn export_generated_runtime_artifacts(
@@ -467,6 +517,57 @@ fn build_artifact_dir(output: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!("{file_name}{BUILD_ARTIFACT_DIR_SUFFIX}")))
 }
 
+fn resolve_build_cache_root(
+    input: &Path,
+    package_name: &str,
+    build_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    match build_dir {
+        Some(dir) => resolve_absolute_path(dir),
+        None => Ok(default_build_cache_root()?
+            .join(package_name)
+            .join(stable_build_cache_key(input, package_name)?)),
+    }
+}
+
+fn resolve_clean_build_cache_root(build_dir: Option<&Path>) -> Result<PathBuf> {
+    match build_dir {
+        Some(dir) => resolve_absolute_path(dir),
+        None => default_build_cache_root(),
+    }
+}
+
+fn default_build_cache_root() -> Result<PathBuf> {
+    Ok(std::env::current_dir()
+        .map_err(Error::Io)?
+        .join(DEFAULT_BUILD_CACHE_DIR))
+}
+
+fn stable_build_cache_key(input: &Path, package_name: &str) -> Result<String> {
+    let absolute_input = resolve_absolute_path(input)?;
+    let canonical_input = absolute_input
+        .canonicalize()
+        .unwrap_or_else(|_| absolute_input.clone());
+    Ok(Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "vsr-build-cache:{package_name}:{}",
+            canonical_input.display()
+        )
+        .as_bytes(),
+    )
+    .simple()
+    .to_string())
+}
+
+fn resolve_absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir().map_err(Error::Io)?.join(path))
+    }
+}
+
 fn run_generated_project_build(
     project_dir: &Path,
     target_dir: &Path,
@@ -579,6 +680,9 @@ fn copy_configured_static_dirs(
     for relative_dir in configured_static_relative_dirs(service) {
         let source = service_root.join(&relative_dir);
         let destination = output_dir.join(&relative_dir);
+        if destination.exists() {
+            fs::remove_dir_all(&destination).map_err(Error::Io)?;
+        }
         copy_dir_recursive(&source, &destination)?;
     }
 
@@ -827,6 +931,68 @@ fn prepare_output_dir(path: &Path, force: bool) -> Result<()> {
     }
 
     fs::create_dir_all(path).map_err(Error::Io)
+}
+
+fn prepare_cached_project_dir(path: &Path) -> Result<()> {
+    if path.exists() && !path.is_dir() {
+        fs::remove_file(path).map_err(Error::Io)?;
+    }
+    fs::create_dir_all(path.join("src")).map_err(Error::Io)?;
+    fs::create_dir_all(path.join("migrations")).map_err(Error::Io)?;
+    Ok(())
+}
+
+fn remove_stale_root_eon_files(path: &Path, current_name: &str) -> Result<()> {
+    for entry in fs::read_dir(path).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        let entry_path = entry.path();
+        if entry_path.extension().and_then(|ext| ext.to_str()) != Some("eon") {
+            continue;
+        }
+        let file_name = entry.file_name();
+        if file_name.to_string_lossy() == current_name {
+            continue;
+        }
+        fs::remove_file(entry_path).map_err(Error::Io)?;
+    }
+    Ok(())
+}
+
+fn remove_stale_generated_migrations(path: &Path, include_builtin_auth: bool) -> Result<()> {
+    let migrations_dir = path.join("migrations");
+    if !migrations_dir.exists() {
+        return Ok(());
+    }
+
+    let managed_paths = [
+        "0000_auth.sql",
+        "0001_auth_management.sql",
+        "0001_service.sql",
+        "0002_service.sql",
+    ];
+    let retained = if include_builtin_auth {
+        [
+            "0000_auth.sql",
+            "0001_auth_management.sql",
+            "0002_service.sql",
+        ]
+        .into_iter()
+        .collect::<Vec<_>>()
+    } else {
+        ["0001_service.sql"].into_iter().collect::<Vec<_>>()
+    };
+
+    for file_name in managed_paths {
+        if retained.contains(&file_name) {
+            continue;
+        }
+        let file_path = migrations_dir.join(file_name);
+        if file_path.exists() {
+            fs::remove_file(file_path).map_err(Error::Io)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn prepare_output_file(path: &Path, force: bool) -> Result<()> {
@@ -1534,10 +1700,10 @@ fn binary_file_name(package_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_file_name, build_artifact_dir, build_server_binary, emit_server_project,
-        expand_server_code, export_generated_runtime_artifacts, is_text_file_busy_failure,
-        resolve_binary_output_path, resolve_expanded_output_path, resolve_generated_package_name,
-        sanitize_package_name,
+        binary_file_name, build_artifact_dir, build_server_binary, clean_build_cache,
+        emit_server_project, expand_server_code, export_generated_runtime_artifacts,
+        is_text_file_busy_failure, resolve_binary_output_path, resolve_build_cache_root,
+        resolve_expanded_output_path, resolve_generated_package_name, sanitize_package_name,
     };
     use crate::commands::db::database_url_from_service_config;
     use crate::commands::setup::run_setup;
@@ -1545,7 +1711,7 @@ mod tests {
     use brotli::Decompressor;
     use flate2::read::GzDecoder;
     use reqwest::blocking::Client;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::fs;
     use std::io::Read;
     use std::net::TcpListener;
@@ -1781,6 +1947,41 @@ mod tests {
         let resolved = resolve_generated_package_name(&example_path("todo_app/todo_app.eon"), None)
             .expect("default package name should resolve");
         assert_eq!(resolved, "todo-app");
+    }
+
+    #[test]
+    fn resolve_build_cache_root_is_stable_for_same_service_and_package() {
+        let input = fixture_path("blog_api.eon");
+        let first = resolve_build_cache_root(&input, "blog-api", None)
+            .expect("build cache root should resolve");
+        let second = resolve_build_cache_root(&input, "blog-api", None)
+            .expect("build cache root should resolve");
+
+        assert_eq!(first, second);
+        assert!(
+            first.starts_with(
+                std::env::current_dir()
+                    .expect("current dir should resolve")
+                    .join(".vsr-build")
+                    .join("blog-api")
+            )
+        );
+    }
+
+    #[test]
+    fn clean_build_cache_removes_explicit_cache_dir() {
+        let root = test_root().join("build-cache");
+        fs::create_dir_all(root.join("project")).expect("cache project dir should be created");
+        fs::create_dir_all(root.join("target")).expect("cache target dir should be created");
+        fs::write(
+            root.join("project/Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("cache project file should be created");
+
+        let removed = clean_build_cache(Some(&root)).expect("build cache should be removed");
+        assert_eq!(removed, root);
+        assert!(!removed.exists(), "cache root should be removed");
     }
 
     #[test]
@@ -2167,9 +2368,11 @@ mod tests {
         assert!(artifact_dir.join("openapi.json").exists());
         assert!(artifact_dir.join("service.eon").exists());
         assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
-        assert!(artifact_dir
-            .join("migrations/0001_auth_management.sql")
-            .exists());
+        assert!(
+            artifact_dir
+                .join("migrations/0001_auth_management.sql")
+                .exists()
+        );
     }
 
     #[test]
@@ -2648,11 +2851,13 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(output
-            .parent()
-            .expect("binary output should have a parent")
-            .join("blog-server.bundle/.env.example")
-            .exists());
+        assert!(
+            output
+                .parent()
+                .expect("binary output should have a parent")
+                .join("blog-server.bundle/.env.example")
+                .exists()
+        );
     }
 
     #[test]
@@ -2678,10 +2883,12 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(output
-            .parent()
-            .expect("binary output should have a parent")
-            .join("turso-encrypted-server.bundle/.env.example")
-            .exists());
+        assert!(
+            output
+                .parent()
+                .expect("binary output should have a parent")
+                .join("turso-encrypted-server.bundle/.env.example")
+                .exists()
+        );
     }
 }
