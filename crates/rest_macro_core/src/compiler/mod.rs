@@ -48,6 +48,14 @@ pub fn expand_service_from_path(path: &FsPath, runtime_crate: Path) -> syn::Resu
     codegen::expand_service_module(&loaded.service, &runtime_crate, &loaded.include_path)
 }
 
+pub fn expand_service(
+    service: &ServiceSpec,
+    runtime_crate: Path,
+    include_path: &str,
+) -> syn::Result<TokenStream> {
+    codegen::expand_service_module(service, &runtime_crate, include_path)
+}
+
 pub fn load_service_from_path(path: &FsPath) -> syn::Result<ServiceSpec> {
     let loaded = eon_parser::load_service_from_path(path)?;
     Ok(loaded.service)

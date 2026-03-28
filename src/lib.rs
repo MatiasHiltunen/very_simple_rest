@@ -177,6 +177,7 @@ columns such as `tenant_id`, `org_id`, or `claim_workspace_id`.
 
 extern crate self as very_simple_rest;
 
+#[cfg(feature = "macros")]
 pub use rest_macro::{RestApi, rest_api_eon, rest_api_from_eon};
 pub use rest_macro_core as core;
 
@@ -277,6 +278,7 @@ pub mod prelude {
     pub use crate::logging;
     pub use crate::runtime;
     pub use crate::tls;
+    #[cfg(feature = "macros")]
     pub use crate::{RestApi, rest_api_eon, rest_api_from_eon};
 
     pub use actix_web::{

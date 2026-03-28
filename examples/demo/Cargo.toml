@@ -14,7 +14,7 @@ serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
-very_simple_rest = { path = "../..", default-features = false, features = ["sqlite", "turso-local"] }
+very_simple_rest = { path = "../..", default-features = false, features = ["macros", "sqlite", "turso-local"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 actix-cors = { workspace = true }
@@ -24,4 +24,3 @@ actix-files = { workspace = true }
 [[bin]]
 name = "demo"
 path = "src/main.rs"
-

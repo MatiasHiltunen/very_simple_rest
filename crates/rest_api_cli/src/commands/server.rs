@@ -320,9 +320,14 @@ fn emit_server_project_inner(
         &render_cargo_toml(&package_name, &service, backend)?,
     )?;
     write_generated_cargo_config(output_dir, &service)?;
+    let generated_include_path = format!("../{eon_file_name}");
+    write_file_if_changed(
+        &output_dir.join("src/generated.rs"),
+        &render_generated_module(&service, &generated_include_path)?,
+    )?;
     write_file_if_changed(
         &output_dir.join("src/main.rs"),
-        &render_main_rs(&service, &module_name, &eon_file_name, include_builtin_auth),
+        &render_main_rs(&service, &module_name, include_builtin_auth),
     )?;
     write_file_if_changed(&output_dir.join(&eon_file_name), &input_content)?;
     write_file_if_changed(
@@ -1117,7 +1122,6 @@ fn render_cargo_toml(
     backend: DbBackend,
 ) -> Result<String> {
     let dependency = render_runtime_dependency(service, backend)?;
-    let backend_feature = backend_feature_name(backend);
     let actix_web_dependency = if service.tls.is_enabled() {
         "actix-web = { version = \"4\", features = [\"rustls-0_23\"] }"
     } else {
@@ -1135,10 +1139,7 @@ edition = "2024"
 [dependencies]
 {actix_web_dependency}
 dotenv = "0.15"
-env_logger = "0.11"
-log = "0.4"
 serde = {{ version = "1", features = ["derive"] }}
-sqlx = {{ version = "0.8.3", features = ["runtime-tokio-native-tls", "any", "macros", "chrono", "{backend_feature}"] }}
 {dependency}
 {release_profile}
 "#
@@ -1208,12 +1209,7 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
     ))
 }
 
-fn render_main_rs(
-    service: &ServiceSpec,
-    module_name: &str,
-    eon_file_name: &str,
-    include_builtin_auth: bool,
-) -> String {
+fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth: bool) -> String {
     let auth_config = if include_builtin_auth {
         "                    .configure(|cfg| auth::auth_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
     } else {
@@ -1227,7 +1223,7 @@ fn render_main_rs(
     let bind_addr_default = default_bind_addr(service);
     let tls_setup = if service.tls.is_enabled() {
         format!(
-            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = {module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
+            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = generated::{module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
         )
     } else {
         String::new()
@@ -1244,7 +1240,7 @@ use std::path::PathBuf;
 
 use very_simple_rest::prelude::*;
 
-rest_api_from_eon!("{eon_file_name}");
+mod generated;
 
 const OPENAPI_JSON: &str = include_str!("../openapi.json");
 
@@ -1292,7 +1288,7 @@ async fn swagger_ui() -> impl Responder {{
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {{
     let _ = dotenv::dotenv();
-    let logging = {module_name}::logging();
+    let logging = generated::{module_name}::logging();
     logging.init_env_logger();
 
 {auth_startup_check}    let current_exe = env::current_exe().ok();
@@ -1306,11 +1302,11 @@ async fn main() -> std::io::Result<()> {{
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let database_config = very_simple_rest::core::database::resolve_database_config(
-        &{module_name}::database(),
+        &generated::{module_name}::database(),
         &database_base_dir,
     );
     let default_database_url = very_simple_rest::core::database::resolve_database_url(
-        {module_name}::default_database_url(),
+        generated::{module_name}::default_database_url(),
         &database_base_dir,
     );
     let database_url = match env::var("DATABASE_URL") {{
@@ -1328,8 +1324,8 @@ async fn main() -> std::io::Result<()> {{
         .await
         .map_err(|error| std::io::Error::other(format!("database connection failed: {{error}}")))?;
 
-{tls_setup}    let api_runtime = {module_name}::runtime();
-    let api_security = {module_name}::security();
+{tls_setup}    let api_runtime = generated::{module_name}::runtime();
+    let api_security = generated::{module_name}::security();
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {{
         let api_runtime = api_runtime.clone();
@@ -1343,14 +1339,27 @@ async fn main() -> std::io::Result<()> {{
             .route("/docs", web::get().to(swagger_ui))
             .service(
                 scope("/api")
-{auth_config}                    .configure(|cfg| {module_name}::configure(cfg, server_pool.clone()))
+{auth_config}                    .configure(|cfg| generated::{module_name}::configure(cfg, server_pool.clone()))
             )
-            .configure({module_name}::configure_static)
+            .configure(generated::{module_name}::configure_static)
     }});
 {server_bind}    server.run().await
 }}
 "##
     )
+}
+
+fn render_generated_module(service: &ServiceSpec, include_path: &str) -> Result<String> {
+    let runtime_crate = parse_str("very_simple_rest")
+        .map_err(|error| Error::Unknown(format!("invalid runtime crate path: {error}")))?;
+    let tokens = compiler::expand_service(service, runtime_crate, include_path)
+        .map_err(|error| Error::Config(format!("failed to expand service module: {error}")))?;
+    let parsed = parse2::<syn::File>(tokens).map_err(|error| {
+        Error::Unknown(format!(
+            "compiler expansion did not parse as a Rust file: {error}"
+        ))
+    })?;
+    Ok(prettyplease::unparse(&parsed))
 }
 
 fn default_bind_addr(service: &ServiceSpec) -> &'static str {
@@ -2115,29 +2124,36 @@ mod tests {
 
         assert!(root.join("Cargo.toml").exists());
         assert!(root.join("src/main.rs").exists());
+        assert!(root.join("src/generated.rs").exists());
         assert!(root.join("blog_api.eon").exists());
         assert!(root.join("openapi.json").exists());
         assert!(root.join("migrations/0001_service.sql").exists());
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("rest_api_from_eon!(\"blog_api.eon\")"));
-        assert!(main_rs.contains("blog_api::security()"));
-        assert!(main_rs.contains("blog_api::runtime()"));
+        assert!(main_rs.contains("mod generated;"));
+        assert!(!main_rs.contains("rest_api_from_eon!("));
+        assert!(main_rs.contains("generated::blog_api::security()"));
+        assert!(main_rs.contains("generated::blog_api::runtime()"));
         assert!(main_rs.contains("resolve_database_config("));
-        assert!(main_rs.contains("&blog_api::database()"));
+        assert!(main_rs.contains("&generated::blog_api::database()"));
         assert!(main_rs.contains("resolve_database_url("));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
-        assert!(main_rs.contains("blog_api::configure"));
+        assert!(main_rs.contains("generated::blog_api::configure"));
         assert!(main_rs.contains("compression_middleware"));
         assert!(main_rs.contains("cors_middleware"));
         assert!(main_rs.contains("security_headers_middleware"));
         assert!(main_rs.contains(".route(\"/openapi.json\""));
         assert!(main_rs.contains(".route(\"/docs\""));
 
+        let generated = read_to_string(&root.join("src/generated.rs"));
+        assert!(generated.contains("pub mod blog_api"));
+        assert!(generated.contains("include_str!(\"../blog_api.eon\")"));
+
         let cargo_toml = read_to_string(&root.join("Cargo.toml"));
         assert!(cargo_toml.contains("name = \"blog-server\""));
         assert!(cargo_toml.contains("very_simple_rest"));
         assert!(cargo_toml.contains("\"sqlite\", \"turso-local\""));
+        assert!(!cargo_toml.contains("\"macros\""));
 
         let migration = read_to_string(&root.join("migrations/0001_service.sql"));
         assert!(migration.contains("CREATE TABLE post"));
@@ -2219,7 +2235,7 @@ mod tests {
         assert!(cargo_toml.contains("name = \"todo-app\""));
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("&todo_app_api::database()"));
+        assert!(main_rs.contains("&generated::todo_app_api::database()"));
     }
 
     #[test]
@@ -2271,7 +2287,7 @@ mod tests {
         assert!(env_example.contains("TURSO_ENCRYPTION_KEY=change-me-hex-key"));
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("let logging = security_api::logging();"));
+        assert!(main_rs.contains("let logging = generated::security_api::logging();"));
         assert!(main_rs.contains("logging.init_env_logger();"));
     }
 
@@ -2288,7 +2304,7 @@ mod tests {
         .expect("tls-enabled server project should emit");
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("let tls_config = tls_api::tls();"));
+        assert!(main_rs.contains("let tls_config = generated::tls_api::tls();"));
         assert!(main_rs.contains("load_rustls_server_config(&tls_config, &tls_base_dir)"));
         assert!(main_rs.contains("bind_rustls_0_23"));
         assert!(main_rs.contains("Server listening on https://"));
@@ -2321,7 +2337,7 @@ mod tests {
         .expect("server project should emit");
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains(".configure(static_site_api::configure_static)"));
+        assert!(main_rs.contains(".configure(generated::static_site_api::configure_static)"));
         assert!(root.join("static_site/index.html").exists());
         assert!(root.join("static_site/assets/app.js").exists());
     }
@@ -2339,9 +2355,9 @@ mod tests {
         .expect("server project should emit");
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("&turso_local_api::database()"));
+        assert!(main_rs.contains("&generated::turso_local_api::database()"));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
-        assert!(main_rs.contains("turso_local_api::default_database_url()"));
+        assert!(main_rs.contains("generated::turso_local_api::default_database_url()"));
 
         let cargo_toml = read_to_string(&root.join("Cargo.toml"));
         assert!(cargo_toml.contains("\"sqlite\", \"turso-local\""));
@@ -2392,7 +2408,7 @@ mod tests {
         .expect("encrypted turso local server project should emit");
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("&turso_local_encrypted_api::database()"));
+        assert!(main_rs.contains("&generated::turso_local_encrypted_api::database()"));
         assert!(main_rs.contains("prepare_database_engine(&database_config)"));
 
         let cargo_toml = read_to_string(&root.join("Cargo.toml"));
