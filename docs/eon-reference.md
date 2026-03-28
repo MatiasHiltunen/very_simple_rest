@@ -412,7 +412,7 @@ Static mounts are resolved relative to the `.eon` file and must stay inside the 
 
 ## Storage
 
-The optional `storage` block declares named object-storage backends, public read-only mounts, and upload endpoints. The current runtime supports a local filesystem backend, backed internally by the shared storage runtime, can expose those objects under explicit public URL prefixes, and can accept multipart uploads into declared backends.
+The optional `storage` block declares named object-storage backends, public read-only mounts, upload endpoints, and a local S3-compatible dev surface. The current runtime supports a local filesystem backend, backed internally by the shared storage runtime, can expose those objects under explicit public URL prefixes, can accept multipart uploads into declared backends, and can mount a narrow path-style S3-compatible API for local workflows without external software.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -433,6 +433,12 @@ The optional `storage` block declares named object-storage backends, public read
 | storage.uploads[].max_bytes | Integer | 26214400 | No | Positive integer | Maximum accepted multipart file size in bytes. |
 | storage.uploads[].require_auth | Bool | true | No | true, false | When `true`, the upload route requires a valid bearer token even if no roles are listed. |
 | storage.uploads[].roles | List<String> | No role restriction | No | Role names | If present, the authenticated user must have at least one matching role. |
+| storage.s3_compat | Object | Disabled | No | S3-compatible local mount config | Mounts a narrow path-style S3-compatible surface for local development only. The current slice does not validate AWS signatures; clients should use a custom endpoint URL and path-style access. |
+| storage.s3_compat.mount | String | "/_s3" | No | Absolute URL path beginning with `/` | Mounted outside `/api` so S3-style bucket paths stay clean. Cannot conflict with static mounts, storage public mounts, `/api`, `/auth`, `/docs`, or `/openapi.json`. |
+| storage.s3_compat.buckets | List<S3Bucket> | No S3-compatible buckets | No | Bucket objects | Bucket names must be unique within the local S3-compatible surface. |
+| storage.s3_compat.buckets[].name | String | None | Yes | Bucket name | Used in path-style URLs like `/_s3/<bucket>/<key>`. |
+| storage.s3_compat.buckets[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
+| storage.s3_compat.buckets[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix inside the selected backend before bucket paths are resolved. |
 
 ## Database Engine
 

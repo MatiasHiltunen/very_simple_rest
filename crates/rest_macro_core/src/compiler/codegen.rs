@@ -213,6 +213,23 @@ pub fn expand_service_module(
             );
         }
     };
+    let configure_s3_compat = if service.storage.s3_compat.is_none() {
+        quote! {}
+    } else {
+        quote! {
+            let storage = storage();
+            let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
+                &storage,
+            )
+            .expect("generated storage config should be valid");
+            #runtime_crate::core::storage::configure_s3_compat_with_runtime(
+                cfg,
+                &storage_registry,
+                storage.s3_compat.as_ref(),
+                &runtime,
+            );
+        }
+    };
     let configure_storage_uploads = if service.storage.uploads.is_empty() {
         quote! {}
     } else {
@@ -245,13 +262,16 @@ pub fn expand_service_module(
             );
         }
     };
-    let configure_static_body =
-        if service.static_mounts.is_empty() && service.storage.public_mounts.is_empty() {
+    let configure_static_body = if service.static_mounts.is_empty()
+        && service.storage.public_mounts.is_empty()
+        && service.storage.s3_compat.is_none()
+    {
             quote! {}
         } else {
             quote! {
                 let runtime = runtime();
                 #configure_storage_public_mounts
+                #configure_s3_compat
                 #configure_static_mounts
             }
         };
@@ -1120,12 +1140,36 @@ fn storage_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
             }
         }
     });
+    let s3_compat = if let Some(s3_compat) = &service.storage.s3_compat {
+        let mount_path = Literal::string(&s3_compat.mount_path);
+        let buckets = s3_compat.buckets.iter().map(|bucket| {
+            let name = Literal::string(&bucket.name);
+            let backend = Literal::string(&bucket.backend);
+            let key_prefix = Literal::string(&bucket.key_prefix);
+            quote! {
+                #runtime_crate::core::storage::StorageS3CompatBucket {
+                    name: #name.to_owned(),
+                    backend: #backend.to_owned(),
+                    key_prefix: #key_prefix.to_owned(),
+                }
+            }
+        });
+        quote! {
+            Some(#runtime_crate::core::storage::StorageS3CompatConfig {
+                mount_path: #mount_path.to_owned(),
+                buckets: vec![#(#buckets),*],
+            })
+        }
+    } else {
+        quote!(None)
+    };
 
     quote! {
         #runtime_crate::core::storage::StorageConfig {
             backends: vec![#(#backends),*],
             public_mounts: vec![#(#public_mounts),*],
             uploads: vec![#(#uploads),*],
+            s3_compat: #s3_compat,
         }
     }
 }

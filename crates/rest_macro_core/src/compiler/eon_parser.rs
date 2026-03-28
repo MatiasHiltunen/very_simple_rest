@@ -58,7 +58,7 @@ use crate::{
     },
     storage::{
         StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
-        StorageUploadEndpoint,
+        StorageS3CompatBucket, StorageS3CompatConfig, StorageUploadEndpoint,
     },
     tls::{
         DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
@@ -468,6 +468,8 @@ struct StorageDocument {
     public_mounts: Vec<StoragePublicMountDocument>,
     #[serde(default)]
     uploads: Vec<StorageUploadDocument>,
+    #[serde(default)]
+    s3_compat: Option<StorageS3CompatDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -500,6 +502,22 @@ struct StorageUploadDocument {
     require_auth: Option<bool>,
     #[serde(default)]
     roles: Vec<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct StorageS3CompatDocument {
+    #[serde(default)]
+    mount: Option<String>,
+    #[serde(default)]
+    buckets: Vec<StorageS3CompatBucketDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct StorageS3CompatBucketDocument {
+    name: String,
+    backend: String,
+    #[serde(default)]
+    prefix: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -4390,10 +4408,57 @@ fn parse_storage_document(
         });
     }
 
+    let s3_compat = if let Some(s3_compat) = storage.s3_compat {
+        let mount_path = normalize_mount_path(s3_compat.mount.as_deref().unwrap_or("/_s3"))?;
+        validate_s3_compat_mount_path(&mount_path)?;
+        let mut buckets = Vec::with_capacity(s3_compat.buckets.len());
+        let mut seen_bucket_names = HashSet::new();
+        for bucket in s3_compat.buckets {
+            let bucket_name = bucket.name.trim();
+            if bucket_name.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "storage s3_compat bucket name cannot be empty",
+                ));
+            }
+            if !seen_bucket_names.insert(bucket_name.to_owned()) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("duplicate storage s3_compat bucket `{bucket_name}`"),
+                ));
+            }
+            let backend = bucket.backend.trim();
+            if backend.is_empty() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("storage s3_compat bucket `{bucket_name}` must reference a backend"),
+                ));
+            }
+            if !seen_backend_names.contains(backend) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!(
+                        "storage s3_compat bucket `{bucket_name}` references unknown backend `{backend}`"
+                    ),
+                ));
+            }
+            buckets.push(StorageS3CompatBucket {
+                name: bucket_name.to_owned(),
+                backend: backend.to_owned(),
+                key_prefix: validate_storage_key_prefix(bucket.prefix.as_deref())?,
+            });
+        }
+
+        Some(StorageS3CompatConfig { mount_path, buckets })
+    } else {
+        None
+    };
+
     Ok(StorageConfig {
         backends,
         public_mounts,
         uploads,
+        s3_compat,
     })
 }
 
@@ -4456,6 +4521,30 @@ fn validate_storage_mount_path(mount_path: &str) -> syn::Result<()> {
         return Err(syn::Error::new(
             Span::call_site(),
             "storage public mount path cannot contain `//`",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_s3_compat_mount_path(mount_path: &str) -> syn::Result<()> {
+    if mount_path == "/api"
+        || mount_path.starts_with("/api/")
+        || mount_path == "/auth"
+        || mount_path.starts_with("/auth/")
+        || mount_path == "/docs"
+        || mount_path == "/openapi.json"
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("storage s3_compat mount `{mount_path}` conflicts with a reserved route"),
+        ));
+    }
+
+    if mount_path.contains("//") {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "storage s3_compat mount path cannot contain `//`",
         ));
     }
 
@@ -4635,6 +4724,18 @@ fn validate_distinct_public_mounts(
                 format!(
                     "mount path `{}` is already declared by a {existing}",
                     mount.mount_path
+                ),
+            ));
+        }
+    }
+    if let Some(s3_compat) = &storage.s3_compat {
+        if let Some(existing) = mounts.insert(s3_compat.mount_path.as_str(), "storage s3_compat mount")
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "mount path `{}` is already declared by a {existing}",
+                    s3_compat.mount_path
                 ),
             ));
         }
@@ -9597,6 +9698,113 @@ resources: [
             error
                 .to_string()
                 .contains("conflicts with an existing API route segment"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parses_storage_s3_compat_mounts_from_eon() {
+        let root = temp_root("eon_storage_s3_compat");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let document = parse_document(
+            r#"
+            storage: {
+                backends: [
+                    {
+                        name: "uploads"
+                        kind: Local
+                        dir: "var/uploads"
+                    }
+                ]
+                s3_compat: {
+                    mount: "/_s3"
+                    buckets: [
+                        {
+                            name: "media"
+                            backend: "uploads"
+                            prefix: "assets"
+                        }
+                    ]
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    api_name: "posts"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let storage =
+            parse_storage_document(&root, document.storage).expect("storage should parse");
+        let s3_compat = storage
+            .s3_compat
+            .expect("s3 compat config should be present");
+        assert_eq!(s3_compat.mount_path, "/_s3");
+        assert_eq!(s3_compat.buckets.len(), 1);
+        assert_eq!(s3_compat.buckets[0].name, "media");
+        assert_eq!(s3_compat.buckets[0].backend, "uploads");
+        assert_eq!(s3_compat.buckets[0].key_prefix, "assets");
+    }
+
+    #[test]
+    fn rejects_storage_s3_compat_mounts_that_conflict_with_static_mounts() {
+        let root = temp_root("eon_storage_s3_compat_conflict");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+
+        let document = parse_document(
+            r#"
+            storage: {
+                backends: [
+                    {
+                        name: "uploads"
+                        kind: Local
+                        dir: "var/uploads"
+                    }
+                ]
+                s3_compat: {
+                    mount: "/studio"
+                    buckets: [
+                        {
+                            name: "media"
+                            backend: "uploads"
+                        }
+                    ]
+                }
+            }
+            static: {
+                mounts: [
+                    {
+                        mount: "/studio"
+                        dir: "public"
+                        mode: Directory
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let static_mounts =
+            build_static_mounts(&root, document.static_config).expect("static mounts should parse");
+        let storage =
+            parse_storage_document(&root, document.storage).expect("storage should parse");
+        let error = validate_distinct_public_mounts(static_mounts.as_slice(), &storage)
+            .expect_err("conflicting s3 compat mount should fail");
+        assert!(
+            error.to_string().contains("mount path `/studio` is already declared"),
             "unexpected error: {error}"
         );
     }

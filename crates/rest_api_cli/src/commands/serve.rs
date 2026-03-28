@@ -27,8 +27,9 @@ use rest_macro_core::db::{DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
 use rest_macro_core::storage::{
-    StoragePublicMount, StorageRegistry, StorageUploadEndpoint,
-    configure_public_mounts_with_runtime, configure_upload_endpoints_with_runtime,
+    StoragePublicMount, StorageRegistry, StorageS3CompatConfig, StorageUploadEndpoint,
+    configure_public_mounts_with_runtime, configure_s3_compat_with_runtime,
+    configure_upload_endpoints_with_runtime,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,7 @@ pub async fn serve_service(
             let static_mounts = dynamic_service.static_mounts.clone();
             let storage_registry = dynamic_service.storage_registry.clone();
             let storage_public_mounts = dynamic_service.storage_public_mounts.clone();
+            let storage_s3_compat = dynamic_service.storage_s3_compat.clone();
             let docs_html = dynamic_service.docs_html.clone();
             let openapi_json = dynamic_service.openapi_json.clone();
 
@@ -165,6 +167,12 @@ pub async fn serve_service(
                         cfg,
                         storage_registry.as_ref(),
                         storage_public_mounts.as_slice(),
+                        &api_runtime,
+                    );
+                    configure_s3_compat_with_runtime(
+                        cfg,
+                        storage_registry.as_ref(),
+                        storage_s3_compat.as_ref().as_ref(),
                         &api_runtime,
                     );
                     configure_static_mounts_with_runtime(
@@ -212,6 +220,7 @@ struct DynamicService {
     storage_registry: Arc<StorageRegistry>,
     storage_public_mounts: Arc<Vec<StoragePublicMount>>,
     storage_uploads: Arc<Vec<StorageUploadEndpoint>>,
+    storage_s3_compat: Arc<Option<StorageS3CompatConfig>>,
 }
 
 impl DynamicService {
@@ -236,6 +245,7 @@ impl DynamicService {
         );
         let storage_public_mounts = Arc::new(service.storage.public_mounts.clone());
         let storage_uploads = Arc::new(service.storage.uploads.clone());
+        let storage_s3_compat = Arc::new(service.storage.s3_compat.clone());
 
         Ok(Self {
             runtime: service.runtime.clone(),
@@ -251,6 +261,7 @@ impl DynamicService {
             storage_registry,
             storage_public_mounts,
             storage_uploads,
+            storage_s3_compat,
         })
     }
 }
@@ -4250,7 +4261,9 @@ mod tests {
     };
     use rest_macro_core::db::{DbPool, query};
     use rest_macro_core::static_files::configure_static_mounts_with_runtime;
-    use rest_macro_core::storage::configure_public_mounts_with_runtime;
+    use rest_macro_core::storage::{
+        configure_public_mounts_with_runtime, configure_s3_compat_with_runtime,
+    };
     use serde::Serialize;
     use serde_json::{Value, json};
     use std::{fs, path::PathBuf};
@@ -5720,5 +5733,79 @@ mod tests {
         let stored_path = uploads_dir.join(&body.object_key);
         assert!(stored_path.is_file(), "uploaded object should exist on disk");
         let _ = fs::remove_file(stored_path);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_serves_s3_compatible_storage_routes() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+
+        let uploads_dir = fixture_path("var/s3-uploads");
+        let _ = fs::remove_dir_all(&uploads_dir);
+        fs::create_dir_all(&uploads_dir).expect("uploads dir should exist");
+
+        let (dynamic_service, _) = build_test_state("storage_s3_compat_api.eon", false).await;
+        let app = test::init_service(
+            App::new().configure({
+                let dynamic_service = dynamic_service.clone();
+                move |cfg| {
+                    configure_s3_compat_with_runtime(
+                        cfg,
+                        dynamic_service.storage_registry.as_ref(),
+                        dynamic_service.storage_s3_compat.as_ref().as_ref(),
+                        &dynamic_service.runtime,
+                    );
+                }
+            }),
+        )
+        .await;
+
+        let put_request = test::TestRequest::put()
+            .uri("/_s3/media/logo.txt")
+            .insert_header(("Content-Type", "text/plain"))
+            .insert_header(("x-amz-meta-origin", "native-test"))
+            .set_payload("hello native s3")
+            .to_request();
+        let put_response = test::call_service(&app, put_request).await;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        assert!(uploads_dir.join("assets/logo.txt").is_file());
+
+        let head_request = test::TestRequest::default()
+            .method(actix_web::http::Method::HEAD)
+            .uri("/_s3/media/logo.txt")
+            .to_request();
+        let head_response = test::call_service(&app, head_request).await;
+        assert_eq!(head_response.status(), StatusCode::OK);
+        assert_eq!(
+            head_response
+                .headers()
+                .get("x-amz-meta-origin")
+                .expect("head metadata should exist"),
+            "native-test"
+        );
+
+        let get_request = test::TestRequest::get().uri("/_s3/media/logo.txt").to_request();
+        let get_response = test::call_service(&app, get_request).await;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = test::read_body(get_response).await;
+        assert_eq!(get_body.as_ref(), b"hello native s3");
+
+        let list_request = test::TestRequest::get()
+            .uri("/_s3/media?list-type=2&prefix=logo")
+            .to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = String::from_utf8(test::read_body(list_response).await.to_vec())
+            .expect("list response should be utf-8");
+        assert!(list_body.contains("<Key>logo.txt</Key>"));
+
+        let delete_request = test::TestRequest::delete().uri("/_s3/media/logo.txt").to_request();
+        let delete_response = test::call_service(&app, delete_request).await;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        assert!(!uploads_dir.join("assets/logo.txt").exists());
+
+        let _ = fs::remove_dir_all(&uploads_dir);
     }
 }

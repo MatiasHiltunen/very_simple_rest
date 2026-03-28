@@ -1,0 +1,30 @@
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: Local
+            dir: "var/s3-uploads"
+        }
+    ]
+    s3_compat: {
+        mount: "/_s3"
+        buckets: [
+            {
+                name: "media"
+                backend: "uploads"
+                prefix: "assets"
+            }
+        ]
+    }
+}
+
+resources: [
+    {
+        name: "Post"
+        api_name: "posts"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]
