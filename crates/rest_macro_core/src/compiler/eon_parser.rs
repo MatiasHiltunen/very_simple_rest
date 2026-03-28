@@ -56,6 +56,7 @@ use crate::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
     },
+    storage::{StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount},
     tls::{
         DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
         DEFAULT_TLS_KEY_PATH_ENV, TlsConfig,
@@ -83,6 +84,8 @@ struct ServiceDocument {
     logging: Option<LoggingDocument>,
     #[serde(default)]
     runtime: Option<RuntimeDocument>,
+    #[serde(default)]
+    storage: Option<StorageDocument>,
     #[serde(default)]
     authorization: Option<AuthorizationDocument>,
     #[serde(default)]
@@ -452,6 +455,31 @@ struct CompressionDocument {
     enabled: Option<bool>,
     #[serde(default)]
     static_precompressed: Option<bool>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct StorageDocument {
+    #[serde(default)]
+    backends: Vec<StorageBackendDocument>,
+    #[serde(default)]
+    public_mounts: Vec<StoragePublicMountDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct StorageBackendDocument {
+    name: String,
+    kind: String,
+    dir: String,
+}
+
+#[derive(serde::Deserialize)]
+struct StoragePublicMountDocument {
+    mount: String,
+    backend: String,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    cache: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -1522,6 +1550,8 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let static_mounts = build_static_mounts(&service_root, document.static_config)?;
+    let storage = parse_storage_document(&service_root, document.storage)?;
+    validate_distinct_public_mounts(static_mounts.as_slice(), &storage)?;
     let database = parse_database_document(
         document.db,
         document.database,
@@ -1557,6 +1587,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             resources,
             authorization,
             static_mounts,
+            storage,
             database,
             logging,
             runtime,
@@ -4203,6 +4234,89 @@ fn build_static_mounts(
     Ok(mounts)
 }
 
+fn parse_storage_document(
+    service_root: &Path,
+    storage: Option<StorageDocument>,
+) -> syn::Result<StorageConfig> {
+    let service_root = service_root
+        .canonicalize()
+        .unwrap_or_else(|_| service_root.to_path_buf());
+    let Some(storage) = storage else {
+        return Ok(StorageConfig::default());
+    };
+
+    let mut backends = Vec::with_capacity(storage.backends.len());
+    let mut seen_backend_names = HashSet::new();
+    for backend in storage.backends {
+        let backend_name = backend.name.trim();
+        if backend_name.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "storage backend name cannot be empty",
+            ));
+        }
+        if !seen_backend_names.insert(backend_name.to_owned()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate storage backend `{backend_name}`"),
+            ));
+        }
+        let kind = parse_storage_backend_kind(&backend.kind)?;
+        let root_dir = validate_relative_path(&backend.dir, "storage backend dir")?;
+        let resolved_root_dir =
+            resolve_path_under_root_allow_missing(&service_root, &root_dir, "storage backend dir")?;
+        backends.push(StorageBackendConfig {
+            name: backend_name.to_owned(),
+            kind,
+            root_dir,
+            resolved_root_dir: resolved_root_dir.display().to_string(),
+        });
+    }
+
+    let mut public_mounts = Vec::with_capacity(storage.public_mounts.len());
+    let mut seen_mounts = HashSet::new();
+    for mount in storage.public_mounts {
+        let mount_path = normalize_mount_path(&mount.mount)?;
+        if !seen_mounts.insert(mount_path.clone()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("duplicate storage public mount `{mount_path}`"),
+            ));
+        }
+        validate_storage_mount_path(&mount_path)?;
+
+        let backend = mount.backend.trim();
+        if backend.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("storage public mount `{mount_path}` must reference a backend"),
+            ));
+        }
+        if !seen_backend_names.contains(backend) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "storage public mount `{mount_path}` references unknown backend `{backend}`"
+                ),
+            ));
+        }
+
+        public_mounts.push(StoragePublicMount {
+            mount_path,
+            backend: backend.to_owned(),
+            key_prefix: validate_storage_key_prefix(mount.prefix.as_deref())?,
+            cache: runtime_static_cache_profile(parse_static_cache_profile(
+                mount.cache.as_deref().unwrap_or("Revalidate"),
+            )?),
+        });
+    }
+
+    Ok(StorageConfig {
+        backends,
+        public_mounts,
+    })
+}
+
 fn normalize_mount_path(value: &str) -> syn::Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -4244,6 +4358,30 @@ fn validate_mount_path(mount_path: &str) -> syn::Result<()> {
     Ok(())
 }
 
+fn validate_storage_mount_path(mount_path: &str) -> syn::Result<()> {
+    if mount_path == "/api"
+        || mount_path.starts_with("/api/")
+        || mount_path == "/auth"
+        || mount_path.starts_with("/auth/")
+        || mount_path == "/docs"
+        || mount_path == "/openapi.json"
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("storage public mount `{mount_path}` conflicts with a reserved route"),
+        ));
+    }
+
+    if mount_path.contains("//") {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "storage public mount path cannot contain `//`",
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_relative_path(value: &str, label: &str) -> syn::Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -4276,6 +4414,57 @@ fn validate_relative_path(value: &str, label: &str) -> syn::Result<String> {
     Ok(trimmed.to_owned())
 }
 
+fn validate_storage_key_prefix(value: Option<&str>) -> syn::Result<String> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(String::new());
+    };
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+
+    let trimmed = value.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    validate_relative_path(trimmed, "storage public mount prefix")
+}
+
+fn resolve_path_under_root_allow_missing(
+    service_root: &Path,
+    relative_path: &str,
+    label: &str,
+) -> syn::Result<PathBuf> {
+    let mut resolved = service_root.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        match component {
+            Component::Normal(segment) => {
+                resolved.push(segment);
+                if resolved.exists() {
+                    let canonical = resolved.canonicalize().map_err(|error| {
+                        syn::Error::new(
+                            Span::call_site(),
+                            format!("failed to resolve {label} `{relative_path}`: {error}"),
+                        )
+                    })?;
+                    if !canonical.starts_with(service_root) {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            format!(
+                                "{label} `{relative_path}` resolves outside the service directory"
+                            ),
+                        ));
+                    }
+                    resolved = canonical;
+                }
+            }
+            Component::CurDir => {}
+            _ => unreachable!("relative path validation should reject unsupported components"),
+        }
+    }
+    Ok(resolved)
+}
+
 fn resolve_directory_under_root(service_root: &Path, relative_dir: &str) -> syn::Result<PathBuf> {
     let resolved = service_root.join(relative_dir);
     let canonical = resolved.canonicalize().map_err(|error| {
@@ -4297,6 +4486,48 @@ fn resolve_directory_under_root(service_root: &Path, relative_dir: &str) -> syn:
         ));
     }
     Ok(canonical)
+}
+
+fn parse_storage_backend_kind(value: &str) -> syn::Result<StorageBackendKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "local" => Ok(StorageBackendKind::Local),
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!("unsupported `storage.backends.kind` value `{other}`"),
+        )),
+    }
+}
+
+fn runtime_static_cache_profile(
+    value: StaticCacheProfile,
+) -> crate::static_files::StaticCacheProfile {
+    match value {
+        StaticCacheProfile::NoStore => crate::static_files::StaticCacheProfile::NoStore,
+        StaticCacheProfile::Revalidate => crate::static_files::StaticCacheProfile::Revalidate,
+        StaticCacheProfile::Immutable => crate::static_files::StaticCacheProfile::Immutable,
+    }
+}
+
+fn validate_distinct_public_mounts(
+    static_mounts: &[StaticMountSpec],
+    storage: &StorageConfig,
+) -> syn::Result<()> {
+    let mut mounts = HashMap::new();
+    for mount in static_mounts {
+        mounts.insert(mount.mount_path.as_str(), "static mount");
+    }
+    for mount in &storage.public_mounts {
+        if let Some(existing) = mounts.insert(mount.mount_path.as_str(), "storage public mount") {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!(
+                    "mount path `{}` is already declared by a {existing}",
+                    mount.mount_path
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_file_under_root(
@@ -7038,6 +7269,7 @@ resources: [
                     .expect("resources should build"),
                 authorization: AuthorizationContract::default(),
                 static_mounts: Vec::new(),
+                storage: StorageConfig::default(),
                 database: parse_database_document(
                     document.db,
                     document.database,
@@ -8988,6 +9220,144 @@ resources: [
             error
                 .to_string()
                 .contains("conflicts with a reserved route")
+        );
+    }
+
+    #[test]
+    fn parses_storage_backends_and_public_mounts_from_eon() {
+        let root = temp_root("eon_storage_mounts");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let document = parse_document(
+            r#"
+            storage: {
+                backends: [
+                    {
+                        name: "uploads"
+                        kind: Local
+                        dir: "var/uploads"
+                    }
+                ]
+                public_mounts: [
+                    {
+                        mount: "/uploads"
+                        backend: "uploads"
+                        prefix: "public"
+                        cache: Immutable
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let storage =
+            parse_storage_document(&root, document.storage).expect("storage should parse");
+        assert_eq!(storage.backends.len(), 1);
+        assert_eq!(storage.backends[0].name, "uploads");
+        assert_eq!(storage.backends[0].kind, StorageBackendKind::Local);
+        assert_eq!(storage.backends[0].root_dir, "var/uploads");
+        assert_eq!(storage.public_mounts.len(), 1);
+        assert_eq!(storage.public_mounts[0].mount_path, "/uploads");
+        assert_eq!(storage.public_mounts[0].backend, "uploads");
+        assert_eq!(storage.public_mounts[0].key_prefix, "public");
+        assert_eq!(
+            storage.public_mounts[0].cache,
+            crate::static_files::StaticCacheProfile::Immutable
+        );
+    }
+
+    #[test]
+    fn rejects_storage_public_mounts_with_unknown_backends() {
+        let root = temp_root("eon_storage_unknown_backend");
+        fs::create_dir_all(&root).expect("root should exist");
+
+        let document = parse_document(
+            r#"
+            storage: {
+                public_mounts: [
+                    {
+                        mount: "/uploads"
+                        backend: "missing"
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = parse_storage_document(&root, document.storage)
+            .expect_err("unknown storage backend should fail");
+        assert!(
+            error.to_string().contains("references unknown backend `missing`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_storage_mounts_that_conflict_with_static_mounts() {
+        let root = temp_root("eon_storage_mount_conflict");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+
+        let document = parse_document(
+            r#"
+            static: {
+                mounts: [
+                    {
+                        mount: "/uploads"
+                        dir: "public"
+                    }
+                ]
+            }
+            storage: {
+                backends: [
+                    {
+                        name: "uploads"
+                        kind: Local
+                        dir: "var/uploads"
+                    }
+                ]
+                public_mounts: [
+                    {
+                        mount: "/uploads"
+                        backend: "uploads"
+                    }
+                ]
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let static_mounts =
+            build_static_mounts(&root, document.static_config).expect("static mounts should parse");
+        let storage =
+            parse_storage_document(&root, document.storage).expect("storage should parse");
+        let error = validate_distinct_public_mounts(static_mounts.as_slice(), &storage)
+            .expect_err("conflicting mount paths should fail");
+        assert!(
+            error.to_string().contains("already declared by a static mount"),
+            "unexpected error: {error}"
         );
     }
 }

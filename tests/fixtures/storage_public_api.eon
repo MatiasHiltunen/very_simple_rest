@@ -1,0 +1,25 @@
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: Local
+            dir: "var/uploads"
+        }
+    ]
+    public_mounts: [
+        {
+            mount: "/uploads"
+            backend: "uploads"
+            cache: Immutable
+        }
+    ]
+}
+resources: [
+    {
+        name: "Post"
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+        ]
+    }
+]

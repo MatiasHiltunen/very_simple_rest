@@ -196,14 +196,30 @@ pub fn expand_service_module(
             }
         }
     });
-    let configure_static_body = if service.static_mounts.is_empty() {
+    let configure_storage_public_mounts = if service.storage.public_mounts.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            let storage = storage();
+            let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
+                &storage,
+            )
+            .expect("generated storage config should be valid");
+            #runtime_crate::core::storage::configure_public_mounts_with_runtime(
+                cfg,
+                &storage_registry,
+                storage.public_mounts.as_slice(),
+                &runtime,
+            );
+        }
+    };
+    let configure_static_mounts = if service.static_mounts.is_empty() {
         quote! {}
     } else {
         quote! {
             let mounts = [
                 #(#static_mounts),*
             ];
-            let runtime = runtime();
             #runtime_crate::core::static_files::configure_static_mounts_with_runtime(
                 cfg,
                 &mounts,
@@ -211,10 +227,21 @@ pub fn expand_service_module(
             );
         }
     };
+    let configure_static_body =
+        if service.static_mounts.is_empty() && service.storage.public_mounts.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                let runtime = runtime();
+                #configure_storage_public_mounts
+                #configure_static_mounts
+            }
+        };
     let database = database_tokens(service, runtime_crate);
     let default_database_url = Literal::string(&default_service_database_url(service));
     let logging = logging_tokens(service, runtime_crate);
     let runtime = runtime_tokens(service, runtime_crate);
+    let storage = storage_tokens(service, runtime_crate);
     let security = security_tokens(service, runtime_crate);
     let authorization = authorization_tokens(service, runtime_crate);
     let authorization_management = authorization_management_tokens(service, runtime_crate);
@@ -265,6 +292,10 @@ pub fn expand_service_module(
 
             pub fn runtime() -> #runtime_crate::core::runtime::RuntimeConfig {
                 #runtime
+            }
+
+            pub fn storage() -> #runtime_crate::core::storage::StorageConfig {
+                #storage
             }
 
             pub fn security() -> #runtime_crate::core::security::SecurityConfig {
@@ -999,6 +1030,58 @@ fn runtime_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 enabled: #compression_enabled,
                 static_precompressed: #static_precompressed,
             },
+        }
+    }
+}
+
+fn storage_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
+    let backends = service.storage.backends.iter().map(|backend| {
+        let name = Literal::string(&backend.name);
+        let root_dir = Literal::string(&backend.root_dir);
+        let resolved_root_dir = Literal::string(&backend.resolved_root_dir);
+        let kind = match backend.kind {
+            crate::storage::StorageBackendKind::Local => {
+                quote!(#runtime_crate::core::storage::StorageBackendKind::Local)
+            }
+        };
+        quote! {
+            #runtime_crate::core::storage::StorageBackendConfig {
+                name: #name.to_owned(),
+                kind: #kind,
+                root_dir: #root_dir.to_owned(),
+                resolved_root_dir: #resolved_root_dir.to_owned(),
+            }
+        }
+    });
+    let public_mounts = service.storage.public_mounts.iter().map(|mount| {
+        let mount_path = Literal::string(&mount.mount_path);
+        let backend = Literal::string(&mount.backend);
+        let key_prefix = Literal::string(&mount.key_prefix);
+        let cache = match mount.cache {
+            crate::static_files::StaticCacheProfile::NoStore => {
+                quote!(#runtime_crate::core::static_files::StaticCacheProfile::NoStore)
+            }
+            crate::static_files::StaticCacheProfile::Revalidate => {
+                quote!(#runtime_crate::core::static_files::StaticCacheProfile::Revalidate)
+            }
+            crate::static_files::StaticCacheProfile::Immutable => {
+                quote!(#runtime_crate::core::static_files::StaticCacheProfile::Immutable)
+            }
+        };
+        quote! {
+            #runtime_crate::core::storage::StoragePublicMount {
+                mount_path: #mount_path.to_owned(),
+                backend: #backend.to_owned(),
+                key_prefix: #key_prefix.to_owned(),
+                cache: #cache,
+            }
+        }
+    });
+
+    quote! {
+        #runtime_crate::core::storage::StorageConfig {
+            backends: vec![#(#backends),*],
+            public_mounts: vec![#(#public_mounts),*],
         }
     }
 }

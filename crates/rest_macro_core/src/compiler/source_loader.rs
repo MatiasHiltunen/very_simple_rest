@@ -15,6 +15,7 @@ use super::{
 use crate::database::DatabaseConfig;
 use crate::logging::LoggingConfig;
 use crate::runtime::RuntimeConfig;
+use crate::storage::StorageConfig;
 use crate::tls::TlsConfig;
 
 pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
@@ -69,6 +70,7 @@ pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
         resources,
         authorization: crate::authorization::AuthorizationContract::default(),
         static_mounts: Vec::new(),
+        storage: StorageConfig::default(),
         database: DatabaseConfig::default(),
         logging: LoggingConfig::default(),
         runtime: RuntimeConfig::default(),

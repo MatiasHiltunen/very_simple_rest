@@ -2628,6 +2628,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+
+[[package]]
 name = "hyper"
 version = "0.14.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3522,6 +3528,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "object_store"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622acbc9100d3c10e2ee15804b0caa40e55c933d5aa53814cd520805b7958a49"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "http 1.4.0",
+ "humantime",
+ "itertools 0.14.0",
+ "parking_lot",
+ "percent-encoding",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "walkdir",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4244,6 +4276,7 @@ dependencies = [
  "jsonwebtoken",
  "lettre",
  "log",
+ "object_store",
  "proc-macro2",
  "quote",
  "rand 0.10.0",
@@ -6088,6 +6121,7 @@ dependencies = [
  "indicatif",
  "jsonwebtoken",
  "log",
+ "prettyplease",
  "rand 0.10.0",
  "rcgen",
  "regex",

@@ -8,6 +8,7 @@ pub mod logging;
 pub mod runtime;
 mod secret;
 pub mod security;
+pub mod storage;
 pub mod static_files;
 pub mod tls;
 

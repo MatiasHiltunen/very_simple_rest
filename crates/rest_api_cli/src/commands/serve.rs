@@ -26,6 +26,9 @@ use rest_macro_core::database::{
 use rest_macro_core::db::{DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
+use rest_macro_core::storage::{
+    StoragePublicMount, StorageRegistry, configure_public_mounts_with_runtime,
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -117,6 +120,8 @@ pub async fn serve_service(
             let api_runtime = dynamic_service.runtime.clone();
             let api_security = dynamic_service.security.clone();
             let static_mounts = dynamic_service.static_mounts.clone();
+            let storage_registry = dynamic_service.storage_registry.clone();
+            let storage_public_mounts = dynamic_service.storage_public_mounts.clone();
             let docs_html = dynamic_service.docs_html.clone();
             let openapi_json = dynamic_service.openapi_json.clone();
 
@@ -155,6 +160,12 @@ pub async fn serve_service(
                 )
                 .service(build_api_scope(dynamic_service.clone(), state.clone()))
                 .configure(move |cfg| {
+                    configure_public_mounts_with_runtime(
+                        cfg,
+                        storage_registry.as_ref(),
+                        storage_public_mounts.as_slice(),
+                        &api_runtime,
+                    );
                     configure_static_mounts_with_runtime(
                         cfg,
                         static_mounts.as_slice(),
@@ -197,6 +208,8 @@ struct DynamicService {
     docs_html: Arc<String>,
     include_builtin_auth: bool,
     static_mounts: Arc<Vec<StaticMount>>,
+    storage_registry: Arc<StorageRegistry>,
+    storage_public_mounts: Arc<Vec<StoragePublicMount>>,
 }
 
 impl DynamicService {
@@ -215,6 +228,11 @@ impl DynamicService {
             .map(Arc::new)
             .collect();
         let static_mounts = Arc::new(convert_static_mounts(service.static_mounts.as_slice()));
+        let storage_registry = Arc::new(
+            StorageRegistry::from_config(&service.storage)
+                .map_err(|error| anyhow!("storage configuration error: {error}"))?,
+        );
+        let storage_public_mounts = Arc::new(service.storage.public_mounts.clone());
 
         Ok(Self {
             runtime: service.runtime.clone(),
@@ -227,6 +245,8 @@ impl DynamicService {
             docs_html: Arc::new(swagger_ui_html().to_owned()),
             include_builtin_auth,
             static_mounts,
+            storage_registry,
+            storage_public_mounts,
         })
     }
 }
@@ -4216,9 +4236,10 @@ mod tests {
     };
     use rest_macro_core::db::{DbPool, query};
     use rest_macro_core::static_files::configure_static_mounts_with_runtime;
+    use rest_macro_core::storage::configure_public_mounts_with_runtime;
     use serde::Serialize;
     use serde_json::{Value, json};
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5586,5 +5607,55 @@ mod tests {
         let api_body: Value = test::read_body_json(api_response).await;
         assert_eq!(api_body["total"], 1);
         assert_eq!(api_body["items"][0]["title"], "Landing page copy");
+    }
+
+    #[actix_web::test]
+    async fn native_serve_serves_storage_public_mounts() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let file_name = format!(
+            "native-storage-{}.txt",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic enough")
+                .as_nanos()
+        );
+        let uploads_dir = fixture_path("var/uploads");
+        fs::create_dir_all(&uploads_dir).expect("uploads dir should exist");
+        let file_path = uploads_dir.join(&file_name);
+        fs::write(&file_path, b"hello native storage").expect("fixture object should write");
+
+        let (dynamic_service, _) = build_test_state("storage_public_api.eon", false).await;
+        let app = test::init_service(
+            App::new().configure({
+                let dynamic_service = dynamic_service.clone();
+                move |cfg| {
+                    configure_public_mounts_with_runtime(
+                        cfg,
+                        dynamic_service.storage_registry.as_ref(),
+                        dynamic_service.storage_public_mounts.as_slice(),
+                        &dynamic_service.runtime,
+                    );
+                    configure_static_mounts_with_runtime(
+                        cfg,
+                        dynamic_service.static_mounts.as_slice(),
+                        &dynamic_service.runtime,
+                    );
+                }
+            }),
+        )
+        .await;
+
+        let request = test::TestRequest::get()
+            .uri(&format!("/uploads/{file_name}"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        assert_eq!(body.as_ref(), b"hello native storage");
+
+        let _ = fs::remove_file(file_path);
     }
 }

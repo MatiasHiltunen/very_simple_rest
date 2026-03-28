@@ -17,6 +17,7 @@ use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
 use crate::runtime::RuntimeConfig;
 use crate::security::SecurityConfig;
+use crate::storage::StorageConfig;
 use crate::tls::TlsConfig;
 use url::Url;
 
@@ -794,6 +795,7 @@ pub struct ServiceSpec {
     pub resources: Vec<ResourceSpec>,
     pub authorization: AuthorizationContract,
     pub static_mounts: Vec<StaticMountSpec>,
+    pub storage: StorageConfig,
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
     pub runtime: RuntimeConfig,
@@ -908,6 +910,7 @@ impl std::fmt::Debug for ServiceSpec {
             .field("resources", &self.resources)
             .field("authorization", &self.authorization)
             .field("static_mounts", &self.static_mounts)
+            .field("storage", &self.storage)
             .field("database", &self.database)
             .field("logging", &self.logging)
             .field("runtime", &self.runtime)
