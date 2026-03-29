@@ -1,3 +1,5 @@
+import { resolveBackendPath } from './runtime';
+
 export type JsonValue =
   | string
   | number
@@ -20,6 +22,10 @@ export interface AuthTokenResponse {
 export interface AuthMeResponse {
   id: number;
   email?: string;
+  email_verified?: boolean;
+  email_verified_at?: string;
+  created_at?: string;
+  updated_at?: string;
   role?: string;
   roles: string[];
   workspace_id?: number;
@@ -50,6 +56,14 @@ export interface ManagedUserUpdateInput {
   claims?: Record<string, JsonValue>;
 }
 
+export interface ManagedUserCreateInput {
+  email: string;
+  password: string;
+  role?: string;
+  email_verified?: boolean;
+  send_verification_email?: boolean;
+}
+
 const TOKEN_STORAGE_KEY = 'modern-cms-studio.token';
 const EMAIL_STORAGE_KEY = 'modern-cms-studio.email';
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -71,7 +85,7 @@ export class ApiError extends Error {
 
 function apiUrl(path: string): string {
   if (!API_BASE_URL) {
-    return path;
+    return resolveBackendPath(path);
   }
   return `${API_BASE_URL.replace(/\/$/, '')}${path}`;
 }
@@ -151,6 +165,12 @@ export async function getAuthenticatedAccount(): Promise<AuthMeResponse> {
   return request<AuthMeResponse>('/api/auth/account');
 }
 
+export async function logout(): Promise<void> {
+  await request<void>('/api/auth/logout', {
+    method: 'POST',
+  });
+}
+
 export async function listResource<T>(
   path: string,
   params: Record<string, string | number | undefined>,
@@ -208,6 +228,19 @@ export async function updateManagedUser(
   return request<AuthMeResponse>(`/api/auth/admin/users/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(body),
+  });
+}
+
+export async function createManagedUser(body: ManagedUserCreateInput): Promise<AuthMeResponse> {
+  return request<AuthMeResponse>('/api/auth/admin/users', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function resendManagedUserVerification(id: number): Promise<void> {
+  await request<void>(`/api/auth/admin/users/${id}/verification`, {
+    method: 'POST',
   });
 }
 

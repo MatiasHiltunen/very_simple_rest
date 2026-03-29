@@ -1,7 +1,7 @@
-import type { ReactNode } from 'react';
 import type { SvgIconComponent } from '@mui/icons-material';
 import {
   AccountCircleRounded,
+  AdminPanelSettingsRounded,
   ArticleRounded,
   DashboardRounded,
   DrawRounded,
@@ -12,7 +12,8 @@ import {
   SettingsRounded,
   SpaceDashboardRounded,
 } from '@mui/icons-material';
-import { Box, Chip, Link, Stack, Typography } from '@mui/material';
+
+export type ResourceRow = Record<string, unknown>;
 
 export type FieldKind =
   | 'text'
@@ -58,16 +59,16 @@ export interface FieldConfig {
   virtual?: boolean;
 }
 
-export interface ColumnConfig {
-  key: string;
-  label: string;
-  render?: (value: unknown, row: Record<string, unknown>) => ReactNode;
-}
-
 export interface ResourceActionConfig {
   key: string;
   label: string;
   tone?: 'primary' | 'secondary' | 'success' | 'warning';
+}
+
+export interface ResourceFieldSection {
+  title: string;
+  description: string;
+  fields: string[];
 }
 
 export interface ResourceConfig {
@@ -77,12 +78,17 @@ export interface ResourceConfig {
   shortLabel: string;
   description: string;
   icon: SvgIconComponent;
+  group: 'publishing' | 'structure' | 'workspace';
   context?: string;
   listLimit?: number;
   searchKeys: string[];
-  columns: ColumnConfig[];
   fields: FieldConfig[];
+  fieldSections: ResourceFieldSection[];
   actions?: ResourceActionConfig[];
+  itemTitle: (row: ResourceRow) => string;
+  itemSubtitle: (row: ResourceRow) => string;
+  itemBadge?: (row: ResourceRow) => string | undefined;
+  previewMode?: 'asset' | 'workspace' | 'generic';
 }
 
 export interface NavigationItem {
@@ -103,125 +109,14 @@ export const MEDIA_KINDS = ['image', 'video', 'document', 'audio'] as const;
 export const MENU_ITEM_KINDS = ['entry', 'url'] as const;
 export const LINK_TARGETS = ['self', 'blank'] as const;
 
-function toneForValue(value: unknown): 'default' | 'success' | 'warning' | 'secondary' {
-  switch (value) {
-    case 'published':
-      return 'success';
-    case 'scheduled':
-    case 'in_review':
-      return 'warning';
-    case 'archived':
-      return 'secondary';
-    default:
-      return 'default';
+function stringValue(value: unknown, fallback: string): string {
+  if (typeof value === 'string' && value.trim()) {
+    return value;
   }
-}
-
-function renderEnumChip(value: unknown): ReactNode {
-  if (value === null || value === undefined || value === '') {
-    return <Typography color="text.secondary">-</Typography>;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
   }
-
-  return (
-    <Chip
-      color={toneForValue(value)}
-      label={String(value).replaceAll('_', ' ')}
-      size="small"
-      sx={{ textTransform: 'capitalize' }}
-      variant="outlined"
-    />
-  );
-}
-
-function renderId(value: unknown): ReactNode {
-  if (value === null || value === undefined || value === '') {
-    return <Typography color="text.secondary">-</Typography>;
-  }
-  return <Typography fontWeight={600}>#{String(value)}</Typography>;
-}
-
-function renderDate(value: unknown): ReactNode {
-  if (typeof value !== 'string' || !value) {
-    return <Typography color="text.secondary">-</Typography>;
-  }
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return <Typography>{value}</Typography>;
-  }
-
-  return (
-    <Stack spacing={0.25}>
-      <Typography fontWeight={600}>{date.toLocaleDateString()}</Typography>
-      <Typography color="text.secondary" variant="body2">
-        {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-      </Typography>
-    </Stack>
-  );
-}
-
-function renderLink(value: unknown): ReactNode {
-  if (typeof value !== 'string' || !value) {
-    return <Typography color="text.secondary">-</Typography>;
-  }
-
-  return (
-    <Link href={value} target="_blank" rel="noreferrer" underline="hover">
-      {value}
-    </Link>
-  );
-}
-
-function assetPreviewUrl(row: Record<string, unknown>): string | null {
-  const deliveryUrl = typeof row.delivery_url === 'string' ? row.delivery_url : null;
-  if (deliveryUrl) {
-    return deliveryUrl;
-  }
-  return typeof row.source_url === 'string' ? row.source_url : null;
-}
-
-function renderAssetPreview(_value: unknown, row: Record<string, unknown>): ReactNode {
-  const kind = typeof row.kind === 'string' ? row.kind : '';
-  const mimeType = typeof row.mime_type === 'string' ? row.mime_type : '';
-  const previewUrl = assetPreviewUrl(row);
-  const isImage = kind === 'image' || mimeType.startsWith('image/');
-
-  if (!previewUrl || !isImage) {
-    return <Typography color="text.secondary">-</Typography>;
-  }
-
-  return (
-    <Box
-      alt={typeof row.alt_text === 'string' && row.alt_text ? row.alt_text : 'Asset preview'}
-      component="img"
-      src={previewUrl}
-      sx={{
-        width: 72,
-        height: 48,
-        objectFit: 'cover',
-        borderRadius: 2,
-        border: '1px solid',
-        borderColor: 'divider',
-        bgcolor: 'action.hover',
-      }}
-    />
-  );
-}
-
-function renderJsonSummary(value: unknown): ReactNode {
-  if (!value) {
-    return <Typography color="text.secondary">-</Typography>;
-  }
-
-  if (Array.isArray(value)) {
-    return <Typography>{value.length} items</Typography>;
-  }
-
-  if (typeof value === 'object') {
-    return <Typography>{Object.keys(value as Record<string, unknown>).length} fields</Typography>;
-  }
-
-  return <Typography>{String(value)}</Typography>;
+  return fallback;
 }
 
 export const cmsResources: ResourceConfig[] = [
@@ -230,23 +125,64 @@ export const cmsResources: ResourceConfig[] = [
     path: 'entries',
     label: 'Entries',
     shortLabel: 'Entry',
-    description: 'Author, review, and publish structured content with blocks and SEO metadata.',
+    description:
+      'Compose structured editorial pages with hero media, reusable topics, workflow actions, SEO, and render settings.',
     icon: ArticleRounded,
+    group: 'publishing',
     context: 'edit',
     listLimit: 50,
-    searchKeys: ['title', 'slug', 'summary'],
-    columns: [
-      { key: 'title', label: 'Title' },
-      { key: 'type', label: 'Type', render: renderEnumChip },
-      { key: 'status', label: 'Status', render: renderEnumChip },
-      { key: 'visibility', label: 'Visibility', render: renderEnumChip },
-      { key: 'author', label: 'Author', render: renderId },
-      { key: 'published_at', label: 'Published', render: renderDate },
+    searchKeys: ['title', 'slug', 'summary', 'preview_label'],
+    itemTitle: (row) => stringValue(row.title, 'Untitled entry'),
+    itemSubtitle: (row) =>
+      stringValue(row.summary, stringValue(row.permalink, 'No summary or permalink yet.')),
+    itemBadge: (row) => stringValue(row.status, 'draft'),
+    fieldSections: [
+      {
+        title: 'Essentials',
+        description: 'Core identity and routing for the page.',
+        fields: ['type', 'status', 'visibility', 'slug', 'title', 'summary', 'hero_asset', 'topics'],
+      },
+      {
+        title: 'Story',
+        description: 'Narrative blocks that power the live page preview.',
+        fields: ['body_blocks'],
+      },
+      {
+        title: 'Publishing',
+        description: 'Review and release controls for the current draft.',
+        fields: ['reviewer', 'published_at', 'scheduled_for'],
+      },
+      {
+        title: 'Discovery',
+        description: 'Search metadata and presentation behavior for the rendered page.',
+        fields: ['seo', 'settings'],
+      },
     ],
     fields: [
-      { key: 'type', label: 'Entry type', kind: 'select', options: [...ENTRY_TYPES], defaultValue: 'article', required: true },
-      { key: 'status', label: 'Status', kind: 'select', options: [...ENTRY_STATUSES], defaultValue: 'draft', required: true },
-      { key: 'visibility', label: 'Visibility', kind: 'select', options: [...VISIBILITY_VALUES], defaultValue: 'workspace', required: true },
+      {
+        key: 'type',
+        label: 'Entry type',
+        kind: 'select',
+        options: [...ENTRY_TYPES],
+        defaultValue: 'article',
+        required: true,
+      },
+      {
+        key: 'status',
+        label: 'Status',
+        kind: 'select',
+        options: [...ENTRY_STATUSES],
+        defaultValue: 'draft',
+        required: true,
+      },
+      {
+        key: 'visibility',
+        label: 'Visibility',
+        kind: 'select',
+        options: [...VISIBILITY_VALUES],
+        defaultValue: 'workspace',
+        required: true,
+      },
       { key: 'slug', label: 'Slug', kind: 'text', required: true },
       { key: 'title', label: 'Title', kind: 'text', required: true },
       { key: 'summary', label: 'Summary', kind: 'textarea', nullable: true, minRows: 3 },
@@ -255,7 +191,7 @@ export const cmsResources: ResourceConfig[] = [
         label: 'Hero asset',
         kind: 'relation',
         nullable: true,
-        helperText: 'Choose a library asset to headline the entry.',
+        helperText: 'Choose the media asset that should lead the page.',
         relation: {
           path: 'assets',
           labelKey: 'file_name',
@@ -303,7 +239,7 @@ export const cmsResources: ResourceConfig[] = [
         kind: 'blocks',
         nullable: true,
         minRows: 10,
-        helperText: 'Build the article body with ordered content blocks.',
+        helperText: 'Order blocks to shape the live reading experience.',
       },
       {
         key: 'seo',
@@ -311,7 +247,7 @@ export const cmsResources: ResourceConfig[] = [
         kind: 'seo',
         nullable: true,
         minRows: 8,
-        helperText: 'Editorial SEO controls with canonical URL and indexing mode.',
+        helperText: 'Canonical URL, title, description, and index mode.',
       },
       {
         key: 'settings',
@@ -319,11 +255,11 @@ export const cmsResources: ResourceConfig[] = [
         kind: 'entrySettings',
         nullable: true,
         minRows: 8,
-        helperText: 'Rendering and promotion flags for the published experience.',
+        helperText: 'Rendering flags such as hero mode and homepage promotion.',
       },
     ],
     actions: [
-      { key: 'submit_review', label: 'Submit', tone: 'secondary' },
+      { key: 'submit_review', label: 'Submit for review', tone: 'secondary' },
       { key: 'publish', label: 'Publish', tone: 'success' },
       { key: 'archive', label: 'Archive', tone: 'warning' },
     ],
@@ -333,16 +269,21 @@ export const cmsResources: ResourceConfig[] = [
     path: 'topics',
     label: 'Topics',
     shortLabel: 'Topic',
-    description: 'Manage reusable editorial taxonomies shared across entries.',
+    description: 'Maintain editorial taxonomies shared across entries and campaigns.',
     icon: LabelRounded,
+    group: 'publishing',
     context: 'edit',
     listLimit: 100,
     searchKeys: ['name', 'slug', 'description'],
-    columns: [
-      { key: 'name', label: 'Name' },
-      { key: 'slug', label: 'Slug' },
-      { key: 'color', label: 'Color' },
-      { key: 'topic_url', label: 'URL', render: renderLink },
+    itemTitle: (row) => stringValue(row.name, 'Untitled topic'),
+    itemSubtitle: (row) => stringValue(row.description, stringValue(row.slug, 'No description yet.')),
+    itemBadge: (row) => stringValue(row.slug, 'topic'),
+    fieldSections: [
+      {
+        title: 'Topic details',
+        description: 'Label, routing, and visual identity for the taxonomy.',
+        fields: ['name', 'slug', 'description', 'color', 'meta'],
+      },
     ],
     fields: [
       { key: 'name', label: 'Name', kind: 'text', required: true },
@@ -357,23 +298,52 @@ export const cmsResources: ResourceConfig[] = [
     path: 'assets',
     label: 'Assets',
     shortLabel: 'Asset',
-    description: 'Track media inventory, metadata, and delivery URLs for the studio.',
+    description: 'Track media metadata, storage references, alt text, and delivery URLs.',
     icon: ImageRounded,
+    group: 'publishing',
     context: 'edit',
     listLimit: 100,
-    searchKeys: ['file_name', 'mime_type', 'alt_text'],
-    columns: [
-      { key: 'delivery_url', label: 'Preview', render: renderAssetPreview },
-      { key: 'file_name', label: 'File name' },
-      { key: 'kind', label: 'Kind', render: renderEnumChip },
-      { key: 'byte_size', label: 'Bytes' },
-      { key: 'uploader', label: 'Uploader', render: renderId },
-      { key: 'delivery_url', label: 'Delivery URL', render: renderLink },
+    searchKeys: ['file_name', 'mime_type', 'alt_text', 'source_url'],
+    itemTitle: (row) => stringValue(row.file_name, 'Unnamed asset'),
+    itemSubtitle: (row) =>
+      stringValue(row.alt_text, stringValue(row.delivery_url, stringValue(row.source_url, 'No delivery URL yet.'))),
+    itemBadge: (row) => stringValue(row.kind, 'asset'),
+    previewMode: 'asset',
+    fieldSections: [
+      {
+        title: 'Asset details',
+        description: 'Media metadata used by previews and delivery.',
+        fields: [
+          'kind',
+          'file_name',
+          'mime_type',
+          'byte_size',
+          'width',
+          'height',
+          'alt_text',
+          'source_url',
+          'focal_point',
+          'metadata',
+        ],
+      },
     ],
     fields: [
-      { key: 'kind', label: 'Kind', kind: 'select', options: [...MEDIA_KINDS], defaultValue: 'image', required: true },
+      {
+        key: 'kind',
+        label: 'Kind',
+        kind: 'select',
+        options: [...MEDIA_KINDS],
+        defaultValue: 'image',
+        required: true,
+      },
       { key: 'file_name', label: 'File name', kind: 'text', required: true },
-      { key: 'mime_type', label: 'MIME type', kind: 'text', required: true, defaultValue: 'image/jpeg' },
+      {
+        key: 'mime_type',
+        label: 'MIME type',
+        kind: 'text',
+        required: true,
+        defaultValue: 'image/jpeg',
+      },
       { key: 'byte_size', label: 'Byte size', kind: 'number', required: true, defaultValue: '0' },
       { key: 'width', label: 'Width', kind: 'number', nullable: true },
       { key: 'height', label: 'Height', kind: 'number', nullable: true },
@@ -388,15 +358,21 @@ export const cmsResources: ResourceConfig[] = [
     path: 'menus',
     label: 'Menus',
     shortLabel: 'Menu',
-    description: 'Define navigational containers for site sections and campaigns.',
+    description: 'Define navigation containers for primary, utility, or campaign-specific menus.',
     icon: DrawRounded,
+    group: 'structure',
     context: 'edit',
     listLimit: 50,
     searchKeys: ['name', 'handle', 'description'],
-    columns: [
-      { key: 'name', label: 'Name' },
-      { key: 'handle', label: 'Handle' },
-      { key: 'description', label: 'Description' },
+    itemTitle: (row) => stringValue(row.name, 'Untitled menu'),
+    itemSubtitle: (row) => stringValue(row.description, stringValue(row.handle, 'No description yet.')),
+    itemBadge: (row) => stringValue(row.handle, 'menu'),
+    fieldSections: [
+      {
+        title: 'Menu details',
+        description: 'Identity and settings for the navigation container.',
+        fields: ['name', 'handle', 'description', 'settings'],
+      },
     ],
     fields: [
       { key: 'name', label: 'Name', kind: 'text', required: true },
@@ -410,17 +386,22 @@ export const cmsResources: ResourceConfig[] = [
     path: 'menu-items',
     label: 'Menu Items',
     shortLabel: 'Menu item',
-    description: 'Compose menu hierarchies with entry links or external destinations.',
+    description: 'Compose hierarchical menu links to entries or external URLs.',
     icon: LinkRounded,
+    group: 'structure',
     context: 'edit',
     listLimit: 100,
     searchKeys: ['label', 'external_url'],
-    columns: [
-      { key: 'label', label: 'Label' },
-      { key: 'menu', label: 'Menu', render: renderId },
-      { key: 'item_kind', label: 'Kind', render: renderEnumChip },
-      { key: 'entry', label: 'Entry', render: renderId },
-      { key: 'sort_order', label: 'Order' },
+    itemTitle: (row) => stringValue(row.label, 'Untitled menu item'),
+    itemSubtitle: (row) =>
+      stringValue(row.external_url, `Menu #${stringValue(row.menu, '?')} · order ${stringValue(row.sort_order, '0')}`),
+    itemBadge: (row) => stringValue(row.item_kind, 'entry'),
+    fieldSections: [
+      {
+        title: 'Link details',
+        description: 'Where the menu item should point and how it should behave.',
+        fields: ['menu', 'parent_item', 'label', 'item_kind', 'entry', 'external_url', 'target', 'sort_order', 'meta'],
+      },
     ],
     fields: [
       {
@@ -448,7 +429,14 @@ export const cmsResources: ResourceConfig[] = [
         },
       },
       { key: 'label', label: 'Label', kind: 'text', required: true },
-      { key: 'item_kind', label: 'Kind', kind: 'select', options: [...MENU_ITEM_KINDS], defaultValue: 'entry', required: true },
+      {
+        key: 'item_kind',
+        label: 'Kind',
+        kind: 'select',
+        options: [...MENU_ITEM_KINDS],
+        defaultValue: 'entry',
+        required: true,
+      },
       {
         key: 'entry',
         label: 'Entry',
@@ -462,7 +450,14 @@ export const cmsResources: ResourceConfig[] = [
         },
       },
       { key: 'external_url', label: 'External URL', kind: 'text', nullable: true },
-      { key: 'target', label: 'Target', kind: 'select', options: [...LINK_TARGETS], defaultValue: 'self', required: true },
+      {
+        key: 'target',
+        label: 'Target',
+        kind: 'select',
+        options: [...LINK_TARGETS],
+        defaultValue: 'self',
+        required: true,
+      },
       { key: 'sort_order', label: 'Sort order', kind: 'number', required: true, defaultValue: '0' },
       { key: 'meta', label: 'Item metadata', kind: 'json', nullable: true, minRows: 8 },
     ],
@@ -472,17 +467,21 @@ export const cmsResources: ResourceConfig[] = [
     path: 'profiles',
     label: 'Profiles',
     shortLabel: 'Profile',
-    description: 'Keep author bios, handles, and publishing preferences in sync with auth users.',
+    description: 'Manage public bios, handles, and publishing preferences for authors.',
     icon: AccountCircleRounded,
+    group: 'workspace',
     context: 'self',
     listLimit: 50,
     searchKeys: ['display_name', 'handle', 'headline'],
-    columns: [
-      { key: 'display_name', label: 'Display name' },
-      { key: 'handle', label: 'Handle' },
-      { key: 'headline', label: 'Headline' },
-      { key: 'avatar_asset', label: 'Avatar asset', render: renderId },
-      { key: 'profile_url', label: 'Profile URL', render: renderLink },
+    itemTitle: (row) => stringValue(row.display_name, 'Unnamed profile'),
+    itemSubtitle: (row) => stringValue(row.headline, stringValue(row.handle, 'No headline yet.')),
+    itemBadge: (row) => stringValue(row.handle, 'profile'),
+    fieldSections: [
+      {
+        title: 'Profile details',
+        description: 'Identity, biography, and member-specific preferences.',
+        fields: ['handle', 'display_name', 'headline', 'bio', 'avatar_asset', 'preferences'],
+      },
     ],
     fields: [
       { key: 'handle', label: 'Handle', kind: 'text', required: true },
@@ -509,24 +508,43 @@ export const cmsResources: ResourceConfig[] = [
     path: 'workspaces',
     label: 'Workspace',
     shortLabel: 'Workspace',
-    description: 'Configure the workspace identity, locale, theme, and editorial settings.',
+    description: 'Configure workspace identity, locale, theming, and editorial policy.',
     icon: SpaceDashboardRounded,
+    group: 'workspace',
     context: 'admin',
     listLimit: 10,
     searchKeys: ['name', 'slug', 'default_locale'],
-    columns: [
-      { key: 'name', label: 'Name' },
-      { key: 'slug', label: 'Slug' },
-      { key: 'default_locale', label: 'Locale' },
-      { key: 'studio_url', label: 'Studio URL', render: renderLink },
+    itemTitle: (row) => stringValue(row.name, 'Untitled workspace'),
+    itemSubtitle: (row) =>
+      stringValue(row.public_base_url, stringValue(row.studio_url, stringValue(row.slug, 'No public base URL yet.'))),
+    itemBadge: (row) => stringValue(row.default_locale, 'en'),
+    previewMode: 'workspace',
+    fieldSections: [
+      {
+        title: 'Workspace identity',
+        description: 'Public routing, locale, and theme behavior for the workspace.',
+        fields: ['name', 'slug', 'default_locale', 'public_base_url', 'theme_settings', 'editorial_settings'],
+      },
     ],
     fields: [
       { key: 'name', label: 'Name', kind: 'text', required: true },
       { key: 'slug', label: 'Slug', kind: 'text', required: true },
-      { key: 'default_locale', label: 'Default locale', kind: 'text', required: true, defaultValue: 'en' },
+      {
+        key: 'default_locale',
+        label: 'Default locale',
+        kind: 'text',
+        required: true,
+        defaultValue: 'en',
+      },
       { key: 'public_base_url', label: 'Public base URL', kind: 'text', nullable: true },
       { key: 'theme_settings', label: 'Theme settings', kind: 'json', nullable: true, minRows: 8 },
-      { key: 'editorial_settings', label: 'Editorial settings', kind: 'json', nullable: true, minRows: 8 },
+      {
+        key: 'editorial_settings',
+        label: 'Editorial settings',
+        kind: 'json',
+        nullable: true,
+        minRows: 8,
+      },
     ],
   },
   {
@@ -536,13 +554,19 @@ export const cmsResources: ResourceConfig[] = [
     shortLabel: 'Entry topic',
     description: 'Manage explicit entry-to-topic links when curating content collections.',
     icon: LayersRounded,
+    group: 'structure',
     context: 'edit',
     listLimit: 100,
     searchKeys: ['entry', 'topic'],
-    columns: [
-      { key: 'entry', label: 'Entry', render: renderId },
-      { key: 'topic', label: 'Topic', render: renderId },
-      { key: 'workspace', label: 'Workspace', render: renderId },
+    itemTitle: (row) => `Entry #${stringValue(row.entry, '?')} → Topic #${stringValue(row.topic, '?')}`,
+    itemSubtitle: (row) => `Workspace #${stringValue(row.workspace, '?')}`,
+    itemBadge: () => 'relation',
+    fieldSections: [
+      {
+        title: 'Relation details',
+        description: 'Map one entry to one reusable topic.',
+        fields: ['entry', 'topic'],
+      },
     ],
     fields: [
       {
@@ -573,10 +597,13 @@ export const cmsResources: ResourceConfig[] = [
   },
 ];
 
+export const entryResource = cmsResources.find((resource) => resource.key === 'entries')!;
+export const collectionResources = cmsResources.filter((resource) => resource.key !== 'entries');
+
 export const cmsNavigation: NavigationSection[] = [
   {
     label: 'Overview',
-    items: [{ label: 'Dashboard', to: '/', icon: DashboardRounded }],
+    items: [{ label: 'Command', to: '/', icon: DashboardRounded }],
   },
   {
     label: 'Publishing',
@@ -598,6 +625,7 @@ export const cmsNavigation: NavigationSection[] = [
     label: 'Workspace',
     items: [
       { label: 'Profiles', to: '/profiles', icon: AccountCircleRounded },
+      { label: 'Users', to: '/users', icon: AdminPanelSettingsRounded },
       { label: 'Workspace', to: '/workspaces', icon: SettingsRounded },
     ],
   },
@@ -613,14 +641,4 @@ export function defaultDraftValue(field: FieldConfig): string {
     return field.defaultValue;
   }
   return '';
-}
-
-export function renderFallbackCell(value: unknown): ReactNode {
-  if (value === null || value === undefined || value === '') {
-    return <Typography color="text.secondary">-</Typography>;
-  }
-  if (Array.isArray(value) || typeof value === 'object') {
-    return renderJsonSummary(value);
-  }
-  return <Typography>{String(value)}</Typography>;
 }

@@ -1,93 +1,131 @@
 import { alpha, createTheme } from '@mui/material/styles';
 
+const ink = '#171411';
+const mist = '#f3ede3';
+const paper = '#fbf7f1';
+const line = alpha('#3d3128', 0.14);
+const primary = '#0f766e';
+const secondary = '#a8572b';
+
 export const studioTheme = createTheme({
   cssVariables: true,
   shape: {
-    borderRadius: 20,
+    borderRadius: 18,
   },
   palette: {
     mode: 'light',
     primary: {
-      main: '#006b62',
-      light: '#3a978c',
-      dark: '#004d47',
+      main: primary,
+      light: '#2e9a90',
+      dark: '#0a5852',
       contrastText: '#ffffff',
     },
     secondary: {
-      main: '#a95f00',
-      light: '#d28127',
-      dark: '#7a4300',
+      main: secondary,
+      light: '#c76c38',
+      dark: '#84421d',
       contrastText: '#ffffff',
     },
     background: {
-      default: '#f4f7f8',
-      paper: '#ffffff',
+      default: mist,
+      paper,
+    },
+    text: {
+      primary: ink,
+      secondary: alpha(ink, 0.68),
     },
     success: {
-      main: '#2e7d32',
+      main: '#2f7d4f',
     },
     warning: {
-      main: '#c77700',
+      main: '#b7751c',
     },
     error: {
-      main: '#ba1a1a',
+      main: '#b13a2f',
     },
+    divider: line,
   },
   typography: {
-    fontFamily: 'Roboto, system-ui, sans-serif',
+    fontFamily: '"Manrope Variable", "Avenir Next", "Segoe UI", sans-serif',
+    h1: {
+      fontFamily: '"Newsreader", Georgia, serif',
+      fontSize: 'clamp(2.8rem, 8vw, 5.5rem)',
+      fontWeight: 700,
+      letterSpacing: '-0.05em',
+      lineHeight: 0.94,
+    },
+    h2: {
+      fontFamily: '"Newsreader", Georgia, serif',
+      fontSize: 'clamp(2.1rem, 6.2vw, 4.2rem)',
+      fontWeight: 700,
+      letterSpacing: '-0.05em',
+      lineHeight: 0.98,
+    },
     h3: {
+      fontFamily: '"Newsreader", Georgia, serif',
+      fontSize: 'clamp(1.6rem, 4.6vw, 2.8rem)',
       fontWeight: 700,
       letterSpacing: '-0.04em',
     },
     h4: {
+      fontFamily: '"Newsreader", Georgia, serif',
+      fontSize: 'clamp(1.28rem, 3.2vw, 1.9rem)',
       fontWeight: 700,
       letterSpacing: '-0.03em',
     },
     h5: {
+      fontSize: 'clamp(0.96rem, 1.8vw, 1.2rem)',
       fontWeight: 700,
+      letterSpacing: '-0.02em',
     },
     h6: {
-      fontWeight: 600,
+      fontSize: 'clamp(0.92rem, 1.4vw, 1.04rem)',
+      fontWeight: 700,
+      letterSpacing: '-0.02em',
+    },
+    body1: {
+      fontSize: '0.95rem',
+      lineHeight: 1.6,
+    },
+    body2: {
+      fontSize: '0.88rem',
+      lineHeight: 1.55,
+    },
+    overline: {
+      fontWeight: 800,
+      fontSize: '0.68rem',
+      letterSpacing: '0.12em',
+      textTransform: 'uppercase',
     },
     button: {
-      fontWeight: 600,
+      fontWeight: 700,
+      letterSpacing: '-0.01em',
       textTransform: 'none',
     },
   },
   components: {
-    MuiAppBar: {
+    MuiCssBaseline: {
       styleOverrides: {
-        root: {
-          backgroundImage: 'none',
-          backgroundColor: alpha('#ffffff', 0.9),
-          backdropFilter: 'blur(18px)',
-          color: '#102027',
-          boxShadow: 'none',
-          borderBottom: `1px solid ${alpha('#102027', 0.08)}`,
+        ':root': {
+          colorScheme: 'light',
         },
-      },
-    },
-    MuiDrawer: {
-      styleOverrides: {
-        paper: {
-          borderRight: `1px solid ${alpha('#102027', 0.08)}`,
-          backgroundImage:
-            'linear-gradient(180deg, rgba(0, 107, 98, 0.08), rgba(255, 255, 255, 0))',
+        body: {
+          color: ink,
+        },
+        '::selection': {
+          backgroundColor: alpha(primary, 0.2),
         },
       },
     },
     MuiPaper: {
+      defaultProps: {
+        elevation: 0,
+      },
       styleOverrides: {
         root: {
           backgroundImage: 'none',
-        },
-      },
-    },
-    MuiCard: {
-      styleOverrides: {
-        root: {
-          boxShadow: '0 18px 40px rgba(16, 32, 39, 0.08)',
-          border: `1px solid ${alpha('#102027', 0.06)}`,
+          border: `1px solid ${line}`,
+          boxShadow: '0 20px 60px rgba(23, 20, 17, 0.04)',
         },
       },
     },
@@ -98,14 +136,27 @@ export const studioTheme = createTheme({
       styleOverrides: {
         root: {
           borderRadius: 999,
-          paddingInline: 18,
+          paddingInline: 14,
+          minHeight: 38,
+        },
+        containedPrimary: {
+          boxShadow: `0 14px 32px ${alpha(primary, 0.22)}`,
         },
       },
     },
-    MuiChip: {
+    MuiOutlinedInput: {
       styleOverrides: {
         root: {
-          fontWeight: 600,
+          borderRadius: 16,
+          backgroundColor: alpha('#ffffff', 0.72),
+          transition: 'background-color 180ms ease, transform 180ms ease',
+          '&:hover': {
+            backgroundColor: '#ffffff',
+          },
+          '&.Mui-focused': {
+            transform: 'translateY(-1px)',
+            backgroundColor: '#ffffff',
+          },
         },
       },
     },
@@ -113,6 +164,53 @@ export const studioTheme = createTheme({
       defaultProps: {
         fullWidth: true,
         size: 'small',
+      },
+    },
+    MuiChip: {
+      styleOverrides: {
+        root: {
+          borderRadius: 999,
+          fontSize: '0.78rem',
+          fontWeight: 700,
+        },
+      },
+    },
+    MuiAutocomplete: {
+      styleOverrides: {
+        paper: {
+          borderRadius: 18,
+          border: `1px solid ${line}`,
+          boxShadow: '0 18px 42px rgba(23, 20, 17, 0.12)',
+        },
+      },
+    },
+    MuiDialog: {
+      styleOverrides: {
+        paper: {
+          borderRadius: 28,
+        },
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: {
+          background: `linear-gradient(180deg, ${alpha('#ffffff', 0.92)}, ${alpha(paper, 0.96)})`,
+          borderRight: `1px solid ${line}`,
+        },
+      },
+    },
+    MuiAvatar: {
+      styleOverrides: {
+        root: {
+          fontWeight: 800,
+        },
+      },
+    },
+    MuiAlert: {
+      styleOverrides: {
+        root: {
+          borderRadius: 18,
+        },
       },
     },
   },
