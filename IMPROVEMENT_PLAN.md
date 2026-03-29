@@ -7,6 +7,7 @@ answer two questions:
 2. What should be built next, in what order, and with what shape?
 
 For backup, restore, and replication planning, see `docs/backup-replication-roadmap.md`.
+For production secret handling and setup hardening, see `docs/production-secrets-roadmap.md`.
 
 ## Current Capability Snapshot
 

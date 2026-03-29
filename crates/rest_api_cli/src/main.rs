@@ -61,6 +61,10 @@ enum Commands {
         /// Skip interactive prompts and use environment variables
         #[arg(short, long)]
         non_interactive: bool,
+
+        /// Use production-safe setup behavior: do not generate live secrets into `.env` or self-signed dev TLS certs
+        #[arg(long)]
+        production: bool,
     },
 
     /// Create a new admin user
@@ -203,6 +207,10 @@ enum Commands {
         /// Path to the environment file
         #[arg(short, long)]
         path: Option<String>,
+
+        /// Generate a production-safe template without writing live secret values
+        #[arg(long)]
+        production: bool,
     },
 
     /// Generate Markdown reference documentation for the `.eon` format
@@ -214,6 +222,18 @@ enum Commands {
         /// Overwrite the output file if it already exists
         #[arg(long)]
         force: bool,
+    },
+
+    /// Generate secret-manager scaffolding from a `.eon` service
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommand,
+    },
+
+    /// Run operational diagnostics against a `.eon` service
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommand,
     },
 
     /// Plan backup and replication posture from a `.eon` service
@@ -364,6 +384,83 @@ enum MigrationCommand {
         /// Directory containing `.sql` migration files
         #[arg(short, long, value_name = "DIR", default_value = "migrations")]
         dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretsCommand {
+    /// Generate Infisical scaffolding from a `.eon` service
+    Infisical {
+        #[command(subcommand)]
+        command: InfisicalCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum InfisicalCommand {
+    /// Generate Infisical Agent templates and runtime file bindings
+    Scaffold {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Output directory for generated Infisical files
+        #[arg(short, long, value_name = "DIR")]
+        output_dir: Option<PathBuf>,
+
+        /// Infisical project slug used by the generated templates
+        #[arg(long, value_name = "SLUG")]
+        project: String,
+
+        /// Optional Infisical project ID used by generated templates instead of the project slug
+        #[arg(long, value_name = "UUID")]
+        project_id: Option<String>,
+
+        /// Infisical environment slug used by the generated templates
+        #[arg(long, value_name = "ENV", default_value = "prod")]
+        environment: String,
+
+        /// Infisical secret path used by the generated templates
+        #[arg(long, value_name = "PATH", default_value = "/")]
+        secret_path: String,
+
+        /// Destination directory where Infisical Agent renders secret files
+        #[arg(long, value_name = "DIR", default_value = "/run/secrets/vsr")]
+        render_dir: String,
+
+        /// Auth method skeleton to use in the generated Infisical Agent config
+        #[arg(long, value_enum, default_value = "universal-auth")]
+        auth_method: commands::secrets::InfisicalAuthMethod,
+
+        /// Overwrite existing generated files
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DoctorCommand {
+    /// Validate resolved secret bindings for a `.eon` service
+    Secrets {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Optional Infisical scaffold directory to validate alongside the runtime bindings
+        #[arg(long, value_name = "DIR")]
+        infisical_dir: Option<PathBuf>,
+
+        /// Write the report to a file instead of stdout
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: BackupPlanFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1006,7 +1103,11 @@ async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let config_path = resolve_config_path(cli.config.as_deref())?;
     let cli_database_url = cli.database_url.clone();
-    let env_database_url = std::env::var("DATABASE_URL").ok();
+    let env_database_url = rest_macro_core::secret::load_optional_secret_from_env_or_file(
+        "DATABASE_URL",
+        "DATABASE_URL",
+    )
+    .map_err(|error| anyhow!(error))?;
 
     // Determine database URL from CLI args, environment, or an `.eon` service config.
     let database_url = if let Some(url) = cli_database_url.clone() {
@@ -1044,13 +1145,17 @@ async fn run_cli() -> Result<()> {
             )?;
         }
 
-        Commands::Setup { non_interactive } => {
+        Commands::Setup {
+            non_interactive,
+            production,
+        } => {
             println!("{}", "Running setup wizard...".green().bold());
             commands::setup::run_setup(
                 &database_url,
                 config_path.as_deref(),
                 *non_interactive,
                 cli_database_url.is_some(),
+                *production,
             )
             .await?;
         }
@@ -1376,15 +1481,85 @@ async fn run_cli() -> Result<()> {
             )?;
         }
 
-        Commands::GenEnv { path } => {
+        Commands::GenEnv { path, production } => {
             println!("{}", "Generating environment file...".green().bold());
-            commands::gen_env::generate_env_file(path.clone(), config_path.as_deref())?;
+            commands::gen_env::generate_env_file(
+                path.clone(),
+                config_path.as_deref(),
+                *production,
+            )?;
         }
 
         Commands::Docs { output, force } => {
             println!("{}", "Generating `.eon` reference docs...".green().bold());
             commands::docs::generate_eon_reference(output, *force)?;
         }
+
+        Commands::Secrets { command } => match command {
+            SecretsCommand::Infisical { command } => match command {
+                InfisicalCommand::Scaffold {
+                    input,
+                    output_dir,
+                    project,
+                    project_id,
+                    environment,
+                    secret_path,
+                    render_dir,
+                    auth_method,
+                    force,
+                } => {
+                    println!(
+                        "{}",
+                        "Generating Infisical secret scaffolding...".green().bold()
+                    );
+                    let input = input
+                        .clone()
+                        .or_else(|| config_path.clone())
+                        .ok_or_else(|| {
+                            anyhow!("secrets infisical scaffold requires --input or --config")
+                        })?;
+                    let report = commands::secrets::scaffold_infisical(
+                        &input,
+                        output_dir.as_deref(),
+                        project,
+                        project_id.as_deref(),
+                        environment,
+                        secret_path,
+                        render_dir,
+                        *auth_method,
+                        *force,
+                    )?;
+                    println!("Scaffold directory: {}", report.output_dir.display());
+                    println!("Secret bindings: {}", report.secret_bindings.join(", "));
+                }
+            },
+        },
+
+        Commands::Doctor { command } => match command {
+            DoctorCommand::Secrets {
+                input,
+                infisical_dir,
+                output,
+                format,
+                force,
+            } => {
+                println!("{}", "Running secrets doctor...".green().bold());
+                let input = input
+                    .clone()
+                    .or_else(|| config_path.clone())
+                    .ok_or_else(|| anyhow!("doctor secrets requires --input or --config"))?;
+                commands::secrets::doctor_secrets(
+                    &input,
+                    infisical_dir.as_deref(),
+                    output.as_deref(),
+                    match format {
+                        BackupPlanFormatArg::Text => commands::secrets::OutputFormat::Text,
+                        BackupPlanFormatArg::Json => commands::secrets::OutputFormat::Json,
+                    },
+                    *force,
+                )?;
+            }
+        },
 
         Commands::Backup { command } => match command {
             BackupCommand::Plan {
@@ -2110,6 +2285,47 @@ mod tests {
     #[test]
     fn docs_command_accepts_output_file() {
         assert!(Cli::try_parse_from(["vsr", "docs", "--output", "docs/eon-reference.md"]).is_ok());
+    }
+
+    #[test]
+    fn secrets_infisical_scaffold_accepts_input_and_project() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "secrets",
+                "infisical",
+                "scaffold",
+                "--input",
+                "api.eon",
+                "--project",
+                "demo-project",
+                "--project-id",
+                "2435f6d5-14d0-4429-b1e6-172b497f2c17",
+                "--environment",
+                "prod",
+                "--auth-method",
+                "azure",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn doctor_secrets_accepts_infisical_dir_and_json_format() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "doctor",
+                "secrets",
+                "--input",
+                "api.eon",
+                "--infisical-dir",
+                "deploy/infisical",
+                "--format",
+                "json",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod init;
 pub mod migrate;
 pub mod openapi;
 pub(crate) mod schema;
+pub mod secrets;
 pub mod serve;
 pub mod server;
 pub mod setup;

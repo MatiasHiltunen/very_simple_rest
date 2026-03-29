@@ -359,7 +359,7 @@ fn vsr_serve_supports_builtin_auth_and_authz_management() {
     tokio::runtime::Runtime::new()
         .expect("tokio runtime should initialize")
         .block_on(async {
-            run_setup(&database_url, Some(&config), true, false)
+            run_setup(&database_url, Some(&config), true, false, false)
                 .await
                 .expect("setup should initialize auth-enabled service");
         });
@@ -491,7 +491,7 @@ fn vsr_serve_applies_field_transforms_in_spawned_process() {
     tokio::runtime::Runtime::new()
         .expect("tokio runtime should initialize")
         .block_on(async {
-            run_setup(&database_url, Some(&config), true, false)
+            run_setup(&database_url, Some(&config), true, false, false)
                 .await
                 .expect("setup should initialize auth-enabled service");
         });
@@ -731,7 +731,7 @@ fn vsr_serve_applies_resource_actions_in_spawned_process() {
     tokio::runtime::Runtime::new()
         .expect("tokio runtime should initialize")
         .block_on(async {
-            run_setup(&database_url, Some(&config), true, false)
+            run_setup(&database_url, Some(&config), true, false, false)
                 .await
                 .expect("setup should initialize auth-enabled service");
 
@@ -964,7 +964,7 @@ fn vsr_serve_bridgeboard_example_supports_clean_room_e2e() {
     tokio::runtime::Runtime::new()
         .expect("tokio runtime should initialize")
         .block_on(async {
-            run_setup(&database_url, Some(&config), true, false)
+            run_setup(&database_url, Some(&config), true, false, false)
                 .await
                 .expect("setup should initialize the bridgeboard database");
         });

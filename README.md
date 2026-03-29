@@ -243,10 +243,15 @@ Built-in auth now requires `JWT_SECRET` to be set before the server starts.
 Supported sources:
 
 1. Environment variable: `JWT_SECRET=your_secret_here`
-2. `.env` file in your project root: `JWT_SECRET=your_secret_here`
+2. Mounted secret file: `JWT_SECRET_FILE=/run/secrets/JWT_SECRET`
+3. `.env` file in your project root: `JWT_SECRET=your_secret_here`
 
 The runtime no longer generates a random fallback secret, so tokens remain valid across restarts
 and multi-instance deployments only when you provide an explicit secret.
+
+For production, prefer secret files or a secret manager over inline `.env` values. The current
+production-secrets plan is in
+[docs/production-secrets-roadmap.md](docs/production-secrets-roadmap.md).
 
 ### Example login:
 
@@ -300,6 +305,9 @@ vsr build api.eon --release
 # Setup wizard with interactive prompts
 vsr setup
 
+# Production-safe setup: do not write live secrets into `.env`
+vsr setup --production
+
 # Create an admin user
 vsr create-admin
 
@@ -311,6 +319,18 @@ vsr check-db
 
 # Generate a .env template file
 vsr gen-env
+
+# Generate a production-safe env template
+vsr gen-env --production
+
+# Generate Infisical Agent/runtime scaffolding from a `.eon` service
+vsr secrets infisical scaffold --input api.eon --project my-project
+
+# For machine-identity agent flows, prefer adding the Infisical project UUID too
+vsr secrets infisical scaffold --input api.eon --project my-project --project-id <project-uuid>
+
+# Validate resolved secret bindings and optional Infisical scaffold files
+vsr doctor secrets --input api.eon --infisical-dir deploy/infisical
 
 # Render a backend-aware backup/replication plan from a `.eon` service
 vsr backup plan --input api.eon
@@ -326,6 +346,16 @@ For `.eon` services, `vsr gen-env` now writes a real local Turso encryption key 
 `database.engine = TursoLocal` is in use, and `vsr setup` now bootstraps local runtime inputs
 before database work: it generates or loads `.env`, can create self-signed dev TLS certs from the
 service `tls` config, and prints the exact paths it generated or reused.
+
+For production, `vsr setup --production` and `vsr gen-env --production` switch to template-only
+secret handling: they do not write live JWT/database/mail secrets into `.env`, and setup refuses
+to continue when required production secrets are unresolved. The CLI and runtime also honor
+`DATABASE_URL_FILE` when you prefer mounted secret files over inline connection URLs.
+
+For Infisical, `vsr secrets infisical scaffold` now generates an Infisical Agent config, per-secret
+templates, and a `runtime.env` file with the `*_FILE` bindings the VSR runtime already understands.
+`vsr doctor secrets` validates the currently resolved bindings and can also verify that the
+generated Infisical scaffold directory is complete. See [docs/infisical.md](docs/infisical.md).
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 

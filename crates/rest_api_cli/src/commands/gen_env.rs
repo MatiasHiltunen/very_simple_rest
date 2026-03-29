@@ -3,17 +3,30 @@ use colored::Colorize;
 use std::path::Path;
 
 /// Generate a .env file with default configuration
-pub fn generate_env_file(path: Option<String>, config_path: Option<&Path>) -> Result<()> {
+pub fn generate_env_file(
+    path: Option<String>,
+    config_path: Option<&Path>,
+    production: bool,
+) -> Result<()> {
     let report = crate::commands::env::write_env_file(
         path.as_deref().map(Path::new),
         config_path,
         false,
         true,
+        if production {
+            crate::commands::env::EnvTemplateMode::Production
+        } else {
+            crate::commands::env::EnvTemplateMode::Development
+        },
     )?;
 
     println!(
         "{} {}",
-        "Environment file created at:".green(),
+        if production {
+            "Production environment template created at:".green()
+        } else {
+            "Environment file created at:".green()
+        },
         report.path.display()
     );
     if report.generated_jwt_secret {
@@ -27,10 +40,18 @@ pub fn generate_env_file(path: Option<String>, config_path: Option<&Path>) -> Re
             report.path.display()
         );
     }
-    println!(
-        "\n{}",
-        "Review the generated values before sharing the file.".yellow()
-    );
+    if production {
+        println!(
+            "\n{}",
+            "No live secrets were written. Resolve secret values via a secret manager or mounted *_FILE bindings before deployment."
+                .yellow()
+        );
+    } else {
+        println!(
+            "\n{}",
+            "Review the generated values before sharing the file.".yellow()
+        );
+    }
 
     Ok(())
 }

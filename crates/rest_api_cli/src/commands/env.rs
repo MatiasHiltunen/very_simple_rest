@@ -24,6 +24,18 @@ fn generate_random_hex(bytes_len: usize) -> String {
     output
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvTemplateMode {
+    Development,
+    Production,
+}
+
+impl EnvTemplateMode {
+    pub fn writes_live_secrets(self) -> bool {
+        matches!(self, Self::Development)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnvFileReport {
     pub path: PathBuf,
@@ -32,6 +44,7 @@ pub struct EnvFileReport {
     pub preserved_turso_encryption_var: Option<String>,
     pub generated_jwt_secret: bool,
     pub preserved_jwt_secret: bool,
+    pub mode: EnvTemplateMode,
 }
 
 struct EnvTemplateConfig {
@@ -120,11 +133,32 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
     })
 }
 
-fn render_env_template_with_config(config: &EnvTemplateConfig) -> String {
+fn render_secret_binding_comment(output: &mut String, var_name: &str, example: &str) {
+    writeln!(output, "# {var_name}={example}").unwrap();
+    writeln!(
+        output,
+        "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
+    )
+    .unwrap();
+}
+
+fn render_env_template_with_config(config: &EnvTemplateConfig, mode: EnvTemplateMode) -> String {
     let jwt_secret = generate_random_secret(32);
     let mut output = String::new();
 
     writeln!(&mut output, "# very_simple_rest API Configuration").unwrap();
+    if mode == EnvTemplateMode::Production {
+        writeln!(
+            &mut output,
+            "# Production mode: this template does not write live secret values."
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "# Prefer workload identity or a secret manager. Mounted secret files are the next-best option."
+        )
+        .unwrap();
+    }
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "# Database Configuration").unwrap();
     writeln!(
@@ -133,22 +167,31 @@ fn render_env_template_with_config(config: &EnvTemplateConfig) -> String {
     )
     .unwrap();
     writeln!(&mut output, "DATABASE_URL={}", config.database_url).unwrap();
+    writeln!(
+        &mut output,
+        "# If the runtime database URL contains credentials, prefer DATABASE_URL_FILE=/run/secrets/DATABASE_URL"
+    )
+    .unwrap();
     writeln!(&mut output).unwrap();
 
     if let Some(var_name) = &config.turso_encryption_var {
-        let turso_key = generate_random_hex(32);
         let heading = if var_name == DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV {
             "# Local Turso encryption used by the compiled database engine"
         } else {
             "# Local Turso encryption"
         };
         writeln!(&mut output, "{heading}").unwrap();
-        writeln!(&mut output, "{var_name}={turso_key}").unwrap();
-        writeln!(
-            &mut output,
-            "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
-        )
-        .unwrap();
+        if mode.writes_live_secrets() {
+            let turso_key = generate_random_hex(32);
+            writeln!(&mut output, "{var_name}={turso_key}").unwrap();
+            writeln!(
+                &mut output,
+                "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
+            )
+            .unwrap();
+        } else {
+            render_secret_binding_comment(&mut output, var_name, "change-me-64-hex-characters");
+        }
         writeln!(&mut output).unwrap();
     }
 
@@ -180,12 +223,16 @@ fn render_env_template_with_config(config: &EnvTemplateConfig) -> String {
         "# IMPORTANT: Changing this will invalidate all existing user tokens"
     )
     .unwrap();
-    writeln!(&mut output, "JWT_SECRET={jwt_secret}").unwrap();
-    writeln!(
-        &mut output,
-        "# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/jwt_secret"
-    )
-    .unwrap();
+    if mode.writes_live_secrets() {
+        writeln!(&mut output, "JWT_SECRET={jwt_secret}").unwrap();
+        writeln!(
+            &mut output,
+            "# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/JWT_SECRET"
+        )
+        .unwrap();
+    } else {
+        render_secret_binding_comment(&mut output, "JWT_SECRET", "change-me");
+    }
     writeln!(&mut output).unwrap();
     if let Some(var_name) = &config.auth_email_env_var {
         writeln!(
@@ -203,27 +250,35 @@ fn render_env_template_with_config(config: &EnvTemplateConfig) -> String {
             .unwrap_or_default()
             .contains("SMTP")
         {
-            writeln!(
+            render_secret_binding_comment(
                 &mut output,
-                "{var_name}=smtp://user:password@smtp.example.com:587"
-            )
-            .unwrap();
+                var_name,
+                "smtp://user:password@smtp.example.com:587",
+            );
         } else {
-            writeln!(&mut output, "{var_name}=change-me").unwrap();
+            render_secret_binding_comment(&mut output, var_name, "change-me");
         }
-        writeln!(
-            &mut output,
-            "# Or mount a secret file and set {var_name}_FILE=/run/secrets/{var_name}"
-        )
-        .unwrap();
         writeln!(&mut output).unwrap();
     }
     writeln!(&mut output, "# Admin User (optional)").unwrap();
-    writeln!(
-        &mut output,
-        "# If set, these will be used when creating the admin user"
-    )
-    .unwrap();
+    if mode == EnvTemplateMode::Production {
+        writeln!(
+            &mut output,
+            "# Avoid storing bootstrap credentials in persisted env files for production."
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "# Prefer interactive bootstrap or one-shot CI / secret-manager injection during setup."
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            &mut output,
+            "# If set, these will be used when creating the admin user"
+        )
+        .unwrap();
+    }
     writeln!(&mut output, "# ADMIN_EMAIL=admin@example.com").unwrap();
     writeln!(&mut output, "# ADMIN_PASSWORD=securepassword").unwrap();
     if config.admin_claim_examples.is_empty() {
@@ -286,9 +341,16 @@ fn render_env_template_with_config(config: &EnvTemplateConfig) -> String {
     output
 }
 
-pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
+pub fn render_env_template_for_mode(
+    config_path: Option<&Path>,
+    mode: EnvTemplateMode,
+) -> Result<String> {
     let config = env_template_config(config_path)?;
-    Ok(render_env_template_with_config(&config))
+    Ok(render_env_template_with_config(&config, mode))
+}
+
+pub fn render_env_template(config_path: Option<&Path>) -> Result<String> {
+    render_env_template_for_mode(config_path, EnvTemplateMode::Development)
 }
 
 fn configured_admin_claim_env_examples(
@@ -382,6 +444,7 @@ pub fn write_env_file(
     config_path: Option<&Path>,
     backup_existing: bool,
     refuse_existing: bool,
+    mode: EnvTemplateMode,
 ) -> Result<EnvFileReport> {
     let env_path = match output_path {
         Some(path) => absolutize_path(path)?,
@@ -435,7 +498,7 @@ pub fn write_env_file(
         .filter(|var_name| existing_env_value(&existing_assignments, var_name.as_str()).is_some())
         .cloned();
     let content = merge_env_template_with_existing(
-        &render_env_template_with_config(&config),
+        &render_env_template_with_config(&config, mode),
         &existing_assignments,
     );
     std::fs::write(&env_path, content)?;
@@ -443,7 +506,8 @@ pub fn write_env_file(
     Ok(EnvFileReport {
         path: env_path,
         backup_path,
-        generated_turso_encryption_var: if config.turso_encryption_var.is_some()
+        generated_turso_encryption_var: if mode.writes_live_secrets()
+            && config.turso_encryption_var.is_some()
             && preserved_turso_encryption_var.is_none()
         {
             config.turso_encryption_var
@@ -451,14 +515,18 @@ pub fn write_env_file(
             None
         },
         preserved_turso_encryption_var,
-        generated_jwt_secret: !preserved_jwt_secret,
+        generated_jwt_secret: mode.writes_live_secrets() && !preserved_jwt_secret,
         preserved_jwt_secret,
+        mode,
     })
 }
 
 /// Generate .env template file
-pub fn generate_env_template(config_path: Option<&Path>) -> Result<EnvFileReport> {
-    write_env_file(None, config_path, true, false)
+pub fn generate_env_template(
+    config_path: Option<&Path>,
+    mode: EnvTemplateMode,
+) -> Result<EnvFileReport> {
+    write_env_file(None, config_path, true, false, mode)
 }
 
 fn parse_env_assignments(content: &str) -> BTreeMap<String, String> {
@@ -527,7 +595,10 @@ fn merge_env_template_with_existing(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_env_path, render_env_template, write_env_file};
+    use super::{
+        EnvTemplateMode, default_env_path, render_env_template, render_env_template_for_mode,
+        write_env_file,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -598,6 +669,23 @@ mod tests {
     }
 
     #[test]
+    fn production_env_template_does_not_write_live_secret_values() {
+        let content = render_env_template_for_mode(
+            Some(&fixture_path("auth_management_api.eon")),
+            EnvTemplateMode::Production,
+        )
+        .expect("production template should render");
+        assert!(
+            content.contains("# Production mode: this template does not write live secret values.")
+        );
+        assert!(content.contains("DATABASE_URL=sqlite:var/data/auth_management_api.db?mode=rwc"));
+        assert!(content.contains("# JWT_SECRET=change-me"));
+        assert!(!content.contains("\nJWT_SECRET="));
+        assert!(content.contains("# RESEND_API_KEY=change-me"));
+        assert!(!content.contains("\nRESEND_API_KEY="));
+    }
+
+    #[test]
     fn default_env_path_uses_service_directory_when_config_is_present() {
         let config = PathBuf::from("/tmp/example/service/api.eon");
         assert_eq!(
@@ -615,8 +703,14 @@ mod tests {
         let env_path = root.join(".env");
         fs::write(&env_path, "DATABASE_URL=sqlite:old.db\n").expect("existing env should write");
 
-        let report = write_env_file(None, Some(&config), true, false)
-            .expect("env file should write with backup");
+        let report = write_env_file(
+            None,
+            Some(&config),
+            true,
+            false,
+            EnvTemplateMode::Development,
+        )
+        .expect("env file should write with backup");
         assert_eq!(report.path, env_path);
         assert_eq!(report.backup_path, Some(root.join(".env.backup")));
         assert!(
@@ -647,8 +741,14 @@ mod tests {
         )
         .expect("existing env should write");
 
-        let report = write_env_file(None, Some(&config), true, false)
-            .expect("env file should preserve existing values");
+        let report = write_env_file(
+            None,
+            Some(&config),
+            true,
+            false,
+            EnvTemplateMode::Development,
+        )
+        .expect("env file should preserve existing values");
         let content = fs::read_to_string(&report.path).expect("env should read");
 
         assert!(report.preserved_jwt_secret);

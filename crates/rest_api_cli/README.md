@@ -91,6 +91,7 @@ Initialize a new API deployment with interactive prompts:
 
 ```bash
 vsr setup
+vsr setup --production
 ```
 
 This command will:
@@ -103,6 +104,12 @@ When `setup` generates or refreshes `.env`, it writes the file next to the selec
 service, loads it into the current setup process immediately, and prints a summary with the exact
 paths it touched. If it refreshes an existing file, the previous contents are backed up to
 `.env.backup`.
+
+`vsr setup --production` switches to production-safe behavior:
+
+- it does not write live secrets into `.env`
+- it does not generate self-signed dev TLS certs
+- it refuses to continue when required production secrets are unresolved
 
 For non-interactive setup (e.g., in CI/CD pipelines):
 
@@ -140,6 +147,7 @@ Generate a `.env` file directly:
 
 ```bash
 vsr gen-env
+vsr gen-env --production
 vsr --config api.eon gen-env --path .env.local
 ```
 
@@ -149,6 +157,38 @@ database URL plus the required/default Turso and security env vars such as
 var when those are referenced by the service. For `database.engine = TursoLocal`, `vsr gen-env`
 now writes a real 64-hex-character local encryption key instead of a placeholder. By default, the
 generated `.env` is written next to the `.eon` file when `--config` is used.
+
+`vsr gen-env --production` keeps the same shape but comments out live secret values instead of
+writing them. Use that mode for deployment templates and prefer mounted `*_FILE` bindings or a
+secret manager for the real values.
+
+### Infisical Scaffolding
+
+Generate Infisical Agent/runtime scaffolding directly from a `.eon` service:
+
+```bash
+vsr secrets infisical scaffold --input api.eon --project my-project
+vsr secrets infisical scaffold --input api.eon --project my-project --project-id <project-uuid>
+vsr doctor secrets --input api.eon --infisical-dir deploy/infisical
+```
+
+The scaffold includes:
+
+- `infisical-agent.yaml`
+- `runtime.env`
+- `expected-secrets.env`
+- `templates/*.tpl`
+- `auth/README.md`
+
+This is designed around the existing VSR `*_FILE` support. Infisical Agent renders secret files,
+and the generated `runtime.env` points VSR at those files. See
+[../../docs/infisical.md](../../docs/infisical.md).
+
+`vsr doctor secrets` validates:
+
+- currently resolved `*_FILE` / inline bindings for the service
+- service-required secret inputs such as `JWT_SECRET`, mail credentials, and Turso keys
+- optional Infisical scaffold completeness when `--infisical-dir` is provided
 
 ### Serve, Emit, and Build
 
@@ -590,8 +630,10 @@ This config currently controls:
 - security response headers on the emitted server
 - built-in auth JWT `iss`, `aud`, and token TTL defaults
 
-Secrets such as `JWT_SECRET` remain environment-driven. The current auth rate limiter is
-process-local rather than distributed.
+Secrets are still configured via environment names today, but production deployments should prefer
+mounted `*_FILE` bindings or a secret manager over inline `.env` values. The Phase 1 roadmap is in
+[../../docs/production-secrets-roadmap.md](../../docs/production-secrets-roadmap.md). The current
+auth rate limiter is process-local rather than distributed.
 
 ### Runtime In `.eon`
 
@@ -677,6 +719,7 @@ Create a template `.env` file with common configuration options:
 
 ```bash
 vsr gen-env
+vsr gen-env --production
 ```
 
 ## Environment Variables
@@ -685,11 +728,11 @@ The CLI tool respects the following environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | Database connection string | Derived from `--config` or a single local `.eon`; otherwise `sqlite:var/data/app.db?mode=rwc` |
+| `DATABASE_URL` / `DATABASE_URL_FILE` | Database connection string or mounted file containing it | Derived from `--config` or a single local `.eon`; otherwise `sqlite:var/data/app.db?mode=rwc` |
 | `ADMIN_EMAIL` | Default admin email address | None |
 | `ADMIN_PASSWORD` | Default admin password | None |
 | `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` or `ADMIN_IS_STAFF` | None |
-| `JWT_SECRET` | Secret key for JWT tokens | Required for built-in auth at runtime |
+| `JWT_SECRET` / `JWT_SECRET_FILE` | Secret key for JWT tokens or mounted file containing it | Required for built-in auth at runtime |
 
 ## Examples
 
@@ -730,6 +773,15 @@ vsr setup
 
 # Check database status
 vsr check-db
+```
+
+For production, prefer:
+
+```bash
+export DATABASE_URL_FILE=/run/secrets/DATABASE_URL
+export JWT_SECRET_FILE=/run/secrets/JWT_SECRET
+
+vsr setup --production
 ```
 
 ### `.eon`-Driven Local Turso Example

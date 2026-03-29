@@ -5,6 +5,7 @@ production-grade for public multi-tenant deployments.
 
 For a phased roadmap and a concrete compression MVP design, see `IMPROVEMENT_PLAN.md`.
 For backup, restore, and replication planning, see `docs/backup-replication-roadmap.md`.
+For production secret handling and setup hardening, see `docs/production-secrets-roadmap.md`.
 
 ## Security
 

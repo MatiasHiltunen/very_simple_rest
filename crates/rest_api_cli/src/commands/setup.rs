@@ -1,6 +1,8 @@
 use crate::commands::admin::{create_admin, create_admin_with_options, prompt_admin_credentials};
 use crate::commands::db::connect_database;
-use crate::commands::env::{EnvFileReport, default_env_path, generate_env_template, load_env_file};
+use crate::commands::env::{
+    EnvFileReport, EnvTemplateMode, default_env_path, generate_env_template, load_env_file,
+};
 use crate::commands::migrate::apply_setup_migrations;
 use crate::commands::tls::generate_self_signed_certificate;
 use crate::error::{Error, Result};
@@ -10,6 +12,7 @@ use rest_macro_core::auth::{AuthDbBackend, auth_user_table_ident};
 use rest_macro_core::compiler::{self, ServiceSpec};
 use rest_macro_core::database::DatabaseEngine;
 use rest_macro_core::db::query_scalar;
+use rest_macro_core::secret::{has_secret_from_env_or_file, load_optional_secret_from_env_or_file};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH, ResolvedTlsPaths, resolve_tls_paths,
 };
@@ -37,12 +40,18 @@ enum TlsBootstrapReport {
     },
 }
 
+struct RequiredSecretBinding {
+    var_name: String,
+    label: String,
+}
+
 /// Run setup wizard to initialize the API
 pub async fn run_setup(
     database_url: &str,
     config_path: Option<&Path>,
     non_interactive: bool,
     database_url_is_explicit: bool,
+    production: bool,
 ) -> Result<()> {
     println!(
         "{}",
@@ -50,11 +59,13 @@ pub async fn run_setup(
     );
 
     println!("\n{}", "Step 1: Preparing local environment".cyan().bold());
-    let bootstrap = bootstrap_setup_environment(config_path, non_interactive)?;
+    let bootstrap = bootstrap_setup_environment(config_path, non_interactive, production)?;
     let effective_database_url = if database_url_is_explicit {
         database_url.to_owned()
     } else {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| database_url.to_owned())
+        load_optional_secret_from_env_or_file("DATABASE_URL", "DATABASE_URL")
+            .map_err(|error| Error::Config(error.to_string()))?
+            .unwrap_or_else(|| database_url.to_owned())
     };
 
     println!("\n{}", "Step 2: Checking database connection".cyan().bold());
@@ -132,6 +143,7 @@ pub async fn run_setup(
 fn bootstrap_setup_environment(
     config_path: Option<&Path>,
     non_interactive: bool,
+    production: bool,
 ) -> Result<SetupBootstrapReport> {
     let mut report = SetupBootstrapReport::default();
     let env_path = default_env_path(config_path)?;
@@ -148,9 +160,23 @@ fn bootstrap_setup_environment(
         config_path.is_some() && (!env_path.exists() || turso_key_missing)
     } else {
         let prompt = if env_path.exists() {
-            format!("Generate or refresh {} before setup?", env_path.display())
+            if production {
+                format!(
+                    "Generate or refresh production-safe {} template before setup?",
+                    env_path.display()
+                )
+            } else {
+                format!("Generate or refresh {} before setup?", env_path.display())
+            }
         } else {
-            format!("Generate {} before setup?", env_path.display())
+            if production {
+                format!(
+                    "Generate production-safe {} template before setup?",
+                    env_path.display()
+                )
+            } else {
+                format!("Generate {} before setup?", env_path.display())
+            }
         };
         Confirm::new()
             .with_prompt(prompt)
@@ -160,10 +186,19 @@ fn bootstrap_setup_environment(
     };
 
     if generate_env {
-        let env_report = generate_env_template(config_path)?;
+        let mode = if production {
+            EnvTemplateMode::Production
+        } else {
+            EnvTemplateMode::Development
+        };
+        let env_report = generate_env_template(config_path, mode)?;
         println!(
             "{} {}",
-            "Generated environment file:".green().bold(),
+            if production {
+                "Generated production environment template:".green().bold()
+            } else {
+                "Generated environment file:".green().bold()
+            },
             env_report.path.display()
         );
         if let Some(backup_path) = &env_report.backup_path {
@@ -199,6 +234,13 @@ fn bootstrap_setup_environment(
                 env_report.path.display()
             );
         }
+        if production {
+            println!(
+                "{}",
+                "Production mode did not write live secret values into the environment file."
+                    .yellow()
+            );
+        }
         load_env_file(&env_report.path)?;
         println!(
             "{} {}",
@@ -229,13 +271,16 @@ fn bootstrap_setup_environment(
         );
         println!(
             "{}",
-            "Database setup may fail until the key is set in the environment or generated into .env."
+            "Database setup may fail until the key is resolved from the environment or a mounted *_FILE secret."
                 .yellow()
         );
     }
 
     if let Some(config_path) = config_path {
-        report.tls = maybe_prepare_tls_assets(config_path, non_interactive)?;
+        if production {
+            validate_required_production_secrets(config_path)?;
+        }
+        report.tls = maybe_prepare_tls_assets(config_path, non_interactive, production)?;
     }
 
     Ok(report)
@@ -252,6 +297,7 @@ fn required_turso_encryption_var(config_path: &Path) -> Result<Option<String>> {
 fn maybe_prepare_tls_assets(
     config_path: &Path,
     non_interactive: bool,
+    production: bool,
 ) -> Result<Option<TlsBootstrapReport>> {
     let service = load_service(config_path)?;
     if !service.tls.is_enabled() {
@@ -300,6 +346,14 @@ fn maybe_prepare_tls_assets(
         }));
     }
 
+    if production {
+        return Err(Error::Config(format!(
+            "production setup refuses to generate self-signed TLS assets. Configure real certificate/key files for `{}` and `{}`, or terminate TLS upstream and remove the `tls` block.",
+            resolved.cert_path.display(),
+            resolved.key_path.display()
+        )));
+    }
+
     let generate_certs = if non_interactive {
         uses_default_dev_tls_paths(&service)
     } else {
@@ -334,6 +388,76 @@ fn maybe_prepare_tls_assets(
     }))
 }
 
+fn validate_required_production_secrets(config_path: &Path) -> Result<()> {
+    let service = load_service(config_path)?;
+    let missing = required_production_secret_bindings(&service)
+        .into_iter()
+        .filter(|binding| !has_secret_from_env_or_file(binding.var_name.as_str()))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let details = missing
+        .iter()
+        .map(|binding| {
+            format!(
+                "- {} via `{}` or `{}_FILE`",
+                binding.label, binding.var_name, binding.var_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Err(Error::Config(format!(
+        "production setup refuses to assume or generate live secrets.\nResolve the required secret bindings before setup continues:\n{details}"
+    )))
+}
+
+fn required_production_secret_bindings(service: &ServiceSpec) -> Vec<RequiredSecretBinding> {
+    let mut bindings = Vec::new();
+
+    if !service
+        .resources
+        .iter()
+        .any(|resource| resource.table_name == "user")
+    {
+        bindings.push(RequiredSecretBinding {
+            var_name: "JWT_SECRET".to_owned(),
+            label: "built-in auth JWT signing key".to_owned(),
+        });
+    }
+
+    if let DatabaseEngine::TursoLocal(engine) = &service.database.engine
+        && let Some(var_name) = engine.encryption_key_env.as_ref()
+    {
+        bindings.push(RequiredSecretBinding {
+            var_name: var_name.clone(),
+            label: "local Turso encryption key".to_owned(),
+        });
+    }
+
+    if let Some(email) = &service.security.auth.email {
+        match &email.provider {
+            rest_macro_core::auth::AuthEmailProvider::Resend { api_key_env, .. } => {
+                bindings.push(RequiredSecretBinding {
+                    var_name: api_key_env.clone(),
+                    label: "Resend API key".to_owned(),
+                });
+            }
+            rest_macro_core::auth::AuthEmailProvider::Smtp { connection_url_env } => {
+                bindings.push(RequiredSecretBinding {
+                    var_name: connection_url_env.clone(),
+                    label: "SMTP connection URL".to_owned(),
+                });
+            }
+        }
+    }
+
+    bindings
+}
+
 fn load_service(config_path: &Path) -> Result<ServiceSpec> {
     compiler::load_service_from_path(config_path).map_err(|error| Error::Config(error.to_string()))
 }
@@ -357,16 +481,21 @@ fn uses_default_dev_tls_paths(service: &ServiceSpec) -> bool {
 }
 
 fn required_env_var_is_missing(var_name: &str) -> bool {
-    std::env::var(var_name)
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
+    !has_secret_from_env_or_file(var_name)
 }
 
 fn print_setup_summary(report: &SetupBootstrapReport) {
     println!("\n{}", "Setup summary".cyan().bold());
 
     if let Some(env_report) = &report.env_generated {
-        println!("Generated .env: {}", env_report.path.display());
+        if env_report.mode == EnvTemplateMode::Production {
+            println!(
+                "Generated production-safe .env template: {}",
+                env_report.path.display()
+            );
+        } else {
+            println!("Generated .env: {}", env_report.path.display());
+        }
         if let Some(backup_path) = &env_report.backup_path {
             println!("Previous .env backup: {}", backup_path.display());
         }
@@ -374,11 +503,21 @@ fn print_setup_summary(report: &SetupBootstrapReport) {
             println!("Generated JWT_SECRET in: {}", env_report.path.display());
         } else if env_report.preserved_jwt_secret {
             println!("Preserved JWT_SECRET in: {}", env_report.path.display());
+        } else if env_report.mode == EnvTemplateMode::Production {
+            println!(
+                "Did not write a live JWT secret into: {}",
+                env_report.path.display()
+            );
         }
         if let Some(var_name) = &env_report.generated_turso_encryption_var {
             println!("Generated {var_name} in: {}", env_report.path.display());
         } else if let Some(var_name) = &env_report.preserved_turso_encryption_var {
             println!("Preserved {var_name} in: {}", env_report.path.display());
+        } else if env_report.mode == EnvTemplateMode::Production {
+            println!(
+                "Did not write live database encryption secrets into: {}",
+                env_report.path.display()
+            );
         }
     } else if let Some(env_path) = &report.env_loaded_from {
         println!("Loaded .env from: {}", env_path.display());
@@ -440,6 +579,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_URL_FILE");
             std::env::remove_var("TURSO_ENCRYPTION_KEY");
             std::env::remove_var("JWT_SECRET");
             std::env::remove_var("TLS_CERT_PATH");
@@ -478,7 +618,7 @@ mod tests {
 
         let database_url =
             database_url_from_service_config(&config_path).expect("database url should resolve");
-        run_setup(&database_url, Some(&config_path), true, false)
+        run_setup(&database_url, Some(&config_path), true, false, false)
             .await
             .expect("setup should complete");
 
@@ -502,10 +642,155 @@ mod tests {
 
         unsafe {
             std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_URL_FILE");
             std::env::remove_var("TURSO_ENCRYPTION_KEY");
             std::env::remove_var("JWT_SECRET");
             std::env::remove_var("TLS_CERT_PATH");
             std::env::remove_var("TLS_KEY_PATH");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn production_setup_refuses_to_generate_live_secrets_or_dev_tls() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_URL_FILE");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY_FILE");
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("JWT_SECRET_FILE");
+            std::env::remove_var("TLS_CERT_PATH");
+            std::env::remove_var("TLS_KEY_PATH");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
+
+        let root = temp_root("production_guard");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config_path = root.join("setup_api.eon");
+        fs::write(
+            &config_path,
+            r#"
+            module: "setup_api"
+            database: {
+                engine: {
+                    kind: TursoLocal
+                    path: "var/data/setup_api.db"
+                    encryption_key_env: "TURSO_ENCRYPTION_KEY"
+                }
+            }
+            tls: {}
+            resources: [
+                {
+                    name: "Note"
+                    fields: [
+                        { name: "id", type: I64, id: true }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+
+        let database_url =
+            database_url_from_service_config(&config_path).expect("database url should resolve");
+        let error = run_setup(&database_url, Some(&config_path), true, false, true)
+            .await
+            .expect_err("production setup should fail without resolved secrets");
+
+        let message = error.to_string();
+        assert!(message.contains("production setup refuses"));
+        assert!(message.contains("JWT_SECRET"));
+        assert!(message.contains("TURSO_ENCRYPTION_KEY"));
+
+        let env_contents = fs::read_to_string(root.join(".env")).expect(".env should exist");
+        assert!(env_contents.contains("# JWT_SECRET=change-me"));
+        assert!(!env_contents.contains("\nJWT_SECRET="));
+
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_URL_FILE");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY_FILE");
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("JWT_SECRET_FILE");
+            std::env::remove_var("TLS_CERT_PATH");
+            std::env::remove_var("TLS_KEY_PATH");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn setup_honors_database_url_file_from_loaded_env() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_URL_FILE");
+            std::env::remove_var("ADMIN_EMAIL");
+            std::env::remove_var("ADMIN_PASSWORD");
+        }
+
+        let root = temp_root("database_url_file");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config_path = root.join("setup_api.eon");
+        fs::write(
+            &config_path,
+            r#"
+            module: "setup_api"
+            database: {
+                engine: {
+                    kind: Sqlx
+                }
+            }
+            resources: [
+                {
+                    name: "Note"
+                    fields: [
+                        { name: "id", type: I64, id: true }
+                        { name: "title", type: String }
+                    ]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+
+        let database_url_file = root.join("database-url.txt");
+        let effective_database_url = format!(
+            "sqlite:{}?mode=rwc",
+            root.join("var/data/from_file.db").display()
+        );
+        fs::create_dir_all(root.join("var/data")).expect("db dir should exist");
+        fs::write(&database_url_file, &effective_database_url).expect("db url file should write");
+        fs::write(
+            root.join(".env"),
+            format!("DATABASE_URL_FILE={}\n", database_url_file.display()),
+        )
+        .expect(".env should write");
+
+        run_setup(
+            "sqlite:var/data/ignored.db?mode=rwc",
+            Some(&config_path),
+            true,
+            false,
+            false,
+        )
+        .await
+        .expect("setup should honor DATABASE_URL_FILE");
+
+        assert!(root.join("var/data/from_file.db").exists());
+        assert!(!root.join("var/data/ignored.db").exists());
+
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("DATABASE_URL_FILE");
             std::env::remove_var("ADMIN_EMAIL");
             std::env::remove_var("ADMIN_PASSWORD");
         }
