@@ -200,52 +200,58 @@ pub fn expand_service_module(
         quote! {}
     } else {
         quote! {
-            let storage = storage();
-            let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
-                &storage,
-            )
-            .expect("generated storage config should be valid");
-            #runtime_crate::core::storage::configure_public_mounts_with_runtime(
-                cfg,
-                &storage_registry,
-                storage.public_mounts.as_slice(),
-                &runtime,
-            );
+            {
+                let storage_config = storage();
+                let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
+                    &storage_config,
+                )
+                .expect("generated storage config should be valid");
+                #runtime_crate::core::storage::configure_public_mounts_with_runtime(
+                    cfg,
+                    &storage_registry,
+                    storage_config.public_mounts.as_slice(),
+                    &runtime,
+                );
+            }
         }
     };
     let configure_s3_compat = if service.storage.s3_compat.is_none() {
         quote! {}
     } else {
         quote! {
-            let storage = storage();
-            let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
-                &storage,
-            )
-            .expect("generated storage config should be valid");
-            #runtime_crate::core::storage::configure_s3_compat_with_runtime(
-                cfg,
-                &storage_registry,
-                storage.s3_compat.as_ref(),
-                &runtime,
-            );
+            {
+                let storage_config = storage();
+                let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
+                    &storage_config,
+                )
+                .expect("generated storage config should be valid");
+                #runtime_crate::core::storage::configure_s3_compat_with_runtime(
+                    cfg,
+                    &storage_registry,
+                    storage_config.s3_compat.as_ref(),
+                    &runtime,
+                );
+            }
         }
     };
     let configure_storage_uploads = if service.storage.uploads.is_empty() {
         quote! {}
     } else {
         quote! {
-            let storage = storage();
-            let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
-                &storage,
-            )
-            .expect("generated storage config should be valid");
-            #runtime_crate::core::storage::configure_upload_endpoints_with_runtime(
-                cfg,
-                &storage_registry,
-                storage.public_mounts.as_slice(),
-                storage.uploads.as_slice(),
-                &runtime(),
-            );
+            {
+                let storage_config = storage();
+                let storage_registry = #runtime_crate::core::storage::StorageRegistry::from_config(
+                    &storage_config,
+                )
+                .expect("generated storage config should be valid");
+                #runtime_crate::core::storage::configure_upload_endpoints_with_runtime(
+                    cfg,
+                    &storage_registry,
+                    storage_config.public_mounts.as_slice(),
+                    storage_config.uploads.as_slice(),
+                    &runtime(),
+                );
+            }
         }
     };
     let configure_static_mounts = if service.static_mounts.is_empty() {
@@ -266,15 +272,15 @@ pub fn expand_service_module(
         && service.storage.public_mounts.is_empty()
         && service.storage.s3_compat.is_none()
     {
-            quote! {}
-        } else {
-            quote! {
-                let runtime = runtime();
-                #configure_storage_public_mounts
-                #configure_s3_compat
-                #configure_static_mounts
-            }
-        };
+        quote! {}
+    } else {
+        quote! {
+            let runtime = runtime();
+            #configure_storage_public_mounts
+            #configure_s3_compat
+            #configure_static_mounts
+        }
+    };
     let database = database_tokens(service, runtime_crate);
     let default_database_url = Literal::string(&default_service_database_url(service));
     let logging = logging_tokens(service, runtime_crate);
