@@ -1,8 +1,13 @@
 # VSR
 
-> **Note**: This project is currently very much in progress and under active development. APIs will change, and features are incomplete.
+<img width="250" height="256" alt="Method Draw Image" src="https://github.com/user-attachments/assets/dacb8710-1160-449b-88c1-577d722f37a4" />
 
 A Rust toolkit for declaring REST APIs in Rust or `.eon` and running them through a CLI-first workflow on top of Actix Web and SQLx.
+
+
+> **Note**: This project is currently very much in progress and under active development. APIs will change, and features are incomplete.
+
+
 
 > VSR started as a derive-macro shortcut for rapid API prototypes. The project is now centered on full `.eon` service definitions, built-in auth and admin flows, explicit migrations, and a native `vsr` runtime that can serve, emit, and build APIs from the same contract.
 
