@@ -3104,4 +3104,70 @@ mod tests {
             &root,
         );
     }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_auth_claims_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("auth_claims_api.eon"),
+            "auth-claims-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_hybrid_runtime_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("hybrid_runtime_api.eon"),
+            "hybrid-runtime-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_many_to_many_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("many_to_many_api.eon"),
+            "many-to-many-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_storage_upload_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("storage_upload_api.eon"),
+            "storage-upload-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_object_fields_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("object_fields_api.eon"),
+            "object-fields-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_enum_fields_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("enum_fields_api.eon"),
+            "enum-fields-warning-clean",
+            &root,
+        );
+    }
 }

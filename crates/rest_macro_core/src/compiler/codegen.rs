@@ -302,8 +302,11 @@ pub fn expand_service_module(
     let authorization_management_mount =
         Literal::string(&service.authorization.management_api.mount);
     let authorization_management_enabled = service.authorization.management_api.enabled;
-    let has_static_mounts = !service.static_mounts.is_empty();
-    let configure_static_arg = if has_static_mounts {
+    let configure_static_needs_cfg = !service.static_mounts.is_empty()
+        || !service.storage.public_mounts.is_empty()
+        || service.storage.s3_compat.is_some()
+        || !service.storage.uploads.is_empty();
+    let configure_static_arg = if configure_static_needs_cfg {
         quote!(cfg)
     } else {
         quote!(_cfg)
@@ -319,6 +322,7 @@ pub fn expand_service_module(
     };
     let authorization_management_fn = if authorization_management_enabled {
         quote! {
+            #[allow(dead_code)]
             pub fn authorization_management(
             ) -> #runtime_crate::core::authorization::AuthorizationManagementApiConfig {
                 #authorization_management
@@ -338,6 +342,7 @@ pub fn expand_service_module(
     };
     let configure_authorization_management_fn = if authorization_management_enabled {
         quote! {
+            #[allow(dead_code)]
             pub fn configure_authorization_management(
                 cfg: &mut web::ServiceConfig,
                 db: impl Into<DbPool>,
@@ -2741,12 +2746,23 @@ fn resource_impl_tokens(
     let update_normalization = update_normalization_tokens(resource);
     let create_validation = create_validation_tokens(resource, authorization, runtime_crate);
     let update_validation = update_validation_tokens(resource, runtime_crate);
-    let create_payload_binding = if create_normalization.is_empty() {
+    let create_payload_is_used = !create_payload_fields(resource, authorization).is_empty()
+        || !create_normalization.is_empty()
+        || !create_validation.is_empty()
+        || resource.policies.has_create_require_filters();
+    let update_payload_is_used = !update_payload_fields(resource).is_empty()
+        || !update_normalization.is_empty()
+        || !update_validation.is_empty();
+    let create_payload_binding = if !create_payload_is_used {
+        quote!(let _ = item.into_inner();)
+    } else if create_normalization.is_empty() {
         quote!(let item = item.into_inner();)
     } else {
         quote!(let mut item = item.into_inner();)
     };
-    let update_payload_binding = if update_normalization.is_empty() {
+    let update_payload_binding = if !update_payload_is_used {
+        quote!(let _ = item.into_inner();)
+    } else if update_normalization.is_empty() {
         quote!(let item = item.into_inner();)
     } else {
         quote!(let mut item = item.into_inner();)
@@ -3434,6 +3450,7 @@ fn resource_impl_tokens(
                     )
                 }
 
+                #[allow(dead_code)]
                 async fn build_many_to_many_list_plan_with_hybrid_read(
                     query: &#list_query_ty,
                     user: &#runtime_crate::core::auth::UserContext,
@@ -3959,6 +3976,7 @@ fn resource_impl_tokens(
         quote!()
     } else {
         quote! {
+            #[allow(dead_code)]
             fn build_many_to_many_list_plan(
                 query: &#list_query_ty,
                 user: &#runtime_crate::core::auth::UserContext,
@@ -5005,6 +5023,7 @@ fn resource_impl_tokens(
                 })
             }
 
+            #[allow(dead_code)]
             fn build_list_plan(
                 query: &#list_query_ty,
                 user: &#runtime_crate::core::auth::UserContext,
@@ -5077,6 +5096,7 @@ fn resource_impl_tokens(
                 db: web::Data<DbPool>
                 #create_runtime_arg
             ) -> impl Responder {
+                let _ = (&req, &item, &user, &db);
                 #create_check
                 #create_payload_binding
                 #(#create_normalization)*
@@ -5092,6 +5112,7 @@ fn resource_impl_tokens(
                 db: web::Data<DbPool>
                 #update_runtime_arg
             ) -> impl Responder {
+                let _ = (&path, &item, &user, &db);
                 #update_check
                 #update_payload_binding
                 #(#update_normalization)*
@@ -5105,6 +5126,7 @@ fn resource_impl_tokens(
                 db: web::Data<DbPool>
                 #delete_runtime_arg
             ) -> impl Responder {
+                let _ = (&path, &user, &db);
                 #delete_check
                 #delete_body
             }
@@ -5324,7 +5346,23 @@ fn resource_action_handler_tokens(
                     )
                 })
                 .collect::<Vec<_>>();
-            let action_payload_binding = if action_normalization.is_empty() {
+            let action_uses_input_assignments = match &action.behavior {
+                super::model::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
+                    assignments.iter().any(|assignment| {
+                        matches!(
+                            assignment.value,
+                            super::model::ResourceActionValueSpec::InputField(_)
+                        )
+                    })
+                }
+                super::model::ResourceActionBehaviorSpec::DeleteResource => false,
+            };
+            let action_payload_is_used = action_uses_input_assignments
+                || !action_normalization.is_empty()
+                || !action_validation.is_empty();
+            let action_payload_binding = if !action_payload_is_used {
+                quote!(let _ = item.into_inner();)
+            } else if action_normalization.is_empty() {
                 quote!(let item = item.into_inner();)
             } else {
                 quote!(let mut item = item.into_inner();)
@@ -5333,6 +5371,7 @@ fn resource_action_handler_tokens(
                 quote!()
             } else {
                 quote! {
+                    let _ = &item;
                     #action_payload_binding
                     #(#action_normalization)*
                     #(#action_validation)*
@@ -5394,6 +5433,7 @@ fn resource_action_handler_tokens(
                         db: web::Data<DbPool>
                         #runtime_arg
                     ) -> impl Responder {
+                        let _ = (&path, &user, &db);
                         #update_check
                         let id = path.into_inner();
                         #action_payload_setup
@@ -5457,6 +5497,7 @@ fn resource_action_handler_tokens(
                         db: web::Data<DbPool>
                         #runtime_arg
                     ) -> impl Responder {
+                        let _ = (&path, &user, &db);
                         #update_check
                         let id = path.into_inner();
                         #action_payload_setup
@@ -5523,6 +5564,7 @@ fn resource_action_handler_tokens(
                         db: web::Data<DbPool>
                         #delete_runtime_arg
                     ) -> impl Responder {
+                        let _ = (&path, &user, &db);
                         #delete_check
                         let sql = format!(
                             "DELETE FROM {} WHERE {} = {}",
@@ -5587,6 +5629,7 @@ fn resource_action_handler_tokens(
                         db: web::Data<DbPool>
                         #delete_runtime_arg
                     ) -> impl Responder {
+                        let _ = (&path, &user, &db);
                         #delete_check
                         let id = path.into_inner();
                         if #admin_bypass && #is_admin {
