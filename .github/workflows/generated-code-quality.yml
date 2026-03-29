@@ -1,0 +1,33 @@
+name: Generated Code Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  generated-warning-clean:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Compiler Crate
+        run: cargo check -p rest_macro_core
+
+      - name: Verify Generated Projects Are Warning Clean
+        run: cargo test -p vsra warning_clean -- --ignored --nocapture

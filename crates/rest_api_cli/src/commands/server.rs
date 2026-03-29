@@ -7,17 +7,17 @@ use std::time::Duration;
 
 use brotli::CompressorWriter;
 use colored::Colorize;
-use flate2::{Compression, write::GzEncoder};
+use flate2::{write::GzEncoder, Compression};
 use rest_macro_core::auth::{
-    AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
+    auth_management_migration_sql, auth_migration_sql, AuthDbBackend, AuthEmailProvider,
 };
 use rest_macro_core::compiler::{self, BuildLtoMode, DbBackend, OpenApiSpecOptions, ServiceSpec};
-use rest_macro_core::database::{DatabaseEngine, sqlite_url_for_path};
+use rest_macro_core::database::{sqlite_url_for_path, DatabaseEngine};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
     DEFAULT_TLS_KEY_PATH_ENV,
 };
-use syn::{parse_str, parse2};
+use syn::{parse2, parse_str};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -1824,7 +1824,7 @@ mod tests {
     use brotli::Decompressor;
     use flate2::read::GzDecoder;
     use reqwest::blocking::Client;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::fs;
     use std::io::Read;
     use std::net::TcpListener;
@@ -1874,6 +1874,51 @@ mod tests {
             .read_to_string(&mut decoded)
             .expect("brotli file should decode");
         decoded
+    }
+
+    fn run_generated_project_cargo_check(
+        project_dir: &Path,
+        target_dir: &Path,
+        rustflags: Option<&str>,
+    ) {
+        let mut command = Command::new("cargo");
+        command.arg("check");
+        command.current_dir(project_dir);
+        command.env("CARGO_TARGET_DIR", target_dir);
+        if let Some(rustflags) = rustflags {
+            command.env("RUSTFLAGS", rustflags);
+        }
+        let output = command
+            .output()
+            .expect("generated cargo check should run successfully");
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "generated cargo check failed for {}\nstdout:\n{}\nstderr:\n{}",
+                project_dir.display(),
+                stdout,
+                stderr
+            );
+        }
+    }
+
+    fn assert_generated_project_is_warning_clean(input: &Path, package_name: &str, root: &Path) {
+        let project_dir = root.join(package_name);
+        emit_server_project(
+            input,
+            &project_dir,
+            Some(package_name.to_owned()),
+            false,
+            false,
+        )
+        .expect("generated server project should emit");
+
+        run_generated_project_cargo_check(
+            &project_dir,
+            &root.join("target").join(package_name),
+            Some("-D warnings"),
+        );
     }
 
     fn env_lock() -> &'static Mutex<()> {
@@ -2071,14 +2116,12 @@ mod tests {
             .expect("build cache root should resolve");
 
         assert_eq!(first, second);
-        assert!(
-            first.starts_with(
-                std::env::current_dir()
-                    .expect("current dir should resolve")
-                    .join(".vsr-build")
-                    .join("blog-api")
-            )
-        );
+        assert!(first.starts_with(
+            std::env::current_dir()
+                .expect("current dir should resolve")
+                .join(".vsr-build")
+                .join("blog-api")
+        ));
     }
 
     #[test]
@@ -2516,11 +2559,9 @@ mod tests {
         assert!(artifact_dir.join("openapi.json").exists());
         assert!(artifact_dir.join("service.eon").exists());
         assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
-        assert!(
-            artifact_dir
-                .join("migrations/0001_auth_management.sql")
-                .exists()
-        );
+        assert!(artifact_dir
+            .join("migrations/0001_auth_management.sql")
+            .exists());
     }
 
     #[test]
@@ -2673,7 +2714,13 @@ mod tests {
 
         tokio::runtime::Runtime::new()
             .expect("tokio runtime should initialize")
-            .block_on(run_setup(&database_url, Some(&bundle_eon), true, false))
+            .block_on(run_setup(
+                &database_url,
+                Some(&bundle_eon),
+                true,
+                false,
+                false,
+            ))
             .expect("setup should initialize the bridgeboard database");
 
         assert!(
@@ -2999,13 +3046,11 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(
-            output
-                .parent()
-                .expect("binary output should have a parent")
-                .join("blog-server.bundle/.env.example")
-                .exists()
-        );
+        assert!(output
+            .parent()
+            .expect("binary output should have a parent")
+            .join("blog-server.bundle/.env.example")
+            .exists());
     }
 
     #[test]
@@ -3031,12 +3076,32 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(
-            output
-                .parent()
-                .expect("binary output should have a parent")
-                .join("turso-encrypted-server.bundle/.env.example")
-                .exists()
+        assert!(output
+            .parent()
+            .expect("binary output should have a parent")
+            .join("turso-encrypted-server.bundle/.env.example")
+            .exists());
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_blog_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &fixture_path("blog_api.eon"),
+            "blog-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_cms_generated_code_is_warning_clean() {
+        let root = test_root();
+        assert_generated_project_is_warning_clean(
+            &example_path("cms/api.eon"),
+            "cms-generated-project",
+            &root,
         );
     }
 }

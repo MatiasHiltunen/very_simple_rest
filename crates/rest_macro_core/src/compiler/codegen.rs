@@ -6,8 +6,8 @@ use quote::{format_ident, quote};
 use syn::{Path, Type};
 
 use super::model::{
-    GeneratedValue, PolicyFilterExpression, PolicyValueSource, ResourceSpec, ServiceSpec,
-    StaticCacheProfile, StaticMode, WriteModelStyle, default_service_database_url,
+    default_service_database_url, GeneratedValue, PolicyFilterExpression, PolicyValueSource,
+    ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode, WriteModelStyle,
 };
 use crate::{
     authorization::{
@@ -44,7 +44,12 @@ pub fn expand_derive_resource(
     resource: &ResourceSpec,
     runtime_crate: &Path,
 ) -> syn::Result<TokenStream> {
-    let struct_tokens = resource_struct_tokens(resource, None, runtime_crate);
+    let struct_tokens = resource_struct_tokens(
+        resource,
+        std::slice::from_ref(resource),
+        None,
+        runtime_crate,
+    );
     let impl_tokens = expand_resource_impl(
         resource,
         std::slice::from_ref(resource),
@@ -128,8 +133,12 @@ pub fn expand_service_module(
         .resources
         .iter()
         .map(|resource| {
-            let struct_tokens =
-                resource_struct_tokens(resource, Some(&service.authorization), runtime_crate);
+            let struct_tokens = resource_struct_tokens(
+                resource,
+                &service.resources,
+                Some(&service.authorization),
+                runtime_crate,
+            );
             let impl_tokens = expand_resource_impl(
                 resource,
                 &service.resources,
@@ -293,6 +302,58 @@ pub fn expand_service_module(
     let authorization_management_mount =
         Literal::string(&service.authorization.management_api.mount);
     let authorization_management_enabled = service.authorization.management_api.enabled;
+    let has_static_mounts = !service.static_mounts.is_empty();
+    let configure_static_arg = if has_static_mounts {
+        quote!(cfg)
+    } else {
+        quote!(_cfg)
+    };
+    let storage_fn = if service.storage.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            pub fn storage() -> #runtime_crate::core::storage::StorageConfig {
+                #storage
+            }
+        }
+    };
+    let authorization_management_fn = if authorization_management_enabled {
+        quote! {
+            pub fn authorization_management(
+            ) -> #runtime_crate::core::authorization::AuthorizationManagementApiConfig {
+                #authorization_management
+            }
+        }
+    } else {
+        quote!()
+    };
+    let tls_fn = if service.tls.is_enabled() {
+        quote! {
+            pub fn tls() -> #runtime_crate::core::tls::TlsConfig {
+                #tls
+            }
+        }
+    } else {
+        quote!()
+    };
+    let configure_authorization_management_fn = if authorization_management_enabled {
+        quote! {
+            pub fn configure_authorization_management(
+                cfg: &mut web::ServiceConfig,
+                db: impl Into<DbPool>,
+            ) {
+                let db = db.into();
+                cfg.app_data(web::Data::new(authorization_runtime(db)));
+                let management = authorization_management();
+                #runtime_crate::core::authorization::authorization_management_routes_at(
+                    cfg,
+                    management.mount.as_str(),
+                );
+            }
+        }
+    } else {
+        quote!()
+    };
 
     Ok(quote! {
         pub mod #module_ident {
@@ -300,7 +361,7 @@ pub fn expand_service_module(
 
             #type_aliases
 
-            use #runtime_crate::actix_web::{web, HttpResponse, Responder};
+            use #runtime_crate::actix_web::web;
             use #runtime_crate::db::DbPool;
 
             #(#resources)*
@@ -319,7 +380,7 @@ pub fn expand_service_module(
                 }
             }
 
-            pub fn configure_static(cfg: &mut web::ServiceConfig) {
+            pub fn configure_static(#configure_static_arg: &mut web::ServiceConfig) {
                 #configure_static_body
             }
 
@@ -339,9 +400,7 @@ pub fn expand_service_module(
                 #runtime
             }
 
-            pub fn storage() -> #runtime_crate::core::storage::StorageConfig {
-                #storage
-            }
+            #storage_fn
 
             pub fn security() -> #runtime_crate::core::security::SecurityConfig {
                 #security
@@ -351,10 +410,7 @@ pub fn expand_service_module(
                 #authorization
             }
 
-            pub fn authorization_management(
-            ) -> #runtime_crate::core::authorization::AuthorizationManagementApiConfig {
-                #authorization_management
-            }
+            #authorization_management_fn
 
             pub fn authorization_runtime(
                 db: impl Into<DbPool>,
@@ -365,27 +421,14 @@ pub fn expand_service_module(
                 )
             }
 
-            pub fn tls() -> #runtime_crate::core::tls::TlsConfig {
-                #tls
-            }
+            #tls_fn
 
             pub fn configure_security(cfg: &mut web::ServiceConfig) {
                 let security = security();
                 #runtime_crate::core::security::configure_scope_security(cfg, &security);
             }
 
-            pub fn configure_authorization_management(
-                cfg: &mut web::ServiceConfig,
-                db: impl Into<DbPool>,
-            ) {
-                let db = db.into();
-                cfg.app_data(web::Data::new(authorization_runtime(db)));
-                let management = authorization_management();
-                #runtime_crate::core::authorization::authorization_management_routes_at(
-                    cfg,
-                    management.mount.as_str(),
-                );
-            }
+            #configure_authorization_management_fn
         }
     })
 }
@@ -1352,11 +1395,15 @@ fn auth_claim_mappings_tokens(
         }
     });
 
-    quote! {
-        {
-            let mut claims = ::std::collections::BTreeMap::new();
-            #(#entries)*
-            claims
+    if claims.is_empty() {
+        quote!(::std::collections::BTreeMap::new())
+    } else {
+        quote! {
+            {
+                let mut claims = ::std::collections::BTreeMap::new();
+                #(#entries)*
+                claims
+            }
         }
     }
 }
@@ -1493,6 +1540,7 @@ fn option_auth_ui_page_tokens(
 
 fn resource_struct_tokens(
     resource: &ResourceSpec,
+    resources: &[ResourceSpec],
     authorization: Option<&AuthorizationContract>,
     runtime_crate: &Path,
 ) -> TokenStream {
@@ -1504,7 +1552,7 @@ fn resource_struct_tokens(
         .iter()
         .filter_map(|action| resource_action_input_struct_tokens(resource, action, runtime_crate))
         .collect::<Vec<_>>();
-    let list_query_tokens = list_query_tokens(resource, runtime_crate);
+    let list_query_tokens = list_query_tokens(resource, resources, runtime_crate);
     let generated_from_row = generated_from_row_tokens(resource, runtime_crate);
     let object_validator_defs = typed_object_validator_defs(resource, runtime_crate);
     let fields = resource.api_fields().map(|field| {
@@ -1637,6 +1685,15 @@ fn typed_object_normalizer_defs(resource: &ResourceSpec, runtime_crate: &Path) -
         .collect()
 }
 
+fn field_needs_normalization(field: &super::model::FieldSpec) -> bool {
+    !field.transforms().is_empty()
+        || field
+            .object_fields
+            .as_deref()
+            .map(|nested_fields| nested_fields.iter().any(field_needs_normalization))
+            .unwrap_or(false)
+}
+
 fn collect_typed_object_normalizer_defs(
     resource: &ResourceSpec,
     field: &super::model::FieldSpec,
@@ -1660,30 +1717,40 @@ fn collect_typed_object_normalizer_defs(
     }
 
     let helper_ident = typed_object_normalizer_ident(resource, path);
-    let statements = nested_fields.iter().filter_map(|nested_field| {
-        let field_name = Literal::string(nested_field.api_name());
-        if nested_field.object_fields.is_some() {
-            let mut nested_path = path.to_vec();
-            nested_path.push(nested_field.name());
-            let nested_helper_ident = typed_object_normalizer_ident(resource, &nested_path);
-            Some(quote! {
-                if let Some(value) = object.get_mut(#field_name) {
-                    Self::#nested_helper_ident(value);
+    let statements = nested_fields
+        .iter()
+        .filter_map(|nested_field| {
+            let field_name = Literal::string(nested_field.api_name());
+            if nested_field.object_fields.is_some() {
+                if !field_needs_normalization(nested_field) {
+                    return None;
                 }
-            })
-        } else if !nested_field.transforms().is_empty() {
-            let transform_ops = string_transform_ops(nested_field.transforms());
-            Some(quote! {
-                if let Some(value) = object.get_mut(#field_name) {
-                    if let #runtime_crate::serde_json::Value::String(value) = value {
-                        #(#transform_ops)*
+                let mut nested_path = path.to_vec();
+                nested_path.push(nested_field.name());
+                let nested_helper_ident = typed_object_normalizer_ident(resource, &nested_path);
+                Some(quote! {
+                    if let Some(value) = object.get_mut(#field_name) {
+                        Self::#nested_helper_ident(value);
                     }
-                }
-            })
-        } else {
-            None
-        }
-    });
+                })
+            } else if !nested_field.transforms().is_empty() {
+                let transform_ops = string_transform_ops(nested_field.transforms());
+                Some(quote! {
+                    if let Some(value) = object.get_mut(#field_name) {
+                        if let #runtime_crate::serde_json::Value::String(value) = value {
+                            #(#transform_ops)*
+                        }
+                    }
+                })
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if statements.is_empty() {
+        return definitions;
+    }
 
     definitions.push(quote! {
         fn #helper_ident(value: &mut #runtime_crate::serde_json::Value) {
@@ -1749,6 +1816,7 @@ fn collect_typed_object_validator_defs(
         .map(typed_object_validator_field_check_tokens);
 
     definitions.push(quote! {
+        #[allow(dead_code)]
         #[derive(Debug, Clone, #runtime_crate::serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct #struct_ident {
@@ -1757,6 +1825,7 @@ fn collect_typed_object_validator_defs(
 
         impl #struct_ident {
             fn validate(&self, base_path: &str) -> Result<(), (String, String)> {
+                let _ = base_path;
                 #(#validations)*
                 Ok(())
             }
@@ -2364,7 +2433,11 @@ fn generated_from_row_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> T
     }
 }
 
-fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStream {
+fn list_query_tokens(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    runtime_crate: &Path,
+) -> TokenStream {
     let list_query_ident = list_query_ident(resource);
     let sort_field_ident = list_sort_field_ident(resource);
     let sort_order_ident = list_sort_order_ident(resource);
@@ -2374,6 +2447,15 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
     let cursor_value_ident = list_cursor_value_ident(resource);
     let cursor_payload_ident = list_cursor_payload_ident(resource);
     let struct_ident = &resource.struct_ident;
+    let bind_variants = list_bind_kinds(resource, resources)
+        .into_iter()
+        .map(|kind| match kind {
+            ListBindKind::Integer => quote!(Integer(i64),),
+            ListBindKind::Real => quote!(Real(f64),),
+            ListBindKind::Boolean => quote!(Boolean(bool),),
+            ListBindKind::Text => quote!(Text(String),),
+        })
+        .collect::<Vec<_>>();
     let sortable_fields = resource
         .api_fields()
         .filter(|field| field_supports_sort(field))
@@ -2518,10 +2600,7 @@ fn list_query_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> TokenStre
 
         #[derive(Debug, Clone)]
         enum #bind_ident {
-            Integer(i64),
-            Real(f64),
-            Boolean(bool),
-            Text(String),
+            #(#bind_variants)*
         }
 
         #[derive(Debug, Clone, #runtime_crate::serde::Serialize, #runtime_crate::serde::Deserialize)]
@@ -2662,6 +2741,16 @@ fn resource_impl_tokens(
     let update_normalization = update_normalization_tokens(resource);
     let create_validation = create_validation_tokens(resource, authorization, runtime_crate);
     let update_validation = update_validation_tokens(resource, runtime_crate);
+    let create_payload_binding = if create_normalization.is_empty() {
+        quote!(let item = item.into_inner();)
+    } else {
+        quote!(let mut item = item.into_inner();)
+    };
+    let update_payload_binding = if update_normalization.is_empty() {
+        quote!(let item = item.into_inner();)
+    } else {
+        quote!(let mut item = item.into_inner();)
+    };
     let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
     let admin_bypass = resource.policies.admin_bypass;
     let hybrid = hybrid_resource_enforcement(resource, authorization);
@@ -2835,17 +2924,43 @@ fn resource_impl_tokens(
     let list_placeholder_body = match resource.db {
         super::model::DbBackend::Postgres => quote!(format!("${index}")),
         super::model::DbBackend::Sqlite | super::model::DbBackend::Mysql => {
-            quote!("?".to_owned())
+            quote!({
+                let _ = index;
+                "?".to_owned()
+            })
         }
     };
     let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
-    let list_bind_matches = list_bind_match_tokens(resource, "q");
-    let count_bind_matches = list_bind_match_tokens(resource, "count_query");
-    let query_bind_matches = list_bind_match_tokens(resource, "q");
-    let policy_plan_enum = policy_plan_enum_tokens(resource);
-    let policy_plan_methods = policy_plan_method_tokens(resource, resources, runtime_crate);
+    let list_bind_matches = list_bind_match_tokens(resource, resources, "q");
+    let count_bind_matches = list_bind_match_tokens(resource, resources, "count_query");
+    let query_bind_matches = list_bind_match_tokens(resource, resources, "q");
+    let has_static_policy_filters = resource.policies.has_read_filters()
+        || resource.policies.has_update_filters()
+        || resource.policies.has_delete_filters();
+    let policy_plan_enum = if has_static_policy_filters {
+        policy_plan_enum_tokens(resource)
+    } else {
+        quote!()
+    };
+    let policy_plan_methods = if has_static_policy_filters {
+        policy_plan_method_tokens(resource, resources, runtime_crate)
+    } else {
+        quote!()
+    };
     let create_requirement_methods =
         create_requirement_method_tokens(resource, resources, authorization, runtime_crate);
+    let next_list_placeholder_helper =
+        if has_static_policy_filters || resource.policies.has_create_require_filters() {
+            quote! {
+                fn take_list_placeholder(next_index: &mut usize) -> String {
+                    let placeholder = Self::list_placeholder(*next_index);
+                    *next_index += 1;
+                    placeholder
+                }
+            }
+        } else {
+            quote!()
+        };
     let read_policy_list_conditions = if resource.policies.has_read_filters() {
         let plan_ident = policy_plan_ident(resource);
         quote! {
@@ -3840,6 +3955,28 @@ fn resource_impl_tokens(
                 })
         })
         .collect::<Vec<_>>();
+    let many_to_many_list_plan_helper = if many_to_many_routes.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            fn build_many_to_many_list_plan(
+                query: &#list_query_ty,
+                user: &#runtime_crate::core::auth::UserContext,
+                through_table: &'static str,
+                source_field: &'static str,
+                target_field: &'static str,
+                parent_id: i64,
+            ) -> Result<#list_plan_ty, HttpResponse> {
+                Self::build_list_plan_internal(
+                    query,
+                    user,
+                    None,
+                    Some((through_table, source_field, target_field, parent_id)),
+                    false,
+                )
+            }
+        }
+    };
     let nested_route_registrations = relation_routes
         .clone()
         .map(|(field_ident, _parent_table, parent_api_name)| {
@@ -4463,6 +4600,7 @@ fn resource_impl_tokens(
             #(#object_normalizer_defs)*
 
             fn can_read(user: &#runtime_crate::core::auth::UserContext) -> bool {
+                let _ = user;
                 #can_read_body
             }
 
@@ -4570,6 +4708,7 @@ fn resource_impl_tokens(
                 db: &DbPool,
                 runtime: Option<&#runtime_crate::core::authorization::AuthorizationRuntime>,
             ) -> HttpResponse {
+                let _ = &runtime;
                 let response_context = match Self::request_response_context(req) {
                     Ok(context) => context,
                     Err(response) => return response,
@@ -4589,6 +4728,8 @@ fn resource_impl_tokens(
             fn list_placeholder(index: usize) -> String {
                 #list_placeholder_body
             }
+
+            #next_list_placeholder_helper
 
             #policy_plan_methods
 
@@ -4830,7 +4971,7 @@ fn resource_impl_tokens(
                     ));
                 }
 
-                if let Some(offset) = query.offset {
+                if query.offset.is_some() {
                     if effective_limit.is_none() {
                         return Err(#runtime_crate::core::errors::bad_request(
                             "invalid_pagination",
@@ -4872,22 +5013,7 @@ fn resource_impl_tokens(
                 Self::build_list_plan_internal(query, user, parent_filter, None, false)
             }
 
-            fn build_many_to_many_list_plan(
-                query: &#list_query_ty,
-                user: &#runtime_crate::core::auth::UserContext,
-                through_table: &'static str,
-                source_field: &'static str,
-                target_field: &'static str,
-                parent_id: i64,
-            ) -> Result<#list_plan_ty, HttpResponse> {
-                Self::build_list_plan_internal(
-                    query,
-                    user,
-                    None,
-                    Some((through_table, source_field, target_field, parent_id)),
-                    false,
-                )
-            }
+            #many_to_many_list_plan_helper
 
             #create_requirement_methods
 
@@ -4952,7 +5078,7 @@ fn resource_impl_tokens(
                 #create_runtime_arg
             ) -> impl Responder {
                 #create_check
-                let mut item = item.into_inner();
+                #create_payload_binding
                 #(#create_normalization)*
                 #(#create_validation)*
                 #create_require_check
@@ -4967,7 +5093,7 @@ fn resource_impl_tokens(
                 #update_runtime_arg
             ) -> impl Responder {
                 #update_check
-                let mut item = item.into_inner();
+                #update_payload_binding
                 #(#update_normalization)*
                 #(#update_validation)*
                 #update_body
@@ -5198,11 +5324,16 @@ fn resource_action_handler_tokens(
                     )
                 })
                 .collect::<Vec<_>>();
+            let action_payload_binding = if action_normalization.is_empty() {
+                quote!(let item = item.into_inner();)
+            } else {
+                quote!(let mut item = item.into_inner();)
+            };
             let action_payload_setup = if action.input_fields.is_empty() {
                 quote!()
             } else {
                 quote! {
-                    let mut item = item.into_inner();
+                    #action_payload_binding
                     #(#action_normalization)*
                     #(#action_validation)*
                 }
@@ -5572,6 +5703,200 @@ fn list_bind_ident(resource: &ResourceSpec) -> syn::Ident {
     format_ident!("{}ListBindValue", resource.struct_ident)
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ListBindKind {
+    Integer,
+    Real,
+    Boolean,
+    Text,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PolicyHelperUsage {
+    needs_all: bool,
+    needs_any: bool,
+    needs_not: bool,
+}
+
+impl PolicyHelperUsage {
+    fn merge(self, other: Self) -> Self {
+        Self {
+            needs_all: self.needs_all || other.needs_all,
+            needs_any: self.needs_any || other.needs_any,
+            needs_not: self.needs_not || other.needs_not,
+        }
+    }
+}
+
+fn list_bind_kind_for_field(field: &super::model::FieldSpec) -> ListBindKind {
+    if super::model::is_structured_scalar_type(&field.ty) {
+        return ListBindKind::Text;
+    }
+
+    if super::model::is_bool_type(&field.ty) {
+        return ListBindKind::Boolean;
+    }
+
+    match field.sql_type.as_str() {
+        sql_type if super::model::is_integer_sql_type(sql_type) => ListBindKind::Integer,
+        "REAL" => ListBindKind::Real,
+        _ => ListBindKind::Text,
+    }
+}
+
+fn collect_exists_condition_bind_kinds(
+    resource: &ResourceSpec,
+    target_resource: &ResourceSpec,
+    condition: &super::model::PolicyExistsCondition,
+    kinds: &mut BTreeSet<ListBindKind>,
+) {
+    match condition {
+        super::model::PolicyExistsCondition::Match(filter) => {
+            let field = resource_field(target_resource, &filter.field);
+            kinds.insert(list_bind_kind_for_field(field));
+        }
+        super::model::PolicyExistsCondition::CurrentRowField { row_field, .. } => {
+            let field = resource_field(resource, row_field);
+            kinds.insert(list_bind_kind_for_field(field));
+        }
+        super::model::PolicyExistsCondition::All(conditions)
+        | super::model::PolicyExistsCondition::Any(conditions) => {
+            for condition in conditions {
+                collect_exists_condition_bind_kinds(resource, target_resource, condition, kinds);
+            }
+        }
+        super::model::PolicyExistsCondition::Not(condition) => {
+            collect_exists_condition_bind_kinds(resource, target_resource, condition, kinds);
+        }
+    }
+}
+
+fn policy_exists_condition_helper_usage(
+    condition: &super::model::PolicyExistsCondition,
+) -> PolicyHelperUsage {
+    match condition {
+        super::model::PolicyExistsCondition::Match(_)
+        | super::model::PolicyExistsCondition::CurrentRowField { .. } => {
+            PolicyHelperUsage::default()
+        }
+        super::model::PolicyExistsCondition::All(conditions) => conditions.iter().fold(
+            PolicyHelperUsage {
+                needs_all: true,
+                ..PolicyHelperUsage::default()
+            },
+            |usage, condition| usage.merge(policy_exists_condition_helper_usage(condition)),
+        ),
+        super::model::PolicyExistsCondition::Any(conditions) => conditions.iter().fold(
+            PolicyHelperUsage {
+                needs_any: true,
+                ..PolicyHelperUsage::default()
+            },
+            |usage, condition| usage.merge(policy_exists_condition_helper_usage(condition)),
+        ),
+        super::model::PolicyExistsCondition::Not(condition) => PolicyHelperUsage {
+            needs_not: true,
+            ..policy_exists_condition_helper_usage(condition)
+        },
+    }
+}
+
+fn policy_expression_helper_usage(expression: &PolicyFilterExpression) -> PolicyHelperUsage {
+    match expression {
+        PolicyFilterExpression::Match(_) => PolicyHelperUsage::default(),
+        PolicyFilterExpression::All(expressions) => expressions.iter().fold(
+            PolicyHelperUsage {
+                needs_all: true,
+                ..PolicyHelperUsage::default()
+            },
+            |usage, expression| usage.merge(policy_expression_helper_usage(expression)),
+        ),
+        PolicyFilterExpression::Any(expressions) => expressions.iter().fold(
+            PolicyHelperUsage {
+                needs_any: true,
+                ..PolicyHelperUsage::default()
+            },
+            |usage, expression| usage.merge(policy_expression_helper_usage(expression)),
+        ),
+        PolicyFilterExpression::Not(expression) => PolicyHelperUsage {
+            needs_not: true,
+            ..policy_expression_helper_usage(expression)
+        },
+        PolicyFilterExpression::Exists(filter) => {
+            policy_exists_condition_helper_usage(&filter.condition)
+        }
+    }
+}
+
+fn collect_policy_expression_bind_kinds(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    expression: &PolicyFilterExpression,
+    kinds: &mut BTreeSet<ListBindKind>,
+) {
+    match expression {
+        PolicyFilterExpression::Match(filter) => {
+            let field = resource_field(resource, &filter.field);
+            kinds.insert(list_bind_kind_for_field(field));
+        }
+        PolicyFilterExpression::All(expressions) | PolicyFilterExpression::Any(expressions) => {
+            for expression in expressions {
+                collect_policy_expression_bind_kinds(resource, resources, expression, kinds);
+            }
+        }
+        PolicyFilterExpression::Not(expression) => {
+            collect_policy_expression_bind_kinds(resource, resources, expression, kinds);
+        }
+        PolicyFilterExpression::Exists(filter) => {
+            let target_resource = resources
+                .iter()
+                .find(|candidate| {
+                    candidate.struct_ident.to_string() == filter.resource
+                        || candidate.table_name == filter.resource
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "validated resource set is missing exists policy target `{}`",
+                        filter.resource
+                    )
+                });
+            collect_exists_condition_bind_kinds(
+                resource,
+                target_resource,
+                &filter.condition,
+                kinds,
+            );
+        }
+    }
+}
+
+fn list_bind_kinds(resource: &ResourceSpec, resources: &[ResourceSpec]) -> Vec<ListBindKind> {
+    let mut kinds = BTreeSet::new();
+    kinds.insert(ListBindKind::Integer);
+
+    for field in resource.api_fields() {
+        if super::model::supports_exact_filters(field) || field_supports_sort(field) {
+            kinds.insert(list_bind_kind_for_field(field));
+        }
+        if super::model::supports_contains_filters(field) {
+            kinds.insert(ListBindKind::Text);
+        }
+    }
+
+    for expression in [
+        resource.policies.read.as_ref(),
+        resource.policies.update.as_ref(),
+        resource.policies.delete.as_ref(),
+        resource.policies.create_require.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        collect_policy_expression_bind_kinds(resource, resources, expression, &mut kinds);
+    }
+
+    kinds.into_iter().collect()
+}
+
 fn list_bind_type(resource: &ResourceSpec) -> TokenStream {
     let ident = list_bind_ident(resource);
     quote!(#ident)
@@ -5795,23 +6120,30 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
         .collect()
 }
 
-fn list_bind_match_tokens(resource: &ResourceSpec, query_ident: &str) -> Vec<TokenStream> {
+fn list_bind_match_tokens(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    query_ident: &str,
+) -> Vec<TokenStream> {
     let bind_ident = list_bind_ident(resource);
     let query_ident = syn::Ident::new(query_ident, proc_macro2::Span::call_site());
-    vec![
-        quote! {
-            #bind_ident::Integer(value) => #query_ident.bind(value),
-        },
-        quote! {
-            #bind_ident::Real(value) => #query_ident.bind(value),
-        },
-        quote! {
-            #bind_ident::Boolean(value) => #query_ident.bind(value),
-        },
-        quote! {
-            #bind_ident::Text(value) => #query_ident.bind(value),
-        },
-    ]
+    list_bind_kinds(resource, resources)
+        .into_iter()
+        .map(|kind| match kind {
+            ListBindKind::Integer => quote! {
+                #bind_ident::Integer(value) => #query_ident.bind(value),
+            },
+            ListBindKind::Real => quote! {
+                #bind_ident::Real(value) => #query_ident.bind(value),
+            },
+            ListBindKind::Boolean => quote! {
+                #bind_ident::Boolean(value) => #query_ident.bind(value),
+            },
+            ListBindKind::Text => quote! {
+                #bind_ident::Text(value) => #query_ident.bind(value),
+            },
+        })
+        .collect()
 }
 
 fn create_validation_tokens(
@@ -5871,6 +6203,9 @@ fn normalization_tokens(
     optional: bool,
 ) -> Option<TokenStream> {
     if let Some(_nested_fields) = field.object_fields.as_deref() {
+        if !field_needs_normalization(field) {
+            return None;
+        }
         let helper_ident = typed_object_normalizer_ident(resource, &[field.name()]);
         return Some(if optional {
             quote! {
@@ -6302,64 +6637,93 @@ fn policy_plan_method_tokens(
             runtime_crate,
         )
     });
-    quote! {
-        fn combine_all_policy_plans(plans: Vec<#plan_ident>) -> #plan_ident {
-            let mut conditions = Vec::new();
-            let mut binds = Vec::new();
-            for plan in plans {
-                match plan {
-                    #plan_ident::Resolved {
-                        condition,
-                        binds: mut plan_binds,
-                    } => {
-                        conditions.push(condition);
-                        binds.append(&mut plan_binds);
+    let helper_usage = [
+        resource.policies.read.as_ref(),
+        resource.policies.update.as_ref(),
+        resource.policies.delete.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(PolicyHelperUsage::default(), |usage, expression| {
+        usage.merge(policy_expression_helper_usage(expression))
+    });
+    let combine_all_helper = if helper_usage.needs_all {
+        quote! {
+            fn combine_all_policy_plans(plans: Vec<#plan_ident>) -> #plan_ident {
+                let mut conditions = Vec::new();
+                let mut binds = Vec::new();
+                for plan in plans {
+                    match plan {
+                        #plan_ident::Resolved {
+                            condition,
+                            binds: mut plan_binds,
+                        } => {
+                            conditions.push(condition);
+                            binds.append(&mut plan_binds);
+                        }
+                        #plan_ident::Indeterminate => return #plan_ident::Indeterminate,
                     }
-                    #plan_ident::Indeterminate => return #plan_ident::Indeterminate,
                 }
-            }
 
-            #plan_ident::Resolved {
-                condition: format!("({})", conditions.join(" AND ")),
-                binds,
-            }
-        }
-
-        fn combine_any_policy_plans(plans: Vec<#plan_ident>) -> #plan_ident {
-            let mut conditions = Vec::new();
-            let mut binds = Vec::new();
-            for plan in plans {
-                match plan {
-                    #plan_ident::Resolved {
-                        condition,
-                        binds: mut plan_binds,
-                    } => {
-                        conditions.push(condition);
-                        binds.append(&mut plan_binds);
-                    }
-                    #plan_ident::Indeterminate => {}
-                }
-            }
-
-            if conditions.is_empty() {
-                #plan_ident::Indeterminate
-            } else {
                 #plan_ident::Resolved {
-                    condition: format!("({})", conditions.join(" OR ")),
+                    condition: format!("({})", conditions.join(" AND ")),
                     binds,
                 }
             }
         }
+    } else {
+        quote!()
+    };
+    let combine_any_helper = if helper_usage.needs_any {
+        quote! {
+            fn combine_any_policy_plans(plans: Vec<#plan_ident>) -> #plan_ident {
+                let mut conditions = Vec::new();
+                let mut binds = Vec::new();
+                for plan in plans {
+                    match plan {
+                        #plan_ident::Resolved {
+                            condition,
+                            binds: mut plan_binds,
+                        } => {
+                            conditions.push(condition);
+                            binds.append(&mut plan_binds);
+                        }
+                        #plan_ident::Indeterminate => {}
+                    }
+                }
 
-        fn negate_policy_plan(plan: #plan_ident) -> #plan_ident {
-            match plan {
-                #plan_ident::Resolved { condition, binds } => #plan_ident::Resolved {
-                    condition: format!("NOT ({condition})"),
-                    binds,
-                },
-                #plan_ident::Indeterminate => #plan_ident::Indeterminate,
+                if conditions.is_empty() {
+                    #plan_ident::Indeterminate
+                } else {
+                    #plan_ident::Resolved {
+                        condition: format!("({})", conditions.join(" OR ")),
+                        binds,
+                    }
+                }
             }
         }
+    } else {
+        quote!()
+    };
+    let negate_helper = if helper_usage.needs_not {
+        quote! {
+            fn negate_policy_plan(plan: #plan_ident) -> #plan_ident {
+                match plan {
+                    #plan_ident::Resolved { condition, binds } => #plan_ident::Resolved {
+                        condition: format!("NOT ({condition})"),
+                        binds,
+                    },
+                    #plan_ident::Indeterminate => #plan_ident::Indeterminate,
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+    quote! {
+        #combine_all_helper
+        #combine_any_helper
+        #negate_helper
 
         #read_method
         #update_method
@@ -6414,7 +6778,7 @@ fn create_requirement_method_tokens(
     let bind_ident = list_bind_ident(resource);
     let create_payload_ty = create_payload_type(resource);
     let next_index_ident = format_ident!("next_index");
-    let bind_matches = list_bind_match_tokens(resource, "q");
+    let bind_matches = list_bind_match_tokens(resource, resources, "q");
     let expression_tokens = create_requirement_expression_plan_tokens(
         resource,
         resources,
@@ -6425,38 +6789,58 @@ fn create_requirement_method_tokens(
         runtime_crate,
         "create_require",
     );
+    let helper_usage = policy_expression_helper_usage(expression);
+    let combine_all_helper = if helper_usage.needs_all {
+        quote! {
+            fn combine_all_create_requirement_plans(
+                plans: Vec<(String, Vec<#bind_ident>)>,
+            ) -> (String, Vec<#bind_ident>) {
+                let mut conditions = Vec::new();
+                let mut binds = Vec::new();
+                for (condition, mut plan_binds) in plans {
+                    conditions.push(condition);
+                    binds.append(&mut plan_binds);
+                }
+                (format!("({})", conditions.join(" AND ")), binds)
+            }
+        }
+    } else {
+        quote!()
+    };
+    let combine_any_helper = if helper_usage.needs_any {
+        quote! {
+            fn combine_any_create_requirement_plans(
+                plans: Vec<(String, Vec<#bind_ident>)>,
+            ) -> (String, Vec<#bind_ident>) {
+                let mut conditions = Vec::new();
+                let mut binds = Vec::new();
+                for (condition, mut plan_binds) in plans {
+                    conditions.push(condition);
+                    binds.append(&mut plan_binds);
+                }
+                (format!("({})", conditions.join(" OR ")), binds)
+            }
+        }
+    } else {
+        quote!()
+    };
+    let negate_helper = if helper_usage.needs_not {
+        quote! {
+            fn negate_create_requirement_plan(
+                plan: (String, Vec<#bind_ident>),
+            ) -> (String, Vec<#bind_ident>) {
+                let (condition, binds) = plan;
+                (format!("NOT ({condition})"), binds)
+            }
+        }
+    } else {
+        quote!()
+    };
 
     quote! {
-        fn combine_all_create_requirement_plans(
-            plans: Vec<(String, Vec<#bind_ident>)>,
-        ) -> (String, Vec<#bind_ident>) {
-            let mut conditions = Vec::new();
-            let mut binds = Vec::new();
-            for (condition, mut plan_binds) in plans {
-                conditions.push(condition);
-                binds.append(&mut plan_binds);
-            }
-            (format!("({})", conditions.join(" AND ")), binds)
-        }
-
-        fn combine_any_create_requirement_plans(
-            plans: Vec<(String, Vec<#bind_ident>)>,
-        ) -> (String, Vec<#bind_ident>) {
-            let mut conditions = Vec::new();
-            let mut binds = Vec::new();
-            for (condition, mut plan_binds) in plans {
-                conditions.push(condition);
-                binds.append(&mut plan_binds);
-            }
-            (format!("({})", conditions.join(" OR ")), binds)
-        }
-
-        fn negate_create_requirement_plan(
-            plan: (String, Vec<#bind_ident>),
-        ) -> (String, Vec<#bind_ident>) {
-            let (condition, binds) = plan;
-            (format!("NOT ({condition})"), binds)
-        }
+        #combine_all_helper
+        #combine_any_helper
+        #negate_helper
 
         async fn create_require_matches(
             item: &#create_payload_ty,
@@ -6464,6 +6848,7 @@ fn create_requirement_method_tokens(
             db: &DbPool,
             runtime: Option<&#runtime_crate::core::authorization::AuthorizationRuntime>,
         ) -> Result<bool, HttpResponse> {
+            let _ = &runtime;
             let mut #next_index_ident = 1usize;
             let (condition, binds) = #expression_tokens;
             let sql = format!("SELECT 1 WHERE {}", condition);
@@ -6517,10 +6902,8 @@ fn create_requirement_expression_plan_tokens(
                         {
                             let left_value = #field_value;
                             let right_value = #source_value;
-                            let left_placeholder = Self::list_placeholder(#next_index_ident);
-                            #next_index_ident += 1;
-                            let right_placeholder = Self::list_placeholder(#next_index_ident);
-                            #next_index_ident += 1;
+                            let left_placeholder = Self::take_list_placeholder(&mut #next_index_ident);
+                            let right_placeholder = Self::take_list_placeholder(&mut #next_index_ident);
                             (format!("{left_placeholder} = {right_placeholder}"), vec![#left_bind, #right_bind])
                         }
                     }
@@ -6699,8 +7082,7 @@ fn create_requirement_exists_condition_tokens(
                     quote! {
                         {
                             let value = #source_value;
-                            let placeholder = Self::list_placeholder(#next_index_ident);
-                            #next_index_ident += 1;
+                            let placeholder = Self::take_list_placeholder(&mut #next_index_ident);
                             (
                                 format!("{}.{} = {}", #alias, #field_name, placeholder),
                                 vec![#bind_value],
@@ -6730,8 +7112,7 @@ fn create_requirement_exists_condition_tokens(
             quote! {
                 {
                     let value = #row_value;
-                    let placeholder = Self::list_placeholder(#next_index_ident);
-                    #next_index_ident += 1;
+                    let placeholder = Self::take_list_placeholder(&mut #next_index_ident);
                     (
                         format!("{}.{} = {}", #alias, #field_name, placeholder),
                         vec![#bind_value],
@@ -7108,8 +7489,7 @@ fn policy_expression_plan_tokens(
                         {
                             match #value {
                                 Some(value) => {
-                                    let placeholder = Self::list_placeholder(#next_index_ident);
-                                    #next_index_ident += 1;
+                                    let placeholder = Self::take_list_placeholder(&mut #next_index_ident);
                                     #plan_ident::Resolved {
                                         condition: format!("{} = {}", #field_name, placeholder),
                                         binds: vec![#bind_value],
@@ -7251,8 +7631,7 @@ fn exists_condition_plan_tokens(
                     quote! {
                         match #value {
                             Some(value) => {
-                                let placeholder = Self::list_placeholder(#next_index_ident);
-                                #next_index_ident += 1;
+                                let placeholder = Self::take_list_placeholder(&mut #next_index_ident);
                                 #plan_ident::Resolved {
                                     condition: format!("{}.{} = {}", #alias, #field_name, placeholder),
                                     binds: vec![#bind_value],
