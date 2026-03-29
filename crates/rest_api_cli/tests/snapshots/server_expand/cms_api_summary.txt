@@ -1,0 +1,454 @@
+pub mod modern_cms_api
+  const _
+  type __VsrDateTimeUtc
+  type __VsrNaiveDate
+  type __VsrNaiveTime
+  type __VsrUuid
+  type __VsrDecimal
+  type __VsrJson
+  type __VsrJsonObject
+  type __VsrJsonArray
+  pub struct Workspace
+  impl Workspace
+    fn from_row
+  pub struct WorkspaceCreate
+  pub struct WorkspaceUpdate
+  pub struct WorkspaceListQuery
+  pub enum WorkspaceListSortOrder
+  impl WorkspaceListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum WorkspaceListSortField
+  impl WorkspaceListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum WorkspaceListBindValue
+  enum WorkspaceCursorValue
+  struct WorkspaceCursorPayload
+  struct WorkspaceListQueryPlan
+  pub struct WorkspaceListResponse
+  mod __rest_api_impl_for_workspace
+    enum WorkspacePolicyFilterPlan
+    impl Workspace
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+  pub struct MemberProfile
+  impl MemberProfile
+    fn from_row
+  pub struct MemberProfileCreate
+  pub struct MemberProfileUpdate
+  pub struct MemberProfileListQuery
+  pub enum MemberProfileListSortOrder
+  impl MemberProfileListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum MemberProfileListSortField
+  impl MemberProfileListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum MemberProfileListBindValue
+  enum MemberProfileCursorValue
+  struct MemberProfileCursorPayload
+  struct MemberProfileListQueryPlan
+  pub struct MemberProfileListResponse
+  mod __rest_api_impl_for_member_profile
+    enum MemberProfilePolicyFilterPlan
+    impl MemberProfile
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+      fn get_by_user_id
+  pub struct MediaAsset
+  impl MediaAsset
+    fn from_row
+  pub struct MediaAssetCreate
+  pub struct MediaAssetUpdate
+  pub struct MediaAssetListQuery
+  pub enum MediaAssetListSortOrder
+  impl MediaAssetListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum MediaAssetListSortField
+  impl MediaAssetListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum MediaAssetListBindValue
+  enum MediaAssetCursorValue
+  struct MediaAssetCursorPayload
+  struct MediaAssetListQueryPlan
+  pub struct MediaAssetListResponse
+  mod __rest_api_impl_for_media_asset
+    enum MediaAssetPolicyFilterPlan
+    impl MediaAsset
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+      fn get_by_uploader_user_id
+  pub struct Topic
+  impl Topic
+    fn from_row
+  pub struct TopicCreate
+  pub struct TopicUpdate
+  pub struct TopicListQuery
+  pub enum TopicListSortOrder
+  impl TopicListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum TopicListSortField
+  impl TopicListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum TopicListBindValue
+  enum TopicCursorValue
+  struct TopicCursorPayload
+  struct TopicListQueryPlan
+  pub struct TopicListResponse
+  mod __rest_api_impl_for_topic
+    enum TopicPolicyFilterPlan
+    impl Topic
+      pub fn configure
+      fn list_contains_pattern
+      fn list_by_entry_topics
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn build_many_to_many_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+  struct EntrySeoObjectSchema
+  impl EntrySeoObjectSchema
+    fn validate
+  pub struct Entry
+  impl Entry
+    fn from_row
+  pub struct EntryCreate
+  pub struct EntryUpdate
+  pub struct EntryListQuery
+  pub enum EntryListSortOrder
+  impl EntryListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum EntryListSortField
+  impl EntryListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum EntryListBindValue
+  enum EntryCursorValue
+  struct EntryCursorPayload
+  struct EntryListQueryPlan
+  pub struct EntryListResponse
+  mod __rest_api_impl_for_entry
+    enum EntryPolicyFilterPlan
+    impl Entry
+      pub fn configure
+      fn list_contains_pattern
+      fn action_publish
+      fn action_submit_review
+      fn action_archive
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+      fn get_by_author_user_id
+  pub struct EntryTopic
+  impl EntryTopic
+    fn from_row
+  pub struct EntryTopicCreate
+  pub struct EntryTopicUpdate
+  pub struct EntryTopicListQuery
+  pub enum EntryTopicListSortOrder
+  impl EntryTopicListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum EntryTopicListSortField
+  impl EntryTopicListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum EntryTopicListBindValue
+  enum EntryTopicCursorValue
+  struct EntryTopicCursorPayload
+  struct EntryTopicListQueryPlan
+  pub struct EntryTopicListResponse
+  mod __rest_api_impl_for_entry_topic
+    enum EntryTopicPolicyFilterPlan
+    impl EntryTopic
+      pub fn configure
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+  pub struct NavigationMenu
+  impl NavigationMenu
+    fn from_row
+  pub struct NavigationMenuCreate
+  pub struct NavigationMenuUpdate
+  pub struct NavigationMenuListQuery
+  pub enum NavigationMenuListSortOrder
+  impl NavigationMenuListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum NavigationMenuListSortField
+  impl NavigationMenuListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum NavigationMenuListBindValue
+  enum NavigationMenuCursorValue
+  struct NavigationMenuCursorPayload
+  struct NavigationMenuListQueryPlan
+  pub struct NavigationMenuListResponse
+  mod __rest_api_impl_for_navigation_menu
+    enum NavigationMenuPolicyFilterPlan
+    impl NavigationMenu
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+  pub struct NavigationItem
+  impl NavigationItem
+    fn from_row
+  pub struct NavigationItemCreate
+  pub struct NavigationItemUpdate
+  pub struct NavigationItemListQuery
+  pub enum NavigationItemListSortOrder
+  impl NavigationItemListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum NavigationItemListSortField
+  impl NavigationItemListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum NavigationItemListBindValue
+  enum NavigationItemCursorValue
+  struct NavigationItemCursorPayload
+  struct NavigationItemListQueryPlan
+  pub struct NavigationItemListResponse
+  mod __rest_api_impl_for_navigation_item
+    enum NavigationItemPolicyFilterPlan
+    impl NavigationItem
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn take_list_placeholder
+      fn read_policy_plan
+      fn update_policy_plan
+      fn delete_policy_plan
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+      fn get_by_menu_id
+  pub fn configure
+  pub fn configure_static
+  pub fn database
+  pub fn default_database_url
+  pub fn logging
+  pub fn runtime
+  pub fn storage
+  pub fn security
+  pub fn authorization
+  pub fn authorization_runtime
+  pub fn configure_security

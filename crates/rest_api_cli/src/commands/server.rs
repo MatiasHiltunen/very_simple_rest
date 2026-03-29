@@ -1876,6 +1876,138 @@ mod tests {
         decoded
     }
 
+    fn snapshot_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/server_expand")
+            .join(name)
+    }
+
+    fn visibility_prefix(visibility: &syn::Visibility) -> &'static str {
+        match visibility {
+            syn::Visibility::Public(_) => "pub ",
+            _ => "",
+        }
+    }
+
+    fn summarize_impl_self_ty(ty: &syn::Type) -> String {
+        match ty {
+            syn::Type::Path(type_path) => type_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::"),
+            _ => "Self".to_owned(),
+        }
+    }
+
+    fn push_item_snapshot(lines: &mut Vec<String>, indent: usize, item: &syn::Item) {
+        let prefix = "  ".repeat(indent);
+        match item {
+            syn::Item::Mod(item_mod) => {
+                lines.push(format!(
+                    "{prefix}{}mod {}",
+                    visibility_prefix(&item_mod.vis),
+                    item_mod.ident
+                ));
+                if let Some((_, items)) = &item_mod.content {
+                    for item in items {
+                        push_item_snapshot(lines, indent + 1, item);
+                    }
+                }
+            }
+            syn::Item::Fn(item_fn) => {
+                lines.push(format!(
+                    "{prefix}{}fn {}",
+                    visibility_prefix(&item_fn.vis),
+                    item_fn.sig.ident
+                ));
+            }
+            syn::Item::Struct(item_struct) => {
+                lines.push(format!(
+                    "{prefix}{}struct {}",
+                    visibility_prefix(&item_struct.vis),
+                    item_struct.ident
+                ));
+            }
+            syn::Item::Enum(item_enum) => {
+                lines.push(format!(
+                    "{prefix}{}enum {}",
+                    visibility_prefix(&item_enum.vis),
+                    item_enum.ident
+                ));
+            }
+            syn::Item::Type(item_type) => {
+                lines.push(format!(
+                    "{prefix}{}type {}",
+                    visibility_prefix(&item_type.vis),
+                    item_type.ident
+                ));
+            }
+            syn::Item::Const(item_const) => {
+                lines.push(format!(
+                    "{prefix}{}const {}",
+                    visibility_prefix(&item_const.vis),
+                    item_const.ident
+                ));
+            }
+            syn::Item::Impl(item_impl) => {
+                lines.push(format!(
+                    "{prefix}impl {}",
+                    summarize_impl_self_ty(&item_impl.self_ty)
+                ));
+                for impl_item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        lines.push(format!(
+                            "{}{}fn {}",
+                            "  ".repeat(indent + 1),
+                            visibility_prefix(&method.vis),
+                            method.sig.ident
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn expanded_code_summary(rendered: &str) -> String {
+        let file = syn::parse_file(rendered).expect("expanded output should parse");
+        let mut lines = Vec::new();
+        for item in &file.items {
+            push_item_snapshot(&mut lines, 0, item);
+        }
+        lines.join("\n") + "\n"
+    }
+
+    fn assert_text_snapshot(snapshot: &Path, actual: &str) {
+        if std::env::var_os("VSR_UPDATE_SNAPSHOTS").is_some() {
+            if let Some(parent) = snapshot.parent() {
+                fs::create_dir_all(parent).expect("snapshot parent should be creatable");
+            }
+            fs::write(snapshot, actual).expect("snapshot should be writable");
+            return;
+        }
+
+        let expected = fs::read_to_string(snapshot).unwrap_or_else(|error| {
+            panic!(
+                "snapshot {} is missing or unreadable: {error}. Re-run with VSR_UPDATE_SNAPSHOTS=1 to create it.",
+                snapshot.display()
+            )
+        });
+        assert_eq!(expected, actual, "snapshot mismatch at {}", snapshot.display());
+    }
+
+    fn assert_expanded_output_matches_snapshot(input: &Path, snapshot_name: &str, root: &Path) {
+        let output_name = snapshot_name.trim_end_matches(".txt").to_owned() + ".expanded.rs";
+        let output = root.join(output_name);
+        expand_server_code(input, Some(&output), false).expect("server expansion should succeed");
+        let rendered = read_to_string(&output);
+        let summary = expanded_code_summary(&rendered);
+        assert_text_snapshot(&snapshot_path(snapshot_name), &summary);
+    }
+
     fn run_generated_project_cargo_check(
         project_dir: &Path,
         target_dir: &Path,
@@ -1903,6 +2035,33 @@ mod tests {
         }
     }
 
+    fn run_generated_project_cargo_clippy(
+        project_dir: &Path,
+        target_dir: &Path,
+        rustflags: Option<&str>,
+    ) {
+        let mut command = Command::new("cargo");
+        command.args(["clippy", "--no-deps", "--", "-D", "warnings"]);
+        command.current_dir(project_dir);
+        command.env("CARGO_TARGET_DIR", target_dir);
+        if let Some(rustflags) = rustflags {
+            command.env("RUSTFLAGS", rustflags);
+        }
+        let output = command
+            .output()
+            .expect("generated cargo clippy should run successfully");
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "generated cargo clippy failed for {}\nstdout:\n{}\nstderr:\n{}",
+                project_dir.display(),
+                stdout,
+                stderr
+            );
+        }
+    }
+
     fn assert_generated_project_is_warning_clean(input: &Path, package_name: &str, root: &Path) {
         let project_dir = root.join(package_name);
         emit_server_project(
@@ -1915,6 +2074,24 @@ mod tests {
         .expect("generated server project should emit");
 
         run_generated_project_cargo_check(
+            &project_dir,
+            &root.join("target").join(package_name),
+            Some("-D warnings"),
+        );
+    }
+
+    fn assert_generated_project_is_clippy_clean(input: &Path, package_name: &str, root: &Path) {
+        let project_dir = root.join(package_name);
+        emit_server_project(
+            input,
+            &project_dir,
+            Some(package_name.to_owned()),
+            false,
+            false,
+        )
+        .expect("generated server project should emit");
+
+        run_generated_project_cargo_clippy(
             &project_dir,
             &root.join("target").join(package_name),
             Some("-D warnings"),
@@ -2251,6 +2428,26 @@ mod tests {
             expand_server_code(&input, None, false).expect("default expansion should work");
         assert_eq!(output, root.join("demo-api.expanded.rs"));
         assert!(output.exists(), "default output file should exist");
+    }
+
+    #[test]
+    fn expand_server_code_blog_matches_snapshot() {
+        let root = test_root();
+        assert_expanded_output_matches_snapshot(
+            &fixture_path("blog_api.eon"),
+            "blog_api_summary.txt",
+            &root,
+        );
+    }
+
+    #[test]
+    fn expand_server_code_cms_matches_snapshot() {
+        let root = test_root();
+        assert_expanded_output_matches_snapshot(
+            &example_path("cms/api.eon"),
+            "cms_api_summary.txt",
+            &root,
+        );
     }
 
     #[test]
@@ -3167,6 +3364,50 @@ mod tests {
         assert_generated_project_is_warning_clean(
             &fixture_path("enum_fields_api.eon"),
             "enum-fields-warning-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_blog_generated_code_is_clippy_clean() {
+        let root = test_root();
+        assert_generated_project_is_clippy_clean(
+            &fixture_path("blog_api.eon"),
+            "blog-clippy-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_cms_generated_code_is_clippy_clean() {
+        let root = test_root();
+        assert_generated_project_is_clippy_clean(
+            &example_path("cms/api.eon"),
+            "cms-clippy-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_hybrid_runtime_generated_code_is_clippy_clean() {
+        let root = test_root();
+        assert_generated_project_is_clippy_clean(
+            &fixture_path("hybrid_runtime_api.eon"),
+            "hybrid-runtime-clippy-clean",
+            &root,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn emit_server_project_storage_upload_generated_code_is_clippy_clean() {
+        let root = test_root();
+        assert_generated_project_is_clippy_clean(
+            &fixture_path("storage_upload_api.eon"),
+            "storage-upload-clippy-clean",
             &root,
         );
     }

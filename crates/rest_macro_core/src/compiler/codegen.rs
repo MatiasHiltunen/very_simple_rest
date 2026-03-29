@@ -2023,7 +2023,7 @@ fn typed_object_validator_scalar_checks(field: &super::model::FieldSpec) -> Vec<
             .collect::<Vec<_>>();
         let enum_values_message = Literal::string(&enum_values_as_message(field));
         checks.push(quote! {
-            if ![#(#enum_values),*].iter().any(|candidate| *candidate == value.as_str()) {
+            if ![#(#enum_values),*].contains(&value.as_str()) {
                 return Err((
                     field_path.clone(),
                     format!("Field `{}` must be one of: {}", field_path, #enum_values_message),
@@ -2688,33 +2688,43 @@ fn resource_impl_tokens(
         let api_name = Literal::string(&field.api_name);
         let parts = field.parts.iter().map(|part| match part {
             super::model::ComputedFieldPart::Literal(value) => {
-                let value = Literal::string(value);
-                quote! {
-                    rendered.push_str(#value);
+                if value.chars().count() == 1 {
+                    let ch = Literal::character(value.chars().next().expect("single-char literal"));
+                    quote! {
+                        if !missing {
+                            rendered.push(#ch);
+                        }
+                    }
+                } else {
+                    let value = Literal::string(value);
+                    quote! {
+                        if !missing {
+                            rendered.push_str(#value);
+                        }
+                    }
                 }
             }
             super::model::ComputedFieldPart::Field(name) => {
                 let name = Literal::string(name);
                 quote! {
-                    match object.get(#name) {
-                        Some(#runtime_crate::serde_json::Value::Null) | None => {
-                            missing = true;
+                    if !missing {
+                        match object.get(#name) {
+                            Some(#runtime_crate::serde_json::Value::Null) | None => {
+                                missing = true;
+                            }
+                            Some(#runtime_crate::serde_json::Value::String(value)) => {
+                                rendered.push_str(value);
+                            }
+                            Some(#runtime_crate::serde_json::Value::Number(value)) => {
+                                rendered.push_str(&value.to_string());
+                            }
+                            Some(#runtime_crate::serde_json::Value::Bool(value)) => {
+                                rendered.push_str(&value.to_string());
+                            }
+                            Some(_) => {
+                                missing = true;
+                            }
                         }
-                        Some(#runtime_crate::serde_json::Value::String(value)) => {
-                            rendered.push_str(value);
-                        }
-                        Some(#runtime_crate::serde_json::Value::Number(value)) => {
-                            rendered.push_str(&value.to_string());
-                        }
-                        Some(#runtime_crate::serde_json::Value::Bool(value)) => {
-                            rendered.push_str(&value.to_string());
-                        }
-                        Some(_) => {
-                            missing = true;
-                        }
-                    }
-                    if missing {
-                        break;
                     }
                 }
             }
@@ -2723,10 +2733,7 @@ fn resource_impl_tokens(
             {
                 let mut rendered = String::new();
                 let mut missing = false;
-                loop {
-                    #(#parts)*
-                    break;
-                }
+                #(#parts)*
                 object.insert(
                     #api_name.to_owned(),
                     if missing {
@@ -2849,8 +2856,9 @@ fn resource_impl_tokens(
                     }
                 }
             } else {
+                let bind_value = bind_field_value_tokens(field, quote!(item.#ident));
                 quote! {
-                    q = q.bind(&item.#ident);
+                    q = q.bind(#bind_value);
                 }
             }
         })
@@ -2901,8 +2909,9 @@ fn resource_impl_tokens(
                     }
                 }
             } else {
+                let bind_value = bind_field_value_tokens(field, quote!(item.#ident));
                 quote! {
-                    q = q.bind(&item.#ident);
+                    q = q.bind(#bind_value);
                 }
             }
         })
@@ -2931,8 +2940,9 @@ fn resource_impl_tokens(
                     q = q.bind(#json_value);
                 }
             } else {
+                let bind_value = bind_field_value_tokens(field, quote!(item.#ident));
                 quote! {
-                    q = q.bind(&item.#ident);
+                    q = q.bind(#bind_value);
                 }
             }
         })
@@ -2993,6 +3003,38 @@ fn resource_impl_tokens(
                 }
             }
         }
+    } else {
+        quote!()
+    };
+    let apply_read_policy_list_conditions = if resource.policies.has_read_filters() {
+        if admin_bypass {
+            quote! {
+                if !skip_static_read_policy && !is_admin {
+                    #read_policy_list_conditions
+                }
+            }
+        } else {
+            quote! {
+                if !skip_static_read_policy {
+                    #read_policy_list_conditions
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+    let skip_static_read_policy_usage = if resource.policies.has_read_filters() {
+        quote!()
+    } else {
+        quote!(let _ = skip_static_read_policy;)
+    };
+    let user_usage = if resource.policies.has_read_filters() {
+        quote!()
+    } else {
+        quote!(let _ = user;)
+    };
+    let is_admin_binding = if resource.policies.has_read_filters() && admin_bypass {
+        quote!(let is_admin = #is_admin;)
     } else {
         quote!()
     };
@@ -3099,10 +3141,12 @@ fn resource_impl_tokens(
     let id_field_ident = &id_field_spec.ident;
     let id_field_name_lit = Literal::string(id_field);
     let id_field_api_name_lit = Literal::string(id_field_spec.api_name());
+    let id_to_i64 = integer_to_i64_tokens(&id_field_spec.ty, quote!(value));
+    let item_id_to_i64 = integer_to_i64_tokens(&id_field_spec.ty, quote!(item.#id_field_ident));
     let cursor_id_for_item_body = if super::model::is_optional_type(&id_field_spec.ty) {
         quote! {
             match item.#id_field_ident {
-                Some(value) => Ok(value as i64),
+                Some(value) => Ok(#id_to_i64),
                 None => Err(#runtime_crate::core::errors::internal_error(
                     format!("Cannot build cursor for `{}` without a persisted id", #id_field_api_name_lit),
                 )),
@@ -3110,7 +3154,7 @@ fn resource_impl_tokens(
         }
     } else {
         quote! {
-            Ok(item.#id_field_ident as i64)
+            Ok(#item_id_to_i64)
         }
     };
     let default_sort_variant =
@@ -3133,17 +3177,19 @@ fn resource_impl_tokens(
         let field_name_lit = Literal::string(field.api_name());
         if field.name() == resource.id_field {
             if super::model::is_optional_type(&field.ty) {
+                let value_to_i64 = integer_to_i64_tokens(&field.ty, quote!(value));
                 quote! {
                     #sort_field_ty::#variant_ident => match item.#ident {
-                        Some(value) => Ok(#cursor_value_ty::Integer(value as i64)),
+                        Some(value) => Ok(#cursor_value_ty::Integer(#value_to_i64)),
                         None => Err(#runtime_crate::core::errors::internal_error(
                             format!("Cannot build cursor for `{}` without a persisted id", #field_name_lit),
                         )),
                     },
                 }
             } else {
+                let item_value_to_i64 = integer_to_i64_tokens(&field.ty, quote!(item.#ident));
                 quote! {
-                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(item.#ident as i64)),
+                    #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(#item_value_to_i64)),
                 }
             }
         } else if super::model::is_optional_type(&field.ty) {
@@ -3167,9 +3213,12 @@ fn resource_impl_tokens(
                     }
                 } else {
                     match field.sql_type.as_str() {
-                    sql_type if super::model::is_integer_sql_type(sql_type) => quote! {
-                        #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(item.#ident as i64)),
-                    },
+                    sql_type if super::model::is_integer_sql_type(sql_type) => {
+                        let item_value_to_i64 = integer_to_i64_tokens(&field.ty, quote!(item.#ident));
+                        quote! {
+                            #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Integer(#item_value_to_i64)),
+                        }
+                    }
                     "REAL" => quote! {
                         #sort_field_ty::#variant_ident => Ok(#cursor_value_ty::Real(item.#ident as f64)),
                     },
@@ -3280,6 +3329,9 @@ fn resource_impl_tokens(
     });
 
     let can_read_body = match resource.roles.read.as_deref() {
+        Some("admin") => quote! {
+            user.roles.iter().any(|candidate| candidate == "admin")
+        },
         Some(role) => quote! {
             user.roles
                 .iter()
@@ -3400,13 +3452,13 @@ fn resource_impl_tokens(
                     query: &#list_query_ty,
                     parent_filter: Option<(&'static str, i64)>,
                 ) -> Option<#runtime_crate::core::authorization::AuthorizationScopeBinding> {
-                    if let Some((field_name, value)) = parent_filter {
-                        if field_name == #scope_field_name {
-                            return Some(#runtime_crate::core::authorization::AuthorizationScopeBinding {
-                                scope: #scope_name.to_owned(),
-                                value: value.to_string(),
-                            });
-                        }
+                    if let Some((field_name, value)) = parent_filter
+                        && field_name == #scope_field_name
+                    {
+                        return Some(#runtime_crate::core::authorization::AuthorizationScopeBinding {
+                            scope: #scope_name.to_owned(),
+                            value: value.to_string(),
+                        });
                     }
                     let value = #list_scope_value;
                     value.map(|value| #runtime_crate::core::authorization::AuthorizationScopeBinding {
@@ -3576,39 +3628,52 @@ fn resource_impl_tokens(
     } else {
         let id_placeholder = resource.db.placeholder(1);
         let plan_ident = policy_plan_ident(resource);
-        quote! {
-            if !Self::can_read(user) {
-                return Ok(None);
-            }
-
-            let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-
-            if #admin_bypass && #is_admin {
-                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                    .bind(id)
-                    .fetch_optional(db)
-                    .await
-            } else {
-                match Self::read_policy_plan(user, 2) {
-                    #plan_ident::Resolved { condition, binds } => {
-                        let filtered_sql = format!(
-                            "SELECT * FROM {} WHERE {} = {} AND {}",
-                            #table_name,
-                            #id_field,
-                            #id_placeholder,
-                            condition
-                        );
-                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&filtered_sql)
-                            .bind(id);
-                        for bind in binds {
-                            q = match bind {
-                                #(#query_bind_matches)*
-                            };
-                        }
-                        q.fetch_optional(db).await
+        let filtered_read = quote! {
+            match Self::read_policy_plan(user, 2) {
+                #plan_ident::Resolved { condition, binds } => {
+                    let filtered_sql = format!(
+                        "SELECT * FROM {} WHERE {} = {} AND {}",
+                        #table_name,
+                        #id_field,
+                        #id_placeholder,
+                        condition
+                    );
+                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&filtered_sql)
+                        .bind(id);
+                    for bind in binds {
+                        q = match bind {
+                            #(#query_bind_matches)*
+                        };
                     }
-                    #plan_ident::Indeterminate => return Ok(None),
+                    q.fetch_optional(db).await
                 }
+                #plan_ident::Indeterminate => Ok(None),
+            }
+        };
+        if admin_bypass {
+            quote! {
+                if !Self::can_read(user) {
+                    return Ok(None);
+                }
+
+                let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
+
+                if #is_admin {
+                    #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
+                        .bind(id)
+                        .fetch_optional(db)
+                        .await
+                } else {
+                    #filtered_read
+                }
+            }
+        } else {
+            quote! {
+                if !Self::can_read(user) {
+                    return Ok(None);
+                }
+
+                #filtered_read
             }
         }
     };
@@ -3793,45 +3858,55 @@ fn resource_impl_tokens(
                 quote!(#runtime_crate::core::errors::not_found("Not found"))
             };
 
-            quote! {
-                let id = path.into_inner();
-                if #admin_bypass && #is_admin {
-                    let sql = #admin_sql;
-                    let mut q = #runtime_crate::db::query(sql);
-                    #(#bind_fields_update)*
-                    q = q.bind(id);
-                    match q.execute(db.get_ref()).await {
-                        Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                        Ok(_) => HttpResponse::Ok().finish(),
-                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                    }
-                } else {
-                    match Self::update_policy_plan(&user, #update_policy_start_index) {
-                        #plan_ident::Resolved { condition, binds } => {
-                            let sql = format!(
-                                "UPDATE {} SET {} WHERE {} = {} AND {}",
-                                #table_name,
-                                #update_sql,
-                                #id_field,
-                                Self::list_placeholder(#update_where_index),
-                                condition
-                            );
-                            let mut q = #runtime_crate::db::query(&sql);
-                            #(#bind_fields_update)*
-                            q = q.bind(id);
-                            for bind in binds {
-                                q = match bind {
-                                    #(#query_bind_matches)*
-                                };
-                            }
-                            match q.execute(db.get_ref()).await {
-                                Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
-                                Ok(_) => HttpResponse::Ok().finish(),
-                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                            }
+            let filtered_update = quote! {
+                match Self::update_policy_plan(&user, #update_policy_start_index) {
+                    #plan_ident::Resolved { condition, binds } => {
+                        let sql = format!(
+                            "UPDATE {} SET {} WHERE {} = {} AND {}",
+                            #table_name,
+                            #update_sql,
+                            #id_field,
+                            Self::list_placeholder(#update_where_index),
+                            condition
+                        );
+                        let mut q = #runtime_crate::db::query(&sql);
+                        #(#bind_fields_update)*
+                        q = q.bind(id);
+                        for bind in binds {
+                            q = match bind {
+                                #(#query_bind_matches)*
+                            };
                         }
-                        #plan_ident::Indeterminate => #hybrid_update_fallback,
+                        match q.execute(db.get_ref()).await {
+                            Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
+                            Ok(_) => HttpResponse::Ok().finish(),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
                     }
+                    #plan_ident::Indeterminate => #hybrid_update_fallback,
+                }
+            };
+            if admin_bypass {
+                quote! {
+                    let id = path.into_inner();
+                    if #is_admin {
+                        let sql = #admin_sql;
+                        let mut q = #runtime_crate::db::query(sql);
+                        #(#bind_fields_update)*
+                        q = q.bind(id);
+                        match q.execute(db.get_ref()).await {
+                            Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                            Ok(_) => HttpResponse::Ok().finish(),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    } else {
+                        #filtered_update
+                    }
+                }
+            } else {
+                quote! {
+                    let id = path.into_inner();
+                    #filtered_update
                 }
             }
         }
@@ -3889,44 +3964,54 @@ fn resource_impl_tokens(
         } else {
             quote!(#runtime_crate::core::errors::not_found("Not found"))
         };
-        quote! {
-            let id = path.into_inner();
-            if #admin_bypass && #is_admin {
-                let sql = #admin_sql;
-                match #runtime_crate::db::query(sql)
-                    .bind(id)
-                    .execute(db.get_ref())
-                    .await
-                {
-                    Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                    Ok(_) => HttpResponse::Ok().finish(),
-                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                }
-            } else {
-                match Self::delete_policy_plan(&user, 2) {
-                    #plan_ident::Resolved { condition, binds } => {
-                        let sql = format!(
-                            "DELETE FROM {} WHERE {} = {} AND {}",
-                            #table_name,
-                            #id_field,
-                            Self::list_placeholder(1),
-                            condition
-                        );
-                        let mut q = #runtime_crate::db::query(&sql);
-                        q = q.bind(id);
-                        for bind in binds {
-                            q = match bind {
-                                #(#query_bind_matches)*
-                            };
-                        }
-                        match q.execute(db.get_ref()).await {
-                            Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
-                            Ok(_) => HttpResponse::Ok().finish(),
-                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                        }
+        let filtered_delete = quote! {
+            match Self::delete_policy_plan(&user, 2) {
+                #plan_ident::Resolved { condition, binds } => {
+                    let sql = format!(
+                        "DELETE FROM {} WHERE {} = {} AND {}",
+                        #table_name,
+                        #id_field,
+                        Self::list_placeholder(1),
+                        condition
+                    );
+                    let mut q = #runtime_crate::db::query(&sql);
+                    q = q.bind(id);
+                    for bind in binds {
+                        q = match bind {
+                            #(#query_bind_matches)*
+                        };
                     }
-                    #plan_ident::Indeterminate => #hybrid_delete_fallback,
+                    match q.execute(db.get_ref()).await {
+                        Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
+                        Ok(_) => HttpResponse::Ok().finish(),
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
                 }
+                #plan_ident::Indeterminate => #hybrid_delete_fallback,
+            }
+        };
+        if admin_bypass {
+            quote! {
+                let id = path.into_inner();
+                if #is_admin {
+                    let sql = #admin_sql;
+                    match #runtime_crate::db::query(sql)
+                        .bind(id)
+                        .execute(db.get_ref())
+                        .await
+                    {
+                        Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                        Ok(_) => HttpResponse::Ok().finish(),
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                } else {
+                    #filtered_delete
+                }
+            }
+        } else {
+            quote! {
+                let id = path.into_inner();
+                #filtered_delete
             }
         }
     };
@@ -4822,7 +4907,9 @@ fn resource_impl_tokens(
                 let mut filter_binds: Vec<#list_bind_ty> = Vec::new();
                 let mut select_only_conditions: Vec<String> = Vec::new();
                 let mut select_only_binds: Vec<#list_bind_ty> = Vec::new();
-                let is_admin = #is_admin;
+                #user_usage
+                #skip_static_read_policy_usage
+                #is_admin_binding
                 let requested_limit = query.limit.or(#default_limit_tokens);
                 let effective_limit = match (requested_limit, #max_limit_tokens) {
                     (Some(limit), Some(max_limit)) => {
@@ -4932,9 +5019,7 @@ fn resource_impl_tokens(
                     filter_binds.push(#list_bind_ty::Integer(parent_id));
                 }
 
-                if !skip_static_read_policy && !(#admin_bypass && is_admin) {
-                    #read_policy_list_conditions
-                }
+                #apply_read_policy_list_conditions
 
                 #(#query_filter_conditions)*
 
@@ -5042,13 +5127,11 @@ fn resource_impl_tokens(
                 mut items: Vec<Self>,
             ) -> Result<#list_response_ty, HttpResponse> {
                 let mut has_more = false;
-                if plan.cursor_mode {
-                    if let Some(limit) = plan.limit {
-                        if items.len() > limit as usize {
-                            has_more = true;
-                            items.pop();
-                        }
-                    }
+                if let Some(limit) = plan.limit.filter(|_| plan.cursor_mode)
+                    && items.len() > limit as usize
+                {
+                    has_more = true;
+                    items.pop();
                 }
 
                 let count = items.len();
@@ -5089,6 +5172,7 @@ fn resource_impl_tokens(
 
             #get_one_handler
 
+            #[allow(clippy::collapsible_if)]
             async fn create(
                 req: HttpRequest,
                 item: web::Json<#create_payload_ty>,
@@ -5105,6 +5189,7 @@ fn resource_impl_tokens(
                 #create_body
             }
 
+            #[allow(clippy::collapsible_if)]
             async fn update(
                 path: web::Path<i64>,
                 item: web::Json<#update_payload_ty>,
@@ -5273,6 +5358,57 @@ fn create_payload_field_is_optional(field: &CreatePayloadField<'_>) -> bool {
         || super::model::is_optional_type(&field.field.ty)
 }
 
+fn type_leaf_name(ty: &Type) -> Option<String> {
+    match super::model::base_type(ty) {
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn type_is_copy_like(ty: &Type) -> bool {
+    if super::model::structured_scalar_kind(ty).is_some() {
+        return true;
+    }
+
+    matches!(
+        type_leaf_name(ty).as_deref(),
+        Some(
+            "bool"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "f32"
+                | "f64"
+        )
+    )
+}
+
+fn bind_field_value_tokens(field: &super::model::FieldSpec, expr: TokenStream) -> TokenStream {
+    if type_is_copy_like(&field.ty) {
+        quote!(#expr)
+    } else {
+        quote!((#expr).clone())
+    }
+}
+
+fn integer_to_i64_tokens(ty: &Type, expr: TokenStream) -> TokenStream {
+    match type_leaf_name(ty).as_deref() {
+        Some("i64") => quote!(#expr),
+        _ => quote!((#expr) as i64),
+    }
+}
+
 fn update_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
     let controlled_fields = policy_controlled_fields(resource);
     resource
@@ -5379,7 +5515,7 @@ fn resource_action_handler_tokens(
             };
             let action_bind_statements = assignments
                 .iter()
-                .map(|assignment| resource_action_bind_statement(action, assignment))
+                .map(|assignment| resource_action_bind_statement(resource, action, assignment))
                 .collect::<Vec<_>>();
             let mut update_clauses = assignments
                 .iter()
@@ -5489,19 +5625,39 @@ fn resource_action_handler_tokens(
                 } else {
                     quote!(#runtime_crate::core::errors::not_found("Not found"))
                 };
-                quote! {
-                    async fn #handler_ident(
-                        path: web::Path<i64>,
-                        user: #runtime_crate::core::auth::UserContext,
-                        #action_payload_arg
-                        db: web::Data<DbPool>
-                        #runtime_arg
-                    ) -> impl Responder {
-                        let _ = (&path, &user, &db);
-                        #update_check
+                let filtered_update = quote! {
+                    match Self::update_policy_plan(&user, #policy_start_index) {
+                        #plan_ident::Resolved { condition, binds } => {
+                            let sql = format!(
+                                "UPDATE {} SET {} WHERE {} = {} AND {}",
+                                #table_name,
+                                #update_sql_literal,
+                                #id_field,
+                                Self::list_placeholder(#where_index_literal),
+                                condition
+                            );
+                            let mut q = #runtime_crate::db::query(&sql);
+                            #(#action_bind_statements)*
+                            q = q.bind(id);
+                            for bind in binds {
+                                q = match bind {
+                                    #(#query_bind_matches)*
+                                };
+                            }
+                            match q.execute(db.get_ref()).await {
+                                Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        }
+                        #plan_ident::Indeterminate => #hybrid_update_fallback,
+                    }
+                };
+                let action_body = if admin_bypass {
+                    quote! {
                         let id = path.into_inner();
                         #action_payload_setup
-                        if #admin_bypass && #is_admin {
+                        if #is_admin {
                             let sql = #admin_sql;
                             let mut q = #runtime_crate::db::query(sql);
                             #(#action_bind_statements)*
@@ -5512,33 +5668,28 @@ fn resource_action_handler_tokens(
                                 Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                             }
                         } else {
-                            match Self::update_policy_plan(&user, #policy_start_index) {
-                                #plan_ident::Resolved { condition, binds } => {
-                                    let sql = format!(
-                                        "UPDATE {} SET {} WHERE {} = {} AND {}",
-                                        #table_name,
-                                        #update_sql_literal,
-                                        #id_field,
-                                        Self::list_placeholder(#where_index_literal),
-                                        condition
-                                    );
-                                    let mut q = #runtime_crate::db::query(&sql);
-                                    #(#action_bind_statements)*
-                                    q = q.bind(id);
-                                    for bind in binds {
-                                        q = match bind {
-                                            #(#query_bind_matches)*
-                                        };
-                                    }
-                                    match q.execute(db.get_ref()).await {
-                                        Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
-                                        Ok(_) => HttpResponse::Ok().finish(),
-                                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                                    }
-                                }
-                                #plan_ident::Indeterminate => #hybrid_update_fallback,
-                            }
+                            #filtered_update
                         }
+                    }
+                } else {
+                    quote! {
+                        let id = path.into_inner();
+                        #action_payload_setup
+                        #filtered_update
+                    }
+                };
+                quote! {
+                    #[allow(clippy::collapsible_if)]
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        #action_payload_arg
+                        db: web::Data<DbPool>
+                        #runtime_arg
+                    ) -> impl Responder {
+                        let _ = (&path, &user, &db);
+                        #update_check
+                        #action_body
                     }
                 }
             }
@@ -5622,17 +5773,36 @@ fn resource_action_handler_tokens(
                 } else {
                     quote!(#runtime_crate::core::errors::not_found("Not found"))
                 };
-                quote! {
-                    async fn #handler_ident(
-                        path: web::Path<i64>,
-                        user: #runtime_crate::core::auth::UserContext,
-                        db: web::Data<DbPool>
-                        #delete_runtime_arg
-                    ) -> impl Responder {
-                        let _ = (&path, &user, &db);
-                        #delete_check
+                let filtered_delete = quote! {
+                    match Self::delete_policy_plan(&user, 2) {
+                        #plan_ident::Resolved { condition, binds } => {
+                            let sql = format!(
+                                "DELETE FROM {} WHERE {} = {} AND {}",
+                                #table_name,
+                                #id_field,
+                                Self::list_placeholder(1),
+                                condition
+                            );
+                            let mut q = #runtime_crate::db::query(&sql);
+                            q = q.bind(id);
+                            for bind in binds {
+                                q = match bind {
+                                    #(#query_bind_matches)*
+                                };
+                            }
+                            match q.execute(db.get_ref()).await {
+                                Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
+                        }
+                        #plan_ident::Indeterminate => #hybrid_delete_fallback,
+                    }
+                };
+                let delete_body = if admin_bypass {
+                    quote! {
                         let id = path.into_inner();
-                        if #admin_bypass && #is_admin {
+                        if #is_admin {
                             let sql = #admin_sql;
                             match #runtime_crate::db::query(sql)
                                 .bind(id)
@@ -5644,31 +5814,25 @@ fn resource_action_handler_tokens(
                                 Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                             }
                         } else {
-                            match Self::delete_policy_plan(&user, 2) {
-                                #plan_ident::Resolved { condition, binds } => {
-                                    let sql = format!(
-                                        "DELETE FROM {} WHERE {} = {} AND {}",
-                                        #table_name,
-                                        #id_field,
-                                        Self::list_placeholder(1),
-                                        condition
-                                    );
-                                    let mut q = #runtime_crate::db::query(&sql);
-                                    q = q.bind(id);
-                                    for bind in binds {
-                                        q = match bind {
-                                            #(#query_bind_matches)*
-                                        };
-                                    }
-                                    match q.execute(db.get_ref()).await {
-                                        Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
-                                        Ok(_) => HttpResponse::Ok().finish(),
-                                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                                    }
-                                }
-                                #plan_ident::Indeterminate => #hybrid_delete_fallback,
-                            }
+                            #filtered_delete
                         }
+                    }
+                } else {
+                    quote! {
+                        let id = path.into_inner();
+                        #filtered_delete
+                    }
+                };
+                quote! {
+                    async fn #handler_ident(
+                        path: web::Path<i64>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>
+                        #delete_runtime_arg
+                    ) -> impl Responder {
+                        let _ = (&path, &user, &db);
+                        #delete_check
+                        #delete_body
                     }
                 }
             }
@@ -5677,6 +5841,7 @@ fn resource_action_handler_tokens(
 }
 
 fn resource_action_bind_statement(
+    resource: &ResourceSpec,
     action: &super::model::ResourceActionSpec,
     assignment: &super::model::ResourceActionAssignmentSpec,
 ) -> TokenStream {
@@ -5717,9 +5882,13 @@ fn resource_action_bind_statement(
                 .iter()
                 .position(|field| field.name == *name)
                 .expect("validated action input field should exist");
+            let target_field = resource
+                .find_field(action.input_fields[index].target_field.as_str())
+                .expect("validated action input target field should exist");
             let ident = resource_action_input_field_ident(index);
+            let bind_value = bind_field_value_tokens(target_field, quote!(item.#ident));
             quote! {
-                q = q.bind(&item.#ident);
+                q = q.bind(#bind_value);
             }
         }
     }
@@ -6130,7 +6299,7 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                                         .map(|value| Literal::string(value.as_str()))
                                         .collect::<Vec<_>>();
                                 quote! {
-                                    if ![#(#enum_values),*].iter().any(|candidate| *candidate == value.as_str()) {
+                                    if ![#(#enum_values),*].contains(&value.as_str()) {
                                         return Err(#runtime_crate::core::errors::bad_request(
                                             "invalid_query",
                                             "Query parameters are invalid",
@@ -6384,7 +6553,7 @@ fn validation_checks(
             .collect::<Vec<_>>();
         let enum_values_message = Literal::string(&enum_values_as_message(field));
         checks.push(quote! {
-            if ![#(#enum_values),*].iter().any(|candidate| *candidate == value.as_str()) {
+            if ![#(#enum_values),*].contains(&value.as_str()) {
                 return #runtime_crate::core::errors::validation_error(
                     #field_name,
                     format!("Field `{}` must be one of: {}", #field_name, #enum_values_message),
@@ -7317,22 +7486,57 @@ fn create_effective_field_value_tokens(
                 let allow_admin_override = resource.policies.admin_bypass;
                 if required {
                     if allow_hybrid_runtime {
-                        quote! {
-                            {
-                                if #is_admin && #allow_admin_override {
-                                    match &item.#ident {
-                                        Some(value) => value.clone(),
-                                        None => match #claim_value {
+                        if allow_admin_override {
+                            quote! {
+                                {
+                                    if #is_admin {
+                                        match &item.#ident {
+                                            Some(value) => value.clone(),
+                                            None => match #claim_value {
+                                                Some(value) => value,
+                                                None => {
+                                                    return Err(#runtime_crate::core::errors::validation_error(
+                                                        #field_name_lit,
+                                                        format!("Missing required create field `{}`", #field_name_lit),
+                                                    ));
+                                                }
+                                            },
+                                        }
+                                    } else {
+                                        match #claim_value {
                                             Some(value) => value,
-                                            None => {
-                                                return Err(#runtime_crate::core::errors::validation_error(
-                                                    #field_name_lit,
-                                                    format!("Missing required create field `{}`", #field_name_lit),
-                                                ));
-                                            }
-                                        },
+                                            None => match &item.#ident {
+                                                Some(value) => match runtime {
+                                                    Some(runtime) => match Self::hybrid_create_allows_item_scope(item, user, runtime).await {
+                                                        Ok(true) => value.clone(),
+                                                        Ok(false) => {
+                                                            return Err(#runtime_crate::core::errors::forbidden(
+                                                                "forbidden",
+                                                                format!("Insufficient privileges for create scope field `{}`", #field_name_lit),
+                                                            ));
+                                                        }
+                                                        Err(response) => return Err(response),
+                                                    },
+                                                    None => {
+                                                        return Err(#runtime_crate::core::errors::internal_error(
+                                                            "Hybrid create scope evaluation requested without runtime authorization state".to_owned(),
+                                                        ));
+                                                    }
+                                                },
+                                                None => {
+                                                    return Err(#runtime_crate::core::errors::validation_error(
+                                                        #field_name_lit,
+                                                        format!("Missing required create field `{}`", #field_name_lit),
+                                                    ));
+                                                }
+                                            },
+                                        }
                                     }
-                                } else {
+                                }
+                            }
+                        } else {
+                            quote! {
+                                {
                                     match #claim_value {
                                         Some(value) => value,
                                         None => match &item.#ident {
@@ -7398,14 +7602,44 @@ fn create_effective_field_value_tokens(
                         quote!(#value)
                     }
                 } else if allow_hybrid_runtime {
-                    quote! {
-                        {
-                            if #is_admin && #allow_admin_override {
-                                match &item.#ident {
-                                    Some(value) => Some(value.clone()),
-                                    None => #claim_value,
+                    if allow_admin_override {
+                        quote! {
+                            {
+                                if #is_admin {
+                                    match &item.#ident {
+                                        Some(value) => Some(value.clone()),
+                                        None => #claim_value,
+                                    }
+                                } else {
+                                    match #claim_value {
+                                        Some(value) => Some(value),
+                                        None => match &item.#ident {
+                                            Some(value) => match runtime {
+                                                Some(runtime) => match Self::hybrid_create_allows_item_scope(item, user, runtime).await {
+                                                    Ok(true) => Some(value.clone()),
+                                                    Ok(false) => {
+                                                        return Err(#runtime_crate::core::errors::forbidden(
+                                                            "forbidden",
+                                                            format!("Insufficient privileges for create scope field `{}`", #field_name_lit),
+                                                        ));
+                                                    }
+                                                    Err(response) => return Err(response),
+                                                },
+                                                None => {
+                                                    return Err(#runtime_crate::core::errors::internal_error(
+                                                        "Hybrid create scope evaluation requested without runtime authorization state".to_owned(),
+                                                    ));
+                                                }
+                                            },
+                                            None => None,
+                                        }
+                                    }
                                 }
-                            } else {
+                            }
+                        }
+                    } else {
+                        quote! {
+                            {
                                 match #claim_value {
                                     Some(value) => Some(value),
                                     None => match &item.#ident {
@@ -7770,6 +8004,14 @@ fn exists_condition_plan_tokens(
 
 fn role_guard(runtime_crate: &Path, role: Option<&str>) -> TokenStream {
     match role {
+        Some("admin") => quote! {
+            if !user.roles.iter().any(|candidate| candidate == "admin") {
+                return #runtime_crate::core::errors::forbidden(
+                    "forbidden",
+                    "Insufficient privileges",
+                );
+            }
+        },
         Some(role) => quote! {
             if !user.roles.iter().any(|candidate| candidate == "admin" || candidate == #role) {
                 return #runtime_crate::core::errors::forbidden(

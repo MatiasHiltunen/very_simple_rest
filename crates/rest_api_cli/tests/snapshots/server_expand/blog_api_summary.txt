@@ -1,0 +1,117 @@
+pub mod blog_api
+  const _
+  type __VsrDateTimeUtc
+  type __VsrNaiveDate
+  type __VsrNaiveTime
+  type __VsrUuid
+  type __VsrDecimal
+  type __VsrJson
+  type __VsrJsonObject
+  type __VsrJsonArray
+  pub struct Post
+  impl Post
+    fn from_row
+  pub struct PostCreate
+  pub struct PostUpdate
+  pub struct PostListQuery
+  pub enum PostListSortOrder
+  impl PostListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum PostListSortField
+  impl PostListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum PostListBindValue
+  enum PostCursorValue
+  struct PostCursorPayload
+  struct PostListQueryPlan
+  pub struct PostListResponse
+  mod __rest_api_impl_for_post
+    impl Post
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+  pub struct Comment
+  impl Comment
+    fn from_row
+  pub struct CommentCreate
+  pub struct CommentUpdate
+  pub struct CommentListQuery
+  pub enum CommentListSortOrder
+  impl CommentListSortOrder
+    fn as_sql
+    fn as_str
+    fn parse
+  pub enum CommentListSortField
+  impl CommentListSortField
+    fn as_sql
+    fn as_name
+    fn from_name
+  enum CommentListBindValue
+  enum CommentCursorValue
+  struct CommentCursorPayload
+  struct CommentListQueryPlan
+  pub struct CommentListResponse
+  mod __rest_api_impl_for_comment
+    impl Comment
+      pub fn configure
+      fn list_contains_pattern
+      fn can_read
+      fn fetch_readable_by_id
+      fn request_response_context
+      fn response_context_fields
+      fn serialize_item_value
+      fn serialize_item_response
+      fn serialize_list_response
+      fn created_location
+      fn created_response
+      fn list_placeholder
+      fn sort_supports_cursor
+      fn cursor_id_for_item
+      fn cursor_value_for_item
+      fn encode_cursor
+      fn decode_cursor
+      fn build_list_plan_internal
+      fn build_list_plan
+      fn finalize_list_response
+      fn get_all
+      fn get_one
+      fn create
+      fn update
+      fn delete
+      fn get_by_post_id
+  pub fn configure
+  pub fn configure_static
+  pub fn database
+  pub fn default_database_url
+  pub fn logging
+  pub fn runtime
+  pub fn security
+  pub fn authorization
+  pub fn authorization_runtime
+  pub fn configure_security

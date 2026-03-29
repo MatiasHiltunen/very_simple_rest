@@ -22,6 +22,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -29,5 +31,11 @@ jobs:
       - name: Check Compiler Crate
         run: cargo check -p rest_macro_core
 
+      - name: Verify Expanded Output Snapshots
+        run: cargo test -p vsra expand_server_code_ -- --nocapture
+
       - name: Verify Generated Projects Are Warning Clean
         run: cargo test -p vsra warning_clean -- --ignored --nocapture
+
+      - name: Verify Representative Generated Projects Are Clippy Clean
+        run: cargo test -p vsra clippy_clean -- --ignored --nocapture
