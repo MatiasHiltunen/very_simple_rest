@@ -1,805 +1,1322 @@
 module: "modern_cms_api"
-
 database: {
-    engine: {
-        kind: TursoLocal
-        path: "var/data/modern_cms_api.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
-    }
-    resilience: {
-        profile: SingleNode
-        backup: {
-            required: true
-            mode: Snapshot
-            target: Local
-            verify_restore: true
-            max_age: "24h"
-            retention: {
-                daily: 7
-                weekly: 4
-                monthly: 6
-            }
-        }
-    }
+	engine: {
+		kind: TursoLocal
+		path: "var/data/modern_cms_api.db"
+		encryption_key_env: "TURSO_ENCRYPTION_KEY"
+	}
+	resilience: {
+		profile: SingleNode
+		backup: {
+			required: true
+			mode: Snapshot
+			target: Local
+			verify_restore: true
+			max_age: "24h"
+			retention: {
+				daily: 7
+				weekly: 4
+				monthly: 6
+			}
+		}
+	}
 }
-
 logging: {
-    filter_env: "RUST_LOG"
-    default_filter: "info"
-    timestamp: Millis
+	filter_env: "RUST_LOG"
+	default_filter: "info"
+	timestamp: Millis
 }
-
 runtime: {
-    compression: {
-        enabled: true
-        static_precompressed: false
-    }
+	compression: {
+		enabled: true
+		static_precompressed: true
+	}
 }
 
-tls: {
-    cert_path_env: "TLS_CERT_PATH"
-    key_path_env: "TLS_KEY_PATH"
-}
-
+//tls: {
+//    cert_path_env: "TLS_CERT_PATH"
+//    key_path_env: "TLS_KEY_PATH"
+//}
 storage: {
-    backends: [
-        {
-            name: "uploads"
-            kind: Local
-            dir: "var/uploads"
-        }
-    ]
-    public_mounts: [
-        {
-            mount: "/uploads"
-            backend: "uploads"
-            cache: Revalidate
-        }
-    ]
-    s3_compat: {
-        mount: "/_s3"
-        buckets: [
-            {
-                name: "media"
-                backend: "uploads"
-                prefix: "assets"
-            }
-        ]
-    }
+	backends: [
+		{
+			name: "uploads"
+			kind: Local
+			dir: "var/uploads"
+		}
+	]
+	public_mounts: [
+		{
+			mount: "/uploads"
+			backend: "uploads"
+			cache: Revalidate
+		}
+	]
+	s3_compat: {
+		mount: "/_s3"
+		buckets: [
+			{
+				name: "media"
+				backend: "uploads"
+				prefix: "assets"
+			}
+		]
+	}
 }
-
 static: {
-    mounts: [
-        {
-            mount: "/studio"
-            dir: "web/dist"
-            mode: Spa
-            cache: NoStore
-        }
-        {
-            mount: "/studio/assets"
-            dir: "web/dist/assets"
-            mode: Directory
-            cache: Immutable
-        }
-    ]
+	mounts: [
+		{
+			mount: "/studio"
+			dir: "web/dist"
+			mode: Spa
+			cache: NoStore
+		}
+		{
+			mount: "/studio/assets"
+			dir: "web/dist/assets"
+			mode: Directory
+			cache: NoStore
+		}
+		{
+			mount: "/"
+			dir: "web/dist"
+			mode: Spa
+			cache: NoStore
+		}
+		{
+			mount: "/assets"
+			dir: "web/dist/assets"
+			mode: Directory
+			cache: NoStore
+		}
+	]
 }
-
 security: {
-    requests: {
-        json_max_bytes: 4194304
-    }
-    cors: {
-        origins_env: "CORS_ALLOWED_ORIGINS"
-        allow_credentials: true
-        allow_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
-        allow_headers: ["authorization", "content-type", "accept", "x-csrf-token"]
-        expose_headers: ["content-length", "content-type"]
-        max_age_seconds: 86400
-    }
-    trusted_proxies: {
-        proxies_env: "TRUSTED_PROXIES"
-    }
-    rate_limits: {
-        login: {
-            requests: 10
-            window_seconds: 300
-        }
-        register: {
-            requests: 5
-            window_seconds: 3600
-        }
-    }
-    headers: {
-        frame_options: SameOrigin
-        content_type_options: true
-        referrer_policy: StrictOriginWhenCrossOrigin
-        hsts: {
-            max_age_seconds: 31536000
-            include_subdomains: true
-        }
-    }
-    auth: {
-        issuer: "modern_cms_api"
-        audience: "modern_cms_admin"
-        access_token_ttl_seconds: 3600
-        require_email_verification: false
-        claims: {
-            workspace_id: { column: "workspace_id", type: I64 }
-            is_staff: { column: "is_staff", type: Bool }
-        }
-        session_cookie: {
-            name: "__Host-cms_session"
-            csrf_cookie_name: "__Host-cms_csrf"
-            csrf_header_name: "x-csrf-token"
-            path: "/"
-            secure: true
-            same_site: Lax
-        }
-        portal: {
-            path: "/account"
-            title: "Account Portal"
-        }
-        admin_dashboard: {
-            path: "/account/admin"
-            title: "Auth Admin"
-        }
-    }
+	requests: {
+		json_max_bytes: 4194304
+	}
+	cors: {
+		origins_env: "CORS_ALLOWED_ORIGINS"
+		allow_credentials: true
+		allow_methods: [
+			"GET"
+			"POST"
+			"PUT"
+			"PATCH"
+			"DELETE"
+			"OPTIONS"
+			"HEAD"
+		]
+		allow_headers: ["authorization", "content-type", "accept", "x-csrf-token"]
+		expose_headers: ["content-length", "content-type"]
+		max_age_seconds: 86400
+	}
+	trusted_proxies: {
+		proxies_env: "TRUSTED_PROXIES"
+	}
+	rate_limits: {
+		login: {
+			requests: 10
+			window_seconds: 300
+		}
+		register: {
+			requests: 5
+			window_seconds: 3600
+		}
+	}
+	headers: {
+		frame_options: SameOrigin
+		content_type_options: true
+		referrer_policy: StrictOriginWhenCrossOrigin
+		hsts: {
+			max_age_seconds: 31536000
+			include_subdomains: true
+		}
+	}
+	auth: {
+		issuer: "modern_cms_api"
+		audience: "modern_cms_admin"
+		access_token_ttl_seconds: 3600
+		require_email_verification: false
+		claims: {
+			workspace_id: {
+				column: "workspace_id"
+				type: I64
+			}
+			is_staff: {
+				column: "is_staff"
+				type: Bool
+			}
+		}
+		session_cookie: {
+			name: "__Host-cms_session"
+			csrf_cookie_name: "__Host-cms_csrf"
+			csrf_header_name: "x-csrf-token"
+			path: "/"
+			secure: true
+			same_site: Lax
+		}
+		portal: {
+			path: "/account"
+			title: "Account Portal"
+		}
+		admin_dashboard: {
+			path: "/account/admin"
+			title: "Auth Admin"
+		}
+	}
 }
-
 enums: {
-    EntryType: ["article", "page", "release_note", "landing_page"]
-    EntryStatus: ["draft", "in_review", "scheduled", "published", "archived"]
-    Visibility: ["public", "workspace", "private"]
-    MediaKind: ["image", "video", "document", "audio"]
-    MenuItemKind: ["entry", "url"]
-    LinkTarget: ["self", "blank"]
-    SeoIndexMode: ["index", "noindex"]
+	EntryType: ["article", "page", "release_note", "landing_page"]
+	EntryStatus: [
+		"draft"
+		"in_review"
+		"scheduled"
+		"published"
+		"archived"
+	]
+	Visibility: ["public", "workspace", "private"]
+	MediaKind: ["image", "video", "document", "audio"]
+	MenuItemKind: ["entry", "url"]
+	LinkTarget: ["self", "blank"]
+	SeoIndexMode: ["index", "noindex"]
 }
-
 mixins: {
-    AuditFields: {
-        fields: {
-            created_at: { type: DateTime, generated: CreatedAt }
-            updated_at: { type: DateTime, generated: UpdatedAt }
-        }
-    }
+	AuditFields: {
+		fields: {
+			created_at: {
+				type: DateTime
+				generated: CreatedAt
+			}
+			updated_at: {
+				type: DateTime
+				generated: UpdatedAt
+			}
+		}
+	}
 }
-
 resources: {
-    Workspace: {
-        table: "workspace"
-        api_name: "workspaces"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "admin"
-            update: "admin"
-            delete: "admin"
-        }
-        policies: {
-            admin_bypass: true
-            read: "id=claim.workspace_id"
-        }
-        indexes: [
-            { fields: ["slug"], unique: true }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            name: { type: String, transforms: [Trim, CollapseWhitespace], validate: { min_length: 2, max_length: 120 } }
-            slug: { type: String, transforms: [Trim, Slugify], validate: { min_length: 2, max_length: 120 } }
-            default_locale: { type: String, transforms: [Trim, Lowercase], validate: { min_length: 2, max_length: 16 } }
-            public_base_url: { type: String, nullable: true, validate: { max_length: 2048 } }
-            theme_settings: { type: JsonObject, nullable: true }
-            editorial_settings: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                name: "name"
-                slug: "slug"
-                default_locale: "default_locale"
-                public_base_url: "public_base_url"
-                theme_settings: "theme_settings"
-                editorial_settings: "editorial_settings"
-                studio_url: {
-                    template: "/studio/{slug}"
-                }
-            }
-            contexts: {
-                view: ["id", "name", "slug", "default_locale", "public_base_url", "studio_url"]
-                admin: ["id", "name", "slug", "default_locale", "public_base_url", "theme_settings", "editorial_settings", "studio_url"]
-            }
-            default_context: "view"
-        }
-    }
-
-    MemberProfile: {
-        table: "member_profile"
-        api_name: "profiles"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                    "user_id=user.id"
-                ]
-            }
-            update: "user_id=user.id"
-            delete: "user_id=user.id"
-        }
-        indexes: [
-            { fields: ["user_id"], unique: true }
-            { fields: ["workspace_id", "handle"], unique: true }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            user_id: {
-                type: I64
-                relation: {
-                    references: "user.id"
-                    on_delete: Cascade
-                    nested_route: true
-                }
-            }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            handle: { type: String, transforms: [Trim, Slugify], validate: { min_length: 2, max_length: 64 } }
-            display_name: { type: String, transforms: [Trim, CollapseWhitespace], validate: { min_length: 2, max_length: 120 } }
-            headline: { type: String, nullable: true, validate: { max_length: 200 } }
-            bio: { type: String, nullable: true, validate: { max_length: 5000 } }
-            avatar_asset_id: {
-                type: I64
-                nullable: true
-                relation: {
-                    references: "media_asset.id"
-                    on_delete: SetNull
-                }
-            }
-            preferences: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                user: { from: "user_id" }
-                workspace: { from: "workspace_id" }
-                handle: "handle"
-                display_name: "display_name"
-                headline: "headline"
-                bio: "bio"
-                avatar_asset: { from: "avatar_asset_id" }
-                preferences: "preferences"
-                profile_url: {
-                    template: "/team/{handle}"
-                }
-            }
-            contexts: {
-                public: ["id", "handle", "display_name", "headline", "bio", "avatar_asset", "profile_url"]
-                self: ["id", "user", "workspace", "handle", "display_name", "headline", "bio", "avatar_asset", "preferences", "profile_url"]
-            }
-            default_context: "public"
-        }
-    }
-
-    MediaAsset: {
-        table: "media_asset"
-        api_name: "assets"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                    "uploader_user_id=user.id"
-                ]
-            }
-            update: "uploader_user_id=user.id"
-            delete: "uploader_user_id=user.id"
-        }
-        indexes: [
-            { fields: ["workspace_id", "file_name"] }
-            { fields: ["uploader_user_id"] }
-            { fields: ["kind"] }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            uploader_user_id: {
-                type: I64
-                relation: {
-                    references: "user.id"
-                    on_delete: Restrict
-                    nested_route: true
-                }
-            }
-            kind: MediaKind
-            file_name: { type: String, transforms: [Trim], validate: { min_length: 1, max_length: 255 } }
-            mime_type: { type: String, transforms: [Trim, Lowercase], validate: { min_length: 3, max_length: 120 } }
-            byte_size: { type: I64, validate: { minimum: 0 } }
-            width: { type: I32, nullable: true, validate: { minimum: 1 } }
-            height: { type: I32, nullable: true, validate: { minimum: 1 } }
-            alt_text: { type: String, nullable: true, validate: { max_length: 5000 } }
-            source_url: { type: String, nullable: true, validate: { max_length: 2048 } }
-            focal_point: { type: JsonObject, nullable: true }
-            metadata: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                workspace: { from: "workspace_id" }
-                uploader: { from: "uploader_user_id" }
-                kind: "kind"
-                file_name: "file_name"
-                mime_type: "mime_type"
-                byte_size: "byte_size"
-                width: "width"
-                height: "height"
-                alt_text: "alt_text"
-                source_url: "source_url"
-                focal_point: "focal_point"
-                metadata: "metadata"
-                delivery_url: {
-                    template: "{source_url}"
-                }
-            }
-            contexts: {
-                card: ["id", "kind", "file_name", "width", "height", "alt_text", "delivery_url"]
-                view: ["id", "workspace", "uploader", "kind", "file_name", "mime_type", "byte_size", "width", "height", "alt_text", "source_url", "focal_point", "metadata", "delivery_url"]
-                edit: ["id", "workspace", "uploader", "kind", "file_name", "mime_type", "byte_size", "width", "height", "alt_text", "source_url", "focal_point", "metadata", "delivery_url"]
-            }
-            default_context: "view"
-        }
-    }
-
-    Topic: {
-        table: "topic"
-        api_name: "topics"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                ]
-            }
-            update: "workspace_id=claim.workspace_id"
-            delete: "workspace_id=claim.workspace_id"
-        }
-        indexes: [
-            { fields: ["workspace_id", "slug"], unique: true }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            name: { type: String, transforms: [Trim, CollapseWhitespace], validate: { min_length: 2, max_length: 120 } }
-            slug: { type: String, transforms: [Trim, Slugify], validate: { min_length: 2, max_length: 120 } }
-            description: { type: String, nullable: true, validate: { max_length: 2000 } }
-            color: { type: String, nullable: true, validate: { max_length: 32 } }
-            meta: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                workspace: { from: "workspace_id" }
-                name: "name"
-                slug: "slug"
-                description: "description"
-                color: "color"
-                meta: "meta"
-                topic_url: {
-                    template: "/topics/{slug}"
-                }
-            }
-            contexts: {
-                view: ["id", "name", "slug", "description", "color", "topic_url"]
-                edit: ["id", "workspace", "name", "slug", "description", "color", "meta", "topic_url"]
-            }
-            default_context: "view"
-        }
-    }
-
-    Entry: {
-        table: "entry"
-        api_name: "entries"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                    "author_user_id=user.id"
-                ]
-            }
-            update: "author_user_id=user.id"
-            delete: "author_user_id=user.id"
-        }
-        list: {
-            default_limit: 20
-            max_limit: 100
-        }
-        indexes: [
-            { fields: ["workspace_id", "slug"], unique: true }
-            { fields: ["author_user_id"] }
-            { fields: ["hero_asset_id"] }
-            { fields: ["status"] }
-            { fields: ["entry_type"] }
-            { fields: ["published_at"] }
-        ]
-        actions: [
-            {
-                name: "publish"
-                behavior: {
-                    kind: UpdateFields
-                    set: {
-                        status: "published"
-                    }
-                }
-            }
-            {
-                name: "submit_review"
-                behavior: {
-                    kind: UpdateFields
-                    set: {
-                        status: "in_review"
-                    }
-                }
-            }
-            {
-                name: "archive"
-                behavior: {
-                    kind: UpdateFields
-                    set: {
-                        status: "archived"
-                    }
-                }
-            }
-        ]
-        many_to_many: [
-            {
-                name: "topics"
-                target: "Topic"
-                through: "EntryTopic"
-                source_field: "entry_id"
-                target_field: "topic_id"
-            }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            author_user_id: {
-                type: I64
-                relation: {
-                    references: "user.id"
-                    on_delete: Restrict
-                    nested_route: true
-                }
-            }
-            reviewer_user_id: {
-                type: I64
-                nullable: true
-                relation: {
-                    references: "user.id"
-                    on_delete: SetNull
-                }
-            }
-            hero_asset_id: {
-                type: I64
-                nullable: true
-                relation: {
-                    references: "media_asset.id"
-                    on_delete: SetNull
-                }
-            }
-            entry_type: EntryType
-            status: EntryStatus
-            visibility: Visibility
-            slug: { type: String, transforms: [Trim, Slugify], validate: { min_length: 2, max_length: 160 } }
-            title: { type: String, transforms: [Trim, CollapseWhitespace], validate: { min_length: 2, max_length: 200 } }
-            summary: { type: String, nullable: true, validate: { max_length: 4000 } }
-            body_blocks: { type: List, items: JsonObject, nullable: true }
-            seo: {
-                type: Object
-                nullable: true
-                fields: {
-                    meta_title: { type: String, nullable: true, validate: { max_length: 160 } }
-                    meta_description: { type: String, nullable: true, validate: { max_length: 320 } }
-                    canonical_url: { type: String, nullable: true, validate: { max_length: 2048 } }
-                    index_mode: { type: SeoIndexMode, nullable: true }
-                }
-            }
-            published_at: { type: DateTime, nullable: true }
-            scheduled_for: { type: DateTime, nullable: true }
-            settings: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                workspace: { from: "workspace_id" }
-                author: { from: "author_user_id" }
-                reviewer: { from: "reviewer_user_id" }
-                hero_asset: { from: "hero_asset_id" }
-                type: { from: "entry_type" }
-                status: "status"
-                visibility: "visibility"
-                slug: "slug"
-                title: "title"
-                summary: "summary"
-                body_blocks: "body_blocks"
-                seo: "seo"
-                published_at: "published_at"
-                scheduled_for: "scheduled_for"
-                settings: "settings"
-                permalink: {
-                    template: "/{slug}"
-                }
-                preview_label: {
-                    template: "{status}:{title}"
-                }
-            }
-            contexts: {
-                card: ["id", "type", "status", "visibility", "slug", "title", "summary", "hero_asset", "published_at", "permalink"]
-                view: ["id", "author", "hero_asset", "type", "status", "visibility", "slug", "title", "summary", "body_blocks", "seo", "published_at", "permalink"]
-                edit: ["id", "workspace", "author", "reviewer", "hero_asset", "type", "status", "visibility", "slug", "title", "summary", "body_blocks", "seo", "published_at", "scheduled_for", "settings", "permalink", "preview_label"]
-            }
-            default_context: "view"
-        }
-    }
-
-    EntryTopic: {
-        table: "entry_topic"
-        api_name: "entry-topics"
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                ]
-            }
-            update: "workspace_id=claim.workspace_id"
-            delete: "workspace_id=claim.workspace_id"
-        }
-        indexes: [
-            { fields: ["entry_id", "topic_id"], unique: true }
-            { fields: ["workspace_id"] }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            entry_id: {
-                type: I64
-                relation: {
-                    references: "entry.id"
-                    on_delete: Cascade
-                }
-            }
-            topic_id: {
-                type: I64
-                relation: {
-                    references: "topic.id"
-                    on_delete: Cascade
-                }
-            }
-        }
-        api: {
-            fields: {
-                id: "id"
-                workspace: { from: "workspace_id" }
-                entry: { from: "entry_id" }
-                topic: { from: "topic_id" }
-            }
-            contexts: {
-                view: ["id", "entry", "topic"]
-                edit: ["id", "workspace", "entry", "topic"]
-            }
-            default_context: "view"
-        }
-    }
-
-    NavigationMenu: {
-        table: "navigation_menu"
-        api_name: "menus"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                ]
-            }
-            update: "workspace_id=claim.workspace_id"
-            delete: "workspace_id=claim.workspace_id"
-        }
-        indexes: [
-            { fields: ["workspace_id", "handle"], unique: true }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            name: { type: String, transforms: [Trim, CollapseWhitespace], validate: { min_length: 2, max_length: 120 } }
-            handle: { type: String, transforms: [Trim, Slugify], validate: { min_length: 2, max_length: 120 } }
-            description: { type: String, nullable: true, validate: { max_length: 1000 } }
-            settings: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                workspace: { from: "workspace_id" }
-                name: "name"
-                handle: "handle"
-                description: "description"
-                settings: "settings"
-            }
-            contexts: {
-                view: ["id", "name", "handle", "description"]
-                edit: ["id", "workspace", "name", "handle", "description", "settings"]
-            }
-            default_context: "view"
-        }
-    }
-
-    NavigationItem: {
-        table: "navigation_item"
-        api_name: "menu-items"
-        use: ["AuditFields"]
-        roles: {
-            read: "user"
-            create: "user"
-            update: "user"
-            delete: "user"
-        }
-        policies: {
-            admin_bypass: true
-            read: "workspace_id=claim.workspace_id"
-            create: {
-                assign: [
-                    "workspace_id=claim.workspace_id"
-                ]
-            }
-            update: "workspace_id=claim.workspace_id"
-            delete: "workspace_id=claim.workspace_id"
-        }
-        indexes: [
-            { fields: ["menu_id"] }
-            { fields: ["parent_item_id"] }
-            { fields: ["sort_order"] }
-        ]
-        fields: {
-            id: { type: I64, id: true }
-            workspace_id: {
-                type: I64
-                relation: {
-                    references: "workspace.id"
-                    on_delete: Cascade
-                }
-            }
-            menu_id: {
-                type: I64
-                relation: {
-                    references: "navigation_menu.id"
-                    on_delete: Cascade
-                    nested_route: true
-                }
-            }
-            parent_item_id: {
-                type: I64
-                nullable: true
-                relation: {
-                    references: "navigation_item.id"
-                    on_delete: SetNull
-                }
-            }
-            label: { type: String, transforms: [Trim, CollapseWhitespace], validate: { min_length: 1, max_length: 120 } }
-            item_kind: MenuItemKind
-            entry_id: {
-                type: I64
-                nullable: true
-                relation: {
-                    references: "entry.id"
-                    on_delete: SetNull
-                }
-            }
-            external_url: { type: String, nullable: true, validate: { max_length: 2048 } }
-            target: LinkTarget
-            sort_order: { type: I32, validate: { minimum: 0 } }
-            meta: { type: JsonObject, nullable: true }
-        }
-        api: {
-            fields: {
-                id: "id"
-                workspace: { from: "workspace_id" }
-                menu: { from: "menu_id" }
-                parent_item: { from: "parent_item_id" }
-                label: "label"
-                item_kind: "item_kind"
-                entry: { from: "entry_id" }
-                external_url: "external_url"
-                target: "target"
-                sort_order: "sort_order"
-                meta: "meta"
-            }
-            contexts: {
-                view: ["id", "parent_item", "label", "item_kind", "entry", "external_url", "target", "sort_order"]
-                edit: ["id", "workspace", "menu", "parent_item", "label", "item_kind", "entry", "external_url", "target", "sort_order", "meta"]
-            }
-            default_context: "view"
-        }
-    }
+	Workspace: {
+		table: "workspace"
+		api_name: "workspaces"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "admin"
+			update: "admin"
+			delete: "admin"
+		}
+		policies: {
+			admin_bypass: true
+			read: "id=claim.workspace_id"
+		}
+		indexes: [
+			{
+				fields: ["slug"]
+				unique: true
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			name: {
+				type: String
+				transforms: [Trim, CollapseWhitespace]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			slug: {
+				type: String
+				transforms: [Trim, Slugify]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			default_locale: {
+				type: String
+				transforms: [Trim, Lowercase]
+				validate: {
+					min_length: 2
+					max_length: 16
+				}
+			}
+			public_base_url: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 2048
+				}
+			}
+			theme_settings: {
+				type: JsonObject
+				nullable: true
+			}
+			editorial_settings: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				name: "name"
+				slug: "slug"
+				default_locale: "default_locale"
+				public_base_url: "public_base_url"
+				theme_settings: "theme_settings"
+				editorial_settings: "editorial_settings"
+				studio_url: {
+					template: "/studio/{slug}"
+				}
+			}
+			contexts: {
+				view: [
+					"id"
+					"name"
+					"slug"
+					"default_locale"
+					"public_base_url"
+					"studio_url"
+				]
+				admin: [
+					"id"
+					"name"
+					"slug"
+					"default_locale"
+					"public_base_url"
+					"theme_settings"
+					"editorial_settings"
+					"studio_url"
+				]
+			}
+			default_context: "view"
+		}
+	}
+	MemberProfile: {
+		table: "member_profile"
+		api_name: "profiles"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: ["workspace_id=claim.workspace_id", "user_id=user.id"]
+			}
+			update: "user_id=user.id"
+			delete: "user_id=user.id"
+		}
+		indexes: [
+			{
+				fields: ["user_id"]
+				unique: true
+			}
+			{
+				fields: ["workspace_id", "handle"]
+				unique: true
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			user_id: {
+				type: I64
+				relation: {
+					references: "user.id"
+					on_delete: Cascade
+					nested_route: true
+				}
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			handle: {
+				type: String
+				transforms: [Trim, Slugify]
+				validate: {
+					min_length: 2
+					max_length: 64
+				}
+			}
+			display_name: {
+				type: String
+				transforms: [Trim, CollapseWhitespace]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			headline: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 200
+				}
+			}
+			bio: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 5000
+				}
+			}
+			avatar_asset_id: {
+				type: I64
+				nullable: true
+				relation: {
+					references: "media_asset.id"
+					on_delete: SetNull
+				}
+			}
+			preferences: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				user: {
+					from: "user_id"
+				}
+				workspace: {
+					from: "workspace_id"
+				}
+				handle: "handle"
+				display_name: "display_name"
+				headline: "headline"
+				bio: "bio"
+				avatar_asset: {
+					from: "avatar_asset_id"
+				}
+				preferences: "preferences"
+				profile_url: {
+					template: "/team/{handle}"
+				}
+			}
+			contexts: {
+				public: [
+					"id"
+					"handle"
+					"display_name"
+					"headline"
+					"bio"
+					"avatar_asset"
+					"profile_url"
+				]
+				self: [
+					"id"
+					"user"
+					"workspace"
+					"handle"
+					"display_name"
+					"headline"
+					"bio"
+					"avatar_asset"
+					"preferences"
+					"profile_url"
+				]
+			}
+			default_context: "public"
+		}
+	}
+	MediaAsset: {
+		table: "media_asset"
+		api_name: "assets"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: [
+					"workspace_id=claim.workspace_id"
+					"uploader_user_id=user.id"
+				]
+			}
+			update: "uploader_user_id=user.id"
+			delete: "uploader_user_id=user.id"
+		}
+		indexes: [
+			{
+				fields: ["workspace_id", "file_name"]
+			}
+			{
+				fields: ["uploader_user_id"]
+			}
+			{
+				fields: ["kind"]
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			uploader_user_id: {
+				type: I64
+				relation: {
+					references: "user.id"
+					on_delete: Restrict
+					nested_route: true
+				}
+			}
+			kind: MediaKind
+			file_name: {
+				type: String
+				transforms: [Trim]
+				validate: {
+					min_length: 1
+					max_length: 255
+				}
+			}
+			mime_type: {
+				type: String
+				transforms: [Trim, Lowercase]
+				validate: {
+					min_length: 3
+					max_length: 120
+				}
+			}
+			byte_size: {
+				type: I64
+				validate: {
+					minimum: 0
+				}
+			}
+			width: {
+				type: I32
+				nullable: true
+				validate: {
+					minimum: 1
+				}
+			}
+			height: {
+				type: I32
+				nullable: true
+				validate: {
+					minimum: 1
+				}
+			}
+			alt_text: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 5000
+				}
+			}
+			source_url: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 2048
+				}
+			}
+			focal_point: {
+				type: JsonObject
+				nullable: true
+			}
+			metadata: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				workspace: {
+					from: "workspace_id"
+				}
+				uploader: {
+					from: "uploader_user_id"
+				}
+				kind: "kind"
+				file_name: "file_name"
+				mime_type: "mime_type"
+				byte_size: "byte_size"
+				width: "width"
+				height: "height"
+				alt_text: "alt_text"
+				source_url: "source_url"
+				focal_point: "focal_point"
+				metadata: "metadata"
+				delivery_url: {
+					template: "{source_url}"
+				}
+			}
+			contexts: {
+				card: [
+					"id"
+					"kind"
+					"file_name"
+					"width"
+					"height"
+					"alt_text"
+					"delivery_url"
+				]
+				view: [
+					"id"
+					"workspace"
+					"uploader"
+					"kind"
+					"file_name"
+					"mime_type"
+					"byte_size"
+					"width"
+					"height"
+					"alt_text"
+					"source_url"
+					"focal_point"
+					"metadata"
+					"delivery_url"
+				]
+				edit: [
+					"id"
+					"workspace"
+					"uploader"
+					"kind"
+					"file_name"
+					"mime_type"
+					"byte_size"
+					"width"
+					"height"
+					"alt_text"
+					"source_url"
+					"focal_point"
+					"metadata"
+					"delivery_url"
+				]
+			}
+			default_context: "view"
+		}
+	}
+	Topic: {
+		table: "topic"
+		api_name: "topics"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: ["workspace_id=claim.workspace_id"]
+			}
+			update: "workspace_id=claim.workspace_id"
+			delete: "workspace_id=claim.workspace_id"
+		}
+		indexes: [
+			{
+				fields: ["workspace_id", "slug"]
+				unique: true
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			name: {
+				type: String
+				transforms: [Trim, CollapseWhitespace]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			slug: {
+				type: String
+				transforms: [Trim, Slugify]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			description: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 2000
+				}
+			}
+			color: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 32
+				}
+			}
+			meta: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				workspace: {
+					from: "workspace_id"
+				}
+				name: "name"
+				slug: "slug"
+				description: "description"
+				color: "color"
+				meta: "meta"
+				topic_url: {
+					template: "/topics/{slug}"
+				}
+			}
+			contexts: {
+				view: [
+					"id"
+					"name"
+					"slug"
+					"description"
+					"color"
+					"topic_url"
+				]
+				edit: [
+					"id"
+					"workspace"
+					"name"
+					"slug"
+					"description"
+					"color"
+					"meta"
+					"topic_url"
+				]
+			}
+			default_context: "view"
+		}
+	}
+	Entry: {
+		table: "entry"
+		api_name: "entries"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: [
+					"workspace_id=claim.workspace_id"
+					"author_user_id=user.id"
+				]
+			}
+			update: "author_user_id=user.id"
+			delete: "author_user_id=user.id"
+		}
+		list: {
+			default_limit: 20
+			max_limit: 100
+		}
+		indexes: [
+			{
+				fields: ["workspace_id", "slug"]
+				unique: true
+			}
+			{
+				fields: ["author_user_id"]
+			}
+			{
+				fields: ["hero_asset_id"]
+			}
+			{
+				fields: ["status"]
+			}
+			{
+				fields: ["entry_type"]
+			}
+			{
+				fields: ["published_at"]
+			}
+		]
+		actions: [
+			{
+				name: "publish"
+				behavior: {
+					kind: UpdateFields
+					set: {
+						status: "published"
+					}
+				}
+			}
+			{
+				name: "submit_review"
+				behavior: {
+					kind: UpdateFields
+					set: {
+						status: "in_review"
+					}
+				}
+			}
+			{
+				name: "archive"
+				behavior: {
+					kind: UpdateFields
+					set: {
+						status: "archived"
+					}
+				}
+			}
+		]
+		many_to_many: [
+			{
+				name: "topics"
+				target: "Topic"
+				through: "EntryTopic"
+				source_field: "entry_id"
+				target_field: "topic_id"
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			author_user_id: {
+				type: I64
+				relation: {
+					references: "user.id"
+					on_delete: Restrict
+					nested_route: true
+				}
+			}
+			reviewer_user_id: {
+				type: I64
+				nullable: true
+				relation: {
+					references: "user.id"
+					on_delete: SetNull
+				}
+			}
+			hero_asset_id: {
+				type: I64
+				nullable: true
+				relation: {
+					references: "media_asset.id"
+					on_delete: SetNull
+				}
+			}
+			entry_type: EntryType
+			status: EntryStatus
+			visibility: Visibility
+			slug: {
+				type: String
+				transforms: [Trim, Slugify]
+				validate: {
+					min_length: 2
+					max_length: 160
+				}
+			}
+			title: {
+				type: String
+				transforms: [Trim, CollapseWhitespace]
+				validate: {
+					min_length: 2
+					max_length: 200
+				}
+			}
+			summary: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 4000
+				}
+			}
+			body_blocks: {
+				type: List
+				items: JsonObject
+				nullable: true
+			}
+			seo: {
+				type: Object
+				nullable: true
+				fields: {
+					meta_title: {
+						type: String
+						nullable: true
+						validate: {
+							max_length: 160
+						}
+					}
+					meta_description: {
+						type: String
+						nullable: true
+						validate: {
+							max_length: 320
+						}
+					}
+					canonical_url: {
+						type: String
+						nullable: true
+						validate: {
+							max_length: 2048
+						}
+					}
+					index_mode: {
+						type: SeoIndexMode
+						nullable: true
+					}
+				}
+			}
+			published_at: {
+				type: DateTime
+				nullable: true
+			}
+			scheduled_for: {
+				type: DateTime
+				nullable: true
+			}
+			settings: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				workspace: {
+					from: "workspace_id"
+				}
+				author: {
+					from: "author_user_id"
+				}
+				reviewer: {
+					from: "reviewer_user_id"
+				}
+				hero_asset: {
+					from: "hero_asset_id"
+				}
+				type: {
+					from: "entry_type"
+				}
+				status: "status"
+				visibility: "visibility"
+				slug: "slug"
+				title: "title"
+				summary: "summary"
+				body_blocks: "body_blocks"
+				seo: "seo"
+				published_at: "published_at"
+				scheduled_for: "scheduled_for"
+				settings: "settings"
+				permalink: {
+					template: "/{slug}"
+				}
+				preview_label: {
+					template: "{status}:{title}"
+				}
+			}
+			contexts: {
+				card: [
+					"id"
+					"type"
+					"status"
+					"visibility"
+					"slug"
+					"title"
+					"summary"
+					"hero_asset"
+					"published_at"
+					"permalink"
+				]
+				view: [
+					"id"
+					"author"
+					"hero_asset"
+					"type"
+					"status"
+					"visibility"
+					"slug"
+					"title"
+					"summary"
+					"body_blocks"
+					"seo"
+					"published_at"
+					"permalink"
+				]
+				edit: [
+					"id"
+					"workspace"
+					"author"
+					"reviewer"
+					"hero_asset"
+					"type"
+					"status"
+					"visibility"
+					"slug"
+					"title"
+					"summary"
+					"body_blocks"
+					"seo"
+					"published_at"
+					"scheduled_for"
+					"settings"
+					"permalink"
+					"preview_label"
+				]
+			}
+			default_context: "view"
+		}
+	}
+	EntryTopic: {
+		table: "entry_topic"
+		api_name: "entry-topics"
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: ["workspace_id=claim.workspace_id"]
+			}
+			update: "workspace_id=claim.workspace_id"
+			delete: "workspace_id=claim.workspace_id"
+		}
+		indexes: [
+			{
+				fields: ["entry_id", "topic_id"]
+				unique: true
+			}
+			{
+				fields: ["workspace_id"]
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			entry_id: {
+				type: I64
+				relation: {
+					references: "entry.id"
+					on_delete: Cascade
+				}
+			}
+			topic_id: {
+				type: I64
+				relation: {
+					references: "topic.id"
+					on_delete: Cascade
+				}
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				workspace: {
+					from: "workspace_id"
+				}
+				entry: {
+					from: "entry_id"
+				}
+				topic: {
+					from: "topic_id"
+				}
+			}
+			contexts: {
+				view: ["id", "entry", "topic"]
+				edit: ["id", "workspace", "entry", "topic"]
+			}
+			default_context: "view"
+		}
+	}
+	NavigationMenu: {
+		table: "navigation_menu"
+		api_name: "menus"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: ["workspace_id=claim.workspace_id"]
+			}
+			update: "workspace_id=claim.workspace_id"
+			delete: "workspace_id=claim.workspace_id"
+		}
+		indexes: [
+			{
+				fields: ["workspace_id", "handle"]
+				unique: true
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			name: {
+				type: String
+				transforms: [Trim, CollapseWhitespace]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			handle: {
+				type: String
+				transforms: [Trim, Slugify]
+				validate: {
+					min_length: 2
+					max_length: 120
+				}
+			}
+			description: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 1000
+				}
+			}
+			settings: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				workspace: {
+					from: "workspace_id"
+				}
+				name: "name"
+				handle: "handle"
+				description: "description"
+				settings: "settings"
+			}
+			contexts: {
+				view: ["id", "name", "handle", "description"]
+				edit: [
+					"id"
+					"workspace"
+					"name"
+					"handle"
+					"description"
+					"settings"
+				]
+			}
+			default_context: "view"
+		}
+	}
+	NavigationItem: {
+		table: "navigation_item"
+		api_name: "menu-items"
+		use: ["AuditFields"]
+		roles: {
+			read: "user"
+			create: "user"
+			update: "user"
+			delete: "user"
+		}
+		policies: {
+			admin_bypass: true
+			read: "workspace_id=claim.workspace_id"
+			create: {
+				assign: ["workspace_id=claim.workspace_id"]
+			}
+			update: "workspace_id=claim.workspace_id"
+			delete: "workspace_id=claim.workspace_id"
+		}
+		indexes: [
+			{
+				fields: ["menu_id"]
+			}
+			{
+				fields: ["parent_item_id"]
+			}
+			{
+				fields: ["sort_order"]
+			}
+		]
+		fields: {
+			id: {
+				type: I64
+				id: true
+			}
+			workspace_id: {
+				type: I64
+				relation: {
+					references: "workspace.id"
+					on_delete: Cascade
+				}
+			}
+			menu_id: {
+				type: I64
+				relation: {
+					references: "navigation_menu.id"
+					on_delete: Cascade
+					nested_route: true
+				}
+			}
+			parent_item_id: {
+				type: I64
+				nullable: true
+				relation: {
+					references: "navigation_item.id"
+					on_delete: SetNull
+				}
+			}
+			label: {
+				type: String
+				transforms: [Trim, CollapseWhitespace]
+				validate: {
+					min_length: 1
+					max_length: 120
+				}
+			}
+			item_kind: MenuItemKind
+			entry_id: {
+				type: I64
+				nullable: true
+				relation: {
+					references: "entry.id"
+					on_delete: SetNull
+				}
+			}
+			external_url: {
+				type: String
+				nullable: true
+				validate: {
+					max_length: 2048
+				}
+			}
+			target: LinkTarget
+			sort_order: {
+				type: I32
+				validate: {
+					minimum: 0
+				}
+			}
+			meta: {
+				type: JsonObject
+				nullable: true
+			}
+		}
+		api: {
+			fields: {
+				id: "id"
+				workspace: {
+					from: "workspace_id"
+				}
+				menu: {
+					from: "menu_id"
+				}
+				parent_item: {
+					from: "parent_item_id"
+				}
+				label: "label"
+				item_kind: "item_kind"
+				entry: {
+					from: "entry_id"
+				}
+				external_url: "external_url"
+				target: "target"
+				sort_order: "sort_order"
+				meta: "meta"
+			}
+			contexts: {
+				view: [
+					"id"
+					"parent_item"
+					"label"
+					"item_kind"
+					"entry"
+					"external_url"
+					"target"
+					"sort_order"
+				]
+				edit: [
+					"id"
+					"workspace"
+					"menu"
+					"parent_item"
+					"label"
+					"item_kind"
+					"entry"
+					"external_url"
+					"target"
+					"sort_order"
+					"meta"
+				]
+			}
+			default_context: "view"
+		}
+	}
 }
