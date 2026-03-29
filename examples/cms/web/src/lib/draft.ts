@@ -277,7 +277,6 @@ export function deriveWorkspaceSeed(account: AuthMeResponse): {
   name: string;
   slug: string;
   defaultLocale: string;
-  publicBaseUrl: string;
 } {
   const localPart = (account.email ?? 'editor')
     .split('@')[0]
@@ -299,7 +298,6 @@ export function deriveWorkspaceSeed(account: AuthMeResponse): {
     name: `${title} Workspace`,
     slug: `${slug || 'editorial'}-studio`,
     defaultLocale: 'en',
-    publicBaseUrl: `https://${slug || 'editorial'}.local`,
   };
 }
 

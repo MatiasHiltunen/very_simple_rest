@@ -13,6 +13,7 @@ import Button from '@mui/material/Button';
 import { useEffect, useState } from 'react';
 import { readLastEmail } from '../lib/api';
 import type { DraftState } from '../lib/draft';
+import { resolveLocalPreviewHref } from '../lib/preview';
 import { resolveDocsPath, studioBasePath } from '../lib/runtime';
 import { PagePreview } from './PagePreview';
 
@@ -74,7 +75,7 @@ const sampleDraft: DraftState = {
 
 const sampleWorkspace = {
   name: 'Very Simple CMS',
-  public_base_url: 'https://example.local',
+  slug: 'very-simple-cms',
 };
 
 export function LoginScreen({
@@ -137,6 +138,10 @@ export function LoginScreen({
               <PagePreview
                 assetsById={new Map()}
                 draft={sampleDraft}
+                headerAction={{
+                  href: resolveLocalPreviewHref('very-simple-cms', '/spring-issue'),
+                  label: 'Open local preview',
+                }}
                 mode="desktop"
                 selectedTopics={[]}
                 workspace={sampleWorkspace}

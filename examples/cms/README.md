@@ -19,6 +19,19 @@ vsr serve api.eon
 
 `vsr setup` will prepare `.env`, generate local TLS certs when needed, and apply the schema. By default the API serves on the configured backend port, and the built studio is mounted at `/studio`.
 
+## Local Site Preview
+
+The CMS studio now has a first-class local site preview route. Editors no longer need to seed a fake
+`public_base_url` just to open a workspace in another tab.
+
+- workspace preview root: `/studio/preview/<workspace-slug>`
+- entry preview path: `/studio/preview/<workspace-slug>/<entry-slug>`
+- the editor's **Open local preview** button carries unsaved draft state into that route for local inspection
+- if `public_base_url` is configured, it remains the published origin and is shown separately in the studio
+
+Because the same SPA is also mounted at `/`, the equivalent root-mounted preview path is
+`/preview/<workspace-slug>`.
+
 ## Seed A First Studio
 
 To create a usable local admin plus starter workspace/content:
@@ -45,6 +58,17 @@ Override any of these when needed:
 ```sh
 ADMIN_EMAIL=lead@example.com ADMIN_PASSWORD='StrongerPass123!' ./seed-studio.sh
 ```
+
+Optional overrides:
+
+```sh
+WORKSPACE_PUBLIC_BASE_URL=https://news.example.com \
+ENTRY_CANONICAL_URL=https://news.example.com/welcome-to-northstar \
+./seed-studio.sh
+```
+
+If you do not provide those overrides, the seed flow leaves `public_base_url` and the entry canonical URL
+unset so the local preview route stays authoritative during development.
 
 ## Local Asset Storage For Development
 
@@ -111,6 +135,7 @@ npm run dev
 
 The Vite dev server runs on `http://127.0.0.1:5173/studio/` and proxies API traffic to `https://127.0.0.1:8443` by default. Override that target with `VITE_API_PROXY_TARGET` if your backend uses a different address.
 The dev proxy also forwards `/_s3` and `/uploads`, so local object uploads and asset previews keep working from the studio during frontend development.
+The same dev server also serves the local site preview route under `http://127.0.0.1:5173/studio/preview/<workspace-slug>`.
 
 ## Production Build
 

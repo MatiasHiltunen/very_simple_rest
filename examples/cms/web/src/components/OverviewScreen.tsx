@@ -18,6 +18,7 @@ import {
 } from '../lib/api';
 import { cmsResources, type ResourceRow } from '../lib/cms';
 import { deriveWorkspaceSeed } from '../lib/draft';
+import { resolveLocalPreviewHref, resolvePublishedSiteHref } from '../lib/preview';
 import { formatMethodLabel, getOperationsForResource } from '../lib/openapi';
 
 export function OverviewScreen({
@@ -65,6 +66,11 @@ export function OverviewScreen({
   const workspace = claimedWorkspace ?? workspaceRows[0] ?? null;
   const needsWorkspaceBootstrap = typeof account.workspace_id !== 'number' || !claimedWorkspace;
   const canBootstrapWorkspace = account.roles.includes('admin');
+  const localPreviewHref =
+    workspace && typeof workspace.slug === 'string' && workspace.slug.trim()
+      ? resolveLocalPreviewHref(workspace.slug)
+      : null;
+  const publishedSiteHref = resolvePublishedSiteHref(workspace, '/');
 
   const bootstrapMutation = useMutation({
     mutationFn: async () => {
@@ -75,7 +81,6 @@ export function OverviewScreen({
           name: workspaceSeed.name,
           slug: workspaceSeed.slug,
           default_locale: workspaceSeed.defaultLocale,
-          public_base_url: workspaceSeed.publicBaseUrl,
           theme_settings: {
             palette: 'linen',
             accent: 'teal',
@@ -218,21 +223,41 @@ export function OverviewScreen({
                 </Box>
                 <Box className="studio-dataRow">
                   <Box>
-                    <Typography fontWeight={700}>Public site</Typography>
+                    <Typography fontWeight={700}>Local preview</Typography>
                     <Typography color="text.secondary" variant="body2">
-                      {String(workspace.public_base_url ?? 'Not configured')}
+                      {localPreviewHref ?? 'Workspace slug required'}
                     </Typography>
                   </Box>
-                  {workspace.public_base_url ? (
+                  {localPreviewHref ? (
                     <Button
                       component="a"
                       endIcon={<LaunchRounded />}
-                      href={String(workspace.public_base_url)}
+                      href={localPreviewHref}
                       rel="noreferrer"
                       target="_blank"
                       variant="outlined"
                     >
                       Open site
+                    </Button>
+                  ) : null}
+                </Box>
+                <Box className="studio-dataRow">
+                  <Box>
+                    <Typography fontWeight={700}>Published origin</Typography>
+                    <Typography color="text.secondary" variant="body2">
+                      {publishedSiteHref ?? 'Not configured'}
+                    </Typography>
+                  </Box>
+                  {publishedSiteHref ? (
+                    <Button
+                      component="a"
+                      endIcon={<LaunchRounded />}
+                      href={publishedSiteHref}
+                      rel="noreferrer"
+                      target="_blank"
+                      variant="outlined"
+                    >
+                      Open published site
                     </Button>
                   ) : null}
                 </Box>

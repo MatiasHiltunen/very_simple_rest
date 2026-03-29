@@ -16,6 +16,7 @@ import { CollectionWorkspace } from './components/CollectionWorkspace';
 import { EntryWorkspace } from './components/EntryWorkspace';
 import { LoginScreen } from './components/LoginScreen';
 import { OverviewScreen } from './components/OverviewScreen';
+import { SitePreviewScreen } from './components/SitePreviewScreen';
 import { StudioShell } from './components/StudioShell';
 import { UsersWorkspace } from './components/UsersWorkspace';
 
@@ -24,7 +25,12 @@ function isKnownStudioPath(pathname: string): boolean {
     return true;
   }
 
-  const knownPrefixes = ['/entries', '/users', ...collectionResources.map((resource) => `/${resource.key}`)];
+  const knownPrefixes = [
+    '/entries',
+    '/users',
+    '/preview',
+    ...collectionResources.map((resource) => `/${resource.key}`),
+  ];
   return knownPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
@@ -107,6 +113,7 @@ export default function App() {
 
   return (
     <Routes>
+      <Route path="preview/:workspaceSlug/*" element={<SitePreviewScreen />} />
       <Route element={<StudioShell account={accountQuery.data} onLogout={handleLogout} />}>
         <Route
           index

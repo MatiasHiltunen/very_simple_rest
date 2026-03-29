@@ -52,6 +52,7 @@ import {
   type Notice,
   type RelationOption,
 } from '../lib/draft';
+import { resolveLocalPreviewHref, resolvePublishedSiteHref } from '../lib/preview';
 import { formatMethodLabel, getOperationsForResource } from '../lib/openapi';
 import { ConfirmDialog } from './ConfirmDialog';
 import { FieldInput } from './FieldInput';
@@ -852,6 +853,12 @@ function CollectionInspector({
   showAssetPreview: boolean;
 }) {
   const operations = getOperationsForResource(config.path);
+  const workspaceSlug = draft.slug?.trim() ? draft.slug.trim() : null;
+  const localPreviewHref = workspaceSlug ? resolveLocalPreviewHref(workspaceSlug) : null;
+  const publishedSiteHref = resolvePublishedSiteHref(
+    draft.public_base_url ? ({ public_base_url: draft.public_base_url } as ResourceRow) : null,
+    '/',
+  );
 
   return (
     <Stack spacing={2.5}>
@@ -873,11 +880,38 @@ function CollectionInspector({
           <Stack spacing={1}>
             <Typography fontWeight={700}>Workspace identity</Typography>
             <Typography color="text.secondary" variant="body2">
-              Public base URL: {draft.public_base_url || 'Not configured'}
+              Local preview: {localPreviewHref ?? 'Workspace slug required'}
             </Typography>
             <Typography color="text.secondary" variant="body2">
               Slug: /{draft.slug || 'workspace'}
             </Typography>
+            <Typography color="text.secondary" variant="body2">
+              Published base URL: {draft.public_base_url || 'Not configured'}
+            </Typography>
+            {localPreviewHref ? (
+              <Button
+                component="a"
+                endIcon={<LaunchRounded />}
+                href={localPreviewHref}
+                rel="noreferrer"
+                target="_blank"
+                variant="outlined"
+              >
+                Open local preview
+              </Button>
+            ) : null}
+            {publishedSiteHref ? (
+              <Button
+                component="a"
+                endIcon={<LaunchRounded />}
+                href={publishedSiteHref}
+                rel="noreferrer"
+                target="_blank"
+                variant="outlined"
+              >
+                Open published site
+              </Button>
+            ) : null}
             {selectedRow && typeof selectedRow.studio_url === 'string' ? (
               <Button
                 component="a"

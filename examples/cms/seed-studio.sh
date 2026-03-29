@@ -10,10 +10,14 @@ ADMIN_EMAIL=${ADMIN_EMAIL:-editor@example.com}
 ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
 ADMIN_WORKSPACE_ID=${ADMIN_WORKSPACE_ID:-1}
 ADMIN_IS_STAFF=${ADMIN_IS_STAFF:-true}
+WORKSPACE_PUBLIC_BASE_URL=${WORKSPACE_PUBLIC_BASE_URL:-}
+ENTRY_CANONICAL_URL=${ENTRY_CANONICAL_URL:-}
 SERVER_LOG=${SERVER_LOG:-"$ROOT_DIR/var/seed-server.log"}
 
 export ADMIN_WORKSPACE_ID
 export ADMIN_IS_STAFF
+export WORKSPACE_PUBLIC_BASE_URL
+export ENTRY_CANONICAL_URL
 
 json_get() {
   node -e '
@@ -180,13 +184,27 @@ ACCOUNT_RESPONSE=$(curl -ksS -H "$AUTH_HEADER" "$BASE_URL/api/auth/account")
 SELF_USER_ID=$(printf '%s' "$ACCOUNT_RESPONSE" | json_get id)
 
 printf 'Seeding workspace-aware studio data...\n'
+WORKSPACE_CREATE_BODY=$(node -e '
+  const payload = {
+    name: "Northstar Studio",
+    slug: "northstar",
+    default_locale: "en",
+    theme_settings: { palette: "editorial", accent: "teal" },
+    editorial_settings: { review_required: true, homepage_entry_slug: "welcome-to-northstar" },
+  };
+  const publicBaseUrl = process.env.WORKSPACE_PUBLIC_BASE_URL?.trim();
+  if (publicBaseUrl) {
+    payload.public_base_url = publicBaseUrl;
+  }
+  process.stdout.write(JSON.stringify(payload));
+')
 WORKSPACE_ID=$(ensure_resource \
   'workspaces' \
   'admin' \
   'slug' \
   'northstar' \
   'workspaces' \
-  '{"name":"Northstar Studio","slug":"northstar","default_locale":"en","public_base_url":"https://northstar.example","theme_settings":{"palette":"editorial","accent":"teal"},"editorial_settings":{"review_required":true,"homepage_entry_slug":"welcome-to-northstar"}}')
+  "$WORKSPACE_CREATE_BODY")
 
 curl -ksS \
   -X PATCH \
@@ -233,7 +251,39 @@ ENTRY_ID=$(ensure_resource \
   'slug' \
   'welcome-to-northstar' \
   'entries' \
-  "{\"type\":\"article\",\"status\":\"draft\",\"visibility\":\"workspace\",\"slug\":\"welcome-to-northstar\",\"title\":\"Welcome to Northstar\",\"summary\":\"A seeded launch article for the modern CMS studio example.\",\"hero_asset\":$ASSET_ID,\"reviewer\":null,\"published_at\":\"2026-03-28T09:00:00.000Z\",\"scheduled_for\":null,\"body_blocks\":[{\"type\":\"hero\",\"content\":\"Northstar launches with a structured editorial workflow.\"},{\"type\":\"paragraph\",\"content\":\"This seeded entry shows how the studio handles blocks, SEO, and workflow actions.\"}],\"seo\":{\"meta_title\":\"Welcome to Northstar\",\"meta_description\":\"Seeded article for the example CMS studio.\",\"canonical_url\":\"https://northstar.example/welcome-to-northstar\",\"index_mode\":\"index\"},\"settings\":{\"featured\":true,\"seeded\":true}}")
+  "$(ASSET_ID=$ASSET_ID node -e '
+    const assetId = Number(process.env.ASSET_ID ?? "0");
+    const canonicalUrl = process.env.ENTRY_CANONICAL_URL?.trim();
+    const payload = {
+      type: "article",
+      status: "draft",
+      visibility: "workspace",
+      slug: "welcome-to-northstar",
+      title: "Welcome to Northstar",
+      summary: "A seeded launch article for the modern CMS studio example.",
+      hero_asset: assetId,
+      reviewer: null,
+      published_at: "2026-03-28T09:00:00.000Z",
+      scheduled_for: null,
+      body_blocks: [
+        { type: "hero", content: "Northstar launches with a structured editorial workflow." },
+        { type: "paragraph", content: "This seeded entry shows how the studio handles blocks, SEO, and workflow actions." },
+      ],
+      seo: {
+        meta_title: "Welcome to Northstar",
+        meta_description: "Seeded article for the example CMS studio.",
+        index_mode: "index",
+      },
+      settings: {
+        featured: true,
+        seeded: true,
+      },
+    };
+    if (canonicalUrl) {
+      payload.seo.canonical_url = canonicalUrl;
+    }
+    process.stdout.write(JSON.stringify(payload));
+  ')")
 
 ENTRY_TOPIC_ID=$(ensure_pair_resource \
   'entry-topics' \
@@ -280,3 +330,7 @@ printf 'EntryTopic id: %s\n' "$ENTRY_TOPIC_ID"
 printf 'Menu id: %s\n' "$MENU_ID"
 printf 'Menu item id: %s\n' "$MENU_ITEM_ID"
 printf '\nOpen the studio at %s/studio/\n' "$BASE_URL"
+printf 'Open the local site preview at %s/studio/preview/northstar\n' "$BASE_URL"
+if [ -n "$WORKSPACE_PUBLIC_BASE_URL" ]; then
+  printf 'Published origin: %s\n' "$WORKSPACE_PUBLIC_BASE_URL"
+fi

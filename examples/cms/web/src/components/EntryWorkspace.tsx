@@ -45,6 +45,11 @@ import {
   type Notice,
   type RelationOption,
 } from '../lib/draft';
+import {
+  createDraftPreviewHref,
+  resolveLocalPreviewHref,
+  resolvePublishedSiteHref,
+} from '../lib/preview';
 import { FieldInput } from './FieldInput';
 import { PagePreview } from './PagePreview';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -255,6 +260,30 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
         .map((id) => topics.find((topic) => String(topic.id ?? '') === id))
         .filter((topic): topic is ResourceRow => Boolean(topic))
     : [];
+  const previewPath = draft.slug?.trim() ? `/${draft.slug.trim()}` : '/untitled';
+  const workspaceSlug =
+    typeof workspace?.slug === 'string' && workspace.slug.trim() ? workspace.slug.trim() : null;
+  const previewHref = workspaceSlug
+    ? resolveLocalPreviewHref(workspaceSlug, previewPath)
+    : (resolvePublishedSiteHref(workspace, previewPath) ?? previewPath);
+
+  const openPreviewWindow = () => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const href = workspaceSlug
+      ? createDraftPreviewHref(workspaceSlug, previewPath, {
+          previewPath,
+          workspace,
+          draft,
+          selectedTopics,
+          assets: Array.from(assetsById.values()),
+        })
+      : previewHref;
+
+    window.open(href, '_blank', 'noopener,noreferrer');
+  };
 
   const syncedRelationFields = entryResource.fields.filter(
     (field): field is FieldConfig & { relationSync: NonNullable<FieldConfig['relationSync']> } =>
@@ -494,6 +523,11 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
       <PagePreview
         assetsById={assetsById}
         draft={draft}
+        headerAction={{
+          href: previewHref,
+          label: workspaceSlug ? 'Open local preview' : 'Open path',
+          onClick: openPreviewWindow,
+        }}
         mode={previewMode}
         selectedTopics={selectedTopics}
         workspace={workspace}
