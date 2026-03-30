@@ -190,6 +190,25 @@ and the generated `runtime.env` points VSR at those files. See
 - service-required secret inputs such as `JWT_SECRET`, mail credentials, and Turso keys
 - optional Infisical scaffold completeness when `--infisical-dir` is provided
 
+### Strict Service Checks
+
+Run compiler-facing schema diagnostics:
+
+```bash
+vsr check --input api.eon
+vsr check --input api.eon --strict --format json
+```
+
+The first strict slice reports high-confidence warnings for:
+
+- TLS certificate/key paths that do not exist yet
+- authorization contracts that do not affect generated runtime behavior
+- declared authorization scopes that are not referenced anywhere else
+- row-policy, nested-route, `exists`, or hybrid scope lookup fields that rely on inferred indexes
+  without an explicit `.eon` index declaration
+
+`--strict` turns those warnings into a failing exit status so the command can be used in CI.
+
 ### Serve, Emit, and Build
 
 Serve a bare `.eon` service directly through the native runtime:

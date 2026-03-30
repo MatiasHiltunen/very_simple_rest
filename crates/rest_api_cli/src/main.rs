@@ -81,6 +81,33 @@ enum Commands {
     /// Check database connection
     CheckDb,
 
+    /// Validate a schema source and report strict compiler diagnostics
+    Check {
+        /// Schema source (`.eon`, `.rs`, or a Rust source directory); falls back to `--config` when omitted
+        #[arg(short, long, value_name = "PATH")]
+        input: Option<PathBuf>,
+
+        /// Exclude a table from the validation
+        #[arg(long = "exclude-table", value_name = "TABLE")]
+        exclude_tables: Vec<String>,
+
+        /// Treat reported warnings as a failing result
+        #[arg(long)]
+        strict: bool,
+
+        /// Optional output file
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = BackupPlanFormatArg::Text)]
+        format: BackupPlanFormatArg,
+
+        /// Overwrite the output file if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Manage SQL migrations generated from a `.eon` service file
     Migrate {
         #[command(subcommand)]
@@ -1218,6 +1245,32 @@ async fn run_cli() -> Result<()> {
             commands::db::check_connection(&database_url, config_path.as_deref()).await?;
         }
 
+        Commands::Check {
+            input,
+            exclude_tables,
+            strict,
+            output,
+            format,
+            force,
+        } => {
+            println!("{}", "Running schema checks...".green().bold());
+            let input = input
+                .clone()
+                .or_else(|| config_path.clone())
+                .ok_or_else(|| anyhow!("check requires --input or --config"))?;
+            commands::check::run_service_check(
+                &input,
+                exclude_tables,
+                *strict,
+                output.as_deref(),
+                match format {
+                    BackupPlanFormatArg::Text => commands::check::OutputFormat::Text,
+                    BackupPlanFormatArg::Json => commands::check::OutputFormat::Json,
+                },
+                *force,
+            )?;
+        }
+
         Commands::Migrate { command } => match command {
             MigrationCommand::Auth { output, force } => {
                 println!("{}", "Generating auth migration SQL...".green().bold());
@@ -2323,6 +2376,16 @@ mod tests {
                 "deploy/infisical",
                 "--format",
                 "json",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn check_command_accepts_strict_and_json_format() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr", "check", "--input", "api.eon", "--strict", "--format", "json",
             ])
             .is_ok()
         );

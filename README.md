@@ -337,6 +337,10 @@ vsr secrets infisical scaffold --input api.eon --project my-project --project-id
 # Validate resolved secret bindings and optional Infisical scaffold files
 vsr doctor secrets --input api.eon --infisical-dir deploy/infisical
 
+# Run compiler-facing schema diagnostics
+vsr check --input api.eon
+vsr check --input api.eon --strict --format json
+
 # Render a backend-aware backup/replication plan from a `.eon` service
 vsr backup plan --input api.eon
 ```
@@ -361,6 +365,13 @@ For Infisical, `vsr secrets infisical scaffold` now generates an Infisical Agent
 templates, and a `runtime.env` file with the `*_FILE` bindings the VSR runtime already understands.
 `vsr doctor secrets` validates the currently resolved bindings and can also verify that the
 generated Infisical scaffold directory is complete. See [docs/infisical.md](docs/infisical.md).
+
+`vsr check` now runs compiler-facing diagnostics over `.eon` or derive-backed schema sources.
+The first strict slice focuses on high-confidence issues: TLS file paths that do not exist,
+authorization contracts that do not affect generated runtime behavior, unused declared scopes, and
+policy, nested-route, `exists`, and hybrid lookup fields that rely on inferred indexes without an
+explicit `.eon` declaration.
+Add `--strict` to fail the command when any warning is reported.
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 
