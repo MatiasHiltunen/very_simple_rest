@@ -243,13 +243,23 @@ updates.
 
 ### JWT Secret Configuration
 
-Built-in auth now requires `JWT_SECRET` to be set before the server starts.
+Built-in auth now requires a JWT signing secret before the server starts. In `.eon`, prefer the
+typed form:
 
-Supported sources:
+```eon
+security: {
+    auth: {
+        jwt_secret: { env_or_file: "JWT_SECRET" }
+    }
+}
+```
+
+Supported runtime sources:
 
 1. Environment variable: `JWT_SECRET=your_secret_here`
 2. Mounted secret file: `JWT_SECRET_FILE=/run/secrets/JWT_SECRET`
-3. `.env` file in your project root: `JWT_SECRET=your_secret_here`
+3. systemd credential via `jwt_secret: { systemd_credential: "jwt_secret" }`
+4. `.env` file in your project root: `JWT_SECRET=your_secret_here`
 
 The runtime no longer generates a random fallback secret, so tokens remain valid across restarts
 and multi-instance deployments only when you provide an explicit secret.
@@ -718,7 +728,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/<module>.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
     }
 }
 ```
@@ -730,7 +740,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/app.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
     }
 }
 ```
@@ -741,8 +751,9 @@ Current support:
   SQLite `.eon` service
 - `TursoLocal`: bootstraps a local Turso database file and uses the project runtime database
   adapter with SQLite-compatible SQL
-- `TursoLocal.encryption_key_env`: reads a hex key from the named environment variable and uses
-  Turso local encryption with the current default cipher (`aegis256`) during bootstrap
+- `TursoLocal.encryption_key`: typed secret ref for the local Turso hex key; the preferred form is
+  `{ env_or_file: "TURSO_ENCRYPTION_KEY" }`
+- `TursoLocal.encryption_key_env`: legacy shorthand still accepted for backward compatibility
 
 Current limitation:
 
@@ -766,11 +777,12 @@ database: {
             target: S3
             verify_restore: true
             max_age: "24h"
+            encryption_key: { env_or_file: "BACKUP_ENCRYPTION_KEY" }
         }
         replication: {
             mode: ReadReplica
             read_routing: Explicit
-            read_url_env: "DATABASE_READ_URL"
+            read_url: { env_or_file: "DATABASE_READ_URL" }
             max_lag: "30s"
         }
     }

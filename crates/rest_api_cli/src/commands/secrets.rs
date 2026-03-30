@@ -278,8 +278,11 @@ pub fn doctor_secrets(
 
     let rendered = match format {
         OutputFormat::Text => render_doctor_report_text(&report),
-        OutputFormat::Json => serde_json::to_string_pretty(&report)
-            .map_err(|error| Error::Unknown(format!("failed to serialize secrets doctor report: {error}")))?,
+        OutputFormat::Json => serde_json::to_string_pretty(&report).map_err(|error| {
+            Error::Unknown(format!(
+                "failed to serialize secrets doctor report: {error}"
+            ))
+        })?,
     };
 
     write_output(rendered, output, force, "secrets doctor report")
@@ -345,10 +348,17 @@ fn collect_secret_bindings(service: &ServiceSpec) -> Vec<SecretBindingSpec> {
     );
 
     if !service_owns_user_table(service) {
+        let jwt_var = service
+            .security
+            .auth
+            .jwt_secret
+            .as_ref()
+            .and_then(|secret| secret.env_binding_name())
+            .unwrap_or("JWT_SECRET");
         insert_binding(
             &mut bindings,
             SecretBindingSpec {
-                var_name: "JWT_SECRET".to_owned(),
+                var_name: jwt_var.to_owned(),
                 description: "Built-in auth JWT signing key".to_owned(),
                 example_value: "change-me".to_owned(),
                 required: true,
@@ -357,12 +367,15 @@ fn collect_secret_bindings(service: &ServiceSpec) -> Vec<SecretBindingSpec> {
     }
 
     if let DatabaseEngine::TursoLocal(engine) = &service.database.engine
-        && let Some(var_name) = engine.encryption_key_env.as_ref()
+        && let Some(var_name) = engine
+            .encryption_key
+            .as_ref()
+            .and_then(|secret| secret.env_binding_name())
     {
         insert_binding(
             &mut bindings,
             SecretBindingSpec {
-                var_name: var_name.clone(),
+                var_name: var_name.to_owned(),
                 description: "Local Turso encryption key".to_owned(),
                 example_value: "change-me-64-hex-characters".to_owned(),
                 required: true,
@@ -372,35 +385,46 @@ fn collect_secret_bindings(service: &ServiceSpec) -> Vec<SecretBindingSpec> {
 
     if let Some(email) = service.security.auth.email.as_ref() {
         match &email.provider {
-            AuthEmailProvider::Resend { api_key_env, .. } => insert_binding(
-                &mut bindings,
-                SecretBindingSpec {
-                    var_name: api_key_env.clone(),
-                    description: "Built-in auth Resend API key".to_owned(),
-                    example_value: "change-me".to_owned(),
-                    required: true,
-                },
-            ),
-            AuthEmailProvider::Smtp { connection_url_env } => insert_binding(
-                &mut bindings,
-                SecretBindingSpec {
-                    var_name: connection_url_env.clone(),
-                    description: "Built-in auth SMTP connection URL".to_owned(),
-                    example_value: "smtp://user:password@smtp.example.com:587".to_owned(),
-                    required: true,
-                },
-            ),
+            AuthEmailProvider::Resend { api_key, .. } => {
+                if let Some(var_name) = api_key.env_binding_name() {
+                    insert_binding(
+                        &mut bindings,
+                        SecretBindingSpec {
+                            var_name: var_name.to_owned(),
+                            description: "Built-in auth Resend API key".to_owned(),
+                            example_value: "change-me".to_owned(),
+                            required: true,
+                        },
+                    );
+                }
+            }
+            AuthEmailProvider::Smtp { connection_url } => {
+                if let Some(var_name) = connection_url.env_binding_name() {
+                    insert_binding(
+                        &mut bindings,
+                        SecretBindingSpec {
+                            var_name: var_name.to_owned(),
+                            description: "Built-in auth SMTP connection URL".to_owned(),
+                            example_value: "smtp://user:password@smtp.example.com:587".to_owned(),
+                            required: true,
+                        },
+                    );
+                }
+            }
         }
     }
 
     if let Some(resilience) = service.database.resilience.as_ref() {
         if let Some(backup) = resilience.backup.as_ref()
-            && let Some(var_name) = backup.encryption_key_env.as_ref()
+            && let Some(var_name) = backup
+                .encryption_key
+                .as_ref()
+                .and_then(|secret| secret.env_binding_name())
         {
             insert_binding(
                 &mut bindings,
                 SecretBindingSpec {
-                    var_name: var_name.clone(),
+                    var_name: var_name.to_owned(),
                     description: "Backup encryption key".to_owned(),
                     example_value: "change-me".to_owned(),
                     required: true,
@@ -408,12 +432,15 @@ fn collect_secret_bindings(service: &ServiceSpec) -> Vec<SecretBindingSpec> {
             );
         }
         if let Some(replication) = resilience.replication.as_ref()
-            && let Some(var_name) = replication.read_url_env.as_ref()
+            && let Some(var_name) = replication
+                .read_url
+                .as_ref()
+                .and_then(|secret| secret.env_binding_name())
         {
             insert_binding(
                 &mut bindings,
                 SecretBindingSpec {
-                    var_name: var_name.clone(),
+                    var_name: var_name.to_owned(),
                     description: "Read-replica database connection string".to_owned(),
                     example_value: "postgres://reader:password@db-replica.example.com/app"
                         .to_owned(),
@@ -806,7 +833,9 @@ fn collect_infisical_scaffold_checks(
     };
 
     for binding in bindings {
-        let template_path = infisical_dir.join("templates").join(format!("{}.tpl", binding.var_name));
+        let template_path = infisical_dir
+            .join("templates")
+            .join(format!("{}.tpl", binding.var_name));
         checks.push(check_path_exists(
             format!("template_{}", binding.var_name).as_str(),
             &template_path,

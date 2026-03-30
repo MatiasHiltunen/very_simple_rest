@@ -67,7 +67,7 @@ pub async fn serve_service(
     let _ = logger.try_init();
 
     if include_builtin_auth {
-        auth::ensure_jwt_secret_configured()
+        auth::ensure_jwt_secret_configured_with_settings(&service.security.auth)
             .map_err(|error| anyhow!("auth configuration error: {error}"))?;
     }
 
@@ -4266,9 +4266,9 @@ mod tests {
     };
     use serde::Serialize;
     use serde_json::{Value, json};
-    use std::{fs, path::PathBuf};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{fs, path::PathBuf};
 
     const TEST_TURSO_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const TEST_JWT_SECRET: &str = "serve-object-fields-secret";
@@ -5655,24 +5655,22 @@ mod tests {
         fs::write(&file_path, b"hello native storage").expect("fixture object should write");
 
         let (dynamic_service, _) = build_test_state("storage_public_api.eon", false).await;
-        let app = test::init_service(
-            App::new().configure({
-                let dynamic_service = dynamic_service.clone();
-                move |cfg| {
-                    configure_public_mounts_with_runtime(
-                        cfg,
-                        dynamic_service.storage_registry.as_ref(),
-                        dynamic_service.storage_public_mounts.as_slice(),
-                        &dynamic_service.runtime,
-                    );
-                    configure_static_mounts_with_runtime(
-                        cfg,
-                        dynamic_service.static_mounts.as_slice(),
-                        &dynamic_service.runtime,
-                    );
-                }
-            }),
-        )
+        let app = test::init_service(App::new().configure({
+            let dynamic_service = dynamic_service.clone();
+            move |cfg| {
+                configure_public_mounts_with_runtime(
+                    cfg,
+                    dynamic_service.storage_registry.as_ref(),
+                    dynamic_service.storage_public_mounts.as_slice(),
+                    &dynamic_service.runtime,
+                );
+                configure_static_mounts_with_runtime(
+                    cfg,
+                    dynamic_service.static_mounts.as_slice(),
+                    &dynamic_service.runtime,
+                );
+            }
+        }))
         .await;
 
         let request = test::TestRequest::get()
@@ -5720,7 +5718,10 @@ mod tests {
                 "Authorization",
                 format!("Bearer {}", issue_token(1, &["user"]).as_str()),
             ))
-            .insert_header(("Content-Type", format!("multipart/form-data; boundary={boundary}")))
+            .insert_header((
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            ))
             .set_payload(payload)
             .to_request();
         let response = test::call_service(&app, request).await;
@@ -5731,7 +5732,10 @@ mod tests {
         assert_eq!(body.file_name, "native.txt");
         assert_eq!(body.size_bytes, 19);
         let stored_path = uploads_dir.join(&body.object_key);
-        assert!(stored_path.is_file(), "uploaded object should exist on disk");
+        assert!(
+            stored_path.is_file(),
+            "uploaded object should exist on disk"
+        );
         let _ = fs::remove_file(stored_path);
     }
 
@@ -5747,19 +5751,17 @@ mod tests {
         fs::create_dir_all(&uploads_dir).expect("uploads dir should exist");
 
         let (dynamic_service, _) = build_test_state("storage_s3_compat_api.eon", false).await;
-        let app = test::init_service(
-            App::new().configure({
-                let dynamic_service = dynamic_service.clone();
-                move |cfg| {
-                    configure_s3_compat_with_runtime(
-                        cfg,
-                        dynamic_service.storage_registry.as_ref(),
-                        dynamic_service.storage_s3_compat.as_ref().as_ref(),
-                        &dynamic_service.runtime,
-                    );
-                }
-            }),
-        )
+        let app = test::init_service(App::new().configure({
+            let dynamic_service = dynamic_service.clone();
+            move |cfg| {
+                configure_s3_compat_with_runtime(
+                    cfg,
+                    dynamic_service.storage_registry.as_ref(),
+                    dynamic_service.storage_s3_compat.as_ref().as_ref(),
+                    &dynamic_service.runtime,
+                );
+            }
+        }))
         .await;
 
         let put_request = test::TestRequest::put()
@@ -5786,7 +5788,9 @@ mod tests {
             "native-test"
         );
 
-        let get_request = test::TestRequest::get().uri("/_s3/media/logo.txt").to_request();
+        let get_request = test::TestRequest::get()
+            .uri("/_s3/media/logo.txt")
+            .to_request();
         let get_response = test::call_service(&app, get_request).await;
         assert_eq!(get_response.status(), StatusCode::OK);
         let get_body = test::read_body(get_response).await;
@@ -5801,7 +5805,9 @@ mod tests {
             .expect("list response should be utf-8");
         assert!(list_body.contains("<Key>logo.txt</Key>"));
 
-        let delete_request = test::TestRequest::delete().uri("/_s3/media/logo.txt").to_request();
+        let delete_request = test::TestRequest::delete()
+            .uri("/_s3/media/logo.txt")
+            .to_request();
         let delete_response = test::call_service(&app, delete_request).await;
         assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
         assert!(!uploads_dir.join("assets/logo.txt").exists());

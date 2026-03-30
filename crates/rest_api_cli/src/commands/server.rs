@@ -1403,7 +1403,7 @@ fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth
         ""
     };
     let auth_startup_check = if include_builtin_auth {
-        "    very_simple_rest::auth::ensure_jwt_secret_configured()\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
+        "    very_simple_rest::auth::ensure_jwt_secret_configured_with_settings(&api_security.auth)\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
     } else {
         ""
     };
@@ -1562,20 +1562,28 @@ fn render_env_example(
     backend: DbBackend,
     include_builtin_auth: bool,
 ) -> String {
+    let jwt_secret_var = service
+        .security
+        .auth
+        .jwt_secret
+        .as_ref()
+        .and_then(|secret| secret.env_binding_name())
+        .unwrap_or("JWT_SECRET");
     let auth_block = if include_builtin_auth {
         format!(
-            "# Required when built-in auth is enabled\nJWT_SECRET=change-me\n# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/jwt_secret\n{}# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n",
+            "# Required when built-in auth is enabled\n{jwt_secret_var}=change-me\n# Or mount a secret file and set {jwt_secret_var}_FILE=/run/secrets/{jwt_secret_var}\n{}# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n",
             render_auth_email_env_example(service)
         )
     } else {
-        "# JWT_SECRET=change-me-if-you-enable-built-in-auth\n".to_owned()
+        format!("# {jwt_secret_var}=change-me-if-you-enable-built-in-auth\n")
     };
     let engine_block = match &service.database.engine {
         DatabaseEngine::Sqlx => String::new(),
         DatabaseEngine::TursoLocal(engine) => {
             let encryption_block = engine
-                .encryption_key_env
+                .encryption_key
                 .as_ref()
+                .and_then(|secret| secret.env_binding_name())
                 .map(|var| {
                     format!(
                         "{var}=change-me-hex-key\n# Or mount a secret file and set {var}_FILE=/run/secrets/{var}\n"
@@ -1643,12 +1651,22 @@ fn render_auth_email_env_example(service: &ServiceSpec) -> String {
     };
 
     match &email.provider {
-        AuthEmailProvider::Resend { api_key_env, .. } => format!(
-            "# Built-in auth email delivery via Resend\n{api_key_env}=change-me\n# Or mount a secret file and set {api_key_env}_FILE=/run/secrets/{api_key_env}\n"
-        ),
-        AuthEmailProvider::Smtp { connection_url_env } => format!(
-            "# Built-in auth email delivery via SMTP/lettre\n{connection_url_env}=smtp://user:password@smtp.example.com:587\n# Or mount a secret file and set {connection_url_env}_FILE=/run/secrets/{connection_url_env}\n"
-        ),
+        AuthEmailProvider::Resend { api_key, .. } => api_key
+            .env_binding_name()
+            .map(|var| {
+                format!(
+                    "# Built-in auth email delivery via Resend\n{var}=change-me\n# Or mount a secret file and set {var}_FILE=/run/secrets/{var}\n"
+                )
+            })
+            .unwrap_or_default(),
+        AuthEmailProvider::Smtp { connection_url } => connection_url
+            .env_binding_name()
+            .map(|var| {
+                format!(
+                    "# Built-in auth email delivery via SMTP/lettre\n{var}=smtp://user:password@smtp.example.com:587\n# Or mount a secret file and set {var}_FILE=/run/secrets/{var}\n"
+                )
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -1658,10 +1676,20 @@ fn render_project_readme(
     backend: DbBackend,
     include_builtin_auth: bool,
 ) -> String {
+    let jwt_secret_var = service
+        .security
+        .auth
+        .jwt_secret
+        .as_ref()
+        .and_then(|secret| secret.env_binding_name())
+        .unwrap_or("JWT_SECRET");
     let auth_note = if include_builtin_auth {
-        "The generated project includes built-in auth/account routes plus `migrations/0000_auth.sql` and `migrations/0001_auth_management.sql`. Set `JWT_SECRET` before starting the server.\n"
+        format!(
+            "The generated project includes built-in auth/account routes plus `migrations/0000_auth.sql` and `migrations/0001_auth_management.sql`. Set `{jwt_secret_var}` before starting the server.\n"
+        )
     } else {
         "The generated project does not include built-in auth/account routes by default.\n"
+            .to_owned()
     };
     let openapi_note = if include_builtin_auth {
         "The OpenAPI document also includes the built-in auth/account routes, with `/auth/me` grouped under `Account` in Swagger.\n\n"
@@ -1672,8 +1700,9 @@ fn render_project_readme(
         DatabaseEngine::Sqlx => "Runtime engine: `Sqlx`.\n\n".to_owned(),
         DatabaseEngine::TursoLocal(engine) => {
             let encryption_note = engine
-                .encryption_key_env
+                .encryption_key
                 .as_ref()
+                .and_then(|secret| secret.env_binding_name())
                 .map(|var| {
                     format!(
                         "Local encryption is enabled. Set `{var}` to a 64-character hex key before starting the server.\n"

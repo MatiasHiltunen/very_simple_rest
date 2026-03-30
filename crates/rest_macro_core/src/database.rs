@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::secret::SecretRef;
 #[cfg(feature = "turso-local")]
-use crate::secret::load_secret_from_env_or_file;
+use crate::secret::load_secret;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseConfig {
@@ -25,7 +26,7 @@ pub enum DatabaseEngine {
 pub struct TursoLocalConfig {
     pub path: String,
     #[serde(default)]
-    pub encryption_key_env: Option<String>,
+    pub encryption_key: Option<SecretRef>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ pub struct DatabaseBackupConfig {
     #[serde(default)]
     pub max_age: Option<String>,
     #[serde(default)]
-    pub encryption_key_env: Option<String>,
+    pub encryption_key: Option<SecretRef>,
     #[serde(default)]
     pub retention: Option<DatabaseBackupRetention>,
 }
@@ -101,7 +102,7 @@ pub struct DatabaseReplicationConfig {
     #[serde(default)]
     pub read_routing: DatabaseReadRoutingMode,
     #[serde(default)]
-    pub read_url_env: Option<String>,
+    pub read_url: Option<SecretRef>,
     #[serde(default)]
     pub max_lag: Option<String>,
     #[serde(default)]
@@ -194,7 +195,7 @@ pub fn resolve_database_config(config: &DatabaseConfig, base_dir: &Path) -> Data
         DatabaseEngine::TursoLocal(engine) => DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: resolve_relative_database_path(base_dir, &engine.path),
-                encryption_key_env: engine.encryption_key_env.clone(),
+                encryption_key: engine.encryption_key.clone(),
             }),
             resilience: config.resilience.clone(),
         },
@@ -248,14 +249,11 @@ pub async fn open_turso_local_database(engine: &TursoLocalConfig) -> Result<turs
 
 #[cfg(feature = "turso-local")]
 fn resolve_turso_encryption(engine: &TursoLocalConfig) -> Result<Option<turso::EncryptionOpts>> {
-    let Some(var_name) = engine.encryption_key_env.as_deref() else {
+    let Some(secret_ref) = engine.encryption_key.as_ref() else {
         return Ok(None);
     };
 
-    let hexkey = load_secret_from_env_or_file(
-        var_name,
-        &format!("database.engine.encryption_key_env `{var_name}`"),
-    )?;
+    let hexkey = load_secret(secret_ref, "database.engine.encryption_key")?;
 
     Ok(Some(turso::EncryptionOpts {
         cipher: "aegis256".to_owned(),
@@ -288,6 +286,7 @@ mod tests {
         TursoLocalConfig, resolve_database_config, resolve_database_url,
         service_base_dir_from_config_path, sqlite_url_for_path,
     };
+    use crate::secret::SecretRef;
 
     #[test]
     fn sqlite_url_for_path_handles_memory_and_file_paths() {
@@ -305,11 +304,11 @@ mod tests {
         assert_eq!(
             DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: "app.db".to_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             }),
             DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: "app.db".to_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             })
         );
     }
@@ -346,7 +345,7 @@ mod tests {
             &DatabaseConfig {
                 engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                     path: "var/data/app.db".to_owned(),
-                    encryption_key_env: Some("TURSO_KEY".to_owned()),
+                    encryption_key: Some(SecretRef::env_or_file("TURSO_KEY")),
                 }),
                 resilience: None,
             },
@@ -358,7 +357,7 @@ mod tests {
             DatabaseConfig {
                 engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                     path: base_dir.join("var/data/app.db").display().to_string(),
-                    encryption_key_env: Some("TURSO_KEY".to_owned()),
+                    encryption_key: Some(SecretRef::env_or_file("TURSO_KEY")),
                 }),
                 resilience: None,
             }
@@ -372,7 +371,7 @@ mod tests {
             &DatabaseConfig {
                 engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                     path: "var/data/app.db".to_owned(),
-                    encryption_key_env: None,
+                    encryption_key: None,
                 }),
                 resilience: Some(DatabaseResilienceConfig {
                     profile: DatabaseResilienceProfile::Pitr,
@@ -382,13 +381,13 @@ mod tests {
                         target: DatabaseBackupTarget::S3,
                         verify_restore: true,
                         max_age: Some("24h".to_owned()),
-                        encryption_key_env: Some("BACKUP_ENCRYPTION_KEY".to_owned()),
+                        encryption_key: Some(SecretRef::env_or_file("BACKUP_ENCRYPTION_KEY")),
                         retention: None,
                     }),
                     replication: Some(DatabaseReplicationConfig {
                         mode: DatabaseReplicationMode::ReadReplica,
                         read_routing: DatabaseReadRoutingMode::Explicit,
-                        read_url_env: Some("DATABASE_READ_URL".to_owned()),
+                        read_url: Some(SecretRef::env_or_file("DATABASE_READ_URL")),
                         max_lag: Some("30s".to_owned()),
                         replicas_expected: Some(1),
                     }),
@@ -406,7 +405,8 @@ mod tests {
                 .resilience
                 .as_ref()
                 .and_then(|config| config.replication.as_ref())
-                .and_then(|config| config.read_url_env.as_deref()),
+                .and_then(|config| config.read_url.as_ref())
+                .and_then(|secret| secret.env_binding_name()),
             Some("DATABASE_READ_URL")
         );
     }
@@ -416,7 +416,7 @@ mod tests {
     fn resolve_turso_encryption_requires_present_env_var() {
         let error = super::resolve_turso_encryption(&TursoLocalConfig {
             path: "app.db".to_owned(),
-            encryption_key_env: Some("VSR_TEST_MISSING_TURSO_KEY".to_owned()),
+            encryption_key: Some(SecretRef::env_or_file("VSR_TEST_MISSING_TURSO_KEY")),
         })
         .expect_err("missing env var should fail");
         assert!(
@@ -438,7 +438,7 @@ mod tests {
 
         let encryption = super::resolve_turso_encryption(&TursoLocalConfig {
             path: "app.db".to_owned(),
-            encryption_key_env: Some(var_name.clone()),
+            encryption_key: Some(SecretRef::env_or_file(var_name.clone())),
         })
         .expect("env var should resolve")
         .expect("encryption opts should exist");
@@ -465,7 +465,7 @@ mod tests {
 
         let encryption = super::resolve_turso_encryption(&TursoLocalConfig {
             path: "app.db".to_owned(),
-            encryption_key_env: Some(var_name.clone()),
+            encryption_key: Some(SecretRef::env_or_file(var_name.clone())),
         })
         .expect("file-backed env should resolve")
         .expect("encryption opts should exist");

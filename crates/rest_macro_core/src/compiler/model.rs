@@ -16,6 +16,7 @@ use crate::authorization::AuthorizationContract;
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
 use crate::runtime::RuntimeConfig;
+use crate::secret::SecretRef;
 use crate::security::SecurityConfig;
 use crate::storage::StorageConfig;
 use crate::tls::TlsConfig;
@@ -1508,6 +1509,16 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
             ));
         }
 
+        if is_bool_type(&field.ty) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "field `{}` does not support validation constraints",
+                    field.name()
+                ),
+            ));
+        }
+
         if let (Some(min), Some(max)) = (validation.min_length, validation.max_length) {
             if min > max {
                 return Err(syn::Error::new(
@@ -2389,6 +2400,10 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         }
     }
 
+    if let Some(jwt_secret) = &security.auth.jwt_secret {
+        validate_secret_ref(jwt_secret, "security.auth.jwt_secret", span)?;
+    }
+
     if let Some(email) = &security.auth.email {
         if email.from_email.trim().is_empty() {
             return Err(syn::Error::new(
@@ -2419,15 +2434,10 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
 
         match &email.provider {
             AuthEmailProvider::Resend {
-                api_key_env,
+                api_key,
                 api_base_url,
             } => {
-                if api_key_env.trim().is_empty() {
-                    return Err(syn::Error::new(
-                        span,
-                        "`security.auth.email.provider.api_key_env` cannot be empty",
-                    ));
-                }
+                validate_secret_ref(api_key, "security.auth.email.provider.api_key", span)?;
                 if let Some(api_base_url) = api_base_url {
                     Url::parse(api_base_url).map_err(|_| {
                         syn::Error::new(
@@ -2437,13 +2447,12 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
                     })?;
                 }
             }
-            AuthEmailProvider::Smtp { connection_url_env } => {
-                if connection_url_env.trim().is_empty() {
-                    return Err(syn::Error::new(
-                        span,
-                        "`security.auth.email.provider.connection_url_env` cannot be empty",
-                    ));
-                }
+            AuthEmailProvider::Smtp { connection_url } => {
+                validate_secret_ref(
+                    connection_url,
+                    "security.auth.email.provider.connection_url",
+                    span,
+                )?;
             }
         }
     }
@@ -2500,6 +2509,52 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         }
         if !custom_paths.insert(page.path.clone()) {
             return Err(syn::Error::new(span, "custom auth UI paths must be unique"));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_secret_ref(secret: &SecretRef, label: &str, span: Span) -> syn::Result<()> {
+    match secret {
+        SecretRef::Env { var_name } | SecretRef::EnvOrFile { var_name } => {
+            if var_name.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`{label}` cannot use an empty environment variable name"),
+                ));
+            }
+        }
+        SecretRef::SystemdCredential { id } => {
+            if id.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`{label}` cannot use an empty systemd credential id"),
+                ));
+            }
+        }
+        SecretRef::External { provider, locator } => {
+            if provider.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`{label}.provider` cannot be empty"),
+                ));
+            }
+            if locator.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`{label}.locator` cannot be empty"),
+                ));
+            }
+        }
+        SecretRef::File { path } => {
+            let rendered = path.to_string_lossy();
+            if rendered.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`{label}` cannot use an empty file path"),
+                ));
+            }
         }
     }
 

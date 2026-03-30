@@ -1512,6 +1512,79 @@ referenced by `exists` conditions.\n\n",
 
     push_section(
         &mut markdown,
+        "Secret References",
+        "Typed secret refs let `.eon` declare where a secret should come from without hard-wiring the runtime to plain environment variables. Prefer the typed form for new configs; legacy `*_env` fields still parse for compatibility.",
+        &[
+            row(
+                "<secret>.env",
+                "String",
+                "None",
+                "Exactly one variant is required",
+                "Environment variable name",
+                "Reads the secret from that exact environment variable only.",
+            ),
+            row(
+                "<secret>.env_or_file",
+                "String",
+                "None",
+                "Exactly one variant is required",
+                "Environment variable name",
+                "Reads from `<VAR>` or `<VAR>_FILE`. This is the preferred general-purpose runtime form.",
+            ),
+            row(
+                "<secret>.systemd_credential",
+                "String",
+                "None",
+                "Exactly one variant is required",
+                "Credential id",
+                "Reads from `/run/credentials/<id>` for systemd-style secret delivery.",
+            ),
+            row(
+                "<secret>.external.provider",
+                "String",
+                "None",
+                "Required when using `external`",
+                "Provider slug",
+                "Declares an external secret-manager contract. Direct runtime resolution is not implemented yet.",
+            ),
+            row(
+                "<secret>.external.locator",
+                "String",
+                "None",
+                "Required when using `external`",
+                "Provider-specific secret locator",
+                "Stores the provider-specific secret path, name, or locator.",
+            ),
+        ],
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"security: {
+    auth: {
+        jwt_secret: { env_or_file: "JWT_SECRET" }
+        email: {
+            from_email: "noreply@example.com"
+            provider: {
+                kind: Resend
+                api_key: { systemd_credential: "resend_api_key" }
+            }
+        }
+    }
+}
+
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/app.db"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
+    }
+}"#,
+    );
+
+    push_section(
+        &mut markdown,
         "Database Engine",
         "The top-level `db` controls SQL generation. `database.engine` controls the runtime connection strategy.",
         &[
@@ -1532,15 +1605,23 @@ referenced by `exists` conditions.\n\n",
                 "The `vsr` runtime resolves relative paths against the service or bundle base directory.",
             ),
             row(
-                "database.engine.encryption_key_env",
-                "String",
+                "database.engine.encryption_key",
+                "SecretRef",
                 format!(
-                    "For the implicit SQLite runtime engine: `{}`",
+                    "For the implicit SQLite runtime engine: `{{ env_or_file: \"{}\" }}`",
                     DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV
                 ),
                 "No",
+                "See Secret References",
+                "Used only by `TursoLocal`. Prefer `{ env_or_file: \"...\" }` for runtime-managed file/env secret delivery.",
+            ),
+            row(
+                "database.engine.encryption_key_env",
+                "String (legacy)",
+                "None",
+                "No",
                 "Environment variable name",
-                "Used only by `TursoLocal`. When set, the runtime loads the key from `<VAR>` or `<VAR>_FILE`.",
+                "Backward-compatible shorthand for `database.engine.encryption_key: { env_or_file: \"...\" }`.",
             ),
         ],
     );
@@ -1623,12 +1704,20 @@ referenced by `exists` conditions.\n\n",
                 "Currently stored as text for planning/doctor output; strict duration parsing is follow-up work.",
             ),
             row(
+                "database.resilience.backup.encryption_key",
+                "SecretRef",
+                "None",
+                "No",
+                "See Secret References",
+                "Documents the expected backup encryption or key-unwrapping secret binding.",
+            ),
+            row(
                 "database.resilience.backup.encryption_key_env",
-                "String",
+                "String (legacy)",
                 "None",
                 "No",
                 "Environment variable name",
-                "Documents the expected backup encryption or key-unwrapping env var.",
+                "Backward-compatible shorthand for `database.resilience.backup.encryption_key: { env_or_file: \"...\" }`.",
             ),
             row(
                 "database.resilience.backup.retention.daily",
@@ -1679,12 +1768,20 @@ referenced by `exists` conditions.\n\n",
                 "Only `Explicit` is planned for the first runtime read-routing phase.",
             ),
             row(
-                "database.resilience.replication.read_url_env",
-                "String",
+                "database.resilience.replication.read_url",
+                "SecretRef",
                 "None",
                 "Required when `read_routing = Explicit`",
+                "See Secret References",
+                "Documents the expected explicit read-replica connection string binding.",
+            ),
+            row(
+                "database.resilience.replication.read_url_env",
+                "String (legacy)",
+                "None",
+                "No",
                 "Environment variable name",
-                "Documents the expected read-replica connection string env var.",
+                "Backward-compatible shorthand for `database.resilience.replication.read_url: { env_or_file: \"...\" }`.",
             ),
             row(
                 "database.resilience.replication.max_lag",
@@ -2197,6 +2294,19 @@ referenced by `exists` conditions.\n\n",
                 "Password-reset token lifetime in seconds.",
             ),
             row(
+                "security.auth.jwt_secret",
+                "SecretRef",
+                format_option(
+                    auth_defaults
+                        .jwt_secret
+                        .as_ref()
+                        .map(|_| "{ env_or_file: \"JWT_SECRET\" }"),
+                ),
+                "No",
+                "See Secret References",
+                "Controls how built-in auth resolves the JWT signing key. Prefer `{ env_or_file: \"JWT_SECRET\" }` for new configs.",
+            ),
+            row(
                 "security.auth.claims",
                 "Map<ClaimName, ClaimMapping>",
                 "None",
@@ -2410,12 +2520,20 @@ referenced by `exists` conditions.\n\n",
                 "Parsed case-insensitively.",
             ),
             row(
-                "security.auth.email.provider.api_key_env",
-                "String",
+                "security.auth.email.provider.api_key",
+                "SecretRef",
                 "None",
                 "Required for `kind = Resend`",
+                "See Secret References",
+                "Preferred Resend API key binding for new configs.",
+            ),
+            row(
+                "security.auth.email.provider.api_key_env",
+                "String (legacy)",
+                "None",
+                "No",
                 "Environment variable name",
-                "Loaded from `<VAR>` or `<VAR>_FILE` by the runtime.",
+                "Backward-compatible shorthand for `security.auth.email.provider.api_key: { env_or_file: \"...\" }`.",
             ),
             row(
                 "security.auth.email.provider.api_base_url",
@@ -2426,12 +2544,20 @@ referenced by `exists` conditions.\n\n",
                 "Optional override for the Resend API base URL.",
             ),
             row(
-                "security.auth.email.provider.connection_url_env",
-                "String",
+                "security.auth.email.provider.connection_url",
+                "SecretRef",
                 "None",
                 "Required for `kind = Smtp`",
+                "See Secret References",
+                "Preferred SMTP connection binding for new configs.",
+            ),
+            row(
+                "security.auth.email.provider.connection_url_env",
+                "String (legacy)",
+                "None",
+                "No",
                 "Environment variable name",
-                "Expected to resolve to an SMTP connection URL for lettre.",
+                "Backward-compatible shorthand for `security.auth.email.provider.connection_url: { env_or_file: \"...\" }`.",
             ),
         ],
     );

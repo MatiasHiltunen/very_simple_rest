@@ -1,12 +1,12 @@
 use std::{
     env, fs,
     io::{Error, ErrorKind, Result},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SecretRef {
     Env { var_name: String },
@@ -28,6 +28,153 @@ impl SecretRef {
             var_name: var_name.into(),
         }
     }
+
+    pub fn env_binding_name(&self) -> Option<&str> {
+        match self {
+            Self::Env { var_name } | Self::EnvOrFile { var_name } => Some(var_name.as_str()),
+            Self::File { .. } | Self::SystemdCredential { .. } | Self::External { .. } => None,
+        }
+    }
+
+    pub fn systemd_credential_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::SystemdCredential { id } => Some(Path::new("/run/credentials").join(id)),
+            Self::Env { .. }
+            | Self::EnvOrFile { .. }
+            | Self::File { .. }
+            | Self::External { .. } => None,
+        }
+    }
+}
+
+pub fn describe_secret_ref(secret: &SecretRef) -> Option<String> {
+    match secret {
+        SecretRef::Env { var_name } | SecretRef::EnvOrFile { var_name } => {
+            describe_secret_source(var_name)
+        }
+        SecretRef::File { path } => {
+            if path.is_file() {
+                Some(format!("file `{}`", path.display()))
+            } else {
+                None
+            }
+        }
+        SecretRef::SystemdCredential { id } => {
+            let path = Path::new("/run/credentials").join(id);
+            if path.is_file() {
+                Some(format!("systemd credential `{}`", id))
+            } else {
+                None
+            }
+        }
+        SecretRef::External { provider, locator } => {
+            Some(format!("external `{provider}` secret `{locator}`"))
+        }
+    }
+}
+
+pub fn has_secret(secret: &SecretRef) -> bool {
+    load_optional_secret(secret, "secret")
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+pub fn load_optional_secret(secret: &SecretRef, label: &str) -> Result<Option<String>> {
+    match secret {
+        SecretRef::Env { var_name } => match env::var(var_name) {
+            Ok(value) => {
+                if value.trim().is_empty() {
+                    Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("{label} `{var_name}` resolved to an empty value"),
+                    ))
+                } else {
+                    Ok(Some(value))
+                }
+            }
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(error) => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("failed to read `{var_name}` for {label}: {error}"),
+            )),
+        },
+        SecretRef::EnvOrFile { var_name } => load_optional_secret_from_env_or_file(var_name, label),
+        SecretRef::File { path } => load_optional_secret_from_path(path, label),
+        SecretRef::SystemdCredential { id } => {
+            load_optional_secret_from_path(&Path::new("/run/credentials").join(id), label)
+        }
+        SecretRef::External { provider, locator } => Err(Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "{label} uses external secret provider `{provider}` locator `{locator}`, but direct runtime resolution is not implemented"
+            ),
+        )),
+    }
+}
+
+pub fn load_secret(secret: &SecretRef, label: &str) -> Result<String> {
+    load_optional_secret(secret, label)?.ok_or_else(|| match secret {
+        SecretRef::Env { var_name } => Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} references missing environment variable `{var_name}`"),
+        ),
+        SecretRef::EnvOrFile { var_name } => {
+            let file_var = format!("{var_name}_FILE");
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "{label} references missing environment variable `{var_name}` or `{file_var}`"
+                ),
+            )
+        }
+        SecretRef::File { path } => Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} references missing file `{}`", path.display()),
+        ),
+        SecretRef::SystemdCredential { id } => Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{label} references missing systemd credential `{id}` at `/run/credentials/{id}`"
+            ),
+        ),
+        SecretRef::External { provider, locator } => Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "{label} uses external secret provider `{provider}` locator `{locator}`, but direct runtime resolution is not implemented"
+            ),
+        ),
+    })
+}
+
+fn load_optional_secret_from_path(path: &Path, label: &str) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    if !path.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} path `{}` is not a file", path.display()),
+        ));
+    }
+
+    let secret = fs::read_to_string(path).map_err(|error| {
+        Error::new(
+            error.kind(),
+            format!("{label} file `{}` is unreadable: {error}", path.display()),
+        )
+    })?;
+    let secret = secret.trim().to_owned();
+    if secret.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{label} file `{}` resolved to an empty value",
+                path.display()
+            ),
+        ));
+    }
+    Ok(Some(secret))
 }
 
 pub fn describe_secret_source(var_name: &str) -> Option<String> {

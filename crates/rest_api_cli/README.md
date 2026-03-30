@@ -519,7 +519,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/<module>.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
     }
 }
 ```
@@ -531,7 +531,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/app.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
     }
 }
 ```
@@ -542,8 +542,9 @@ Current support:
   SQLite `.eon` service
 - `TursoLocal`: bootstraps a local Turso database file and uses the project runtime database
   adapter with SQLite-compatible SQL
-- `TursoLocal.encryption_key_env`: reads a hex key from the named environment variable and uses
-  Turso local encryption with the current default cipher (`aegis256`) during bootstrap
+- `TursoLocal.encryption_key`: typed secret ref for the local Turso hex key; the preferred form is
+  `{ env_or_file: "TURSO_ENCRYPTION_KEY" }`
+- `TursoLocal.encryption_key_env`: legacy shorthand still accepted for backward compatibility
 
 Current limitation:
 
@@ -566,11 +567,12 @@ database: {
             target: S3
             verify_restore: true
             max_age: "24h"
+            encryption_key: { env_or_file: "BACKUP_ENCRYPTION_KEY" }
         }
         replication: {
             mode: ReadReplica
             read_routing: Explicit
-            read_url_env: "DATABASE_READ_URL"
+            read_url: { env_or_file: "DATABASE_READ_URL" }
             max_lag: "30s"
         }
     }

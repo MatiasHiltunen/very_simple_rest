@@ -4,6 +4,7 @@ use rand::{RngExt, rng};
 use rest_macro_core::auth::{AuthClaimType, AuthEmailProvider};
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
+use rest_macro_core::secret::SecretRef;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ pub struct EnvFileReport {
 
 struct EnvTemplateConfig {
     database_url: String,
+    jwt_secret_var: Option<String>,
     turso_encryption_var: Option<String>,
     auth_email_env_var: Option<String>,
     auth_email_env_comment: Option<String>,
@@ -74,6 +76,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
     let Some(path) = config_path else {
         return Ok(EnvTemplateConfig {
             database_url: "sqlite:var/data/app.db?mode=rwc".to_owned(),
+            jwt_secret_var: Some("JWT_SECRET".to_owned()),
             turso_encryption_var: None,
             auth_email_env_var: None,
             auth_email_env_comment: None,
@@ -92,18 +95,29 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
 
     let service = compiler::load_service_from_path(path)
         .map_err(|error| crate::error::Error::Config(error.to_string()))?;
+    let jwt_secret_var = service
+        .security
+        .auth
+        .jwt_secret
+        .as_ref()
+        .and_then(SecretRef::env_binding_name)
+        .map(str::to_owned);
     let turso_encryption_var = match &service.database.engine {
-        DatabaseEngine::TursoLocal(engine) => engine.encryption_key_env.clone(),
+        DatabaseEngine::TursoLocal(engine) => engine
+            .encryption_key
+            .as_ref()
+            .and_then(SecretRef::env_binding_name)
+            .map(str::to_owned),
         DatabaseEngine::Sqlx => None,
     };
     let (auth_email_env_var, auth_email_env_comment) = match service.security.auth.email.as_ref() {
         Some(email) => match &email.provider {
-            AuthEmailProvider::Resend { api_key_env, .. } => (
-                Some(api_key_env.clone()),
+            AuthEmailProvider::Resend { api_key, .. } => (
+                api_key.env_binding_name().map(str::to_owned),
                 Some("Built-in auth email delivery via Resend".to_owned()),
             ),
-            AuthEmailProvider::Smtp { connection_url_env } => (
-                Some(connection_url_env.clone()),
+            AuthEmailProvider::Smtp { connection_url } => (
+                connection_url.env_binding_name().map(str::to_owned),
                 Some("Built-in auth email delivery via SMTP/lettre".to_owned()),
             ),
         },
@@ -113,6 +127,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
 
     Ok(EnvTemplateConfig {
         database_url: default_service_database_url(&service),
+        jwt_secret_var,
         turso_encryption_var,
         auth_email_env_var,
         auth_email_env_comment,
@@ -223,15 +238,16 @@ fn render_env_template_with_config(config: &EnvTemplateConfig, mode: EnvTemplate
         "# IMPORTANT: Changing this will invalidate all existing user tokens"
     )
     .unwrap();
+    let jwt_secret_var = config.jwt_secret_var.as_deref().unwrap_or("JWT_SECRET");
     if mode.writes_live_secrets() {
-        writeln!(&mut output, "JWT_SECRET={jwt_secret}").unwrap();
+        writeln!(&mut output, "{jwt_secret_var}={jwt_secret}").unwrap();
         writeln!(
             &mut output,
-            "# Or mount a secret file and set JWT_SECRET_FILE=/run/secrets/JWT_SECRET"
+            "# Or mount a secret file and set {jwt_secret_var}_FILE=/run/secrets/{jwt_secret_var}"
         )
         .unwrap();
     } else {
-        render_secret_binding_comment(&mut output, "JWT_SECRET", "change-me");
+        render_secret_binding_comment(&mut output, jwt_secret_var, "change-me");
     }
     writeln!(&mut output).unwrap();
     if let Some(var_name) = &config.auth_email_env_var {

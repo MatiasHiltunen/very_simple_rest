@@ -25,6 +25,7 @@ use rest_macro_core::{
         DatabaseResilienceProfile, sqlite_url_for_path,
     },
     db::{DbPool, query, query_scalar},
+    secret::{describe_secret_ref, load_optional_secret},
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row as _;
@@ -1514,7 +1515,7 @@ fn database_config_for_restore(base: &DatabaseConfig, restore_path: &Path) -> Da
         DatabaseEngine::TursoLocal(engine) => DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(rest_macro_core::database::TursoLocalConfig {
                 path: restore_path.display().to_string(),
-                encryption_key_env: engine.encryption_key_env.clone(),
+                encryption_key: engine.encryption_key.clone(),
             }),
             resilience: base.resilience.clone(),
         },
@@ -1567,10 +1568,10 @@ async fn build_backup_doctor_report(
         .as_ref()
         .and_then(|config| config.backup.as_ref())
     {
-        if let Some(var_name) = backup.encryption_key_env.as_deref() {
-            checks.push(check_env_or_file_present(
+        if let Some(secret) = backup.encryption_key.as_ref() {
+            checks.push(check_secret_present(
                 "backup_encryption_env",
-                var_name,
+                secret,
                 "Backup encryption",
             ));
         } else {
@@ -1863,10 +1864,13 @@ fn build_backup_guidance(backend: DbBackend, database: &DatabaseConfig) -> Vec<S
                             .to_owned(),
                     );
                 }
-                if let Some(var_name) = backup.encryption_key_env.as_deref() {
+                if let Some(source) = backup
+                    .encryption_key
+                    .as_ref()
+                    .map(describe_secret_binding_contract)
+                {
                     guidance.push(format!(
-                        "Provision `{}` for backup artifact encryption or envelope-key access.",
-                        var_name
+                        "Provision {source} for backup artifact encryption or envelope-key access."
                     ));
                 }
                 if let Some(retention) = &backup.retention {
@@ -1939,10 +1943,13 @@ fn build_replication_guidance(backend: DbBackend, database: &DatabaseConfig) -> 
                     "Replication mode: {}.",
                     replication_mode_name(replication.mode)
                 ));
-                if let Some(var_name) = replication.read_url_env.as_deref() {
+                if let Some(source) = replication
+                    .read_url
+                    .as_ref()
+                    .map(describe_secret_binding_contract)
+                {
                     guidance.push(format!(
-                        "Use `{}` for the explicit read connection.",
-                        var_name
+                        "Use {source} for the explicit read connection."
                     ));
                 }
                 if let Some(max_lag) = replication.max_lag.as_deref() {
@@ -2063,22 +2070,41 @@ async fn check_database_connection(
     }
 }
 
-fn check_env_or_file_present(name: &str, var_name: &str, label: &str) -> DoctorCheck {
-    if let Some(source) = resolve_env_or_file_source(var_name) {
+fn check_secret_present(
+    name: &str,
+    secret: &rest_macro_core::secret::SecretRef,
+    label: &str,
+) -> DoctorCheck {
+    if let Some(source) = describe_secret_ref(secret) {
         DoctorCheck {
             name: name.to_owned(),
             status: DoctorStatus::Pass,
             detail: format!("{label} secret/source is available via {source}."),
         }
     } else {
+        let detail = if let Some(var_name) = secret.env_binding_name() {
+            format!(
+                "{label} source is missing. Set `{}` or `{}_FILE`.",
+                var_name, var_name
+            )
+        } else {
+            format!("{label} source is missing or unresolved.")
+        };
         DoctorCheck {
             name: name.to_owned(),
             status: DoctorStatus::Fail,
-            detail: format!(
-                "{label} source is missing. Set `{}` or `{}_FILE`.",
-                var_name, var_name
-            ),
+            detail,
         }
+    }
+}
+
+fn describe_secret_binding_contract(secret: &rest_macro_core::secret::SecretRef) -> String {
+    if let Some(var_name) = secret.env_binding_name() {
+        format!("`{var_name}` or `{var_name}_FILE`")
+    } else if let Some(source) = describe_secret_ref(secret) {
+        source
+    } else {
+        "the configured secret reference".to_owned()
     }
 }
 
@@ -2150,36 +2176,13 @@ fn resolve_replication_read_database_url(
 ) -> Option<String> {
     read_database_url.map(str::to_owned).or_else(|| {
         replication
-            .and_then(|config| config.read_url_env.as_deref())
-            .and_then(resolve_env_or_file_value)
+            .and_then(|config| config.read_url.as_ref())
+            .and_then(|secret| {
+                load_optional_secret(secret, "replication read database URL")
+                    .ok()
+                    .flatten()
+            })
     })
-}
-
-fn resolve_env_or_file_source(var_name: &str) -> Option<String> {
-    if std::env::var_os(var_name).is_some() {
-        Some(format!("`{var_name}`"))
-    } else {
-        let file_var = format!("{var_name}_FILE");
-        std::env::var_os(&file_var).map(|_| format!("`{file_var}`"))
-    }
-}
-
-fn resolve_env_or_file_value(var_name: &str) -> Option<String> {
-    if let Ok(value) = std::env::var(var_name)
-        && !value.trim().is_empty()
-    {
-        return Some(value);
-    }
-
-    let file_var = format!("{var_name}_FILE");
-    let file_path = std::env::var(&file_var).ok()?;
-    let value = fs::read_to_string(&file_path).ok()?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
 }
 
 fn render_doctor_report(report: &DoctorReport, format: OutputFormat) -> Result<String> {
@@ -2482,7 +2485,9 @@ mod tests {
 
         assert!(rendered.contains("\"profile\": \"Pitr\""));
         assert!(rendered.contains("\"mode\": \"ReadReplica\""));
-        assert!(rendered.contains("\"read_url_env\": \"DATABASE_READ_URL\""));
+        assert!(rendered.contains("\"read_url\": {"));
+        assert!(rendered.contains("\"kind\": \"env_or_file\""));
+        assert!(rendered.contains("\"var_name\": \"DATABASE_READ_URL\""));
     }
 
     #[test]

@@ -12,7 +12,9 @@ use rest_macro_core::auth::{AuthDbBackend, auth_user_table_ident};
 use rest_macro_core::compiler::{self, ServiceSpec};
 use rest_macro_core::database::DatabaseEngine;
 use rest_macro_core::db::query_scalar;
-use rest_macro_core::secret::{has_secret_from_env_or_file, load_optional_secret_from_env_or_file};
+use rest_macro_core::secret::{
+    SecretRef, describe_secret_ref, has_secret, load_optional_secret_from_env_or_file,
+};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_KEY_PATH, ResolvedTlsPaths, resolve_tls_paths,
 };
@@ -41,7 +43,7 @@ enum TlsBootstrapReport {
 }
 
 struct RequiredSecretBinding {
-    var_name: String,
+    secret: SecretRef,
     label: String,
 }
 
@@ -289,7 +291,11 @@ fn bootstrap_setup_environment(
 fn required_turso_encryption_var(config_path: &Path) -> Result<Option<String>> {
     let service = load_service(config_path)?;
     Ok(match &service.database.engine {
-        DatabaseEngine::TursoLocal(engine) => engine.encryption_key_env.clone(),
+        DatabaseEngine::TursoLocal(engine) => engine
+            .encryption_key
+            .as_ref()
+            .and_then(SecretRef::env_binding_name)
+            .map(str::to_owned),
         DatabaseEngine::Sqlx => None,
     })
 }
@@ -392,7 +398,7 @@ fn validate_required_production_secrets(config_path: &Path) -> Result<()> {
     let service = load_service(config_path)?;
     let missing = required_production_secret_bindings(&service)
         .into_iter()
-        .filter(|binding| !has_secret_from_env_or_file(binding.var_name.as_str()))
+        .filter(|binding| !has_secret(&binding.secret))
         .collect::<Vec<_>>();
 
     if missing.is_empty() {
@@ -402,10 +408,8 @@ fn validate_required_production_secrets(config_path: &Path) -> Result<()> {
     let details = missing
         .iter()
         .map(|binding| {
-            format!(
-                "- {} via `{}` or `{}_FILE`",
-                binding.label, binding.var_name, binding.var_name
-            )
+            let source = describe_required_secret_binding(&binding.secret);
+            format!("- {} via {source}", binding.label)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -424,31 +428,36 @@ fn required_production_secret_bindings(service: &ServiceSpec) -> Vec<RequiredSec
         .any(|resource| resource.table_name == "user")
     {
         bindings.push(RequiredSecretBinding {
-            var_name: "JWT_SECRET".to_owned(),
+            secret: service
+                .security
+                .auth
+                .jwt_secret
+                .clone()
+                .unwrap_or_else(|| SecretRef::env_or_file("JWT_SECRET")),
             label: "built-in auth JWT signing key".to_owned(),
         });
     }
 
     if let DatabaseEngine::TursoLocal(engine) = &service.database.engine
-        && let Some(var_name) = engine.encryption_key_env.as_ref()
+        && let Some(secret) = engine.encryption_key.as_ref()
     {
         bindings.push(RequiredSecretBinding {
-            var_name: var_name.clone(),
+            secret: secret.clone(),
             label: "local Turso encryption key".to_owned(),
         });
     }
 
     if let Some(email) = &service.security.auth.email {
         match &email.provider {
-            rest_macro_core::auth::AuthEmailProvider::Resend { api_key_env, .. } => {
+            rest_macro_core::auth::AuthEmailProvider::Resend { api_key, .. } => {
                 bindings.push(RequiredSecretBinding {
-                    var_name: api_key_env.clone(),
+                    secret: api_key.clone(),
                     label: "Resend API key".to_owned(),
                 });
             }
-            rest_macro_core::auth::AuthEmailProvider::Smtp { connection_url_env } => {
+            rest_macro_core::auth::AuthEmailProvider::Smtp { connection_url } => {
                 bindings.push(RequiredSecretBinding {
-                    var_name: connection_url_env.clone(),
+                    secret: connection_url.clone(),
                     label: "SMTP connection URL".to_owned(),
                 });
             }
@@ -456,6 +465,16 @@ fn required_production_secret_bindings(service: &ServiceSpec) -> Vec<RequiredSec
     }
 
     bindings
+}
+
+fn describe_required_secret_binding(secret: &SecretRef) -> String {
+    if let Some(var_name) = secret.env_binding_name() {
+        format!("`{var_name}` or `{var_name}_FILE`")
+    } else if let Some(source) = describe_secret_ref(secret) {
+        source
+    } else {
+        "an unavailable secret binding".to_owned()
+    }
 }
 
 fn load_service(config_path: &Path) -> Result<ServiceSpec> {
@@ -481,7 +500,7 @@ fn uses_default_dev_tls_paths(service: &ServiceSpec) -> bool {
 }
 
 fn required_env_var_is_missing(var_name: &str) -> bool {
-    !has_secret_from_env_or_file(var_name)
+    !has_secret(&SecretRef::env_or_file(var_name))
 }
 
 fn print_setup_summary(report: &SetupBootstrapReport) {

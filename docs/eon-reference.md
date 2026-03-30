@@ -441,6 +441,41 @@ The optional `storage` block declares named object-storage backends, public read
 | storage.s3_compat.buckets[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
 | storage.s3_compat.buckets[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix inside the selected backend before bucket paths are resolved. |
 
+## Secret References
+
+Typed secret refs let `.eon` declare where a secret should come from without hard-wiring the runtime to plain environment variables. Prefer the typed form for new configs; legacy `*_env` fields still parse for compatibility.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| <secret>.env | String | None | Exactly one variant is required | Environment variable name | Reads the secret from that exact environment variable only. |
+| <secret>.env_or_file | String | None | Exactly one variant is required | Environment variable name | Reads from `<VAR>` or `<VAR>_FILE`. This is the preferred general-purpose runtime form. |
+| <secret>.systemd_credential | String | None | Exactly one variant is required | Credential id | Reads from `/run/credentials/<id>` for systemd-style secret delivery. |
+| <secret>.external.provider | String | None | Required when using `external` | Provider slug | Declares an external secret-manager contract. Direct runtime resolution is not implemented yet. |
+| <secret>.external.locator | String | None | Required when using `external` | Provider-specific secret locator | Stores the provider-specific secret path, name, or locator. |
+
+```eon
+security: {
+    auth: {
+        jwt_secret: { env_or_file: "JWT_SECRET" }
+        email: {
+            from_email: "noreply@example.com"
+            provider: {
+                kind: Resend
+                api_key: { systemd_credential: "resend_api_key" }
+            }
+        }
+    }
+}
+
+database: {
+    engine: {
+        kind: TursoLocal
+        path: "var/data/app.db"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
+    }
+}
+```
+
 ## Database Engine
 
 The top-level `db` controls SQL generation. `database.engine` controls the runtime connection strategy.
@@ -449,7 +484,8 @@ The top-level `db` controls SQL generation. `database.engine` controls the runti
 | --- | --- | --- | --- | --- | --- |
 | database.engine.kind | Enum | If omitted: `TursoLocal` for `db: Sqlite`; `Sqlx` for `db: Postgres\|Mysql` | No | Sqlx, TursoLocal | Accepted aliases include `turso_local` and `turso-local`. `TursoLocal` requires `db: Sqlite`. |
 | database.engine.path | String | For the implicit SQLite runtime engine: `var/data/<module>.db` | Required for explicit `kind = TursoLocal` | Relative path, absolute path, or `:memory:` | The `vsr` runtime resolves relative paths against the service or bundle base directory. |
-| database.engine.encryption_key_env | String | For the implicit SQLite runtime engine: `TURSO_ENCRYPTION_KEY` | No | Environment variable name | Used only by `TursoLocal`. When set, the runtime loads the key from `<VAR>` or `<VAR>_FILE`. |
+| database.engine.encryption_key | SecretRef | For the implicit SQLite runtime engine: `{ env_or_file: "TURSO_ENCRYPTION_KEY" }` | No | See Secret References | Used only by `TursoLocal`. Prefer `{ env_or_file: "..." }` for runtime-managed file/env secret delivery. |
+| database.engine.encryption_key_env | String (legacy) | None | No | Environment variable name | Backward-compatible shorthand for `database.engine.encryption_key: { env_or_file: "..." }`. |
 
 ## Database Resilience
 
@@ -472,7 +508,8 @@ Backup settings describe the intended durability posture. They do not schedule j
 | database.resilience.backup.target | Enum | Local | No | Local, S3, Gcs, AzureBlob, Custom | Describes the expected backup destination family. Credentials remain environment-specific. |
 | database.resilience.backup.verify_restore | Bool | false | No | true, false | Marks restore verification as part of the required operational posture. |
 | database.resilience.backup.max_age | String | None | No | Any non-empty duration-like string such as `24h` | Currently stored as text for planning/doctor output; strict duration parsing is follow-up work. |
-| database.resilience.backup.encryption_key_env | String | None | No | Environment variable name | Documents the expected backup encryption or key-unwrapping env var. |
+| database.resilience.backup.encryption_key | SecretRef | None | No | See Secret References | Documents the expected backup encryption or key-unwrapping secret binding. |
+| database.resilience.backup.encryption_key_env | String (legacy) | None | No | Environment variable name | Backward-compatible shorthand for `database.resilience.backup.encryption_key: { env_or_file: "..." }`. |
 | database.resilience.backup.retention.daily | u32 | None | No | Positive integer | Optional daily retention target. |
 | database.resilience.backup.retention.weekly | u32 | None | No | Positive integer | Optional weekly retention target. |
 | database.resilience.backup.retention.monthly | u32 | None | No | Positive integer | Optional monthly retention target. |
@@ -485,7 +522,8 @@ Replication settings declare explicit primary/read topology intent. Generated se
 | --- | --- | --- | --- | --- | --- |
 | database.resilience.replication.mode | Enum | Required when the replication block exists | Yes when the block exists | None, ReadReplica, HotStandby, ManagedExternal | TursoLocal currently rejects replication contracts. `ManagedExternal` is meant for provider-managed replica setups. |
 | database.resilience.replication.read_routing | Enum | Off | No | Off, Explicit | Only `Explicit` is planned for the first runtime read-routing phase. |
-| database.resilience.replication.read_url_env | String | None | Required when `read_routing = Explicit` | Environment variable name | Documents the expected read-replica connection string env var. |
+| database.resilience.replication.read_url | SecretRef | None | Required when `read_routing = Explicit` | See Secret References | Documents the expected explicit read-replica connection string binding. |
+| database.resilience.replication.read_url_env | String (legacy) | None | No | Environment variable name | Backward-compatible shorthand for `database.resilience.replication.read_url: { env_or_file: "..." }`. |
 | database.resilience.replication.max_lag | String | None | No | Any non-empty duration-like string such as `30s` | Currently stored as text for planning/doctor output. |
 | database.resilience.replication.replicas_expected | u32 | None | No | Positive integer | Documents the expected minimum replica count for validation tooling. |
 
@@ -610,6 +648,7 @@ These settings configure the built-in auth/account routes. They do not affect cu
 | security.auth.require_email_verification | Bool | false | No | true, false | When true, registration/login flows require email verification and `security.auth.email` must also be configured. |
 | security.auth.verification_token_ttl_seconds | i64 | 86400 | No | Positive integer | Verification-token lifetime in seconds. |
 | security.auth.password_reset_token_ttl_seconds | i64 | 3600 | No | Positive integer | Password-reset token lifetime in seconds. |
+| security.auth.jwt_secret | SecretRef | { env_or_file: "JWT_SECRET" } | No | See Secret References | Controls how built-in auth resolves the JWT signing key. Prefer `{ env_or_file: "JWT_SECRET" }` for new configs. |
 | security.auth.claims | Map<ClaimName, ClaimMapping> | None | No | Keyed map of claim names to claim mappings | Makes built-in auth claims explicit. Claim names must be unique and cannot use reserved fields such as `sub`, `roles`, `iss`, `aud`, `exp`, or `id`. |
 | security.auth.session_cookie | Map | None | No | See Session Cookie | Enables cookie-based session auth in addition to bearer tokens. |
 | security.auth.email | Map | None | No | See Auth Email | Configures transactional email for verification and password reset flows. |
@@ -675,9 +714,11 @@ This block is required when email verification is mandatory.
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | security.auth.email.provider.kind | Enum | None | Yes | Resend, Smtp | Parsed case-insensitively. |
-| security.auth.email.provider.api_key_env | String | None | Required for `kind = Resend` | Environment variable name | Loaded from `<VAR>` or `<VAR>_FILE` by the runtime. |
+| security.auth.email.provider.api_key | SecretRef | None | Required for `kind = Resend` | See Secret References | Preferred Resend API key binding for new configs. |
+| security.auth.email.provider.api_key_env | String (legacy) | None | No | Environment variable name | Backward-compatible shorthand for `security.auth.email.provider.api_key: { env_or_file: "..." }`. |
 | security.auth.email.provider.api_base_url | String | None | No | Absolute URL | Optional override for the Resend API base URL. |
-| security.auth.email.provider.connection_url_env | String | None | Required for `kind = Smtp` | Environment variable name | Expected to resolve to an SMTP connection URL for lettre. |
+| security.auth.email.provider.connection_url | SecretRef | None | Required for `kind = Smtp` | See Secret References | Preferred SMTP connection binding for new configs. |
+| security.auth.email.provider.connection_url_env | String (legacy) | None | No | Environment variable name | Backward-compatible shorthand for `security.auth.email.provider.connection_url: { env_or_file: "..." }`. |
 
 ## Auth UI Pages
 

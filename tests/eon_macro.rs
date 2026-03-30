@@ -60,10 +60,9 @@ fn eon_macro_defaults_sqlite_services_to_turso_local_database_engine() {
         very_simple_rest::core::database::DatabaseEngine::TursoLocal(
             very_simple_rest::core::database::TursoLocalConfig {
                 path: "var/data/blog_api.db".to_owned(),
-                encryption_key_env: Some(
-                    very_simple_rest::core::database::DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV
-                        .to_owned()
-                ),
+                encryption_key: Some(very_simple_rest::core::secret::SecretRef::env_or_file(
+                    very_simple_rest::core::database::DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV,
+                )),
             }
         )
     );
@@ -119,12 +118,6 @@ fn eon_macro_exposes_authorization_model() {
 
     let _authorization_runtime_with_db_pool =
         |db: very_simple_rest::db::DbPool| authorization_contract_api::authorization_runtime(db);
-    let _authorization_management_config = authorization_contract_api::authorization_management();
-    let _configure_authorization_management_with_db_pool =
-        |cfg: &mut very_simple_rest::actix_web::web::ServiceConfig,
-         db: very_simple_rest::db::DbPool| {
-            authorization_contract_api::configure_authorization_management(cfg, db)
-        };
 }
 
 #[test]
@@ -283,7 +276,7 @@ fn eon_macro_generates_database_config_function() {
         very_simple_rest::core::database::DatabaseEngine::TursoLocal(
             very_simple_rest::core::database::TursoLocalConfig {
                 path: "var/data/turso_local.db".to_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             }
         )
     );
@@ -316,7 +309,9 @@ fn eon_macro_preserves_turso_encryption_env_name() {
         very_simple_rest::core::database::DatabaseEngine::TursoLocal(
             very_simple_rest::core::database::TursoLocalConfig {
                 path: "var/data/turso_encrypted.db".to_owned(),
-                encryption_key_env: Some("TURSO_ENCRYPTION_KEY".to_owned()),
+                encryption_key: Some(very_simple_rest::core::secret::SecretRef::env_or_file(
+                    "TURSO_ENCRYPTION_KEY",
+                ),),
             }
         )
     );

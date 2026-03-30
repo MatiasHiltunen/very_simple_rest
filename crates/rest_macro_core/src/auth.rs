@@ -19,14 +19,14 @@ use sqlx::{Column, FromRow, Row, any::AnyRow};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::{Ready, ready};
 use std::io::{IsTerminal, Write, stdin, stdout};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::{
     db::{DbPool, query, query_scalar},
     email::{AuthEmailMessage, send_auth_email},
     errors,
-    secret::load_secret_from_env_or_file,
+    secret::{SecretRef, load_secret},
     security::{RateLimitRule, SecurityConfig, request_client_ip},
 };
 
@@ -44,6 +44,11 @@ pub struct AuthSettings {
     pub verification_token_ttl_seconds: i64,
     #[serde(default = "default_password_reset_token_ttl_seconds")]
     pub password_reset_token_ttl_seconds: i64,
+    #[serde(
+        default = "default_jwt_secret_ref",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub jwt_secret: Option<SecretRef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub claims: BTreeMap<String, AuthClaimMapping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,12 +93,12 @@ pub struct AuthEmailSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthEmailProvider {
     Resend {
-        api_key_env: String,
+        api_key: SecretRef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_base_url: Option<String>,
     },
     Smtp {
-        connection_url_env: String,
+        connection_url: SecretRef,
     },
 }
 
@@ -137,6 +142,7 @@ impl Default for AuthSettings {
             require_email_verification: false,
             verification_token_ttl_seconds: default_verification_token_ttl_seconds(),
             password_reset_token_ttl_seconds: default_password_reset_token_ttl_seconds(),
+            jwt_secret: default_jwt_secret_ref(),
             claims: BTreeMap::new(),
             session_cookie: None,
             email: None,
@@ -169,6 +175,10 @@ const fn default_verification_token_ttl_seconds() -> i64 {
 
 const fn default_password_reset_token_ttl_seconds() -> i64 {
     60 * 60
+}
+
+fn default_jwt_secret_ref() -> Option<SecretRef> {
+    Some(SecretRef::env_or_file("JWT_SECRET"))
 }
 
 fn default_session_cookie_name() -> String {
@@ -435,29 +445,43 @@ fn is_builtin_auth_user_column(column_name: &str) -> bool {
     )
 }
 
-fn load_jwt_secret_from_env() -> Result<Vec<u8>, String> {
+fn load_jwt_secret(secret: &SecretRef) -> Result<Arc<[u8]>, String> {
     let _ = dotenv();
 
-    load_secret_from_env_or_file("JWT_SECRET", "JWT secret")
-        .map(String::into_bytes)
-        .map_err(|_| {
-            "JWT_SECRET or JWT_SECRET_FILE must be set when built-in auth is enabled".to_owned()
-        })
+    load_secret(secret, "JWT secret")
+        .map(|value| Arc::<[u8]>::from(value.into_bytes()))
+        .map_err(|error| error.to_string())
 }
 
-fn configured_jwt_secret() -> Result<&'static [u8], &'static str> {
-    static JWT_SECRET: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+fn configured_jwt_secret(settings: &AuthSettings) -> Result<Arc<[u8]>, String> {
+    static JWT_SECRETS: OnceLock<Mutex<HashMap<SecretRef, Result<Arc<[u8]>, String>>>> =
+        OnceLock::new();
 
-    match JWT_SECRET.get_or_init(load_jwt_secret_from_env) {
-        Ok(secret) => Ok(secret.as_slice()),
-        Err(message) => Err(message.as_str()),
+    let secret_ref = settings
+        .jwt_secret
+        .clone()
+        .unwrap_or_else(|| SecretRef::env_or_file("JWT_SECRET"));
+    let cache = JWT_SECRETS.get_or_init(|| Mutex::new(HashMap::new()));
+
+    {
+        let guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(secret) = guard.get(&secret_ref) {
+            return secret.clone();
+        }
     }
+
+    let resolved = load_jwt_secret(&secret_ref);
+    let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+    guard.insert(secret_ref, resolved.clone());
+    resolved
 }
 
 pub fn ensure_jwt_secret_configured() -> Result<(), String> {
-    configured_jwt_secret()
-        .map(|_| ())
-        .map_err(ToOwned::to_owned)
+    ensure_jwt_secret_configured_with_settings(&AuthSettings::default())
+}
+
+pub fn ensure_jwt_secret_configured_with_settings(settings: &AuthSettings) -> Result<(), String> {
+    configured_jwt_secret(settings).map(|_| ())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -541,10 +565,11 @@ fn decode_user_context_token(
     token: &str,
     settings: &AuthSettings,
 ) -> Result<UserContext, actix_web::Error> {
-    let jwt_secret = configured_jwt_secret().map_err(actix_web::error::ErrorInternalServerError)?;
+    let jwt_secret =
+        configured_jwt_secret(settings).map_err(actix_web::error::ErrorInternalServerError)?;
     let data = decode::<Claims>(
         token,
-        &DecodingKey::from_secret(jwt_secret),
+        &DecodingKey::from_secret(jwt_secret.as_ref()),
         &validation_for_settings(settings),
     )
     .map_err(|_| {
@@ -1158,7 +1183,7 @@ async fn login_with_settings(
                 as usize,
             extra: user.claims,
         };
-        let jwt_secret = match configured_jwt_secret() {
+        let jwt_secret = match configured_jwt_secret(&settings) {
             Ok(secret) => secret,
             Err(message) => return errors::internal_error(message),
         };
@@ -1166,7 +1191,7 @@ async fn login_with_settings(
         match encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret(jwt_secret),
+            &EncodingKey::from_secret(jwt_secret.as_ref()),
         ) {
             Ok(token) => {
                 if let Some(cookie_settings) = &settings.session_cookie {
@@ -4320,7 +4345,7 @@ mod tests {
         AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
         AuthSettings, LoginInput, auth_claim_migration_sql, auth_management_migration_sql,
         auth_migration_sql, build_public_auth_url,
-        ensure_admin_exists_with_settings_and_claim_prompt_mode, load_jwt_secret_from_env,
+        ensure_admin_exists_with_settings_and_claim_prompt_mode, load_jwt_secret,
         login_with_settings, validate_auth_claim_mappings,
     };
     #[cfg(feature = "turso-local")]
@@ -4328,6 +4353,7 @@ mod tests {
     #[cfg(feature = "turso-local")]
     use crate::db::connect_with_config;
     use crate::db::{connect, query, query_scalar};
+    use crate::secret::SecretRef;
     use actix_web::test::TestRequest;
     use actix_web::{body::to_bytes, http::StatusCode, web};
     use sqlx::Row;
@@ -4407,21 +4433,23 @@ mod tests {
     }
 
     #[test]
-    fn load_jwt_secret_from_env_requires_non_empty_secret() {
+    fn load_jwt_secret_requires_non_empty_secret() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::remove_var("JWT_SECRET");
             std::env::remove_var("JWT_SECRET_FILE");
         }
 
-        let error = load_jwt_secret_from_env().expect_err("missing JWT secret should fail");
+        let error = load_jwt_secret(&SecretRef::env_or_file("JWT_SECRET"))
+            .expect_err("missing JWT secret should fail");
         assert!(error.contains("JWT_SECRET"));
 
         unsafe {
             std::env::set_var("JWT_SECRET", "");
         }
 
-        let error = load_jwt_secret_from_env().expect_err("empty JWT secret should fail");
+        let error = load_jwt_secret(&SecretRef::env_or_file("JWT_SECRET"))
+            .expect_err("empty JWT secret should fail");
         assert!(error.contains("JWT_SECRET"));
 
         unsafe {
@@ -4430,14 +4458,15 @@ mod tests {
     }
 
     #[test]
-    fn load_jwt_secret_from_env_accepts_non_empty_secret() {
+    fn load_jwt_secret_accepts_non_empty_secret() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
             std::env::set_var("JWT_SECRET", "unit-test-secret");
         }
 
-        let secret = load_jwt_secret_from_env().expect("non-empty JWT secret should load");
-        assert_eq!(secret, b"unit-test-secret");
+        let secret = load_jwt_secret(&SecretRef::env_or_file("JWT_SECRET"))
+            .expect("non-empty JWT secret should load");
+        assert_eq!(&*secret, b"unit-test-secret");
 
         unsafe {
             std::env::remove_var("JWT_SECRET");
@@ -4461,8 +4490,9 @@ mod tests {
             std::env::set_var("JWT_SECRET_FILE", path.as_os_str());
         }
 
-        let secret = load_jwt_secret_from_env().expect("file-backed JWT secret should load");
-        assert_eq!(secret, b"file-secret");
+        let secret = load_jwt_secret(&SecretRef::env_or_file("JWT_SECRET"))
+            .expect("file-backed JWT secret should load");
+        assert_eq!(&*secret, b"file-secret");
 
         unsafe {
             std::env::remove_var("JWT_SECRET_FILE");
@@ -4479,7 +4509,7 @@ mod tests {
                 reply_to: None,
                 public_base_url: Some("https://app.example".to_owned()),
                 provider: AuthEmailProvider::Resend {
-                    api_key_env: "RESEND_API_KEY".to_owned(),
+                    api_key: SecretRef::env_or_file("RESEND_API_KEY"),
                     api_base_url: None,
                 },
             }),
@@ -4511,7 +4541,7 @@ mod tests {
                 reply_to: None,
                 public_base_url: Some("https://app.example/app/api".to_owned()),
                 provider: AuthEmailProvider::Resend {
-                    api_key_env: "RESEND_API_KEY".to_owned(),
+                    api_key: SecretRef::env_or_file("RESEND_API_KEY"),
                     api_base_url: None,
                 },
             }),
@@ -4729,7 +4759,7 @@ mod tests {
         let config = DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: path.to_string_lossy().into_owned(),
-                encryption_key_env: Some(env_var.clone()),
+                encryption_key: Some(SecretRef::env_or_file(env_var.clone())),
             }),
             resilience: None,
         };

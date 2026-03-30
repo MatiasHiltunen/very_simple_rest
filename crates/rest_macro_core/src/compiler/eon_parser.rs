@@ -55,6 +55,7 @@ use crate::{
     },
     logging::{LogTimestampPrecision, LoggingConfig},
     runtime::{CompressionConfig, RuntimeConfig},
+    secret::SecretRef,
     security::{
         CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
         ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
@@ -121,6 +122,8 @@ struct DatabaseEngineDocument {
     path: Option<String>,
     #[serde(default)]
     encryption_key_env: Option<String>,
+    #[serde(default)]
+    encryption_key: Option<SecretRefDocument>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -148,6 +151,8 @@ struct DatabaseBackupDocument {
     #[serde(default)]
     encryption_key_env: Option<String>,
     #[serde(default)]
+    encryption_key: Option<SecretRefDocument>,
+    #[serde(default)]
     retention: Option<DatabaseBackupRetentionDocument>,
 }
 
@@ -169,6 +174,8 @@ struct DatabaseReplicationDocument {
     read_routing: Option<String>,
     #[serde(default)]
     read_url_env: Option<String>,
+    #[serde(default)]
+    read_url: Option<SecretRefDocument>,
     #[serde(default)]
     max_lag: Option<String>,
     #[serde(default)]
@@ -271,6 +278,8 @@ struct AuthSecurityDocument {
     #[serde(default)]
     password_reset_token_ttl_seconds: Option<i64>,
     #[serde(default)]
+    jwt_secret: Option<SecretRefDocument>,
+    #[serde(default)]
     claims: BTreeMap<String, AuthClaimMapValueDocument>,
     #[serde(default)]
     session_cookie: Option<SessionCookieDocument>,
@@ -316,9 +325,31 @@ struct AuthEmailProviderDocument {
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
+    api_key: Option<SecretRefDocument>,
+    #[serde(default)]
     api_base_url: Option<String>,
     #[serde(default)]
     connection_url_env: Option<String>,
+    #[serde(default)]
+    connection_url: Option<SecretRefDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SecretRefDocument {
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    env_or_file: Option<String>,
+    #[serde(default)]
+    systemd_credential: Option<String>,
+    #[serde(default)]
+    external: Option<ExternalSecretRefDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct ExternalSecretRefDocument {
+    provider: String,
+    locator: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -3525,6 +3556,12 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
                 password_reset_token_ttl_seconds: auth
                     .password_reset_token_ttl_seconds
                     .unwrap_or(defaults.password_reset_token_ttl_seconds),
+                jwt_secret: parse_secret_ref_with_legacy_env(
+                    auth.jwt_secret,
+                    None,
+                    "security.auth.jwt_secret",
+                )?
+                .or(defaults.jwt_secret),
                 claims: parse_auth_claims_document(auth.claims),
                 session_cookie: auth
                     .session_cookie
@@ -3938,27 +3975,130 @@ fn parse_auth_email_provider_document(
 ) -> syn::Result<AuthEmailProvider> {
     match document.kind.trim().to_ascii_lowercase().as_str() {
         "resend" => Ok(AuthEmailProvider::Resend {
-            api_key_env: document.api_key_env.ok_or_else(|| {
-                syn::Error::new(
-                    Span::call_site(),
-                    "`security.auth.email.provider.api_key_env` is required for `kind = Resend`",
-                )
-            })?,
+            api_key: parse_required_secret_ref_with_legacy_env(
+                document.api_key,
+                document.api_key_env,
+                "security.auth.email.provider.api_key",
+                "security.auth.email.provider.api_key_env",
+                "kind = Resend",
+            )?,
             api_base_url: document.api_base_url,
         }),
         "smtp" => Ok(AuthEmailProvider::Smtp {
-            connection_url_env: document.connection_url_env.ok_or_else(|| {
-                syn::Error::new(
-                    Span::call_site(),
-                    "`security.auth.email.provider.connection_url_env` is required for `kind = Smtp`",
-                )
-            })?,
+            connection_url: parse_required_secret_ref_with_legacy_env(
+                document.connection_url,
+                document.connection_url_env,
+                "security.auth.email.provider.connection_url",
+                "security.auth.email.provider.connection_url_env",
+                "kind = Smtp",
+            )?,
         }),
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("unsupported `security.auth.email.provider.kind` value `{other}`"),
         )),
     }
+}
+
+fn parse_secret_ref_with_legacy_env(
+    document: Option<SecretRefDocument>,
+    legacy_env: Option<String>,
+    label: &str,
+) -> syn::Result<Option<SecretRef>> {
+    if document.is_some() && legacy_env.is_some() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("`{label}` cannot be combined with its legacy `*_env` form"),
+        ));
+    }
+
+    if let Some(document) = document {
+        return Ok(Some(parse_secret_ref_document(document, label)?));
+    }
+
+    match legacy_env {
+        Some(value) => {
+            if value.trim().is_empty() {
+                Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("legacy env binding for `{label}` cannot be empty"),
+                ))
+            } else {
+                Ok(Some(SecretRef::env_or_file(value)))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn parse_required_secret_ref_with_legacy_env(
+    document: Option<SecretRefDocument>,
+    legacy_env: Option<String>,
+    label: &str,
+    legacy_label: &str,
+    kind_label: &str,
+) -> syn::Result<SecretRef> {
+    parse_secret_ref_with_legacy_env(document, legacy_env, label)?.ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("`{label}` or `{legacy_label}` is required for `{kind_label}`"),
+        )
+    })
+}
+
+fn parse_secret_ref_document(document: SecretRefDocument, label: &str) -> syn::Result<SecretRef> {
+    let mut variants = Vec::new();
+    if let Some(env) = document.env {
+        variants.push(("env", env));
+    }
+    if let Some(env_or_file) = document.env_or_file {
+        variants.push(("env_or_file", env_or_file));
+    }
+    if let Some(systemd_credential) = document.systemd_credential {
+        variants.push(("systemd_credential", systemd_credential));
+    }
+
+    if variants.len() + usize::from(document.external.is_some()) != 1 {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "`{label}` must set exactly one of `env`, `env_or_file`, `systemd_credential`, or `external`"
+            ),
+        ));
+    }
+
+    if let Some((kind, value)) = variants.into_iter().next() {
+        if value.trim().is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("`{label}.{kind}` cannot be empty"),
+            ));
+        }
+        return Ok(match kind {
+            "env" => SecretRef::env(value),
+            "env_or_file" => SecretRef::env_or_file(value),
+            "systemd_credential" => SecretRef::SystemdCredential { id: value },
+            _ => unreachable!("validated secret ref kind"),
+        });
+    }
+
+    let external = document.external.expect("validated external secret ref");
+    if external.provider.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("`{label}.external.provider` cannot be empty"),
+        ));
+    }
+    if external.locator.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("`{label}.external.locator` cannot be empty"),
+        ));
+    }
+    Ok(SecretRef::External {
+        provider: external.provider,
+        locator: external.locator,
+    })
 }
 
 fn parse_auth_ui_page_document(
@@ -4026,7 +4166,9 @@ fn parse_database_document(
         None => match db {
             DbBackend::Sqlite => DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: format!("var/data/{module_name}.db"),
-                encryption_key_env: Some(DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV.to_owned()),
+                encryption_key: Some(SecretRef::env_or_file(
+                    DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV,
+                )),
             }),
             DbBackend::Postgres | DbBackend::Mysql => DatabaseEngine::Sqlx,
         },
@@ -4069,7 +4211,11 @@ fn parse_database_engine_document(
 
             Ok(DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path,
-                encryption_key_env: document.encryption_key_env,
+                encryption_key: parse_secret_ref_with_legacy_env(
+                    document.encryption_key,
+                    document.encryption_key_env,
+                    "database.engine.encryption_key",
+                )?,
             }))
         }
         other => Err(syn::Error::new(
@@ -4100,15 +4246,15 @@ fn parse_database_resilience_document(
 
     if let Some(replication) = &replication {
         if replication.read_routing == DatabaseReadRoutingMode::Explicit
-            && replication.read_url_env.is_none()
+            && replication.read_url.is_none()
         {
             return Err(syn::Error::new(
                 span,
-                "database.resilience.replication.read_url_env is required when `read_routing = Explicit`",
+                "database.resilience.replication.read_url or `read_url_env` is required when `read_routing = Explicit`",
             ));
         }
         if replication.mode == DatabaseReplicationMode::None
-            && (replication.read_url_env.is_some()
+            && (replication.read_url.is_some()
                 || replication.max_lag.is_some()
                 || replication.replicas_expected.is_some()
                 || replication.read_routing != DatabaseReadRoutingMode::Off)
@@ -4172,11 +4318,6 @@ fn parse_database_backup_document(
         document.max_age.as_deref(),
         span,
     )?;
-    validate_non_empty_optional(
-        "database.resilience.backup.encryption_key_env",
-        document.encryption_key_env.as_deref(),
-        span,
-    )?;
     let retention = document.retention.map(|retention| DatabaseBackupRetention {
         daily: retention.daily,
         weekly: retention.weekly,
@@ -4189,7 +4330,11 @@ fn parse_database_backup_document(
         target,
         verify_restore: document.verify_restore.unwrap_or(false),
         max_age: document.max_age,
-        encryption_key_env: document.encryption_key_env,
+        encryption_key: parse_secret_ref_with_legacy_env(
+            document.encryption_key,
+            document.encryption_key_env,
+            "database.resilience.backup.encryption_key",
+        )?,
         retention,
     })
 }
@@ -4250,11 +4395,6 @@ fn parse_database_replication_document(
         None => DatabaseReadRoutingMode::Off,
     };
     validate_non_empty_optional(
-        "database.resilience.replication.read_url_env",
-        document.read_url_env.as_deref(),
-        span,
-    )?;
-    validate_non_empty_optional(
         "database.resilience.replication.max_lag",
         document.max_lag.as_deref(),
         span,
@@ -4263,7 +4403,11 @@ fn parse_database_replication_document(
     Ok(DatabaseReplicationConfig {
         mode,
         read_routing,
-        read_url_env: document.read_url_env,
+        read_url: parse_secret_ref_with_legacy_env(
+            document.read_url,
+            document.read_url_env,
+            "database.resilience.replication.read_url",
+        )?,
         max_lag: document.max_lag,
         replicas_expected: document.replicas_expected,
     })
@@ -5813,6 +5957,7 @@ mod tests {
                 engine: Some(DatabaseEngineDocument {
                     kind: "TursoLocal".to_owned(),
                     path: Some("var/data/app.db".to_owned()),
+                    encryption_key: None,
                     encryption_key_env: None,
                 }),
                 resilience: None,
@@ -5825,7 +5970,7 @@ mod tests {
             database.engine,
             DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: "var/data/app.db".to_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             })
         );
         assert!(database.resilience.is_none());
@@ -5839,6 +5984,7 @@ mod tests {
                 engine: Some(DatabaseEngineDocument {
                     kind: "TursoLocal".to_owned(),
                     path: Some("var/data/app.db".to_owned()),
+                    encryption_key: None,
                     encryption_key_env: None,
                 }),
                 resilience: None,
@@ -5864,7 +6010,9 @@ mod tests {
             database.engine,
             DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: "var/data/blog_api.db".to_owned(),
-                encryption_key_env: Some(DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV.to_owned()),
+                encryption_key: Some(SecretRef::env_or_file(
+                    DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV,
+                )),
             })
         );
         assert!(database.resilience.is_none());
@@ -5878,6 +6026,7 @@ mod tests {
                 engine: Some(DatabaseEngineDocument {
                     kind: "Sqlx".to_owned(),
                     path: None,
+                    encryption_key: None,
                     encryption_key_env: None,
                 }),
                 resilience: Some(DatabaseResilienceDocument {
@@ -5888,6 +6037,7 @@ mod tests {
                         target: Some("S3".to_owned()),
                         verify_restore: Some(true),
                         max_age: Some("24h".to_owned()),
+                        encryption_key: None,
                         encryption_key_env: Some("BACKUP_ENCRYPTION_KEY".to_owned()),
                         retention: Some(DatabaseBackupRetentionDocument {
                             daily: Some(7),
@@ -5898,6 +6048,7 @@ mod tests {
                     replication: Some(DatabaseReplicationDocument {
                         mode: Some("ReadReplica".to_owned()),
                         read_routing: Some("Explicit".to_owned()),
+                        read_url: None,
                         read_url_env: Some("DATABASE_READ_URL".to_owned()),
                         max_lag: Some("30s".to_owned()),
                         replicas_expected: Some(1),
@@ -5920,19 +6071,80 @@ mod tests {
         assert_eq!(replication.mode, DatabaseReplicationMode::ReadReplica);
         assert_eq!(replication.read_routing, DatabaseReadRoutingMode::Explicit);
         assert_eq!(
-            replication.read_url_env.as_deref(),
-            Some("DATABASE_READ_URL")
+            replication.read_url.as_ref(),
+            Some(&SecretRef::env_or_file("DATABASE_READ_URL"))
         );
     }
 
     #[test]
-    fn rejects_replication_read_routing_without_read_url_env() {
+    fn parses_typed_database_secret_refs_from_eon() {
+        let database = parse_database_document(
+            DbBackend::Sqlite,
+            Some(DatabaseDocument {
+                engine: Some(DatabaseEngineDocument {
+                    kind: "TursoLocal".to_owned(),
+                    path: Some("var/data/app.db".to_owned()),
+                    encryption_key: Some(SecretRefDocument {
+                        env: None,
+                        env_or_file: Some("TURSO_ENCRYPTION_KEY".to_owned()),
+                        systemd_credential: None,
+                        external: None,
+                    }),
+                    encryption_key_env: None,
+                }),
+                resilience: Some(DatabaseResilienceDocument {
+                    profile: Some("Pitr".to_owned()),
+                    backup: Some(DatabaseBackupDocument {
+                        required: Some(true),
+                        mode: Some("Snapshot".to_owned()),
+                        target: Some("Local".to_owned()),
+                        verify_restore: Some(true),
+                        max_age: None,
+                        encryption_key: Some(SecretRefDocument {
+                            env: None,
+                            env_or_file: None,
+                            systemd_credential: Some("backup_encryption_key".to_owned()),
+                            external: None,
+                        }),
+                        encryption_key_env: None,
+                        retention: None,
+                    }),
+                    replication: None,
+                }),
+            }),
+            "app_api",
+            Span::call_site(),
+        )
+        .expect("typed secret refs should parse");
+
+        assert_eq!(
+            database.engine,
+            DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: "var/data/app.db".to_owned(),
+                encryption_key: Some(SecretRef::env_or_file("TURSO_ENCRYPTION_KEY")),
+            })
+        );
+        assert_eq!(
+            database
+                .resilience
+                .as_ref()
+                .and_then(|config| config.backup.as_ref())
+                .and_then(|backup| backup.encryption_key.as_ref()),
+            Some(&SecretRef::SystemdCredential {
+                id: "backup_encryption_key".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_replication_read_routing_without_read_url() {
         let error = parse_database_document(
             DbBackend::Postgres,
             Some(DatabaseDocument {
                 engine: Some(DatabaseEngineDocument {
                     kind: "Sqlx".to_owned(),
                     path: None,
+                    encryption_key: None,
                     encryption_key_env: None,
                 }),
                 resilience: Some(DatabaseResilienceDocument {
@@ -5941,6 +6153,7 @@ mod tests {
                     replication: Some(DatabaseReplicationDocument {
                         mode: Some("ReadReplica".to_owned()),
                         read_routing: Some("Explicit".to_owned()),
+                        read_url: None,
                         read_url_env: None,
                         max_lag: None,
                         replicas_expected: None,
@@ -5955,7 +6168,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("database.resilience.replication.read_url_env is required"),
+                .contains("database.resilience.replication.read_url or `read_url_env` is required"),
             "unexpected error: {error}"
         );
     }
@@ -5968,6 +6181,7 @@ mod tests {
                 engine: Some(DatabaseEngineDocument {
                     kind: "TursoLocal".to_owned(),
                     path: Some("var/data/app.db".to_owned()),
+                    encryption_key: None,
                     encryption_key_env: None,
                 }),
                 resilience: Some(DatabaseResilienceDocument {
@@ -5976,6 +6190,7 @@ mod tests {
                     replication: Some(DatabaseReplicationDocument {
                         mode: Some("ReadReplica".to_owned()),
                         read_routing: Some("Off".to_owned()),
+                        read_url: None,
                         read_url_env: None,
                         max_lag: None,
                         replicas_expected: None,
@@ -8328,6 +8543,57 @@ resources: [
             Some(Hsts {
                 max_age_seconds: 3600,
                 include_subdomains: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_typed_auth_secret_refs_from_eon() {
+        let document = parse_document(
+            r#"
+            security: {
+                auth: {
+                    jwt_secret: { systemd_credential: "jwt_signing_key" }
+                    email: {
+                        from_email: "noreply@example.com"
+                        provider: {
+                            kind: Resend
+                            api_key: {
+                                external: {
+                                    provider: "infisical"
+                                    locator: "prod/resend_api_key"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+
+        assert_eq!(
+            security.auth.jwt_secret,
+            Some(SecretRef::SystemdCredential {
+                id: "jwt_signing_key".to_owned(),
+            })
+        );
+        assert_eq!(
+            security.auth.email.map(|email| email.provider),
+            Some(AuthEmailProvider::Resend {
+                api_key: SecretRef::External {
+                    provider: "infisical".to_owned(),
+                    locator: "prod/resend_api_key".to_owned(),
+                },
+                api_base_url: None,
             })
         );
     }

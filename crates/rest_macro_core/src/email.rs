@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::{AuthEmailProvider, AuthEmailSettings};
-use crate::secret::load_secret_from_env_or_file;
+use crate::secret::load_secret;
 
 pub const AUTH_EMAIL_CAPTURE_DIR_ENV: &str = "VSR_AUTH_EMAIL_CAPTURE_DIR";
 
@@ -31,11 +31,11 @@ pub async fn send_auth_email(
 
     match &settings.provider {
         AuthEmailProvider::Resend {
-            api_key_env,
+            api_key,
             api_base_url,
         } => {
-            let api_key = load_secret_from_env_or_file(api_key_env, "Resend API key")
-                .map_err(|error| error.to_string())?;
+            let api_key =
+                load_secret(api_key, "Resend API key").map_err(|error| error.to_string())?;
             send_via_resend(
                 settings,
                 message,
@@ -44,10 +44,9 @@ pub async fn send_auth_email(
             )
             .await
         }
-        AuthEmailProvider::Smtp { connection_url_env } => {
-            let connection_url =
-                load_secret_from_env_or_file(connection_url_env, "SMTP connection URL")
-                    .map_err(|error| error.to_string())?;
+        AuthEmailProvider::Smtp { connection_url } => {
+            let connection_url = load_secret(connection_url, "SMTP connection URL")
+                .map_err(|error| error.to_string())?;
             send_via_smtp(settings, message, &connection_url).await
         }
     }

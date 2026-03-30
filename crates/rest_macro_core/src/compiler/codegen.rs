@@ -6,8 +6,8 @@ use quote::{format_ident, quote};
 use syn::{Path, Type};
 
 use super::model::{
-    default_service_database_url, GeneratedValue, PolicyFilterExpression, PolicyValueSource,
-    ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode, WriteModelStyle,
+    GeneratedValue, PolicyFilterExpression, PolicyValueSource, ResourceSpec, ServiceSpec,
+    StaticCacheProfile, StaticMode, WriteModelStyle, default_service_database_url,
 };
 use crate::{
     authorization::{
@@ -944,18 +944,13 @@ fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
         }
         DatabaseEngine::TursoLocal(engine) => {
             let path = Literal::string(&engine.path);
-            let encryption_key_env = match engine.encryption_key_env.as_deref() {
-                Some(value) => {
-                    let value = Literal::string(value);
-                    quote!(Some(#value.to_owned()))
-                }
-                None => quote!(None),
-            };
+            let encryption_key =
+                option_secret_ref_tokens(engine.encryption_key.as_ref(), runtime_crate);
             quote!(
                 #runtime_crate::core::database::DatabaseEngine::TursoLocal(
                     #runtime_crate::core::database::TursoLocalConfig {
                         path: #path.to_owned(),
-                        encryption_key_env: #encryption_key_env,
+                        encryption_key: #encryption_key,
                     }
                 )
             )
@@ -977,13 +972,8 @@ fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                         }
                         None => quote!(None),
                     };
-                    let encryption_key_env = match backup.encryption_key_env.as_deref() {
-                        Some(value) => {
-                            let value = Literal::string(value);
-                            quote!(Some(#value.to_owned()))
-                        }
-                        None => quote!(None),
-                    };
+                    let encryption_key =
+                        option_secret_ref_tokens(backup.encryption_key.as_ref(), runtime_crate);
                     let retention = match &backup.retention {
                         Some(retention) => {
                             let daily = match retention.daily {
@@ -1012,7 +1002,7 @@ fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                         target: #target,
                         verify_restore: #verify_restore,
                         max_age: #max_age,
-                        encryption_key_env: #encryption_key_env,
+                        encryption_key: #encryption_key,
                         retention: #retention,
                     }))
                 }
@@ -1023,13 +1013,8 @@ fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                     let mode = database_replication_mode_tokens(replication.mode, runtime_crate);
                     let read_routing =
                         database_read_routing_mode_tokens(replication.read_routing, runtime_crate);
-                    let read_url_env = match replication.read_url_env.as_deref() {
-                        Some(value) => {
-                            let value = Literal::string(value);
-                            quote!(Some(#value.to_owned()))
-                        }
-                        None => quote!(None),
-                    };
+                    let read_url =
+                        option_secret_ref_tokens(replication.read_url.as_ref(), runtime_crate);
                     let max_lag = match replication.max_lag.as_deref() {
                         Some(value) => {
                             let value = Literal::string(value);
@@ -1044,7 +1029,7 @@ fn database_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                     quote!(Some(#runtime_crate::core::database::DatabaseReplicationConfig {
                         mode: #mode,
                         read_routing: #read_routing,
-                        read_url_env: #read_url_env,
+                        read_url: #read_url,
                         max_lag: #max_lag,
                         replicas_expected: #replicas_expected,
                     }))
@@ -1297,6 +1282,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
         Literal::i64_unsuffixed(security.auth.verification_token_ttl_seconds);
     let password_reset_token_ttl_seconds =
         Literal::i64_unsuffixed(security.auth.password_reset_token_ttl_seconds);
+    let jwt_secret = option_secret_ref_tokens(security.auth.jwt_secret.as_ref(), runtime_crate);
     let auth_claims = auth_claim_mappings_tokens(&security.auth.claims, runtime_crate);
     let session_cookie =
         option_session_cookie_tokens(security.auth.session_cookie.as_ref(), runtime_crate);
@@ -1341,6 +1327,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 require_email_verification: #require_email_verification,
                 verification_token_ttl_seconds: #verification_token_ttl_seconds,
                 password_reset_token_ttl_seconds: #password_reset_token_ttl_seconds,
+                jwt_secret: #jwt_secret,
                 claims: #auth_claims,
                 session_cookie: #session_cookie,
                 email: #email,
@@ -1368,6 +1355,56 @@ fn option_usize_tokens(value: Option<usize>) -> TokenStream {
             quote!(Some(#value))
         }
         None => quote!(None),
+    }
+}
+
+fn option_secret_ref_tokens(
+    value: Option<&crate::secret::SecretRef>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        Some(value) => {
+            let secret = secret_ref_tokens(value, runtime_crate);
+            quote!(Some(#secret))
+        }
+        None => quote!(None),
+    }
+}
+
+fn secret_ref_tokens(value: &crate::secret::SecretRef, runtime_crate: &Path) -> TokenStream {
+    match value {
+        crate::secret::SecretRef::Env { var_name } => {
+            let var_name = Literal::string(var_name);
+            quote!(#runtime_crate::core::secret::SecretRef::Env {
+                var_name: #var_name.to_owned(),
+            })
+        }
+        crate::secret::SecretRef::EnvOrFile { var_name } => {
+            let var_name = Literal::string(var_name);
+            quote!(#runtime_crate::core::secret::SecretRef::EnvOrFile {
+                var_name: #var_name.to_owned(),
+            })
+        }
+        crate::secret::SecretRef::SystemdCredential { id } => {
+            let id = Literal::string(id);
+            quote!(#runtime_crate::core::secret::SecretRef::SystemdCredential {
+                id: #id.to_owned(),
+            })
+        }
+        crate::secret::SecretRef::External { provider, locator } => {
+            let provider = Literal::string(provider);
+            let locator = Literal::string(locator);
+            quote!(#runtime_crate::core::secret::SecretRef::External {
+                provider: #provider.to_owned(),
+                locator: #locator.to_owned(),
+            })
+        }
+        crate::secret::SecretRef::File { path } => {
+            let path = Literal::string(&path.to_string_lossy());
+            quote!(#runtime_crate::core::secret::SecretRef::File {
+                path: ::std::path::PathBuf::from(#path),
+            })
+        }
     }
 }
 
@@ -1489,23 +1526,23 @@ fn option_auth_email_tokens(
             let public_base_url = option_string_tokens(value.public_base_url.as_deref());
             let provider = match &value.provider {
                 crate::auth::AuthEmailProvider::Resend {
-                    api_key_env,
+                    api_key,
                     api_base_url,
                 } => {
-                    let api_key_env = Literal::string(api_key_env);
+                    let api_key = secret_ref_tokens(api_key, runtime_crate);
                     let api_base_url = option_string_tokens(api_base_url.as_deref());
                     quote!(
                         #runtime_crate::core::auth::AuthEmailProvider::Resend {
-                            api_key_env: #api_key_env.to_owned(),
+                            api_key: #api_key,
                             api_base_url: #api_base_url,
                         }
                     )
                 }
-                crate::auth::AuthEmailProvider::Smtp { connection_url_env } => {
-                    let connection_url_env = Literal::string(connection_url_env);
+                crate::auth::AuthEmailProvider::Smtp { connection_url } => {
+                    let connection_url = secret_ref_tokens(connection_url, runtime_crate);
                     quote!(
                         #runtime_crate::core::auth::AuthEmailProvider::Smtp {
-                            connection_url_env: #connection_url_env.to_owned(),
+                            connection_url: #connection_url,
                         }
                     )
                 }
@@ -6293,11 +6330,10 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                         },
                         _ => {
                             let enum_check = if let Some(enum_values) = field.enum_values() {
-                                let enum_values =
-                                    enum_values
-                                        .iter()
-                                        .map(|value| Literal::string(value.as_str()))
-                                        .collect::<Vec<_>>();
+                                let enum_values = enum_values
+                                    .iter()
+                                    .map(|value| Literal::string(value.as_str()))
+                                    .collect::<Vec<_>>();
                                 quote! {
                                     if ![#(#enum_values),*].contains(&value.as_str()) {
                                         return Err(#runtime_crate::core::errors::bad_request(
@@ -6310,17 +6346,17 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                                 quote! {}
                             };
                             quote! {
-                            if let Some(value) = &query.#filter_ident {
-                                #enum_check
-                                conditions.push(format!(
-                                    "{} = {}",
-                                    #field_name,
-                                    Self::list_placeholder(filter_binds.len() + 1)
-                                ));
-                                filter_binds.push(#bind_ident::Text(value.clone()));
+                                if let Some(value) = &query.#filter_ident {
+                                    #enum_check
+                                    conditions.push(format!(
+                                        "{} = {}",
+                                        #field_name,
+                                        Self::list_placeholder(filter_binds.len() + 1)
+                                    ));
+                                    filter_binds.push(#bind_ident::Text(value.clone()));
+                                }
                             }
                         }
-                        },
                     }
                 }
             };

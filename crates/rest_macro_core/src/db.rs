@@ -33,6 +33,8 @@ use uuid::Uuid;
 #[cfg(feature = "turso-local")]
 use crate::database::open_turso_local_database;
 use crate::database::{DatabaseConfig, DatabaseEngine};
+#[cfg(feature = "turso-local")]
+use crate::secret::SecretRef;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1379,26 +1381,26 @@ fn parse_turso_local_url(
                 }
             }
         };
-        let encryption_key_env = parsed
-            .query_pairs()
-            .find_map(|(key, value)| (key == "encryption_key_env").then(|| value.into_owned()));
+        let encryption_key = parsed.query_pairs().find_map(|(key, value)| {
+            (key == "encryption_key_env").then(|| SecretRef::env_or_file(value.into_owned()))
+        });
         return Ok(Some(crate::database::TursoLocalConfig {
             path,
-            encryption_key_env,
+            encryption_key,
         }));
     }
 
     if let Some(path) = url.strip_prefix("turso-local:") {
         return Ok(Some(crate::database::TursoLocalConfig {
             path: path.to_owned(),
-            encryption_key_env: None,
+            encryption_key: None,
         }));
     }
 
     if let Some(path) = url.strip_prefix("turso:") {
         return Ok(Some(crate::database::TursoLocalConfig {
             path: path.to_owned(),
-            encryption_key_env: None,
+            encryption_key: None,
         }));
     }
 
@@ -1419,6 +1421,8 @@ mod tests {
     use super::{SqlxBackend, rewrite_sql_placeholders};
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
+    #[cfg(feature = "turso-local")]
+    use crate::secret::SecretRef;
     #[cfg(feature = "turso-local")]
     use std::sync::{Mutex, OnceLock};
 
@@ -1448,7 +1452,10 @@ mod tests {
         .expect("relative url should parse")
         .expect("relative url should resolve to config");
         assert_eq!(relative.path, "var/data/app.db");
-        assert_eq!(relative.encryption_key_env.as_deref(), Some("TURSO_KEY"));
+        assert_eq!(
+            relative.encryption_key.as_ref(),
+            Some(&SecretRef::env_or_file("TURSO_KEY"))
+        );
 
         let absolute = super::parse_turso_local_url("turso-local:///tmp/app.db")
             .expect("absolute url should parse")
@@ -1493,7 +1500,7 @@ mod tests {
         let config = DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: path.to_string_lossy().into_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             }),
             resilience: None,
         };
@@ -1543,7 +1550,7 @@ mod tests {
         let config = DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: path.to_string_lossy().into_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             }),
             resilience: None,
         };
@@ -1595,7 +1602,7 @@ mod tests {
         let config = DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: path.to_string_lossy().into_owned(),
-                encryption_key_env: None,
+                encryption_key: None,
             }),
             resilience: None,
         };
@@ -1664,7 +1671,7 @@ mod tests {
         let config = DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: path.to_string_lossy().into_owned(),
-                encryption_key_env: Some(env_var.clone()),
+                encryption_key: Some(SecretRef::env_or_file(env_var.clone())),
             }),
             resilience: None,
         };

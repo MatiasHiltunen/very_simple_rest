@@ -110,9 +110,10 @@ SQLite `.eon` services now default to `database.engine = TursoLocal`, using a pe
 `var/data/<module>.db` path unless you override it explicitly. You can still opt back into the
 legacy runtime path with `database.engine.kind = Sqlx`. `TursoLocal` bootstraps a local Turso
 database file before the emitted server connects through the project runtime's database adapter
-while keeping the SQL dialect as SQLite. `TursoLocal` can also carry `encryption_key_env`, which
-is read from the environment as a hex key for local Turso bootstrap and encrypted local database
-access.
+while keeping the SQL dialect as SQLite. `TursoLocal` can also carry a typed
+`database.engine.encryption_key` secret ref; the preferred form is
+`{ env_or_file: "TURSO_ENCRYPTION_KEY" }` for local Turso bootstrap and encrypted local database
+access. The legacy `encryption_key_env` shorthand still parses for backward compatibility.
 
 `.eon` services can also define service-level `logging`, `runtime`, and `security` defaults.
 Logging controls the emitted server's filter env var, default filter, and timestamp precision
@@ -144,7 +145,9 @@ Nested collection routes can do the same when their parent filter targets that c
 accept that one field as an optional runtime-authorized fallback. When the created row is only
 runtime-readable, the generated created response can also return that row through the same hybrid
 read fallback. This slice is additive only and still requires the static role check to pass first.
-Secrets such as `JWT_SECRET` still belong in the environment.
+Secrets can now be declared in `.eon` with typed secret refs such as
+`security.auth.jwt_secret: { env_or_file: "JWT_SECRET" }`, but the runtime still resolves them
+through environment variables, mounted files, systemd credentials, or future external providers.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
 the `/auth/register` and `/auth/login` routes in a fresh database.

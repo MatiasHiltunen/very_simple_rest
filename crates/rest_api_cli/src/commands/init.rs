@@ -277,7 +277,7 @@ database: {{
     engine: {{
         kind: TursoLocal
         path: "var/data/app.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+        encryption_key: {{ env_or_file: "TURSO_ENCRYPTION_KEY" }}
     }}
 }}
 
