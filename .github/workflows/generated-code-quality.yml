@@ -34,6 +34,12 @@ jobs:
       - name: Verify Expanded Output Snapshots
         run: cargo test -p vsra expand_server_code_ -- --nocapture
 
+      - name: Verify Representative Examples Pass Strict Schema Checks
+        run: |
+          cargo run -p vsra -- check --input examples/template/api.eon --strict
+          cargo run -p vsra -- check --input examples/cms/api.eon --strict
+          cargo run -p vsra -- check --input examples/family_app/family_app.eon --strict
+
       - name: Verify Generated Projects Are Warning Clean
         run: cargo test -p vsra warning_clean -- --ignored --nocapture
 

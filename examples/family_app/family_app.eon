@@ -190,6 +190,11 @@ resources: {
             }
             delete: "owner_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["owner_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             owner_user_id: I64
@@ -258,6 +263,17 @@ resources: {
             update: "created_by_user_id=user.id"
             delete: "created_by_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id"]
+            }
+            {
+                fields: ["created_by_user_id"]
+            }
+            {
+                fields: ["slug"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -348,6 +364,18 @@ resources: {
                 ]
             }
         }
+        indexes: [
+            {
+                fields: ["family_id", "user_id"]
+                unique: true
+            }
+            {
+                fields: ["user_id"]
+            }
+            {
+                fields: ["created_by_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -395,6 +423,18 @@ resources: {
             update: "primary_user_id=user.id"
             delete: "primary_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id", "primary_user_id", "delegate_user_id"]
+                unique: true
+            }
+            {
+                fields: ["primary_user_id"]
+            }
+            {
+                fields: ["delegate_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -496,6 +536,17 @@ resources: {
             }
             delete: "created_by_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id"]
+            }
+            {
+                fields: ["household_id"]
+            }
+            {
+                fields: ["created_by_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -574,6 +625,17 @@ resources: {
             update: "author_user_id=user.id"
             delete: "author_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id"]
+            }
+            {
+                fields: ["child_profile_id"]
+            }
+            {
+                fields: ["author_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -648,6 +710,17 @@ resources: {
             update: "author_user_id=user.id"
             delete: "author_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id"]
+            }
+            {
+                fields: ["child_profile_id"]
+            }
+            {
+                fields: ["author_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -755,6 +828,14 @@ resources: {
             update: "author_user_id=user.id"
             delete: "author_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id", "household_slug"]
+            }
+            {
+                fields: ["author_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: I64
@@ -816,6 +897,17 @@ resources: {
             update: "created_by_user_id=user.id"
             delete: "created_by_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id"]
+            }
+            {
+                fields: ["household_id"]
+            }
+            {
+                fields: ["created_by_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {
@@ -889,6 +981,17 @@ resources: {
             update: "created_by_user_id=user.id"
             delete: "created_by_user_id=user.id"
         }
+        indexes: [
+            {
+                fields: ["family_id"]
+            }
+            {
+                fields: ["household_id"]
+            }
+            {
+                fields: ["created_by_user_id"]
+            }
+        ]
         fields: {
             id: { type: I64, id: true }
             family_id: {

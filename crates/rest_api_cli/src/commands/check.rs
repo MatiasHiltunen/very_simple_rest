@@ -202,6 +202,40 @@ fn explicit_index_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
     let mut findings = Vec::new();
 
     for resource in &service.resources {
+        for relation in &resource.many_to_many {
+            let Some(through_resource) =
+                resolve_resource_reference(&service.resources, &relation.through_table)
+            else {
+                continue;
+            };
+            let Some(field) = through_resource.find_field(relation.source_field.as_str()) else {
+                continue;
+            };
+            if !supports_declared_index(field)
+                || has_explicit_lookup_index(through_resource, relation.source_field.as_str())
+            {
+                continue;
+            }
+            findings.push(CheckFinding {
+                code: "indexes.explicit_many_to_many_index_missing".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("resources.{}.indexes", through_resource.api_name()),
+                message: format!(
+                    "join resource `{}` backs many-to-many relation `{}`.`{}`, but no explicit index starts with `{}`",
+                    through_resource.api_name(),
+                    resource.api_name(),
+                    relation.name,
+                    relation.source_field
+                ),
+                suggestion: Some(format!(
+                    "Declare an explicit index on `{}` or a composite index starting with it, such as `[\"{}\", \"{}\"]`.",
+                    relation.source_field, relation.source_field, relation.target_field
+                )),
+            });
+        }
+    }
+
+    for resource in &service.resources {
         for field in resource.fields.iter().filter(|field| {
             field
                 .relation
@@ -404,6 +438,13 @@ fn tls_path_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
 }
 
 fn resolve_exists_target_resource<'a>(
+    resources: &'a [ResourceSpec],
+    target_resource: &str,
+) -> Option<&'a ResourceSpec> {
+    resolve_resource_reference(resources, target_resource)
+}
+
+fn resolve_resource_reference<'a>(
     resources: &'a [ResourceSpec],
     target_resource: &str,
 ) -> Option<&'a ResourceSpec> {
@@ -625,6 +666,70 @@ resources: [
             .map(|finding| finding.code.as_str())
             .collect::<Vec<_>>();
         assert!(codes.contains(&"indexes.explicit_nested_route_index_missing"));
+    }
+
+    #[test]
+    fn check_report_warns_for_many_to_many_join_without_explicit_source_index() {
+        let root = temp_dir("many-to-many-fixture");
+        let config = root.join("many_to_many_check_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "many_to_many_check_api"
+resources: [
+    {
+        name: "Post"
+        many_to_many: [
+            {
+                name: "tags"
+                target: "Tag"
+                through: "PostTag"
+                source_field: "post_id"
+                target_field: "tag_id"
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+    {
+        name: "Tag"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+    {
+        name: "PostTag"
+        fields: [
+            { name: "id", type: I64, id: true }
+            {
+                name: "post_id"
+                type: I64
+                relation: {
+                    references: "post.id"
+                }
+            }
+            {
+                name: "tag_id"
+                type: I64
+                relation: {
+                    references: "tag.id"
+                }
+            }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"indexes.explicit_many_to_many_index_missing"));
     }
 
     #[test]

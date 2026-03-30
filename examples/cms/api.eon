@@ -1196,6 +1196,9 @@ resources: {
 		}
 		indexes: [
 			{
+				fields: ["workspace_id"]
+			}
+			{
 				fields: ["menu_id"]
 			}
 			{
