@@ -15,15 +15,17 @@ use syn::{LitStr, Type};
 use uuid::Uuid;
 
 use super::model::{
-    BuildConfig, BuildLtoMode, DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation,
-    GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
-    GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
-    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
-    PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyValueSource, ReferentialAction, ReleaseBuildConfig,
-    ResourceActionAssignmentSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
-    ResourceActionMethod, ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec,
-    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    BuildArtifactPathConfig, BuildArtifactsConfig, BuildCacheArtifactConfig,
+    BuildCacheCleanupStrategy, BuildConfig, BuildLtoMode, DbBackend, EnumSpec, FieldSpec,
+    FieldTransform, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
+    GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS, GENERATED_JSON_ARRAY_ALIAS,
+    GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
+    IndexSpec, ListConfig, NumericBound, PolicyAssignment, PolicyExistsCondition,
+    PolicyExistsFilter, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
+    PolicyValueSource, ReferentialAction, ReleaseBuildConfig, ResourceActionAssignmentSpec,
+    ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
+    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceSpec,
+    ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
     StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
     default_resource_module_ident, infer_generated_value, infer_sql_type, is_json_array_type,
     is_json_object_type, is_json_type, is_list_field, is_optional_type, is_typed_object_field,
@@ -365,6 +367,8 @@ struct BuildDocument {
     target_cpu_native: Option<bool>,
     #[serde(default)]
     release: Option<ReleaseBuildDocument>,
+    #[serde(default)]
+    artifacts: Option<BuildArtifactsDocument>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -375,6 +379,34 @@ struct ReleaseBuildDocument {
     codegen_units: Option<u32>,
     #[serde(default)]
     strip_debug_symbols: Option<bool>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct BuildArtifactsDocument {
+    #[serde(default)]
+    binary: Option<BuildArtifactPathDocument>,
+    #[serde(default)]
+    bundle: Option<BuildArtifactPathDocument>,
+    #[serde(default)]
+    cache: Option<BuildCacheArtifactDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct BuildArtifactPathDocument {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    env: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct BuildCacheArtifactDocument {
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    env: Option<String>,
+    #[serde(default)]
+    cleanup: Option<String>,
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -3551,6 +3583,8 @@ fn parse_build_document(document: Option<BuildDocument>) -> syn::Result<BuildCon
     };
 
     let release = document.release.unwrap_or_default();
+    let artifacts = document.artifacts.unwrap_or_default();
+    let cache = artifacts.cache.unwrap_or_default();
     let lto = match release.lto {
         None => None,
         Some(BuildLtoDocument::Bool(false)) => None,
@@ -3566,7 +3600,48 @@ fn parse_build_document(document: Option<BuildDocument>) -> syn::Result<BuildCon
             codegen_units: release.codegen_units,
             strip_debug_symbols: release.strip_debug_symbols.unwrap_or(false),
         },
+        artifacts: BuildArtifactsConfig {
+            binary: parse_build_artifact_path_document(artifacts.binary),
+            bundle: parse_build_artifact_path_document(artifacts.bundle),
+            cache: BuildCacheArtifactConfig {
+                root: cache.root,
+                env: cache.env,
+                cleanup: parse_build_cache_cleanup(cache.cleanup)?,
+            },
+        },
     })
+}
+
+fn parse_build_artifact_path_document(
+    document: Option<BuildArtifactPathDocument>,
+) -> BuildArtifactPathConfig {
+    let document = document.unwrap_or_default();
+    BuildArtifactPathConfig {
+        path: document.path,
+        env: document.env,
+    }
+}
+
+fn parse_build_cache_cleanup(value: Option<String>) -> syn::Result<BuildCacheCleanupStrategy> {
+    let Some(value) = value else {
+        return Ok(BuildCacheCleanupStrategy::Reuse);
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "reuse" => Ok(BuildCacheCleanupStrategy::Reuse),
+        "cleanbeforebuild" | "clean_before_build" | "clean-before-build" => {
+            Ok(BuildCacheCleanupStrategy::CleanBeforeBuild)
+        }
+        "removeonsuccess" | "remove_on_success" | "remove-on-success" => {
+            Ok(BuildCacheCleanupStrategy::RemoveOnSuccess)
+        }
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "unsupported `build.artifacts.cache.cleanup` value `{other}`; expected `Reuse`, `CleanBeforeBuild`, or `RemoveOnSuccess`"
+            ),
+        )),
+    }
 }
 
 fn parse_runtime_document(document: Option<RuntimeDocument>) -> RuntimeConfig {
@@ -8287,6 +8362,21 @@ resources: [
             r#"
             build: {
                 target_cpu_native: true
+                artifacts: {
+                    binary: {
+                        path: "dist/api"
+                        env: "CMS_BINARY_PATH"
+                    }
+                    bundle: {
+                        path: "dist/api.bundle"
+                        env: "CMS_BUNDLE_PATH"
+                    }
+                    cache: {
+                        root: ".vsr-build"
+                        env: "CMS_BUILD_CACHE_DIR"
+                        cleanup: RemoveOnSuccess
+                    }
+                }
                 release: {
                     lto: Thin
                     codegen_units: 1
@@ -8307,6 +8397,28 @@ resources: [
         assert_eq!(build.release.lto, Some(BuildLtoMode::Thin));
         assert_eq!(build.release.codegen_units, Some(1));
         assert!(build.release.strip_debug_symbols);
+        assert_eq!(build.artifacts.binary.path.as_deref(), Some("dist/api"));
+        assert_eq!(
+            build.artifacts.binary.env.as_deref(),
+            Some("CMS_BINARY_PATH")
+        );
+        assert_eq!(
+            build.artifacts.bundle.path.as_deref(),
+            Some("dist/api.bundle")
+        );
+        assert_eq!(
+            build.artifacts.bundle.env.as_deref(),
+            Some("CMS_BUNDLE_PATH")
+        );
+        assert_eq!(build.artifacts.cache.root.as_deref(), Some(".vsr-build"));
+        assert_eq!(
+            build.artifacts.cache.env.as_deref(),
+            Some("CMS_BUILD_CACHE_DIR")
+        );
+        assert_eq!(
+            build.artifacts.cache.cleanup,
+            BuildCacheCleanupStrategy::RemoveOnSuccess
+        );
     }
 
     #[test]
@@ -8334,6 +8446,36 @@ resources: [
             error
                 .to_string()
                 .contains("`build.release.codegen_units` must be greater than zero")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_build_artifact_env_names() {
+        let document = parse_document(
+            r#"
+            build: {
+                artifacts: {
+                    binary: {
+                        env: ""
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+        let build = parse_build_document(document.build).expect("build config should parse");
+        let error = validate_build_config(&build, Span::call_site())
+            .expect_err("empty build artifact env should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("`build.artifacts.binary.env` cannot be empty")
         );
     }
 

@@ -1774,6 +1774,62 @@ referenced by `exists` conditions.\n\n",
                 "true, false",
                 "Emits `strip = \"debuginfo\"` in `[profile.release]` for generated server projects.",
             ),
+            row(
+                "build.artifacts.binary.path",
+                "String",
+                "Service-relative `<input-stem>`",
+                "No",
+                "Relative or absolute path",
+                "Controls the default binary output path for `vsr build`. Relative paths resolve from the `.eon` file directory.",
+            ),
+            row(
+                "build.artifacts.binary.env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "Optional env var override for the binary output path. `vsr` reads it only when this field is declared.",
+            ),
+            row(
+                "build.artifacts.bundle.path",
+                "String",
+                "Adjacent `<binary>.bundle`",
+                "No",
+                "Relative or absolute directory path",
+                "Controls the exported runtime bundle directory when the binary output is not overridden explicitly on the CLI.",
+            ),
+            row(
+                "build.artifacts.bundle.env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "Optional env var override for the bundle directory. `vsr` reads it only when this field is declared.",
+            ),
+            row(
+                "build.artifacts.cache.root",
+                "String",
+                "Service-relative `.vsr-build`",
+                "No",
+                "Relative or absolute directory path",
+                "Base directory for reusable generated-project caches. `vsr build` appends the package name and stable service hash under this root.",
+            ),
+            row(
+                "build.artifacts.cache.env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "Optional env var override for the build cache root. `vsr` reads it only when this field is declared.",
+            ),
+            row(
+                "build.artifacts.cache.cleanup",
+                "Enum",
+                "Reuse",
+                "No",
+                "Reuse, CleanBeforeBuild, RemoveOnSuccess",
+                "Controls reusable build-cache lifecycle for `vsr build`. `CleanBeforeBuild` clears the resolved cache root first; `RemoveOnSuccess` deletes it after a successful build unless `--keep-build-dir` is used.",
+            ),
         ],
     );
 
@@ -2814,6 +2870,7 @@ mod tests {
         assert!(markdown.contains("database.resilience.backup.mode"));
         assert!(markdown.contains("build.release.lto"));
         assert!(markdown.contains("build.target_cpu_native"));
+        assert!(markdown.contains("build.artifacts.binary.path"));
         assert!(markdown.contains("runtime.compression.static_precompressed"));
         assert!(markdown.contains("security.auth.claims.<claim_name>"));
         assert!(markdown.contains("fields: {"));

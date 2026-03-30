@@ -409,16 +409,26 @@ Built-in auth and account routes are enabled by default for generated servers an
 `--without-auth` if your `.eon` service defines its own `user` table or if you want to omit the
 shared `/auth` routes and `migrations/0000_auth.sql`.
 
-`vsr build <service.eon>` now writes the binary into the current directory by default, naming it
-after the `.eon` file stem. For example, `vsr build blog_api.eon` produces `./blog-api`. If
-`--output` points to an existing directory, the binary is placed inside that directory using the
-same default name.
+`vsr build <service.eon>` now writes the binary next to the `.eon` file by default, naming it
+after the `.eon` file stem. For example, `vsr build examples/cms/api.eon` produces
+`examples/cms/api` and uses `examples/cms/.vsr-build/` for its reusable generated-project cache.
+If `--output` points to an existing directory, the binary is placed inside that directory using
+the same default name.
 
 The build command also exports the generated runtime assets next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file,
 `README.md`, `migrations/`, and relative TLS certificate files when they exist at build time.
 When `runtime.compression.static_precompressed = true`, `vsr build` also generates `.br` and
 `.gz` companion files for copied static assets inside that bundle.
+
+`.eon` services can now also declare build artifact locations under `build.artifacts`, with the
+following precedence for each artifact path: explicit CLI override, then a declared env var
+override, then the literal `.eon` path, then the service-relative default. If a build artifact
+does not declare an env var in `.eon`, `vsr` does not attempt to read one implicitly.
+
+`vsr clean --input <service.eon>` now resolves and removes that same service-specific build cache.
+Without `--input` or `--build-dir`, it preserves the legacy fallback of cleaning `./.vsr-build`
+from the current working directory.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and a Swagger UI page at
 `/docs`.

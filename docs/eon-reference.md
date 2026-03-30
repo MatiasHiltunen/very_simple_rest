@@ -509,6 +509,13 @@ Build settings affect generated server projects and `vsr build` output without c
 | build.release.lto | Bool or Enum | None | No | true, false, Thin, Fat | `true` maps to thin LTO. `false` disables emitted release-profile LTO overrides. |
 | build.release.codegen_units | u32 | None | No | Positive integer | Emits `codegen-units` in `[profile.release]`. Values must be greater than zero. |
 | build.release.strip_debug_symbols | Bool | false | No | true, false | Emits `strip = "debuginfo"` in `[profile.release]` for generated server projects. |
+| build.artifacts.binary.path | String | Service-relative `<input-stem>` | No | Relative or absolute path | Controls the default binary output path for `vsr build`. Relative paths resolve from the `.eon` file directory. |
+| build.artifacts.binary.env | String | None | No | Environment variable name | Optional env var override for the binary output path. `vsr` reads it only when this field is declared. |
+| build.artifacts.bundle.path | String | Adjacent `<binary>.bundle` | No | Relative or absolute directory path | Controls the exported runtime bundle directory when the binary output is not overridden explicitly on the CLI. |
+| build.artifacts.bundle.env | String | None | No | Environment variable name | Optional env var override for the bundle directory. `vsr` reads it only when this field is declared. |
+| build.artifacts.cache.root | String | Service-relative `.vsr-build` | No | Relative or absolute directory path | Base directory for reusable generated-project caches. `vsr build` appends the package name and stable service hash under this root. |
+| build.artifacts.cache.env | String | None | No | Environment variable name | Optional env var override for the build cache root. `vsr` reads it only when this field is declared. |
+| build.artifacts.cache.cleanup | Enum | Reuse | No | Reuse, CleanBeforeBuild, RemoveOnSuccess | Controls reusable build-cache lifecycle for `vsr build`. `CleanBeforeBuild` clears the resolved cache root first; `RemoveOnSuccess` deletes it after a successful build unless `--keep-build-dir` is used. |
 
 ## Runtime
 

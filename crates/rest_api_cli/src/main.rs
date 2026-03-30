@@ -126,7 +126,7 @@ enum Commands {
         #[arg(value_name = "FILE")]
         input: PathBuf,
 
-        /// Output binary path or directory
+        /// Output binary path or directory override; otherwise `.eon` build settings or the service directory default is used
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
 
@@ -134,7 +134,7 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         package_name: Option<String>,
 
-        /// Build cache directory for the generated Cargo project and Cargo target artifacts
+        /// Build cache directory override for the generated Cargo project and Cargo target artifacts
         #[arg(long, value_name = "DIR")]
         build_dir: Option<PathBuf>,
 
@@ -165,7 +165,11 @@ enum Commands {
 
     /// Remove cached generated build projects and Cargo build artifacts
     Clean {
-        /// Build cache directory to remove; defaults to `./.vsr-build`
+        /// Path to the `.eon` service file; when set, the resolved service-specific build cache is removed
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Build cache directory to remove; otherwise the `.eon` build cache or `./.vsr-build` in the current working directory is used
         #[arg(long, value_name = "DIR")]
         build_dir: Option<PathBuf>,
     },
@@ -1476,9 +1480,10 @@ async fn run_cli() -> Result<()> {
             )?;
         }
 
-        Commands::Clean { build_dir } => {
+        Commands::Clean { input, build_dir } => {
             println!("{}", "Cleaning build cache...".green().bold());
-            commands::server::clean_build_cache(build_dir.as_deref())?;
+            let input = input.clone().or_else(|| config_path.clone());
+            commands::server::clean_build_cache(input.as_deref(), build_dir.as_deref())?;
         }
 
         Commands::Serve {
@@ -2259,6 +2264,7 @@ mod tests {
     fn clean_command_accepts_optional_build_dir() {
         assert!(Cli::try_parse_from(["vsr", "clean"]).is_ok());
         assert!(Cli::try_parse_from(["vsr", "clean", "--build-dir", ".vsr-build"]).is_ok());
+        assert!(Cli::try_parse_from(["vsr", "clean", "--input", "todo_app.eon"]).is_ok());
     }
 
     #[test]

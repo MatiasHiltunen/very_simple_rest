@@ -269,13 +269,22 @@ Useful options:
 - `--build-dir` keeps the temporary Cargo project in a known location
 - `--keep-build-dir` preserves the generated build project after compilation
 - `--output dist` writes the binary into an existing directory; otherwise it defaults to the
-  current directory and names the binary after the `.eon` file stem
+  `.eon` service directory and names the binary after the `.eon` file stem
 
 `vsr build` also exports the generated runtime artifacts next to the binary in
 `<binary>.bundle/`, including `.env.example`, `openapi.json`, the copied `.eon` file, `README.md`,
 `migrations/`, and relative TLS certificate files when they exist at build time. When
 `runtime.compression.static_precompressed = true`, `vsr build` also generates `.br` and `.gz`
 companion files for copied static assets inside that bundle.
+
+`.eon` services can declare build artifact locations under `build.artifacts`. Each artifact path
+resolves with this precedence: CLI override, then the declared env var override, then the literal
+`.eon` path, then the service-relative default. No build-path env vars are read unless the `.eon`
+file explicitly names them.
+
+`vsr clean --input api.eon` removes the same resolved build cache that `vsr build api.eon` uses.
+Without `--input` or `--build-dir`, `vsr clean` keeps the legacy `./.vsr-build` current-directory
+fallback.
 
 The generated server fails fast if built-in auth is enabled and `JWT_SECRET` is missing. `vsr
 gen-env` and emitted `.env.example` files still help by generating or surfacing the required env

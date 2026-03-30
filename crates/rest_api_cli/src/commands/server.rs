@@ -7,17 +7,22 @@ use std::time::Duration;
 
 use brotli::CompressorWriter;
 use colored::Colorize;
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use rest_macro_core::auth::{
-    auth_management_migration_sql, auth_migration_sql, AuthDbBackend, AuthEmailProvider,
+    AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
 };
-use rest_macro_core::compiler::{self, BuildLtoMode, DbBackend, OpenApiSpecOptions, ServiceSpec};
-use rest_macro_core::database::{sqlite_url_for_path, DatabaseEngine};
+use rest_macro_core::compiler::{
+    self, BuildArtifactPathConfig, BuildCacheCleanupStrategy, BuildLtoMode, DbBackend,
+    OpenApiSpecOptions, ServiceSpec,
+};
+use rest_macro_core::database::{
+    DatabaseEngine, service_base_dir_from_config_path, sqlite_url_for_path,
+};
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
     DEFAULT_TLS_KEY_PATH_ENV,
 };
-use syn::{parse2, parse_str};
+use syn::{parse_str, parse2};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -116,12 +121,27 @@ pub fn build_server_binary_with_defaults(
     keep_build_dir: bool,
     force: bool,
 ) -> Result<PathBuf> {
-    let resolved_output = resolve_binary_output_path(input, output, package_name.as_deref())?;
-    build_server_binary(
+    let service = compiler::load_service_from_path(input)
+        .map_err(|error| Error::Config(format!("failed to load `{}`: {error}", input.display())))?;
+    let resolved_output =
+        resolve_binary_output_path(input, &service, output, package_name.as_deref())?;
+    let resolved_package_name = resolve_generated_package_name(input, package_name.as_deref())?;
+    let build_root = resolve_build_cache_root(
+        input,
+        &service,
+        &resolved_package_name,
+        build_dir.as_deref(),
+    )?;
+    let bundle_output =
+        resolve_bundle_output_path(input, &service, &resolved_output, output.is_some())?;
+
+    build_server_binary_from_resolved(
         input,
         &resolved_output,
+        &bundle_output,
+        &build_root,
+        service.build.artifacts.cache.cleanup,
         package_name,
-        build_dir,
         include_builtin_auth,
         release,
         target,
@@ -143,6 +163,10 @@ pub fn build_server_binary(
     keep_build_dir: bool,
     force: bool,
 ) -> Result<()> {
+    let service = compiler::load_service_from_path(input)
+        .map_err(|error| Error::Config(format!("failed to load `{}`: {error}", input.display())))?;
+    let resolved_package_name = resolve_generated_package_name(input, package_name.as_deref())?;
+    let output = resolve_absolute_path(output)?;
     if output.exists() && !force {
         return Err(Error::Config(format!(
             "output binary already exists: {} (pass --force to overwrite)",
@@ -150,8 +174,47 @@ pub fn build_server_binary(
         )));
     }
 
-    let resolved_package_name = resolve_generated_package_name(input, package_name.as_deref())?;
-    let build_root = resolve_build_cache_root(input, &resolved_package_name, build_dir.as_deref())?;
+    let build_root = resolve_build_cache_root(
+        input,
+        &service,
+        &resolved_package_name,
+        build_dir.as_deref(),
+    )?;
+    let bundle_output = build_artifact_dir(&output)?;
+
+    build_server_binary_from_resolved(
+        input,
+        &output,
+        &bundle_output,
+        &build_root,
+        service.build.artifacts.cache.cleanup,
+        package_name,
+        include_builtin_auth,
+        release,
+        target,
+        keep_build_dir,
+        force,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_server_binary_from_resolved(
+    input: &Path,
+    output: &Path,
+    bundle_output: &Path,
+    build_root: &Path,
+    cache_cleanup: BuildCacheCleanupStrategy,
+    package_name: Option<String>,
+    include_builtin_auth: bool,
+    release: bool,
+    target: Option<String>,
+    keep_build_dir: bool,
+    force: bool,
+) -> Result<()> {
+    if matches!(cache_cleanup, BuildCacheCleanupStrategy::CleanBeforeBuild) && build_root.exists() {
+        fs::remove_dir_all(build_root).map_err(Error::Io)?;
+    }
+
     let project_dir = build_root.join("project");
     let target_dir = build_root.join("target");
 
@@ -221,9 +284,10 @@ pub fn build_server_binary(
     println!(
         "{} {}",
         "Exporting runtime artifacts next to".cyan().bold(),
-        output.display()
+        bundle_output.display()
     );
-    let artifact_dir = export_generated_runtime_artifacts(&emitted.project_dir, output, force)?;
+    let artifact_dir =
+        export_generated_runtime_artifacts(&emitted.project_dir, bundle_output, force)?;
 
     if keep_build_dir {
         println!(
@@ -231,6 +295,10 @@ pub fn build_server_binary(
             "Preserved generated project cache in".cyan().bold(),
             project_dir.display()
         );
+    } else if matches!(cache_cleanup, BuildCacheCleanupStrategy::RemoveOnSuccess)
+        && build_root.exists()
+    {
+        fs::remove_dir_all(build_root).map_err(Error::Io)?;
     }
 
     println!(
@@ -247,8 +315,8 @@ pub fn build_server_binary(
     Ok(())
 }
 
-pub fn clean_build_cache(build_dir: Option<&Path>) -> Result<PathBuf> {
-    let cache_root = resolve_clean_build_cache_root(build_dir)?;
+pub fn clean_build_cache(input: Option<&Path>, build_dir: Option<&Path>) -> Result<PathBuf> {
+    let cache_root = resolve_clean_build_cache_root(input, build_dir)?;
     if !cache_root.exists() {
         println!(
             "{} {}",
@@ -409,11 +477,10 @@ fn write_generated_cargo_config(output_dir: &Path, service: &ServiceSpec) -> Res
 
 fn export_generated_runtime_artifacts(
     project_dir: &Path,
-    output: &Path,
+    artifact_dir: &Path,
     force: bool,
 ) -> Result<PathBuf> {
-    let artifact_dir = build_artifact_dir(output)?;
-    prepare_output_dir(&artifact_dir, force)?;
+    prepare_output_dir(artifact_dir, force)?;
 
     for file_name in [".env.example", "README.md", "openapi.json"] {
         let source = project_dir.join(file_name);
@@ -441,7 +508,7 @@ fn export_generated_runtime_artifacts(
     generate_precompressed_static_artifacts(&artifact_dir, service.as_ref())?;
     copy_generated_tls_artifacts(project_dir, &artifact_dir, service.as_ref())?;
 
-    Ok(artifact_dir)
+    Ok(artifact_dir.to_path_buf())
 }
 
 fn copy_generated_static_artifacts(
@@ -551,21 +618,41 @@ fn build_artifact_dir(output: &Path) -> Result<PathBuf> {
 
 fn resolve_build_cache_root(
     input: &Path,
+    service: &ServiceSpec,
     package_name: &str,
     build_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     match build_dir {
         Some(dir) => resolve_absolute_path(dir),
-        None => Ok(default_build_cache_root()?
-            .join(package_name)
-            .join(stable_build_cache_key(input, package_name)?)),
+        None => {
+            let cache_root = resolve_build_cache_root_from_config(input, service)?
+                .unwrap_or(default_build_cache_root_for_input(input)?);
+            Ok(cache_root
+                .join(package_name)
+                .join(stable_build_cache_key(input, package_name)?))
+        }
     }
 }
 
-fn resolve_clean_build_cache_root(build_dir: Option<&Path>) -> Result<PathBuf> {
+fn resolve_clean_build_cache_root(
+    input: Option<&Path>,
+    build_dir: Option<&Path>,
+) -> Result<PathBuf> {
     match build_dir {
         Some(dir) => resolve_absolute_path(dir),
-        None => default_build_cache_root(),
+        None => match input {
+            Some(service_input) => {
+                let service = compiler::load_service_from_path(service_input).map_err(|error| {
+                    Error::Config(format!(
+                        "failed to load `{}`: {error}",
+                        service_input.display()
+                    ))
+                })?;
+                let package_name = resolve_generated_package_name(service_input, None)?;
+                resolve_build_cache_root(service_input, &service, &package_name, None)
+            }
+            None => default_build_cache_root(),
+        },
     }
 }
 
@@ -573,6 +660,10 @@ fn default_build_cache_root() -> Result<PathBuf> {
     Ok(std::env::current_dir()
         .map_err(Error::Io)?
         .join(DEFAULT_BUILD_CACHE_DIR))
+}
+
+fn default_build_cache_root_for_input(input: &Path) -> Result<PathBuf> {
+    Ok(absolute_service_base_dir(input)?.join(DEFAULT_BUILD_CACHE_DIR))
 }
 
 fn stable_build_cache_key(input: &Path, package_name: &str) -> Result<String> {
@@ -598,6 +689,102 @@ fn resolve_absolute_path(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(std::env::current_dir().map_err(Error::Io)?.join(path))
     }
+}
+
+fn resolve_binary_output_path(
+    input: &Path,
+    service: &ServiceSpec,
+    output: Option<&Path>,
+    package_name: Option<&str>,
+) -> Result<PathBuf> {
+    let package_name = resolve_generated_package_name(input, package_name)?;
+    let binary_name = binary_file_name(&package_name);
+
+    match output {
+        Some(path) if path.exists() && path.is_dir() => {
+            Ok(resolve_absolute_path(path)?.join(binary_name))
+        }
+        Some(path) => resolve_absolute_path(path),
+        None => {
+            let configured =
+                resolve_build_artifact_path_from_config(input, &service.build.artifacts.binary)?;
+            match configured {
+                Some(path) if path.exists() && path.is_dir() => Ok(path.join(binary_name)),
+                Some(path) => Ok(path),
+                None => Ok(absolute_service_base_dir(input)?.join(binary_name)),
+            }
+        }
+    }
+}
+
+fn resolve_bundle_output_path(
+    input: &Path,
+    service: &ServiceSpec,
+    binary_output: &Path,
+    binary_output_overridden: bool,
+) -> Result<PathBuf> {
+    if binary_output_overridden {
+        return build_artifact_dir(binary_output);
+    }
+
+    if let Some(path) =
+        resolve_build_artifact_path_from_config(input, &service.build.artifacts.bundle)?
+    {
+        return Ok(path);
+    }
+
+    build_artifact_dir(binary_output)
+}
+
+fn resolve_build_cache_root_from_config(
+    input: &Path,
+    service: &ServiceSpec,
+) -> Result<Option<PathBuf>> {
+    resolve_build_artifact_path_from_config(
+        input,
+        &BuildArtifactPathConfig {
+            path: service.build.artifacts.cache.root.clone(),
+            env: service.build.artifacts.cache.env.clone(),
+        },
+    )
+}
+
+fn resolve_build_artifact_path_from_config(
+    input: &Path,
+    config: &BuildArtifactPathConfig,
+) -> Result<Option<PathBuf>> {
+    if let Some(env_name) = config.env.as_deref() {
+        if let Ok(value) = std::env::var(env_name) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(Some(resolve_config_relative_path(
+                    input,
+                    Path::new(trimmed),
+                )));
+            }
+        }
+    }
+
+    Ok(config
+        .path
+        .as_deref()
+        .map(|path| resolve_config_relative_path(input, Path::new(path))))
+}
+
+fn resolve_config_relative_path(input: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        absolute_service_base_dir(input)
+            .unwrap_or_else(|_| service_base_dir_from_config_path(input))
+            .join(path)
+    }
+}
+
+fn absolute_service_base_dir(input: &Path) -> Result<PathBuf> {
+    Ok(service_base_dir_from_config_path(&resolve_absolute_path(
+        input,
+    )?))
 }
 
 fn run_generated_project_build(
@@ -1737,23 +1924,6 @@ fn resolve_generated_package_name(input: &Path, package_name: Option<&str>) -> R
     Ok(sanitize_package_name(&service.module_ident.to_string()))
 }
 
-fn resolve_binary_output_path(
-    input: &Path,
-    output: Option<&Path>,
-    package_name: Option<&str>,
-) -> Result<PathBuf> {
-    let package_name = resolve_generated_package_name(input, package_name)?;
-    let binary_name = binary_file_name(&package_name);
-
-    match output {
-        Some(path) if path.exists() && path.is_dir() => Ok(path.join(binary_name)),
-        Some(path) => Ok(path.to_path_buf()),
-        None => Ok(std::env::current_dir()
-            .map_err(Error::Io)?
-            .join(binary_name)),
-    }
-}
-
 fn default_database_url(service: &ServiceSpec, backend: DbBackend) -> String {
     match &service.database.engine {
         DatabaseEngine::TursoLocal(engine) => sqlite_url_for_path(&engine.path),
@@ -1813,10 +1983,12 @@ fn binary_file_name(package_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        binary_file_name, build_artifact_dir, build_server_binary, clean_build_cache,
-        emit_server_project, expand_server_code, export_generated_runtime_artifacts,
-        is_text_file_busy_failure, resolve_binary_output_path, resolve_build_cache_root,
-        resolve_expanded_output_path, resolve_generated_package_name, sanitize_package_name,
+        DEFAULT_BUILD_CACHE_DIR, binary_file_name, build_artifact_dir, build_server_binary,
+        clean_build_cache, compiler, emit_server_project, expand_server_code,
+        export_generated_runtime_artifacts, is_text_file_busy_failure, resolve_absolute_path,
+        resolve_binary_output_path, resolve_build_cache_root, resolve_bundle_output_path,
+        resolve_clean_build_cache_root, resolve_expanded_output_path,
+        resolve_generated_package_name, sanitize_package_name, stable_build_cache_key,
     };
     use crate::commands::db::database_url_from_service_config;
     use crate::commands::setup::run_setup;
@@ -1824,7 +1996,7 @@ mod tests {
     use brotli::Decompressor;
     use flate2::read::GzDecoder;
     use reqwest::blocking::Client;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::fs;
     use std::io::Read;
     use std::net::TcpListener;
@@ -1996,7 +2168,12 @@ mod tests {
                 snapshot.display()
             )
         });
-        assert_eq!(expected, actual, "snapshot mismatch at {}", snapshot.display());
+        assert_eq!(
+            expected,
+            actual,
+            "snapshot mismatch at {}",
+            snapshot.display()
+        );
     }
 
     fn assert_expanded_output_matches_snapshot(input: &Path, snapshot_name: &str, root: &Path) {
@@ -2257,24 +2434,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_binary_output_path_defaults_to_current_directory() {
-        let resolved = resolve_binary_output_path(&fixture_path("blog_api.eon"), None, None)
+    fn resolve_binary_output_path_defaults_to_input_directory() {
+        let input = fixture_path("blog_api.eon");
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let resolved = resolve_binary_output_path(&input, &service, None, None)
             .expect("default output should resolve");
         assert_eq!(
             resolved,
-            std::env::current_dir()
-                .expect("current dir should resolve")
+            input
+                .parent()
+                .expect("fixture should have parent")
                 .join(binary_file_name("blog-api"))
         );
     }
 
     #[test]
     fn resolve_binary_output_path_places_binary_inside_existing_directory() {
+        let input = fixture_path("blog_api.eon");
+        let service = compiler::load_service_from_path(&input).expect("service should load");
         let root = test_root();
         fs::create_dir_all(&root).expect("output directory should exist");
-        let resolved = resolve_binary_output_path(&fixture_path("blog_api.eon"), Some(&root), None)
+        let resolved = resolve_binary_output_path(&input, &service, Some(&root), None)
             .expect("directory output should resolve");
-        assert_eq!(resolved, root.join(binary_file_name("blog-api")));
+        assert_eq!(
+            resolved,
+            resolve_absolute_path(&root)
+                .expect("directory should resolve")
+                .join(binary_file_name("blog-api"))
+        );
     }
 
     #[test]
@@ -2287,18 +2474,196 @@ mod tests {
     #[test]
     fn resolve_build_cache_root_is_stable_for_same_service_and_package() {
         let input = fixture_path("blog_api.eon");
-        let first = resolve_build_cache_root(&input, "blog-api", None)
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let first = resolve_build_cache_root(&input, &service, "blog-api", None)
             .expect("build cache root should resolve");
-        let second = resolve_build_cache_root(&input, "blog-api", None)
+        let second = resolve_build_cache_root(&input, &service, "blog-api", None)
             .expect("build cache root should resolve");
 
         assert_eq!(first, second);
-        assert!(first.starts_with(
-            std::env::current_dir()
-                .expect("current dir should resolve")
-                .join(".vsr-build")
-                .join("blog-api")
-        ));
+        assert!(
+            first.starts_with(
+                input
+                    .parent()
+                    .expect("fixture should have parent")
+                    .join(".vsr-build")
+                    .join("blog-api")
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_binary_output_path_uses_build_config_relative_to_input() {
+        let root = test_root().join("binary-config");
+        fs::create_dir_all(&root).expect("test root should exist");
+        let input = root.join("service.eon");
+        fs::write(
+            &input,
+            r#"
+module: "build_output_demo"
+build: {
+    artifacts: {
+        binary: {
+            path: "dist/custom-api"
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        fields: [{ name: "id", type: I64 }]
+    }
+]
+"#,
+        )
+        .expect("service should write");
+
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let resolved =
+            resolve_binary_output_path(&input, &service, None, None).expect("path should resolve");
+        assert_eq!(resolved, root.join("dist/custom-api"));
+    }
+
+    #[test]
+    fn resolve_binary_output_path_prefers_declared_env_override() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let root = test_root().join("binary-env");
+        fs::create_dir_all(&root).expect("test root should exist");
+        let input = root.join("service.eon");
+        fs::write(
+            &input,
+            r#"
+module: "build_output_env_demo"
+build: {
+    artifacts: {
+        binary: {
+            path: "dist/fallback-api"
+            env: "CMS_BINARY_PATH"
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        fields: [{ name: "id", type: I64 }]
+    }
+]
+"#,
+        )
+        .expect("service should write");
+
+        unsafe {
+            std::env::set_var("CMS_BINARY_PATH", "env/custom-api");
+        }
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let resolved =
+            resolve_binary_output_path(&input, &service, None, None).expect("path should resolve");
+        assert_eq!(resolved, root.join("env/custom-api"));
+        unsafe {
+            std::env::remove_var("CMS_BINARY_PATH");
+        }
+    }
+
+    #[test]
+    fn resolve_build_cache_root_uses_build_config_relative_to_input() {
+        let root = test_root().join("cache-config");
+        fs::create_dir_all(&root).expect("test root should exist");
+        let input = root.join("service.eon");
+        fs::write(
+            &input,
+            r#"
+module: "build_cache_demo"
+build: {
+    artifacts: {
+        cache: {
+            root: "build-cache"
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        fields: [{ name: "id", type: I64 }]
+    }
+]
+"#,
+        )
+        .expect("service should write");
+
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let resolved = resolve_build_cache_root(&input, &service, "build-cache-demo", None)
+            .expect("cache root should resolve");
+        assert!(
+            resolved.starts_with(root.join("build-cache").join("build-cache-demo")),
+            "{}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn resolve_bundle_output_path_uses_config_when_binary_is_not_overridden() {
+        let root = test_root().join("bundle-config");
+        fs::create_dir_all(&root).expect("test root should exist");
+        let input = root.join("service.eon");
+        fs::write(
+            &input,
+            r#"
+module: "bundle_demo"
+build: {
+    artifacts: {
+        bundle: {
+            path: "dist/site.bundle"
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        fields: [{ name: "id", type: I64 }]
+    }
+]
+"#,
+        )
+        .expect("service should write");
+
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let binary_output = root.join("bundle-demo");
+        let resolved = resolve_bundle_output_path(&input, &service, &binary_output, false)
+            .expect("bundle should resolve");
+        assert_eq!(resolved, root.join("dist/site.bundle"));
+    }
+
+    #[test]
+    fn resolve_bundle_output_path_follows_explicit_binary_output() {
+        let root = test_root().join("bundle-cli-override");
+        fs::create_dir_all(&root).expect("test root should exist");
+        let input = root.join("service.eon");
+        fs::write(
+            &input,
+            r#"
+module: "bundle_override_demo"
+build: {
+    artifacts: {
+        bundle: {
+            path: "dist/ignored.bundle"
+        }
+    }
+}
+resources: [
+    {
+        name: "Post"
+        fields: [{ name: "id", type: I64 }]
+    }
+]
+"#,
+        )
+        .expect("service should write");
+
+        let service = compiler::load_service_from_path(&input).expect("service should load");
+        let binary_output = root.join("bin/override-api");
+        let resolved = resolve_bundle_output_path(&input, &service, &binary_output, true)
+            .expect("bundle should resolve");
+        assert_eq!(resolved, root.join("bin/override-api.bundle"));
     }
 
     #[test]
@@ -2312,9 +2677,40 @@ mod tests {
         )
         .expect("cache project file should be created");
 
-        let removed = clean_build_cache(Some(&root)).expect("build cache should be removed");
+        let removed = clean_build_cache(None, Some(&root)).expect("build cache should be removed");
         assert_eq!(removed, root);
         assert!(!removed.exists(), "cache root should be removed");
+    }
+
+    #[test]
+    fn resolve_clean_build_cache_root_uses_service_input() {
+        let root = test_root().join("clean-service-cache");
+        fs::create_dir_all(&root).expect("test root should exist");
+        let input = root.join("service.eon");
+        fs::write(
+            &input,
+            r#"
+module: "clean_demo"
+resources: [
+    {
+        name: "Post"
+        fields: [{ name: "id", type: I64 }]
+    }
+]
+"#,
+        )
+        .expect("service should write");
+
+        let resolved = resolve_clean_build_cache_root(Some(&input), None)
+            .expect("service clean cache should resolve");
+        let package_name =
+            resolve_generated_package_name(&input, None).expect("package name should resolve");
+        assert_eq!(
+            resolved,
+            root.join(DEFAULT_BUILD_CACHE_DIR)
+                .join(&package_name)
+                .join(stable_build_cache_key(&input, &package_name).expect("cache key"))
+        );
     }
 
     #[test]
@@ -2756,9 +3152,11 @@ mod tests {
         assert!(artifact_dir.join("openapi.json").exists());
         assert!(artifact_dir.join("service.eon").exists());
         assert!(artifact_dir.join("migrations/0000_auth.sql").exists());
-        assert!(artifact_dir
-            .join("migrations/0001_auth_management.sql")
-            .exists());
+        assert!(
+            artifact_dir
+                .join("migrations/0001_auth_management.sql")
+                .exists()
+        );
     }
 
     #[test]
@@ -3243,11 +3641,13 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(output
-            .parent()
-            .expect("binary output should have a parent")
-            .join("blog-server.bundle/.env.example")
-            .exists());
+        assert!(
+            output
+                .parent()
+                .expect("binary output should have a parent")
+                .join("blog-server.bundle/.env.example")
+                .exists()
+        );
     }
 
     #[test]
@@ -3273,11 +3673,13 @@ mod tests {
             "binary should exist at {}",
             output.display()
         );
-        assert!(output
-            .parent()
-            .expect("binary output should have a parent")
-            .join("turso-encrypted-server.bundle/.env.example")
-            .exists());
+        assert!(
+            output
+                .parent()
+                .expect("binary output should have a parent")
+                .join("turso-encrypted-server.bundle/.env.example")
+                .exists()
+        );
     }
 
     #[test]

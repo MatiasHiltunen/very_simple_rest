@@ -626,9 +626,48 @@ pub struct ReleaseBuildConfig {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildArtifactPathConfig {
+    pub path: Option<String>,
+    pub env: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BuildCacheCleanupStrategy {
+    #[default]
+    Reuse,
+    CleanBeforeBuild,
+    RemoveOnSuccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildCacheArtifactConfig {
+    pub root: Option<String>,
+    pub env: Option<String>,
+    pub cleanup: BuildCacheCleanupStrategy,
+}
+
+impl Default for BuildCacheArtifactConfig {
+    fn default() -> Self {
+        Self {
+            root: None,
+            env: None,
+            cleanup: BuildCacheCleanupStrategy::Reuse,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BuildArtifactsConfig {
+    pub binary: BuildArtifactPathConfig,
+    pub bundle: BuildArtifactPathConfig,
+    pub cache: BuildCacheArtifactConfig,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BuildConfig {
     pub target_cpu_native: bool,
     pub release: ReleaseBuildConfig,
+    pub artifacts: BuildArtifactsConfig,
 }
 
 #[derive(Clone)]
@@ -2579,6 +2618,37 @@ pub fn validate_build_config(build: &BuildConfig, span: Span) -> syn::Result<()>
             span,
             "`build.release.codegen_units` must be greater than zero",
         ));
+    }
+
+    for (label, value) in [
+        (
+            "build.artifacts.binary.path",
+            build.artifacts.binary.path.as_deref(),
+        ),
+        (
+            "build.artifacts.binary.env",
+            build.artifacts.binary.env.as_deref(),
+        ),
+        (
+            "build.artifacts.bundle.path",
+            build.artifacts.bundle.path.as_deref(),
+        ),
+        (
+            "build.artifacts.bundle.env",
+            build.artifacts.bundle.env.as_deref(),
+        ),
+        (
+            "build.artifacts.cache.root",
+            build.artifacts.cache.root.as_deref(),
+        ),
+        (
+            "build.artifacts.cache.env",
+            build.artifacts.cache.env.as_deref(),
+        ),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(syn::Error::new(span, format!("`{label}` cannot be empty")));
+        }
     }
 
     Ok(())
