@@ -12,7 +12,13 @@ use rest_macro_core::{
     tls,
 };
 
-use crate::commands::schema::load_schema_service;
+use crate::commands::{
+    schema::load_schema_service,
+    server::{
+        resolve_binary_output_path, resolve_build_cache_root, resolve_bundle_output_path,
+        resolve_generated_package_name,
+    },
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
@@ -114,8 +120,158 @@ fn collect_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
     findings.extend(authorization_surface_findings(service));
     findings.extend(unused_authorization_scope_findings(service));
     findings.extend(explicit_index_findings(service));
+    findings.extend(build_artifact_findings(input, service));
+    findings.extend(storage_path_findings(service));
     findings.extend(tls_path_findings(input, service));
     findings
+}
+
+fn build_artifact_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = build_artifact_env_findings(service);
+
+    let Ok(package_name) = resolve_generated_package_name(input, None) else {
+        return findings;
+    };
+    let Ok(binary_output) = resolve_binary_output_path(input, service, None, Some(&package_name))
+    else {
+        return findings;
+    };
+    let Ok(bundle_output) = resolve_bundle_output_path(input, service, &binary_output, false)
+    else {
+        return findings;
+    };
+    let Ok(build_root) = resolve_build_cache_root(input, service, &package_name, None) else {
+        return findings;
+    };
+
+    if paths_equal(&binary_output, &bundle_output) {
+        findings.push(CheckFinding {
+            code: "build.artifacts.binary_bundle_path_collision".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "build.artifacts".to_owned(),
+            message: format!(
+                "resolved binary output and bundle directory both point to `{}`",
+                binary_output.display()
+            ),
+            suggestion: Some(
+                "Move `build.artifacts.binary.path` or `build.artifacts.bundle.path` so the binary and runtime bundle do not share the same path."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if path_is_within(&binary_output, &bundle_output) {
+        findings.push(CheckFinding {
+            code: "build.artifacts.binary_inside_bundle".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "build.artifacts".to_owned(),
+            message: format!(
+                "resolved binary output `{}` is inside the bundle directory `{}`",
+                binary_output.display(),
+                bundle_output.display()
+            ),
+            suggestion: Some(
+                "Place the binary outside the bundle directory. `vsr build --force` recreates the bundle directory and can delete files nested inside it."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if paths_overlap(&build_root, &bundle_output) {
+        findings.push(CheckFinding {
+            code: "build.artifacts.cache_bundle_overlap".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "build.artifacts".to_owned(),
+            message: format!(
+                "resolved build cache `{}` overlaps the bundle directory `{}`",
+                build_root.display(),
+                bundle_output.display()
+            ),
+            suggestion: Some(
+                "Move `build.artifacts.cache.root` or `build.artifacts.bundle.path` so the reusable build cache stays separate from exported runtime artifacts."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if paths_overlap(&build_root, &binary_output) {
+        findings.push(CheckFinding {
+            code: "build.artifacts.cache_binary_overlap".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "build.artifacts".to_owned(),
+            message: format!(
+                "resolved build cache `{}` overlaps the binary output path `{}`",
+                build_root.display(),
+                binary_output.display()
+            ),
+            suggestion: Some(
+                "Move `build.artifacts.cache.root` or `build.artifacts.binary.path` so cleaning the build cache cannot touch the built binary."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    findings
+}
+
+fn build_artifact_env_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = Vec::new();
+
+    for (path, env_name, code, label) in [
+        (
+            "build.artifacts.binary.env",
+            service.build.artifacts.binary.env.as_deref(),
+            "build.artifacts.binary_env_override_empty",
+            "binary output path",
+        ),
+        (
+            "build.artifacts.bundle.env",
+            service.build.artifacts.bundle.env.as_deref(),
+            "build.artifacts.bundle_env_override_empty",
+            "bundle output path",
+        ),
+        (
+            "build.artifacts.cache.env",
+            service.build.artifacts.cache.env.as_deref(),
+            "build.artifacts.cache_env_override_empty",
+            "build cache root",
+        ),
+    ] {
+        let Some(env_name) = env_name else {
+            continue;
+        };
+        let Some(value) = std::env::var_os(env_name) else {
+            continue;
+        };
+        if !value.to_string_lossy().trim().is_empty() {
+            continue;
+        }
+        findings.push(CheckFinding {
+            code: code.to_owned(),
+            severity: CheckSeverity::Warning,
+            path: path.to_owned(),
+            message: format!(
+                "declared env override `{env_name}` is set, but it resolves to an empty {label}"
+            ),
+            suggestion: Some(format!(
+                "Unset `{env_name}` or give it a non-empty path value. When it is empty, `vsr` falls back to the literal `.eon` path or service-relative default."
+            )),
+        });
+    }
+
+    findings
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+fn path_is_within(path: &Path, ancestor: &Path) -> bool {
+    path != ancestor && path.starts_with(ancestor)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 fn authorization_surface_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
@@ -437,6 +593,75 @@ fn tls_path_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
     findings
 }
 
+fn storage_path_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = Vec::new();
+    let mut used_backends = BTreeSet::<String>::new();
+
+    for mount in &service.storage.public_mounts {
+        used_backends.insert(mount.backend.clone());
+    }
+    for upload in &service.storage.uploads {
+        used_backends.insert(upload.backend.clone());
+        if !upload.require_auth && !upload.roles.is_empty() {
+            findings.push(CheckFinding {
+                code: "storage.upload_roles_without_auth".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("storage.uploads.{}.roles", upload.name),
+                message: format!(
+                    "storage upload `{}` declares roles, but `require_auth` is false so those roles are never enforced",
+                    upload.name
+                ),
+                suggestion: Some(
+                    "Set `require_auth: true` if the upload should use role-based access, or remove `roles` to make the public intent explicit."
+                        .to_owned(),
+                ),
+            });
+        }
+    }
+    if let Some(s3_compat) = &service.storage.s3_compat {
+        for bucket in &s3_compat.buckets {
+            used_backends.insert(bucket.backend.clone());
+        }
+    }
+
+    for backend in &service.storage.backends {
+        let path = PathBuf::from(&backend.resolved_root_dir);
+        if path.exists() && !path.is_dir() {
+            findings.push(CheckFinding {
+                code: "storage.backend_root_not_directory".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("storage.backends.{}.dir", backend.name),
+                message: format!(
+                    "storage backend `{}` resolves to `{}`, but that path is not a directory",
+                    backend.name,
+                    path.display()
+                ),
+                suggestion: Some(
+                    "Point `storage.backends.*.dir` to a directory path, or remove the blocking file before runtime initializes the backend."
+                        .to_owned(),
+                ),
+            });
+        }
+        if !used_backends.contains(&backend.name) {
+            findings.push(CheckFinding {
+                code: "storage.unused_backend".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("storage.backends.{}", backend.name),
+                message: format!(
+                    "storage backend `{}` is declared but not referenced by any public mount, upload endpoint, or S3-compatible bucket",
+                    backend.name
+                ),
+                suggestion: Some(
+                    "Reference the backend from `storage.public_mounts`, `storage.uploads`, or `storage.s3_compat`, or remove it until it is needed."
+                        .to_owned(),
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
 fn resolve_exists_target_resource<'a>(
     resources: &'a [ResourceSpec],
     target_resource: &str,
@@ -527,12 +752,13 @@ fn write_output(rendered: String, output: Option<&Path>, force: bool, label: &st
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        OutputFormat, build_service_check_report, render_service_check_report, run_service_check,
+        OutputFormat, ServiceCheckReport, build_service_check_report, render_service_check_report,
+        run_service_check,
     };
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -549,6 +775,43 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vsr-check-{name}-{stamp}"));
         fs::create_dir_all(&dir).expect("temp dir should create");
         dir
+    }
+
+    fn snapshot_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/check")
+            .join(name)
+    }
+
+    fn assert_text_snapshot(snapshot: &Path, actual: &str) {
+        if std::env::var_os("VSR_UPDATE_SNAPSHOTS").is_some() {
+            if let Some(parent) = snapshot.parent() {
+                fs::create_dir_all(parent).expect("snapshot parent should be creatable");
+            }
+            fs::write(snapshot, actual).expect("snapshot should be writable");
+            return;
+        }
+
+        let expected = fs::read_to_string(snapshot).unwrap_or_else(|error| {
+            panic!(
+                "snapshot {} is missing or unreadable: {error}. Re-run with VSR_UPDATE_SNAPSHOTS=1 to create it.",
+                snapshot.display()
+            )
+        });
+        let expected = expected.trim_end_matches('\n');
+        let actual = actual.trim_end_matches('\n');
+        assert_eq!(
+            expected,
+            actual,
+            "snapshot mismatch at {}",
+            snapshot.display()
+        );
+    }
+
+    fn normalize_report_source(report: &ServiceCheckReport, source: &str) -> ServiceCheckReport {
+        let mut normalized = report.clone();
+        normalized.source = source.to_owned();
+        normalized
     }
 
     #[test]
@@ -733,6 +996,273 @@ resources: [
     }
 
     #[test]
+    fn check_report_warns_for_build_artifact_overlaps() {
+        let root = temp_dir("build-artifact-overlap");
+        let config = root.join("build_artifact_overlap_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "build_artifact_overlap_api"
+build: {
+    artifacts: {
+        binary: {
+            path: "dist/site.bundle/api"
+        }
+        bundle: {
+            path: "dist/site.bundle"
+        }
+        cache: {
+            root: "dist/site.bundle/cache"
+        }
+    }
+}
+resources: [
+    {
+        name: "Asset"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"build.artifacts.binary_inside_bundle"));
+        assert!(codes.contains(&"build.artifacts.cache_bundle_overlap"));
+    }
+
+    #[test]
+    fn check_report_warns_for_empty_build_artifact_env_override() {
+        let root = temp_dir("build-artifact-env-empty");
+        let config = root.join("build_artifact_env_check_api.eon");
+        let env_name = format!(
+            "VSR_TEST_BUILD_ARTIFACT_BINARY_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should advance")
+                .as_nanos()
+        );
+        fs::write(
+            &config,
+            format!(
+                r#"
+module: "build_artifact_env_check_api"
+build: {{
+    artifacts: {{
+        binary: {{
+            env: "{env_name}"
+        }}
+    }}
+}}
+resources: [
+    {{
+        name: "Asset"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "title", type: String }}
+        ]
+    }}
+]
+"#
+            ),
+        )
+        .expect("fixture should write");
+
+        unsafe {
+            std::env::set_var(&env_name, "   ");
+        }
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        unsafe {
+            std::env::remove_var(&env_name);
+        }
+
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"build.artifacts.binary_env_override_empty"));
+    }
+
+    #[test]
+    fn check_report_warns_for_binary_bundle_path_collision() {
+        let root = temp_dir("build-artifact-collision");
+        let config = root.join("build_artifact_collision_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "build_artifact_collision_api"
+build: {
+    artifacts: {
+        binary: {
+            path: "dist/api"
+        }
+        bundle: {
+            path: "dist/api"
+        }
+    }
+}
+resources: [
+    {
+        name: "Asset"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"build.artifacts.binary_bundle_path_collision"));
+    }
+
+    #[test]
+    fn check_report_warns_for_storage_backend_root_that_is_not_directory() {
+        let root = temp_dir("storage-backend-root-file");
+        let blocking_path = root.join("var/uploads");
+        fs::create_dir_all(blocking_path.parent().expect("parent should exist"))
+            .expect("parent directory should create");
+        fs::write(&blocking_path, "not a directory").expect("blocking file should write");
+        let config = root.join("storage_backend_check_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "storage_backend_check_api"
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: "Local"
+            dir: "var/uploads"
+        }
+    ]
+}
+resources: [
+    {
+        name: "Asset"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"storage.backend_root_not_directory"));
+    }
+
+    #[test]
+    fn check_report_warns_for_unused_storage_backend() {
+        let root = temp_dir("unused-storage-backend");
+        let config = root.join("unused_storage_backend_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "unused_storage_backend_api"
+storage: {
+    backends: [
+        {
+            name: "orphaned"
+            kind: "Local"
+            dir: "var/orphaned"
+        }
+    ]
+}
+resources: [
+    {
+        name: "Asset"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"storage.unused_backend"));
+    }
+
+    #[test]
+    fn check_report_warns_for_upload_roles_without_auth() {
+        let root = temp_dir("upload-roles-without-auth");
+        let config = root.join("upload_roles_without_auth_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "upload_roles_without_auth_api"
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: "Local"
+            dir: "var/uploads"
+        }
+    ]
+    uploads: [
+        {
+            name: "asset_upload"
+            path: "uploads"
+            backend: "uploads"
+            require_auth: false
+            roles: ["editor"]
+        }
+    ]
+}
+resources: [
+    {
+        name: "Asset"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"storage.upload_roles_without_auth"));
+    }
+
+    #[test]
     fn run_service_check_writes_json_output() {
         let root = temp_dir("check-output");
         let output = root.join("report.json");
@@ -781,5 +1311,27 @@ resources: [
         let error = run_service_check(&config, &[], true, None, OutputFormat::Text, true)
             .expect_err("strict check should fail");
         assert!(error.to_string().contains("strict check found 2 warning"));
+    }
+
+    #[test]
+    fn check_report_authorization_contract_matches_text_snapshot() {
+        let report =
+            build_service_check_report(&fixture_path("authorization_contract_api.eon"), &[], true)
+                .expect("fixture should load");
+        let normalized =
+            normalize_report_source(&report, "tests/fixtures/authorization_contract_api.eon");
+        let rendered = render_service_check_report(&normalized, OutputFormat::Text)
+            .expect("text should render");
+        assert_text_snapshot(&snapshot_path("authorization_contract_api.txt"), &rendered);
+    }
+
+    #[test]
+    fn check_report_hybrid_runtime_matches_json_snapshot() {
+        let report = build_service_check_report(&fixture_path("hybrid_runtime_api.eon"), &[], true)
+            .expect("fixture should load");
+        let normalized = normalize_report_source(&report, "tests/fixtures/hybrid_runtime_api.eon");
+        let rendered = render_service_check_report(&normalized, OutputFormat::Json)
+            .expect("json should render");
+        assert_text_snapshot(&snapshot_path("hybrid_runtime_api.json"), &rendered);
     }
 }

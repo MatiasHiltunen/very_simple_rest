@@ -206,6 +206,8 @@ The first strict slice reports high-confidence warnings for:
 - declared authorization scopes that are not referenced anywhere else
 - row-policy, nested-route, `exists`, or hybrid scope lookup fields that rely on inferred indexes
   without an explicit `.eon` index declaration
+- empty declared build-artifact env overrides, binary/bundle path collisions, and cache/output
+  path overlaps that can make `vsr build` or `vsr clean` unsafe
 
 `--strict` turns those warnings into a failing exit status so the command can be used in CI.
 

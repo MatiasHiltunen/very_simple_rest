@@ -370,7 +370,8 @@ generated Infisical scaffold directory is complete. See [docs/infisical.md](docs
 The first strict slice focuses on high-confidence issues: TLS file paths that do not exist,
 authorization contracts that do not affect generated runtime behavior, unused declared scopes, and
 policy, nested-route, `exists`, and hybrid lookup fields that rely on inferred indexes without an
-explicit `.eon` declaration.
+explicit `.eon` declaration. It also flags build-artifact misconfigurations such as empty declared
+env overrides, binary/bundle path collisions, and resolved cache/output overlaps.
 Add `--strict` to fail the command when any warning is reported.
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).

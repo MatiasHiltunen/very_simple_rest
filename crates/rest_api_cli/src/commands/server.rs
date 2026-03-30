@@ -616,7 +616,7 @@ fn build_artifact_dir(output: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!("{file_name}{BUILD_ARTIFACT_DIR_SUFFIX}")))
 }
 
-fn resolve_build_cache_root(
+pub(crate) fn resolve_build_cache_root(
     input: &Path,
     service: &ServiceSpec,
     package_name: &str,
@@ -691,7 +691,7 @@ fn resolve_absolute_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn resolve_binary_output_path(
+pub(crate) fn resolve_binary_output_path(
     input: &Path,
     service: &ServiceSpec,
     output: Option<&Path>,
@@ -717,7 +717,7 @@ fn resolve_binary_output_path(
     }
 }
 
-fn resolve_bundle_output_path(
+pub(crate) fn resolve_bundle_output_path(
     input: &Path,
     service: &ServiceSpec,
     binary_output: &Path,
@@ -1906,7 +1906,10 @@ fn runtime_feature_list(service: &ServiceSpec, backend: DbBackend) -> String {
     features.join(", ")
 }
 
-fn resolve_generated_package_name(input: &Path, package_name: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_generated_package_name(
+    input: &Path,
+    package_name: Option<&str>,
+) -> Result<String> {
     if let Some(package_name) = package_name {
         return Ok(sanitize_package_name(package_name));
     }
