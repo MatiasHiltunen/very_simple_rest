@@ -2,7 +2,7 @@
 
 <img width="250" height="256" alt="Method Draw Image" src="https://github.com/user-attachments/assets/dacb8710-1160-449b-88c1-577d722f37a4" />
 
-A Rust toolkit for declaring REST APIs in Rust or `.eon` and running them through a CLI-first workflow on top of Actix Web and SQLx.
+A Rust toolkit for declaring REST APIs in Rust or [`.eon`](https://github.com/emilk/eon) and running them through a CLI-first workflow on top of Actix Web and SQLx.
 
 
 > **Note**: This project is currently very much in progress and under active development. APIs will change, and features are incomplete.
