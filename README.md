@@ -18,16 +18,20 @@ The main entry point is the `vsr` command-line tool. The published crate is `vsr
 Instant schema defined server for REST API with real database connections:
 
 ```bash
-vsr setup # Sets up default env and runs defined db migrations, prompts admin account creation if one is not found
-vsr serve # Open the /docs to see the Swagger docs for the API
-vsr docs -o docs.md # Generate the full documentation of the vsr features, works well with most AI agents aswell
+
 ```
 
 ```bash
-cargo install vsra --locked
+cargo install vsra
 
-vsr init my-api
-vsr init my-api --starter minimal
+# Create <some_name>.eon file and define the service
+
+vsr setup # Sets up default env and runs defined db migrations, prompts admin account creation if one is not found
+vsr serve # Open the /docs to see the Swagger docs for the API
+vsr docs -o docs.md # Generate the full documentation of the vsr features, works well with most AI agents aswell
+
+# Alternative commands to get started
+vsr init my-api # You may need to use the vsr setup currently from above
 vsr serve api.eon
 vsr server expand --input api.eon --output api.expanded.rs
 vsr server emit --input api.eon --output-dir generated-api
