@@ -18,10 +18,6 @@ The main entry point is the `vsr` command-line tool. The published crate is `vsr
 Instant schema defined server for REST API with real database connections:
 
 ```bash
-
-```
-
-```bash
 cargo install vsra
 
 # Create <some_name>.eon file and define the service
