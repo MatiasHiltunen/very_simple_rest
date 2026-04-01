@@ -15,6 +15,14 @@ A Rust toolkit for declaring REST APIs in Rust or [`.eon`](https://github.com/em
 
 The main entry point is the `vsr` command-line tool. The published crate is `vsra`; the installed binary is `vsr`.
 
+Instant schema defined server for REST API with real database connections:
+
+```bash
+vsr setup # Sets up default env and runs defined db migrations, prompts admin account creation if one is not found
+vsr serve # Open the /docs to see the Swagger docs for the API
+vsr docs -o docs.md # Generate the full documentation of the vsr features, works well with most AI agents aswell
+```
+
 ```bash
 cargo install vsra --locked
 
