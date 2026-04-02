@@ -1,0 +1,31 @@
+{
+  "kind": "service_check",
+  "source": "tests/fixtures/hybrid_runtime_api.eon",
+  "strict": true,
+  "summary": {
+    "warning_count": 3
+  },
+  "findings": [
+    {
+      "code": "indexes.explicit_nested_route_index_missing",
+      "severity": "warning",
+      "path": "resources.scoped_doc.indexes",
+      "message": "resource `scoped_doc` exposes a nested route through `family_id`, but no explicit index starts with that field",
+      "suggestion": "Declare an explicit index on `family_id` so nested-route lookup paths stay visible in the `.eon` contract."
+    },
+    {
+      "code": "indexes.explicit_policy_index_missing",
+      "severity": "warning",
+      "path": "resources.scoped_doc.indexes",
+      "message": "resource `scoped_doc` uses `user_id` in `delete, read, update` policy filters, but no explicit index starts with that field",
+      "suggestion": "Declare an explicit index on `user_id` for schema clarity. Generated migrations can infer one, but the `.eon` contract does not show it today."
+    },
+    {
+      "code": "indexes.explicit_policy_index_missing",
+      "severity": "warning",
+      "path": "resources.scoped_claim_doc.indexes",
+      "message": "resource `scoped_claim_doc` uses `family_id` in `read` policy filters, but no explicit index starts with that field",
+      "suggestion": "Declare an explicit index on `family_id` for schema clarity. Generated migrations can infer one, but the `.eon` contract does not show it today."
+    }
+  ]
+}

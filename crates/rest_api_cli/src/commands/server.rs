@@ -3212,13 +3212,11 @@ resources: [
         .expect("management migration should write");
 
         let output = root.join("dist/api-server");
-        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+        let bundle_output = build_artifact_dir(&output).expect("artifact dir should resolve");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &bundle_output, false)
             .expect("runtime artifacts should export");
 
-        assert_eq!(
-            artifact_dir,
-            build_artifact_dir(&output).expect("artifact dir should resolve")
-        );
+        assert_eq!(artifact_dir, bundle_output);
         assert!(artifact_dir.join(".env.example").exists());
         assert!(artifact_dir.join("README.md").exists());
         assert!(artifact_dir.join("openapi.json").exists());
@@ -3245,7 +3243,8 @@ resources: [
         .expect("server project should emit");
 
         let output = root.join("dist/static-site-server");
-        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+        let bundle_output = build_artifact_dir(&output).expect("artifact dir should resolve");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &bundle_output, false)
             .expect("runtime artifacts should export");
 
         assert!(artifact_dir.join("static_site/index.html").exists());
@@ -3270,7 +3269,8 @@ resources: [
         .expect("server project should emit");
 
         let output = root.join("dist/static-site-precompressed-server");
-        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+        let bundle_output = build_artifact_dir(&output).expect("artifact dir should resolve");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &bundle_output, false)
             .expect("runtime artifacts should export");
 
         let index_html = artifact_dir.join("static_site/index.html");
@@ -3332,7 +3332,8 @@ resources: [
         assert!(project_dir.join("certs/dev-key.pem").exists());
 
         let output = root.join("dist/tls-service-server");
-        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &output, false)
+        let bundle_output = build_artifact_dir(&output).expect("artifact dir should resolve");
+        let artifact_dir = export_generated_runtime_artifacts(&project_dir, &bundle_output, false)
             .expect("runtime artifacts should export");
 
         assert!(artifact_dir.join("certs/dev-cert.pem").exists());

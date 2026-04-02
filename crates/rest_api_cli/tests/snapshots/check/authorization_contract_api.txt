@@ -1,0 +1,8 @@
+Service Check
+Source: tests/fixtures/authorization_contract_api.eon
+Strict: true
+Warnings: 1
+
+Findings:
+- [Warning] authorization.contract_without_generated_surface at `authorization`: authorization scopes, permissions, or templates are declared, but no generated runtime surface consumes them directly
+  Suggestion: Enable `authorization.management_api`, add `authorization.hybrid_enforcement`, or keep the contract only for custom handlers and `vsr authz` tooling.
