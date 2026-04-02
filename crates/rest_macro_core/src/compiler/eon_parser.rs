@@ -38,8 +38,9 @@ use super::model::{
 };
 use crate::{
     auth::{
-        AuthClaimMapping, AuthClaimType, AuthEmailProvider, AuthEmailSettings, AuthSettings,
-        AuthUiPageSettings, SessionCookieSameSite, SessionCookieSettings,
+        AuthClaimMapping, AuthClaimType, AuthEmailProvider, AuthEmailSettings, AuthJwtAlgorithm,
+        AuthJwtSettings, AuthJwtVerificationKey, AuthSettings, AuthUiPageSettings,
+        SessionCookieSameSite, SessionCookieSettings,
     },
     authorization::{
         AuthorizationAction, AuthorizationContract, AuthorizationHybridEnforcementConfig,
@@ -278,6 +279,8 @@ struct AuthSecurityDocument {
     #[serde(default)]
     password_reset_token_ttl_seconds: Option<i64>,
     #[serde(default)]
+    jwt: Option<AuthJwtDocument>,
+    #[serde(default)]
     jwt_secret: Option<SecretRefDocument>,
     #[serde(default)]
     claims: BTreeMap<String, AuthClaimMapValueDocument>,
@@ -289,6 +292,24 @@ struct AuthSecurityDocument {
     portal: Option<AuthUiPageDocument>,
     #[serde(default)]
     admin_dashboard: Option<AuthUiPageDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct AuthJwtDocument {
+    #[serde(default)]
+    algorithm: Option<String>,
+    #[serde(default)]
+    active_kid: Option<String>,
+    #[serde(default)]
+    signing_key: Option<SecretRefDocument>,
+    #[serde(default)]
+    verification_keys: Vec<AuthJwtVerificationKeyDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthJwtVerificationKeyDocument {
+    kid: String,
+    key: SecretRefDocument,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -3541,6 +3562,18 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
     let auth = match document.auth {
         Some(auth) => {
             let defaults = AuthSettings::default();
+            let explicit_jwt_secret = parse_secret_ref_with_legacy_env(
+                auth.jwt_secret,
+                None,
+                "security.auth.jwt_secret",
+            )?;
+            let jwt = auth.jwt.map(parse_auth_jwt_document).transpose()?;
+            if jwt.is_some() && explicit_jwt_secret.is_some() {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "`security.auth.jwt` cannot be combined with `security.auth.jwt_secret`",
+                ));
+            }
             AuthSettings {
                 issuer: auth.issuer,
                 audience: auth.audience,
@@ -3556,12 +3589,12 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
                 password_reset_token_ttl_seconds: auth
                     .password_reset_token_ttl_seconds
                     .unwrap_or(defaults.password_reset_token_ttl_seconds),
-                jwt_secret: parse_secret_ref_with_legacy_env(
-                    auth.jwt_secret,
-                    None,
-                    "security.auth.jwt_secret",
-                )?
-                .or(defaults.jwt_secret),
+                jwt: jwt.clone(),
+                jwt_secret: if jwt.is_some() {
+                    explicit_jwt_secret
+                } else {
+                    explicit_jwt_secret.or(defaults.jwt_secret)
+                },
                 claims: parse_auth_claims_document(auth.claims),
                 session_cookie: auth
                     .session_cookie
@@ -3958,6 +3991,65 @@ fn parse_session_cookie_document(
         secure: document.secure.unwrap_or(defaults.secure),
         same_site,
     })
+}
+
+fn parse_auth_jwt_document(document: AuthJwtDocument) -> syn::Result<AuthJwtSettings> {
+    Ok(AuthJwtSettings {
+        algorithm: document
+            .algorithm
+            .as_deref()
+            .map(parse_auth_jwt_algorithm)
+            .transpose()?
+            .unwrap_or_default(),
+        active_kid: document.active_kid,
+        signing_key: document.signing_key.map_or_else(
+            || {
+                Err(syn::Error::new(
+                    Span::call_site(),
+                    "`security.auth.jwt.signing_key` is required",
+                ))
+            },
+            |secret| parse_secret_ref_document(secret, "security.auth.jwt.signing_key"),
+        )?,
+        verification_keys: document
+            .verification_keys
+            .into_iter()
+            .map(parse_auth_jwt_verification_key_document)
+            .collect::<syn::Result<Vec<_>>>()?,
+    })
+}
+
+fn parse_auth_jwt_verification_key_document(
+    document: AuthJwtVerificationKeyDocument,
+) -> syn::Result<AuthJwtVerificationKey> {
+    if document.kid.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`security.auth.jwt.verification_keys[].kid` cannot be empty",
+        ));
+    }
+
+    Ok(AuthJwtVerificationKey {
+        kid: document.kid,
+        key: parse_secret_ref_document(document.key, "security.auth.jwt.verification_keys[].key")?,
+    })
+}
+
+fn parse_auth_jwt_algorithm(value: &str) -> syn::Result<AuthJwtAlgorithm> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "hs256" => Ok(AuthJwtAlgorithm::Hs256),
+        "hs384" => Ok(AuthJwtAlgorithm::Hs384),
+        "hs512" => Ok(AuthJwtAlgorithm::Hs512),
+        "es256" => Ok(AuthJwtAlgorithm::Es256),
+        "es384" => Ok(AuthJwtAlgorithm::Es384),
+        "eddsa" | "ed_dsa" | "ed-dsa" => Ok(AuthJwtAlgorithm::EdDsa),
+        other => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "unsupported `security.auth.jwt.algorithm` value `{other}`; expected HS256, HS384, HS512, ES256, ES384, or EdDSA"
+            ),
+        )),
+    }
 }
 
 fn parse_auth_email_document(document: AuthEmailDocument) -> syn::Result<AuthEmailSettings> {
@@ -8594,6 +8686,62 @@ resources: [
                     locator: "prod/resend_api_key".to_owned(),
                 },
                 api_base_url: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_structured_auth_jwt_from_eon() {
+        let document = parse_document(
+            r#"
+            security: {
+                auth: {
+                    jwt: {
+                        algorithm: EdDSA
+                        active_kid: "current"
+                        signing_key: { systemd_credential: "jwt_signing_key" }
+                        verification_keys: [
+                            {
+                                kid: "current"
+                                key: {
+                                    external: {
+                                        provider: "infisical"
+                                        locator: "prod/jwt_public_key"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let security =
+            parse_security_document(document.security, Span::call_site()).expect("security ok");
+
+        assert_eq!(security.auth.jwt_secret, None);
+        assert_eq!(
+            security.auth.jwt,
+            Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::SystemdCredential {
+                    id: "jwt_signing_key".to_owned(),
+                },
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "current".to_owned(),
+                    key: SecretRef::External {
+                        provider: "infisical".to_owned(),
+                        locator: "prod/jwt_public_key".to_owned(),
+                    },
+                }],
             })
         );
     }

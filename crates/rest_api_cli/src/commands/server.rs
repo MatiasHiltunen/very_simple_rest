@@ -9,7 +9,8 @@ use brotli::CompressorWriter;
 use colored::Colorize;
 use flate2::{Compression, write::GzEncoder};
 use rest_macro_core::auth::{
-    AuthDbBackend, AuthEmailProvider, auth_management_migration_sql, auth_migration_sql,
+    AuthDbBackend, AuthEmailProvider, auth_jwt_signing_secret_ref, auth_management_migration_sql,
+    auth_migration_sql,
 };
 use rest_macro_core::compiler::{
     self, BuildArtifactPathConfig, BuildCacheCleanupStrategy, BuildLtoMode, DbBackend,
@@ -1562,21 +1563,7 @@ fn render_env_example(
     backend: DbBackend,
     include_builtin_auth: bool,
 ) -> String {
-    let jwt_secret_var = service
-        .security
-        .auth
-        .jwt_secret
-        .as_ref()
-        .and_then(|secret| secret.env_binding_name())
-        .unwrap_or("JWT_SECRET");
-    let auth_block = if include_builtin_auth {
-        format!(
-            "# Required when built-in auth is enabled\n{jwt_secret_var}=change-me\n# Or mount a secret file and set {jwt_secret_var}_FILE=/run/secrets/{jwt_secret_var}\n{}# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n",
-            render_auth_email_env_example(service)
-        )
-    } else {
-        format!("# {jwt_secret_var}=change-me-if-you-enable-built-in-auth\n")
-    };
+    let auth_block = render_auth_env_example(service, include_builtin_auth);
     let engine_block = match &service.database.engine {
         DatabaseEngine::Sqlx => String::new(),
         DatabaseEngine::TursoLocal(engine) => {
@@ -1611,6 +1598,63 @@ fn render_env_example(
         security_block,
         logging_env_var,
         logging_default_filter
+    )
+}
+
+fn render_auth_env_example(service: &ServiceSpec, include_builtin_auth: bool) -> String {
+    let jwt_secret_var = auth_jwt_signing_secret_ref(&service.security.auth)
+        .and_then(|secret| secret.env_binding_name())
+        .unwrap_or("JWT_SECRET");
+    let jwt_comment = if service
+        .security
+        .auth
+        .jwt
+        .as_ref()
+        .is_some_and(|jwt| !jwt.algorithm.is_symmetric())
+    {
+        format!(
+            "# Required when built-in auth is enabled\n# Prefer a PEM file and set {jwt_secret_var}_FILE=/run/secrets/{jwt_secret_var}\n# {jwt_secret_var}=-----BEGIN PRIVATE KEY-----...\n"
+        )
+    } else if include_builtin_auth {
+        format!(
+            "# Required when built-in auth is enabled\n{jwt_secret_var}=change-me\n# Or mount a secret file and set {jwt_secret_var}_FILE=/run/secrets/{jwt_secret_var}\n"
+        )
+    } else {
+        format!("# {jwt_secret_var}=change-me-if-you-enable-built-in-auth\n")
+    };
+
+    let verification_keys = service
+        .security
+        .auth
+        .jwt
+        .as_ref()
+        .map(|jwt| {
+            jwt.verification_keys
+                .iter()
+                .filter_map(|key| {
+                    key.key.env_binding_name().map(|var| {
+                        format!(
+                            "# JWT verification key `{}`\n# Prefer a PEM file and set {var}_FILE=/run/secrets/{var}\n# {var}=-----BEGIN PUBLIC KEY-----...\n",
+                            key.kid
+                        )
+                    })
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+
+    let bootstrap = if include_builtin_auth {
+        "# Optional built-in auth bootstrap values\n# ADMIN_EMAIL=admin@example.com\n# ADMIN_PASSWORD=change-me\n# ADMIN_TENANT_ID=1\n"
+    } else {
+        ""
+    };
+
+    format!(
+        "{}{}{}{}",
+        jwt_comment,
+        verification_keys,
+        render_auth_email_env_example(service),
+        bootstrap
     )
 }
 
@@ -1676,11 +1720,7 @@ fn render_project_readme(
     backend: DbBackend,
     include_builtin_auth: bool,
 ) -> String {
-    let jwt_secret_var = service
-        .security
-        .auth
-        .jwt_secret
-        .as_ref()
+    let jwt_secret_var = auth_jwt_signing_secret_ref(&service.security.auth)
         .and_then(|secret| secret.env_binding_name())
         .unwrap_or("JWT_SECRET");
     let auth_note = if include_builtin_auth {

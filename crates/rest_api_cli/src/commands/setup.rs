@@ -8,7 +8,7 @@ use crate::commands::tls::generate_self_signed_certificate;
 use crate::error::{Error, Result};
 use colored::Colorize;
 use dialoguer::Confirm;
-use rest_macro_core::auth::{AuthDbBackend, auth_user_table_ident};
+use rest_macro_core::auth::{AuthDbBackend, auth_jwt_signing_secret_ref, auth_user_table_ident};
 use rest_macro_core::compiler::{self, ServiceSpec};
 use rest_macro_core::database::DatabaseEngine;
 use rest_macro_core::db::query_scalar;
@@ -428,14 +428,22 @@ fn required_production_secret_bindings(service: &ServiceSpec) -> Vec<RequiredSec
         .any(|resource| resource.table_name == "user")
     {
         bindings.push(RequiredSecretBinding {
-            secret: service
-                .security
-                .auth
-                .jwt_secret
-                .clone()
+            secret: auth_jwt_signing_secret_ref(&service.security.auth)
+                .cloned()
                 .unwrap_or_else(|| SecretRef::env_or_file("JWT_SECRET")),
             label: "built-in auth JWT signing key".to_owned(),
         });
+        if let Some(jwt) = &service.security.auth.jwt {
+            for verification_key in &jwt.verification_keys {
+                bindings.push(RequiredSecretBinding {
+                    secret: verification_key.key.clone(),
+                    label: format!(
+                        "built-in auth JWT verification key `{}`",
+                        verification_key.kid
+                    ),
+                });
+            }
+        }
     }
 
     if let DatabaseEngine::TursoLocal(engine) = &service.database.engine

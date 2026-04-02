@@ -648,7 +648,8 @@ These settings configure the built-in auth/account routes. They do not affect cu
 | security.auth.require_email_verification | Bool | false | No | true, false | When true, registration/login flows require email verification and `security.auth.email` must also be configured. |
 | security.auth.verification_token_ttl_seconds | i64 | 86400 | No | Positive integer | Verification-token lifetime in seconds. |
 | security.auth.password_reset_token_ttl_seconds | i64 | 3600 | No | Positive integer | Password-reset token lifetime in seconds. |
-| security.auth.jwt_secret | SecretRef | { env_or_file: "JWT_SECRET" } | No | See Secret References | Controls how built-in auth resolves the JWT signing key. Prefer `{ env_or_file: "JWT_SECRET" }` for new configs. |
+| security.auth.jwt | Map | None | No | See Auth JWT | Structured JWT signing/verification config with algorithm selection, key ids, and rotation support. |
+| security.auth.jwt_secret | SecretRef | { env_or_file: "JWT_SECRET" } | No | See Secret References | Controls how built-in auth resolves the legacy shared-secret signing key. Prefer `security.auth.jwt` for new configs that need explicit algorithms or rotation. |
 | security.auth.claims | Map<ClaimName, ClaimMapping> | None | No | Keyed map of claim names to claim mappings | Makes built-in auth claims explicit. Claim names must be unique and cannot use reserved fields such as `sub`, `roles`, `iss`, `aud`, `exp`, or `id`. |
 | security.auth.session_cookie | Map | None | No | See Session Cookie | Enables cookie-based session auth in addition to bearer tokens. |
 | security.auth.email | Map | None | No | See Auth Email | Configures transactional email for verification and password reset flows. |
@@ -663,6 +664,34 @@ security: {
             workspace_id: "claim_workspace_id"
             staff: { column: "is_staff", type: Bool }
             plan: String
+        }
+    }
+}
+```
+
+## Auth JWT
+
+Use `security.auth.jwt` for asymmetric keys or explicit rotation. Keep `security.auth.jwt_secret` only for the legacy shared-secret path.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| security.auth.jwt.algorithm | Enum | EdDSA when the `jwt` block exists and `algorithm` is omitted | No | HS256, HS384, HS512, ES256, ES384, EdDSA | Selects the signing and verification algorithm for built-in auth tokens. |
+| security.auth.jwt.active_kid | String | None | Required when `verification_keys` are configured | Non-empty string | Emitted in the JWT header as `kid` for newly-issued tokens. |
+| security.auth.jwt.signing_key | SecretRef | None | Yes | See Secret References | Signing key for JWT issuance. Asymmetric algorithms expect a private PEM. |
+| security.auth.jwt.verification_keys[].kid | String | None | Required for each verification key | Non-empty string | Key id matched against the incoming JWT header `kid`. |
+| security.auth.jwt.verification_keys[].key | SecretRef | None | Required for each verification key | See Secret References | Verification key material. Asymmetric algorithms expect a public PEM. |
+
+```eon
+security: {
+    auth: {
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "2026-04"
+            signing_key: { env_or_file: "JWT_SIGNING_KEY" }
+            verification_keys: [
+                { kid: "2026-04", key: { env_or_file: "JWT_VERIFYING_KEY" } }
+                { kid: "2026-03", key: { env_or_file: "JWT_VERIFYING_KEY_PREVIOUS" } }
+            ]
         }
     }
 }

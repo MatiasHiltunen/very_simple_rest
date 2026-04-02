@@ -20,6 +20,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async token verification
 - Rate limiting and security enhancements
 
+## [0.1.5] - 2026-04-02
+
+### Added
+
+- Typed `SecretRef` support throughout `.eon`, including auth, database, mail, and Infisical-backed secret scaffolding
+- Structured JWT configuration under `security.auth.jwt` with algorithm selection, `kid`-based verification, asymmetric signing, and rotation support
+- `vsr check --strict` compiler diagnostics for authz/index/build-path/storage issues
+- Generated-code quality gates with warning-clean and `clippy -D warnings` checks plus emitted-code snapshots
+- CMS local site-preview routes so the example can open local previews without fake published URLs
+
+### Changed
+
+- `vsr build` and `vsr clean` now resolve outputs and cache paths relative to the input `.eon` service by default, with `.eon` artifact-path config and cleanup strategy support
+- Production secret tooling now prefers runtime-resolved secret bindings, `*_FILE` inputs, and Infisical Agent scaffolding over inline `.env` secrets
+- Generated server code now tracks the actual `.eon` feature surface more tightly, reducing dead helper emission and lint noise
+- `examples/cms` now ships with a cleaner local preview workflow, better studio UX, and safer build defaults
+
+### Fixed
+
+- Generated storage setup code no longer shadows `storage()` and break example builds
+- Emitted server builds now stay warning-clean across representative `.eon` fixtures
+- JWT key material now reloads correctly from env/file sources during rotation instead of sticking to stale cached values
+- Service-relative build outputs prevent stray `api`, `api.bundle`, and `.vsr-build` artifacts from landing in the current shell directory by default
+
 ## [0.1.4] - 2026-03-28
 
 ### Added

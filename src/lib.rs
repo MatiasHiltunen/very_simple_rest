@@ -145,8 +145,9 @@ Nested collection routes can do the same when their parent filter targets that c
 accept that one field as an optional runtime-authorized fallback. When the created row is only
 runtime-readable, the generated created response can also return that row through the same hybrid
 read fallback. This slice is additive only and still requires the static role check to pass first.
-Secrets can now be declared in `.eon` with typed secret refs such as
-`security.auth.jwt_secret: { env_or_file: "JWT_SECRET" }`, but the runtime still resolves them
+Secrets can now be declared in `.eon` with typed secret refs, including structured JWT config like
+`security.auth.jwt.signing_key: { env_or_file: "JWT_SIGNING_KEY" }` or the legacy shared-secret
+path `security.auth.jwt_secret: { env_or_file: "JWT_SECRET" }`. The runtime still resolves them
 through environment variables, mounted files, systemd credentials, or future external providers.
 
 For the built-in auth schema, use `vsr migrate auth` before relying on `ensure_admin_exists` or
@@ -168,11 +169,12 @@ For live drift checks, `vsr migrate inspect` compares the current database to a 
 reports mismatches in columns, indexes, foreign keys, and `ON DELETE` actions without generating
 SQL.
 
-## JWT Secret Configuration
+## JWT Configuration
 
-Built-in auth requires `JWT_SECRET` to be set, either through the environment or a `.env` file
-in your project root. The runtime now fails closed instead of generating a random secret at
-startup, so tokens remain stable across restarts and multi-instance deployments.
+Built-in auth requires explicit JWT signing material to be configured. Legacy shared-secret
+configs can still use `JWT_SECRET`, but new services should prefer `security.auth.jwt` with
+asymmetric keys and `kid`-based rotation. The runtime now fails closed instead of generating a
+random secret at startup, so tokens remain stable across restarts and multi-instance deployments.
 
 The built-in auth login route will also emit numeric claims automatically from `user` table
 columns such as `tenant_id`, `org_id`, or `claim_workspace_id`.
@@ -186,16 +188,17 @@ pub use rest_macro_core as core;
 
 pub mod auth {
     pub use rest_macro_core::auth::{
-        AccountInfo, AuthEmailProvider, AuthEmailSettings, AuthSettings, AuthUiPageSettings,
-        ChangePasswordInput, CreateManagedUserInput, LoginInput, PasswordResetConfirmInput,
-        PasswordResetRequestInput, RegisterInput, SessionCookieSameSite, SessionCookieSettings,
-        UpdateManagedUserInput, User, UserContext, VerificationResendInput, VerifyEmailInput,
-        account, auth_routes, auth_routes_with_settings, change_password, confirm_password_reset,
-        create_managed_user, delete_managed_user, ensure_admin_exists,
-        ensure_admin_exists_with_settings, ensure_jwt_secret_configured, list_managed_users, login,
-        login_with_request, logout, managed_user, me, register, request_password_reset,
-        resend_account_verification, resend_managed_user_verification, resend_verification,
-        update_managed_user, validate_auth_claim_mappings, verify_email_page, verify_email_token,
+        AccountInfo, AuthEmailProvider, AuthEmailSettings, AuthJwtAlgorithm, AuthJwtSettings,
+        AuthJwtVerificationKey, AuthSettings, AuthUiPageSettings, ChangePasswordInput,
+        CreateManagedUserInput, LoginInput, PasswordResetConfirmInput, PasswordResetRequestInput,
+        RegisterInput, SessionCookieSameSite, SessionCookieSettings, UpdateManagedUserInput, User,
+        UserContext, VerificationResendInput, VerifyEmailInput, account, auth_routes,
+        auth_routes_with_settings, change_password, confirm_password_reset, create_managed_user,
+        delete_managed_user, ensure_admin_exists, ensure_admin_exists_with_settings,
+        ensure_jwt_secret_configured, list_managed_users, login, login_with_request, logout,
+        managed_user, me, register, request_password_reset, resend_account_verification,
+        resend_managed_user_verification, resend_verification, update_managed_user,
+        validate_auth_claim_mappings, verify_email_page, verify_email_token,
     };
 }
 

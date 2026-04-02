@@ -1282,6 +1282,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
         Literal::i64_unsuffixed(security.auth.verification_token_ttl_seconds);
     let password_reset_token_ttl_seconds =
         Literal::i64_unsuffixed(security.auth.password_reset_token_ttl_seconds);
+    let jwt = option_auth_jwt_tokens(security.auth.jwt.as_ref(), runtime_crate);
     let jwt_secret = option_secret_ref_tokens(security.auth.jwt_secret.as_ref(), runtime_crate);
     let auth_claims = auth_claim_mappings_tokens(&security.auth.claims, runtime_crate);
     let session_cookie =
@@ -1327,6 +1328,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
                 require_email_verification: #require_email_verification,
                 verification_token_ttl_seconds: #verification_token_ttl_seconds,
                 password_reset_token_ttl_seconds: #password_reset_token_ttl_seconds,
+                jwt: #jwt,
                 jwt_secret: #jwt_secret,
                 claims: #auth_claims,
                 session_cookie: #session_cookie,
@@ -1405,6 +1407,57 @@ fn secret_ref_tokens(value: &crate::secret::SecretRef, runtime_crate: &Path) -> 
                 path: ::std::path::PathBuf::from(#path),
             })
         }
+    }
+}
+
+fn option_auth_jwt_tokens(
+    value: Option<&crate::auth::AuthJwtSettings>,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        Some(value) => {
+            let signing_key = secret_ref_tokens(&value.signing_key, runtime_crate);
+            let active_kid = option_string_tokens(value.active_kid.as_deref());
+            let algorithm = match value.algorithm {
+                crate::auth::AuthJwtAlgorithm::Hs256 => {
+                    quote!(#runtime_crate::core::auth::AuthJwtAlgorithm::Hs256)
+                }
+                crate::auth::AuthJwtAlgorithm::Hs384 => {
+                    quote!(#runtime_crate::core::auth::AuthJwtAlgorithm::Hs384)
+                }
+                crate::auth::AuthJwtAlgorithm::Hs512 => {
+                    quote!(#runtime_crate::core::auth::AuthJwtAlgorithm::Hs512)
+                }
+                crate::auth::AuthJwtAlgorithm::Es256 => {
+                    quote!(#runtime_crate::core::auth::AuthJwtAlgorithm::Es256)
+                }
+                crate::auth::AuthJwtAlgorithm::Es384 => {
+                    quote!(#runtime_crate::core::auth::AuthJwtAlgorithm::Es384)
+                }
+                crate::auth::AuthJwtAlgorithm::EdDsa => {
+                    quote!(#runtime_crate::core::auth::AuthJwtAlgorithm::EdDsa)
+                }
+            };
+            let verification_keys = value.verification_keys.iter().map(|key| {
+                let kid = Literal::string(&key.kid);
+                let key_ref = secret_ref_tokens(&key.key, runtime_crate);
+                quote! {
+                    #runtime_crate::core::auth::AuthJwtVerificationKey {
+                        kid: #kid.to_owned(),
+                        key: #key_ref,
+                    }
+                }
+            });
+            quote! {
+                Some(#runtime_crate::core::auth::AuthJwtSettings {
+                    algorithm: #algorithm,
+                    active_kid: #active_kid,
+                    signing_key: #signing_key,
+                    verification_keys: vec![#(#verification_keys),*],
+                })
+            }
+        }
+        None => quote!(None),
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use clap::ValueEnum;
 use rest_macro_core::{
-    auth::AuthEmailProvider,
+    auth::{AuthEmailProvider, auth_jwt_signing_secret_ref},
     compiler::{self, ServiceSpec, default_service_database_url},
     database::{DatabaseEngine, DatabaseReplicationMode},
     secret::{describe_secret_source, load_optional_secret_from_env_or_file},
@@ -348,11 +348,7 @@ fn collect_secret_bindings(service: &ServiceSpec) -> Vec<SecretBindingSpec> {
     );
 
     if !service_owns_user_table(service) {
-        let jwt_var = service
-            .security
-            .auth
-            .jwt_secret
-            .as_ref()
+        let jwt_var = auth_jwt_signing_secret_ref(&service.security.auth)
             .and_then(|secret| secret.env_binding_name())
             .unwrap_or("JWT_SECRET");
         insert_binding(
@@ -360,10 +356,38 @@ fn collect_secret_bindings(service: &ServiceSpec) -> Vec<SecretBindingSpec> {
             SecretBindingSpec {
                 var_name: jwt_var.to_owned(),
                 description: "Built-in auth JWT signing key".to_owned(),
-                example_value: "change-me".to_owned(),
+                example_value: if service
+                    .security
+                    .auth
+                    .jwt
+                    .as_ref()
+                    .is_some_and(|jwt| !jwt.algorithm.is_symmetric())
+                {
+                    "-----BEGIN PRIVATE KEY-----...".to_owned()
+                } else {
+                    "change-me".to_owned()
+                },
                 required: true,
             },
         );
+        if let Some(jwt) = &service.security.auth.jwt {
+            for verification_key in &jwt.verification_keys {
+                if let Some(var_name) = verification_key.key.env_binding_name() {
+                    insert_binding(
+                        &mut bindings,
+                        SecretBindingSpec {
+                            var_name: var_name.to_owned(),
+                            description: format!(
+                                "Built-in auth JWT verification key `{}`",
+                                verification_key.kid
+                            ),
+                            example_value: "-----BEGIN PUBLIC KEY-----...".to_owned(),
+                            required: true,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     if let DatabaseEngine::TursoLocal(engine) = &service.database.engine
@@ -1193,6 +1217,72 @@ mod tests {
         assert!(report.contains("JWT_SECRET [fail]"));
         assert!(report.contains("RESEND_API_KEY [fail]"));
         assert!(report.contains("DATABASE_URL [pass]"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scaffold_infisical_includes_structured_jwt_key_bindings() {
+        let root = temp_root("jwt_structured");
+        let config_path = root.join("jwt_api.eon");
+        fs::create_dir_all(&root).expect("root should exist");
+        fs::write(
+            &config_path,
+            r#"
+            module: "jwt_api"
+            security: {
+                auth: {
+                    jwt: {
+                        algorithm: EdDSA
+                        active_kid: "current"
+                        signing_key: { env_or_file: "JWT_SIGNING_KEY" }
+                        verification_keys: [
+                            { kid: "current", key: { env_or_file: "JWT_VERIFYING_KEY" } }
+                            { kid: "previous", key: { env_or_file: "JWT_VERIFYING_KEY_PREVIOUS" } }
+                        ]
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64, id: true }]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+
+        scaffold_infisical(
+            &config_path,
+            Some(&root),
+            "demo-project",
+            None,
+            "prod",
+            "/",
+            "/run/secrets/vsr",
+            InfisicalAuthMethod::UniversalAuth,
+            true,
+        )
+        .expect("scaffold should write");
+
+        let runtime_env = fs::read_to_string(root.join("runtime.env")).expect("runtime env");
+        assert!(runtime_env.contains("JWT_SIGNING_KEY_FILE=/run/secrets/vsr/JWT_SIGNING_KEY"));
+        assert!(runtime_env.contains("JWT_VERIFYING_KEY_FILE=/run/secrets/vsr/JWT_VERIFYING_KEY"));
+        assert!(runtime_env.contains(
+            "JWT_VERIFYING_KEY_PREVIOUS_FILE=/run/secrets/vsr/JWT_VERIFYING_KEY_PREVIOUS"
+        ));
+
+        let expected =
+            fs::read_to_string(root.join("expected-secrets.env")).expect("expected secrets env");
+        assert!(expected.contains("JWT_SIGNING_KEY=-----BEGIN PRIVATE KEY-----..."));
+        assert!(expected.contains("JWT_VERIFYING_KEY=-----BEGIN PUBLIC KEY-----..."));
+        assert!(expected.contains("JWT_VERIFYING_KEY_PREVIOUS=-----BEGIN PUBLIC KEY-----..."));
+
+        let template =
+            fs::read_to_string(root.join("templates/JWT_SIGNING_KEY.tpl")).expect("template");
+        assert!(template.contains("listSecretsByProjectSlug \"demo-project\" \"prod\" \"/\""));
+        assert!(template.contains("JWT_SIGNING_KEY"));
 
         let _ = fs::remove_dir_all(root);
     }

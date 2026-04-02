@@ -8,7 +8,10 @@ use actix_web::{HttpResponse, Responder, web};
 use bcrypt::{hash, verify};
 use chrono::{Duration, SecondsFormat, Utc};
 use dotenv::dotenv;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{
+    Algorithm as JsonWebTokenAlgorithm, DecodingKey, EncodingKey, Header, Validation, decode,
+    decode_header, encode,
+};
 use rand::distr::{Alphanumeric, SampleString};
 use rand::rng;
 use rpassword;
@@ -19,7 +22,7 @@ use sqlx::{Column, FromRow, Row, any::AnyRow};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::{Ready, ready};
 use std::io::{IsTerminal, Write, stdin, stdout};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::{
@@ -44,6 +47,8 @@ pub struct AuthSettings {
     pub verification_token_ttl_seconds: i64,
     #[serde(default = "default_password_reset_token_ttl_seconds")]
     pub password_reset_token_ttl_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwt: Option<AuthJwtSettings>,
     #[serde(
         default = "default_jwt_secret_ref",
         skip_serializing_if = "Option::is_none"
@@ -102,6 +107,57 @@ pub enum AuthEmailProvider {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum AuthJwtAlgorithm {
+    #[serde(rename = "HS256")]
+    Hs256,
+    #[serde(rename = "HS384")]
+    Hs384,
+    #[serde(rename = "HS512")]
+    Hs512,
+    #[serde(rename = "ES256")]
+    Es256,
+    #[serde(rename = "ES384")]
+    Es384,
+    #[default]
+    #[serde(rename = "EdDSA")]
+    EdDsa,
+}
+
+impl AuthJwtAlgorithm {
+    pub fn is_symmetric(self) -> bool {
+        matches!(self, Self::Hs256 | Self::Hs384 | Self::Hs512)
+    }
+
+    fn jsonwebtoken(self) -> JsonWebTokenAlgorithm {
+        match self {
+            Self::Hs256 => JsonWebTokenAlgorithm::HS256,
+            Self::Hs384 => JsonWebTokenAlgorithm::HS384,
+            Self::Hs512 => JsonWebTokenAlgorithm::HS512,
+            Self::Es256 => JsonWebTokenAlgorithm::ES256,
+            Self::Es384 => JsonWebTokenAlgorithm::ES384,
+            Self::EdDsa => JsonWebTokenAlgorithm::EdDSA,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthJwtVerificationKey {
+    pub kid: String,
+    pub key: SecretRef,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuthJwtSettings {
+    #[serde(default)]
+    pub algorithm: AuthJwtAlgorithm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_kid: Option<String>,
+    pub signing_key: SecretRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_keys: Vec<AuthJwtVerificationKey>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AuthUiPageSettings {
     pub path: String,
@@ -142,6 +198,7 @@ impl Default for AuthSettings {
             require_email_verification: false,
             verification_token_ttl_seconds: default_verification_token_ttl_seconds(),
             password_reset_token_ttl_seconds: default_password_reset_token_ttl_seconds(),
+            jwt: None,
             jwt_secret: default_jwt_secret_ref(),
             claims: BTreeMap::new(),
             session_cookie: None,
@@ -179,6 +236,14 @@ const fn default_password_reset_token_ttl_seconds() -> i64 {
 
 fn default_jwt_secret_ref() -> Option<SecretRef> {
     Some(SecretRef::env_or_file("JWT_SECRET"))
+}
+
+pub fn auth_jwt_signing_secret_ref(settings: &AuthSettings) -> Option<&SecretRef> {
+    settings
+        .jwt
+        .as_ref()
+        .map(|jwt| &jwt.signing_key)
+        .or(settings.jwt_secret.as_ref())
 }
 
 fn default_session_cookie_name() -> String {
@@ -445,35 +510,151 @@ fn is_builtin_auth_user_column(column_name: &str) -> bool {
     )
 }
 
-fn load_jwt_secret(secret: &SecretRef) -> Result<Arc<[u8]>, String> {
+fn load_jwt_key_material(secret: &SecretRef, label: &str) -> Result<Arc<[u8]>, String> {
     let _ = dotenv();
 
-    load_secret(secret, "JWT secret")
+    load_secret(secret, label)
         .map(|value| Arc::<[u8]>::from(value.into_bytes()))
         .map_err(|error| error.to_string())
 }
 
-fn configured_jwt_secret(settings: &AuthSettings) -> Result<Arc<[u8]>, String> {
-    static JWT_SECRETS: OnceLock<Mutex<HashMap<SecretRef, Result<Arc<[u8]>, String>>>> =
-        OnceLock::new();
+fn load_jwt_secret(secret: &SecretRef) -> Result<Arc<[u8]>, String> {
+    load_jwt_key_material(secret, "JWT secret")
+}
 
-    let secret_ref = settings
-        .jwt_secret
-        .clone()
+fn configured_legacy_jwt_secret(settings: &AuthSettings) -> Result<Arc<[u8]>, String> {
+    let secret_ref = auth_jwt_signing_secret_ref(settings)
+        .cloned()
         .unwrap_or_else(|| SecretRef::env_or_file("JWT_SECRET"));
-    let cache = JWT_SECRETS.get_or_init(|| Mutex::new(HashMap::new()));
+    load_jwt_secret(&secret_ref)
+}
 
-    {
-        let guard = cache.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(secret) = guard.get(&secret_ref) {
-            return secret.clone();
+fn load_jwt_encoding_key(
+    algorithm: AuthJwtAlgorithm,
+    secret: &SecretRef,
+    label: &str,
+) -> Result<Arc<EncodingKey>, String> {
+    let material = load_jwt_key_material(secret, label)?;
+    let key = match algorithm {
+        AuthJwtAlgorithm::Hs256 | AuthJwtAlgorithm::Hs384 | AuthJwtAlgorithm::Hs512 => {
+            Ok(EncodingKey::from_secret(material.as_ref()))
         }
-    }
+        AuthJwtAlgorithm::Es256 | AuthJwtAlgorithm::Es384 => {
+            EncodingKey::from_ec_pem(material.as_ref()).map_err(|error| {
+                format!(
+                    "{label} must be a valid EC private PEM for {}: {error}",
+                    algorithm_name(algorithm)
+                )
+            })
+        }
+        AuthJwtAlgorithm::EdDsa => EncodingKey::from_ed_pem(material.as_ref()).map_err(|error| {
+            format!("{label} must be a valid Ed25519 private PEM for EdDSA: {error}")
+        }),
+    }?;
+    Ok(Arc::new(key))
+}
 
-    let resolved = load_jwt_secret(&secret_ref);
-    let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
-    guard.insert(secret_ref, resolved.clone());
-    resolved
+fn load_jwt_decoding_key(
+    algorithm: AuthJwtAlgorithm,
+    secret: &SecretRef,
+    label: &str,
+) -> Result<Arc<DecodingKey>, String> {
+    let material = load_jwt_key_material(secret, label)?;
+    let key = match algorithm {
+        AuthJwtAlgorithm::Hs256 | AuthJwtAlgorithm::Hs384 | AuthJwtAlgorithm::Hs512 => {
+            Ok(DecodingKey::from_secret(material.as_ref()))
+        }
+        AuthJwtAlgorithm::Es256 | AuthJwtAlgorithm::Es384 => {
+            DecodingKey::from_ec_pem(material.as_ref()).map_err(|error| {
+                format!(
+                    "{label} must be a valid EC public PEM for {}: {error}",
+                    algorithm_name(algorithm)
+                )
+            })
+        }
+        AuthJwtAlgorithm::EdDsa => DecodingKey::from_ed_pem(material.as_ref()).map_err(|error| {
+            format!("{label} must be a valid Ed25519 public PEM for EdDSA: {error}")
+        }),
+    }?;
+    Ok(Arc::new(key))
+}
+
+fn configured_jwt_signer(settings: &AuthSettings) -> Result<(Header, Arc<EncodingKey>), String> {
+    if let Some(jwt) = &settings.jwt {
+        let mut header = Header::new(jwt.algorithm.jsonwebtoken());
+        header.kid = jwt.active_kid.clone();
+        let key = load_jwt_encoding_key(jwt.algorithm, &jwt.signing_key, "JWT signing key")?;
+        Ok((header, key))
+    } else {
+        let secret = configured_legacy_jwt_secret(settings)?;
+        Ok((
+            Header::default(),
+            Arc::new(EncodingKey::from_secret(secret.as_ref())),
+        ))
+    }
+}
+
+fn configured_jwt_decoding_key(
+    token: &str,
+    settings: &AuthSettings,
+) -> Result<(Arc<DecodingKey>, Validation), String> {
+    if let Some(jwt) = &settings.jwt {
+        let header =
+            decode_header(token).map_err(|error| format!("invalid JWT header: {error}"))?;
+        if header.alg != jwt.algorithm.jsonwebtoken() {
+            return Err(format!(
+                "token header algorithm `{:?}` does not match configured `{}`",
+                header.alg,
+                algorithm_name(jwt.algorithm)
+            ));
+        }
+
+        let decoding_key = if jwt.verification_keys.is_empty() {
+            if let (Some(active_kid), Some(header_kid)) =
+                (jwt.active_kid.as_deref(), header.kid.as_deref())
+                && active_kid != header_kid
+            {
+                return Err(format!(
+                    "token kid `{header_kid}` does not match configured active kid `{active_kid}`"
+                ));
+            }
+            load_jwt_decoding_key(jwt.algorithm, &jwt.signing_key, "JWT signing key")?
+        } else if let Some(header_kid) = header.kid.as_deref() {
+            let key = jwt
+                .verification_keys
+                .iter()
+                .find(|key| key.kid == header_kid)
+                .ok_or_else(|| format!("unknown JWT key id `{header_kid}`"))?;
+            load_jwt_decoding_key(jwt.algorithm, &key.key, "JWT verification key")?
+        } else if jwt.verification_keys.len() == 1 {
+            let key = &jwt.verification_keys[0];
+            load_jwt_decoding_key(jwt.algorithm, &key.key, "JWT verification key")?
+        } else {
+            return Err("JWT token is missing a `kid` header".to_owned());
+        };
+
+        Ok((
+            decoding_key,
+            validation_for_settings(settings, jwt.algorithm),
+        ))
+    } else {
+        let secret = configured_legacy_jwt_secret(settings)?;
+        Ok((
+            Arc::new(DecodingKey::from_secret(secret.as_ref())),
+            validation_for_settings(settings, AuthJwtAlgorithm::Hs256),
+        ))
+    }
+}
+
+fn algorithm_name(algorithm: AuthJwtAlgorithm) -> &'static str {
+    match algorithm {
+        AuthJwtAlgorithm::Hs256 => "HS256",
+        AuthJwtAlgorithm::Hs384 => "HS384",
+        AuthJwtAlgorithm::Hs512 => "HS512",
+        AuthJwtAlgorithm::Es256 => "ES256",
+        AuthJwtAlgorithm::Es384 => "ES384",
+        AuthJwtAlgorithm::EdDsa => "EdDSA",
+    }
 }
 
 pub fn ensure_jwt_secret_configured() -> Result<(), String> {
@@ -481,7 +662,17 @@ pub fn ensure_jwt_secret_configured() -> Result<(), String> {
 }
 
 pub fn ensure_jwt_secret_configured_with_settings(settings: &AuthSettings) -> Result<(), String> {
-    configured_jwt_secret(settings).map(|_| ())
+    let _ = configured_jwt_signer(settings)?;
+    if let Some(jwt) = &settings.jwt {
+        for verification_key in &jwt.verification_keys {
+            let _ = load_jwt_decoding_key(
+                jwt.algorithm,
+                &verification_key.key,
+                "JWT verification key",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -565,14 +756,11 @@ fn decode_user_context_token(
     token: &str,
     settings: &AuthSettings,
 ) -> Result<UserContext, actix_web::Error> {
-    let jwt_secret =
-        configured_jwt_secret(settings).map_err(actix_web::error::ErrorInternalServerError)?;
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(jwt_secret.as_ref()),
-        &validation_for_settings(settings),
-    )
-    .map_err(|_| {
+    let (decoding_key, validation) =
+        configured_jwt_decoding_key(token, settings).map_err(|_| {
+            errors::into_actix_error(errors::unauthorized("invalid_token", "Invalid token"))
+        })?;
+    let data = decode::<Claims>(token, decoding_key.as_ref(), &validation).map_err(|_| {
         errors::into_actix_error(errors::unauthorized("invalid_token", "Invalid token"))
     })?;
     let claims = data.claims;
@@ -1183,16 +1371,12 @@ async fn login_with_settings(
                 as usize,
             extra: user.claims,
         };
-        let jwt_secret = match configured_jwt_secret(&settings) {
-            Ok(secret) => secret,
+        let (header, encoding_key) = match configured_jwt_signer(&settings) {
+            Ok(signer) => signer,
             Err(message) => return errors::internal_error(message),
         };
 
-        match encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(jwt_secret.as_ref()),
-        ) {
+        match encode(&header, &claims, encoding_key.as_ref()) {
             Ok(token) => {
                 if let Some(cookie_settings) = &settings.session_cookie {
                     issue_cookie_login_response(
@@ -4284,8 +4468,8 @@ fn enforce_auth_rate_limit(req: &HttpRequest, scope: AuthRateLimitScope) -> Opti
     Some(response)
 }
 
-fn validation_for_settings(settings: &AuthSettings) -> Validation {
-    let mut validation = Validation::default();
+fn validation_for_settings(settings: &AuthSettings, algorithm: AuthJwtAlgorithm) -> Validation {
+    let mut validation = Validation::new(algorithm.jsonwebtoken());
     let mut required = vec!["exp"];
 
     if let Some(audience) = &settings.audience {
@@ -4343,10 +4527,10 @@ impl AuthRateLimiter {
 mod tests {
     use super::{
         AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
-        AuthSettings, LoginInput, auth_claim_migration_sql, auth_management_migration_sql,
-        auth_migration_sql, build_public_auth_url,
-        ensure_admin_exists_with_settings_and_claim_prompt_mode, load_jwt_secret,
-        login_with_settings, validate_auth_claim_mappings,
+        AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings, Claims,
+        LoginInput, auth_claim_migration_sql, auth_management_migration_sql, auth_migration_sql,
+        build_public_auth_url, ensure_admin_exists_with_settings_and_claim_prompt_mode,
+        load_jwt_secret, login_with_settings, validate_auth_claim_mappings,
     };
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
@@ -4356,6 +4540,8 @@ mod tests {
     use crate::secret::SecretRef;
     use actix_web::test::TestRequest;
     use actix_web::{body::to_bytes, http::StatusCode, web};
+    use chrono::{Duration, Utc};
+    use jsonwebtoken::encode;
     use sqlx::Row;
     use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
@@ -4374,6 +4560,23 @@ mod tests {
         let path = std::env::temp_dir().join(format!("vsr_auth_{prefix}_{nanos}.db"));
         format!("sqlite:{}?mode=rwc", path.display())
     }
+
+    fn write_temp_secret_file(prefix: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "vsr_auth_{prefix}_{}.pem",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic enough")
+                .as_nanos()
+        ));
+        std::fs::write(&path, contents).expect("temporary secret file should write");
+        path
+    }
+
+    const TEST_ED25519_PRIVATE_KEY_CURRENT: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICan3gTz94CxAFR90FubWnI1S7Hu81HAawRP0JnhgJd1\n-----END PRIVATE KEY-----\n";
+    const TEST_ED25519_PUBLIC_KEY_CURRENT: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6SXZeouSZ6gAAGu0fq5MlKZt7T0z0mf3pK1NmaIWqi4=\n-----END PUBLIC KEY-----\n";
+    const TEST_ED25519_PRIVATE_KEY_PREVIOUS: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIHP+7KrmLqsh9YuYdKt7lixHaso9B9XfoxDhheTT93xC\n-----END PRIVATE KEY-----\n";
+    const TEST_ED25519_PUBLIC_KEY_PREVIOUS: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMtHpnFKVCrgrEn+eT5L9XptGRw7nq2RZy5ZsM6TdS1Q=\n-----END PUBLIC KEY-----\n";
 
     #[test]
     fn sqlite_auth_migration_uses_expected_schema() {
@@ -4498,6 +4701,143 @@ mod tests {
             std::env::remove_var("JWT_SECRET_FILE");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn eddsa_jwt_signing_and_verification_supports_configured_key_ids() {
+        let private_key =
+            write_temp_secret_file("jwt_current_private", TEST_ED25519_PRIVATE_KEY_CURRENT);
+        let public_key =
+            write_temp_secret_file("jwt_current_public", TEST_ED25519_PUBLIC_KEY_CURRENT);
+
+        let settings = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::File {
+                    path: private_key.clone(),
+                },
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "current".to_owned(),
+                    key: SecretRef::File {
+                        path: public_key.clone(),
+                    },
+                }],
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+
+        let claims = Claims {
+            sub: 42,
+            roles: vec!["user".to_owned()],
+            iss: None,
+            aud: None,
+            exp: (Utc::now() + Duration::minutes(5)).timestamp() as usize,
+            extra: BTreeMap::new(),
+        };
+
+        let (header, encoding_key) =
+            super::configured_jwt_signer(&settings).expect("jwt signer should resolve");
+        assert_eq!(header.kid.as_deref(), Some("current"));
+        let token = encode(&header, &claims, encoding_key.as_ref()).expect("jwt should encode");
+
+        let context =
+            super::decode_user_context_token(&token, &settings).expect("jwt should decode");
+        assert_eq!(context.id, 42);
+        assert_eq!(context.roles, vec!["user".to_owned()]);
+
+        let _ = std::fs::remove_file(private_key);
+        let _ = std::fs::remove_file(public_key);
+    }
+
+    #[test]
+    fn eddsa_jwt_rotation_accepts_previous_verification_key() {
+        let current_private = write_temp_secret_file(
+            "jwt_rotate_current_private",
+            TEST_ED25519_PRIVATE_KEY_CURRENT,
+        );
+        let current_public =
+            write_temp_secret_file("jwt_rotate_current_public", TEST_ED25519_PUBLIC_KEY_CURRENT);
+        let previous_private = write_temp_secret_file(
+            "jwt_rotate_previous_private",
+            TEST_ED25519_PRIVATE_KEY_PREVIOUS,
+        );
+        let previous_public = write_temp_secret_file(
+            "jwt_rotate_previous_public",
+            TEST_ED25519_PUBLIC_KEY_PREVIOUS,
+        );
+
+        let previous_settings = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("previous".to_owned()),
+                signing_key: SecretRef::File {
+                    path: previous_private.clone(),
+                },
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "previous".to_owned(),
+                    key: SecretRef::File {
+                        path: previous_public.clone(),
+                    },
+                }],
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+        let rotated_settings = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::File {
+                    path: current_private.clone(),
+                },
+                verification_keys: vec![
+                    AuthJwtVerificationKey {
+                        kid: "current".to_owned(),
+                        key: SecretRef::File {
+                            path: current_public.clone(),
+                        },
+                    },
+                    AuthJwtVerificationKey {
+                        kid: "previous".to_owned(),
+                        key: SecretRef::File {
+                            path: previous_public.clone(),
+                        },
+                    },
+                ],
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+
+        let claims = Claims {
+            sub: 7,
+            roles: vec!["admin".to_owned()],
+            iss: None,
+            aud: None,
+            exp: (Utc::now() + Duration::minutes(5)).timestamp() as usize,
+            extra: BTreeMap::new(),
+        };
+
+        let (header, encoding_key) = super::configured_jwt_signer(&previous_settings)
+            .expect("previous jwt signer should resolve");
+        let token =
+            encode(&header, &claims, encoding_key.as_ref()).expect("rotated jwt should encode");
+
+        let context = super::decode_user_context_token(&token, &rotated_settings)
+            .expect("old token should decode after rotation");
+        assert_eq!(context.id, 7);
+        assert_eq!(context.roles, vec!["admin".to_owned()]);
+
+        for path in [
+            current_private,
+            current_public,
+            previous_private,
+            previous_public,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

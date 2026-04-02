@@ -11,7 +11,7 @@ use quote::ToTokens;
 use serde_json::Value as JsonValue;
 use syn::{Ident, Type};
 
-use crate::auth::{AuthClaimType, AuthEmailProvider, SessionCookieSameSite};
+use crate::auth::{AuthClaimType, AuthEmailProvider, AuthJwtAlgorithm, SessionCookieSameSite};
 use crate::authorization::AuthorizationContract;
 use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
@@ -2400,6 +2400,87 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         }
     }
 
+    if security.auth.jwt.is_some() && security.auth.jwt_secret.is_some() {
+        return Err(syn::Error::new(
+            span,
+            "`security.auth.jwt` cannot be combined with `security.auth.jwt_secret`",
+        ));
+    }
+
+    if let Some(jwt) = &security.auth.jwt {
+        if matches!(jwt.active_kid.as_deref(), Some("")) {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.jwt.active_kid` cannot be empty",
+            ));
+        }
+
+        validate_secret_ref(&jwt.signing_key, "security.auth.jwt.signing_key", span)?;
+
+        if !jwt.verification_keys.is_empty() && jwt.active_kid.is_none() {
+            return Err(syn::Error::new(
+                span,
+                "`security.auth.jwt.active_kid` is required when verification keys are configured",
+            ));
+        }
+
+        if !jwt.algorithm.is_symmetric() && jwt.verification_keys.is_empty() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`security.auth.jwt.verification_keys` is required for asymmetric `{}` JWT configuration",
+                    match jwt.algorithm {
+                        AuthJwtAlgorithm::Es256 => "ES256",
+                        AuthJwtAlgorithm::Es384 => "ES384",
+                        AuthJwtAlgorithm::EdDsa => "EdDSA",
+                        AuthJwtAlgorithm::Hs256 => "HS256",
+                        AuthJwtAlgorithm::Hs384 => "HS384",
+                        AuthJwtAlgorithm::Hs512 => "HS512",
+                    }
+                ),
+            ));
+        }
+
+        let mut seen_kids = HashSet::new();
+        for key in &jwt.verification_keys {
+            if key.kid.trim().is_empty() {
+                return Err(syn::Error::new(
+                    span,
+                    "`security.auth.jwt.verification_keys[].kid` cannot be empty",
+                ));
+            }
+            if !seen_kids.insert(key.kid.as_str()) {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "duplicate `security.auth.jwt.verification_keys[].kid` value `{}`",
+                        key.kid
+                    ),
+                ));
+            }
+            validate_secret_ref(
+                &key.key,
+                &format!("security.auth.jwt.verification_keys[{}].key", key.kid),
+                span,
+            )?;
+        }
+
+        if let Some(active_kid) = jwt.active_kid.as_deref()
+            && !jwt.verification_keys.is_empty()
+            && !jwt
+                .verification_keys
+                .iter()
+                .any(|verification_key| verification_key.kid == active_kid)
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`security.auth.jwt.active_kid` references unknown verification key `{active_kid}`",
+                ),
+            ));
+        }
+    }
+
     if let Some(jwt_secret) = &security.auth.jwt_secret {
         validate_secret_ref(jwt_secret, "security.auth.jwt_secret", span)?;
     }
@@ -3135,4 +3216,85 @@ fn validate_policy_field<'a>(
     }
 
     Ok(field)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_security_config;
+    use crate::auth::{AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings};
+    use crate::secret::SecretRef;
+    use crate::security::SecurityConfig;
+    use proc_macro2::Span;
+
+    #[test]
+    fn rejects_combined_structured_and_legacy_jwt_config() {
+        let mut security = SecurityConfig::default();
+        security.auth = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "current".to_owned(),
+                    key: SecretRef::env_or_file("JWT_VERIFYING_KEY"),
+                }],
+            }),
+            jwt_secret: Some(SecretRef::env_or_file("JWT_SECRET")),
+            ..AuthSettings::default()
+        };
+
+        let error =
+            validate_security_config(&security, Span::call_site()).expect_err("config should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("`security.auth.jwt` cannot be combined with `security.auth.jwt_secret`")
+        );
+    }
+
+    #[test]
+    fn rejects_asymmetric_jwt_without_verification_keys() {
+        let mut security = SecurityConfig::default();
+        security.auth = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: None,
+                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                verification_keys: Vec::new(),
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+
+        let error =
+            validate_security_config(&security, Span::call_site()).expect_err("config should fail");
+        let message = error.to_string();
+        assert!(message.contains("security.auth.jwt.verification_keys"));
+        assert!(message.contains("asymmetric"));
+    }
+
+    #[test]
+    fn rejects_active_kid_not_present_in_verification_keys() {
+        let mut security = SecurityConfig::default();
+        security.auth = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "previous".to_owned(),
+                    key: SecretRef::env_or_file("JWT_VERIFYING_KEY_PREVIOUS"),
+                }],
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+
+        let error =
+            validate_security_config(&security, Span::call_site()).expect_err("config should fail");
+        let message = error.to_string();
+        assert!(message.contains("security.auth.jwt.active_kid"));
+        assert!(message.contains("unknown verification key"));
+        assert!(message.contains("current"));
+    }
 }

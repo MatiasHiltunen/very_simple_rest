@@ -187,7 +187,8 @@ and the generated `runtime.env` points VSR at those files. See
 `vsr doctor secrets` validates:
 
 - currently resolved `*_FILE` / inline bindings for the service
-- service-required secret inputs such as `JWT_SECRET`, mail credentials, and Turso keys
+- service-required secret inputs such as the configured JWT signing key, mail credentials, and
+  Turso keys
 - optional Infisical scaffold completeness when `--infisical-dir` is provided
 
 ### Strict Service Checks
@@ -288,9 +289,10 @@ file explicitly names them.
 Without `--input` or `--build-dir`, `vsr clean` keeps the legacy `./.vsr-build` current-directory
 fallback.
 
-The generated server fails fast if built-in auth is enabled and `JWT_SECRET` is missing. `vsr
-gen-env` and emitted `.env.example` files still help by generating or surfacing the required env
-vars, but runtime auth is no longer allowed to fall back to a random secret.
+The generated server fails fast if built-in auth is enabled and the configured JWT signing
+material is missing. `vsr gen-env` and emitted `.env.example` files still help by generating or
+surfacing the required env vars, but runtime auth is no longer allowed to fall back to a random
+secret.
 
 Generated server projects serve the OpenAPI document at `/openapi.json` and Swagger UI at `/docs`.
 When a `.eon` service defines static mounts, `vsr server emit` also copies those directories into
@@ -764,7 +766,7 @@ The CLI tool respects the following environment variables:
 | `ADMIN_EMAIL` | Default admin email address | None |
 | `ADMIN_PASSWORD` | Default admin password | None |
 | `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` or `ADMIN_IS_STAFF` | None |
-| `JWT_SECRET` / `JWT_SECRET_FILE` | Secret key for JWT tokens or mounted file containing it | Required for built-in auth at runtime |
+| `JWT_SECRET` / `JWT_SECRET_FILE` | Legacy shared-secret JWT signing key or mounted file containing it | Required only when built-in auth uses the legacy `security.auth.jwt_secret` path |
 
 ## Examples
 
@@ -816,6 +818,16 @@ export JWT_SECRET_FILE=/run/secrets/JWT_SECRET
 vsr setup --production
 ```
 
+Or, for asymmetric JWT signing:
+
+```bash
+export DATABASE_URL_FILE=/run/secrets/DATABASE_URL
+export JWT_SIGNING_KEY_FILE=/run/secrets/JWT_SIGNING_KEY
+export JWT_VERIFYING_KEY_FILE=/run/secrets/JWT_VERIFYING_KEY
+
+vsr setup --production
+```
+
 ### `.eon`-Driven Local Turso Example
 
 ```bash
@@ -842,7 +854,8 @@ vsr create-admin --email $ADMIN_EMAIL --password $ADMIN_PASSWORD
 ## Security Best Practices
 
 - Never store admin credentials in version control
-- Use environment variables or a secure secret management system
+- Use mounted secret files or a secure secret management system for JWT keys and other high-value
+  secrets
 - Change default admin passwords immediately in production
 - Use strong, unique passwords
 - Consider setting up a dedicated admin user for each team member

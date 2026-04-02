@@ -249,10 +249,10 @@ also update configured `security.auth.claims` values on existing users. That mak
 bootstrap claim-scoped examples and policy-heavy services through HTTP instead of direct SQL
 updates.
 
-### JWT Secret Configuration
+### JWT Configuration
 
-Built-in auth now requires a JWT signing secret before the server starts. In `.eon`, prefer the
-typed form:
+Built-in auth now requires an explicit JWT signing configuration before the server starts. The
+legacy shared-secret path still works:
 
 ```eon
 security: {
@@ -262,15 +262,34 @@ security: {
 }
 ```
 
-Supported runtime sources:
+For new services, prefer the structured JWT block so you can choose an algorithm and rotate keys:
 
-1. Environment variable: `JWT_SECRET=your_secret_here`
-2. Mounted secret file: `JWT_SECRET_FILE=/run/secrets/JWT_SECRET`
-3. systemd credential via `jwt_secret: { systemd_credential: "jwt_secret" }`
-4. `.env` file in your project root: `JWT_SECRET=your_secret_here`
+```eon
+security: {
+    auth: {
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "2026-04"
+            signing_key: { env_or_file: "JWT_SIGNING_KEY" }
+            verification_keys: [
+                { kid: "2026-04", key: { env_or_file: "JWT_VERIFYING_KEY" } }
+                { kid: "2026-03", key: { env_or_file: "JWT_VERIFYING_KEY_PREVIOUS" } }
+            ]
+        }
+    }
+}
+```
+
+Supported runtime secret sources still use typed `SecretRef`s:
+
+1. Environment variable or mounted file via `{ env_or_file: "JWT_SIGNING_KEY" }`
+2. Explicit file path via `{ file: "/run/secrets/JWT_SIGNING_KEY.pem" }`
+3. systemd credential via `{ systemd_credential: "jwt_signing_key" }`
+4. External secret contract via `{ external: { provider: "...", locator: "..." } }`
 
 The runtime no longer generates a random fallback secret, so tokens remain valid across restarts
-and multi-instance deployments only when you provide an explicit secret.
+and multi-instance deployments only when you provide explicit signing material. For asymmetric
+algorithms, prefer PEM files via `*_FILE` or direct file paths instead of inline env values.
 
 For production, prefer secret files or a secret manager over inline `.env` values. The current
 production-secrets plan is in
@@ -925,9 +944,10 @@ Supported security options:
 - `auth.access_token_ttl_seconds`: built-in auth token lifetime
 
 Generated `.eon` modules expose the compiled settings through `module::security()` and
-`module::configure_security(...)`. Secrets such as `JWT_SECRET` still belong in the environment,
-not in `.eon`. The current rate-limit implementation is in-memory and process-local, so it is a
-good default for a single binary but not a shared distributed limiter.
+`module::configure_security(...)`. JWT signing material and other secrets should still resolve
+from the runtime environment, mounted files, systemd credentials, or a secret manager, not from
+literal values embedded in `.eon`. The current rate-limit implementation is in-memory and
+process-local, so it is a good default for a single binary but not a shared distributed limiter.
 
 ## Runtime In `.eon`
 

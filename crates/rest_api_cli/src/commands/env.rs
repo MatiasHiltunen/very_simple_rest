@@ -1,7 +1,9 @@
 use crate::error::{Error, Result};
 use rand::distr::{Alphanumeric, SampleString};
 use rand::{RngExt, rng};
-use rest_macro_core::auth::{AuthClaimType, AuthEmailProvider};
+use rest_macro_core::auth::{
+    AuthClaimType, AuthEmailProvider, AuthJwtAlgorithm, auth_jwt_signing_secret_ref,
+};
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
 use rest_macro_core::secret::SecretRef;
@@ -51,6 +53,7 @@ pub struct EnvFileReport {
 struct EnvTemplateConfig {
     database_url: String,
     jwt_secret_var: Option<String>,
+    jwt_algorithm: Option<AuthJwtAlgorithm>,
     turso_encryption_var: Option<String>,
     auth_email_env_var: Option<String>,
     auth_email_env_comment: Option<String>,
@@ -77,6 +80,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
         return Ok(EnvTemplateConfig {
             database_url: "sqlite:var/data/app.db?mode=rwc".to_owned(),
             jwt_secret_var: Some("JWT_SECRET".to_owned()),
+            jwt_algorithm: Some(AuthJwtAlgorithm::Hs256),
             turso_encryption_var: None,
             auth_email_env_var: None,
             auth_email_env_comment: None,
@@ -95,13 +99,10 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
 
     let service = compiler::load_service_from_path(path)
         .map_err(|error| crate::error::Error::Config(error.to_string()))?;
-    let jwt_secret_var = service
-        .security
-        .auth
-        .jwt_secret
-        .as_ref()
+    let jwt_secret_var = auth_jwt_signing_secret_ref(&service.security.auth)
         .and_then(SecretRef::env_binding_name)
         .map(str::to_owned);
+    let jwt_algorithm = service.security.auth.jwt.as_ref().map(|jwt| jwt.algorithm);
     let turso_encryption_var = match &service.database.engine {
         DatabaseEngine::TursoLocal(engine) => engine
             .encryption_key
@@ -128,6 +129,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
     Ok(EnvTemplateConfig {
         database_url: default_service_database_url(&service),
         jwt_secret_var,
+        jwt_algorithm,
         turso_encryption_var,
         auth_email_env_var,
         auth_email_env_comment,
@@ -239,7 +241,12 @@ fn render_env_template_with_config(config: &EnvTemplateConfig, mode: EnvTemplate
     )
     .unwrap();
     let jwt_secret_var = config.jwt_secret_var.as_deref().unwrap_or("JWT_SECRET");
-    if mode.writes_live_secrets() {
+    if mode.writes_live_secrets()
+        && config
+            .jwt_algorithm
+            .unwrap_or(AuthJwtAlgorithm::Hs256)
+            .is_symmetric()
+    {
         writeln!(&mut output, "{jwt_secret_var}={jwt_secret}").unwrap();
         writeln!(
             &mut output,
@@ -247,7 +254,24 @@ fn render_env_template_with_config(config: &EnvTemplateConfig, mode: EnvTemplate
         )
         .unwrap();
     } else {
-        render_secret_binding_comment(&mut output, jwt_secret_var, "change-me");
+        if config
+            .jwt_algorithm
+            .unwrap_or(AuthJwtAlgorithm::Hs256)
+            .is_symmetric()
+        {
+            render_secret_binding_comment(&mut output, jwt_secret_var, "change-me");
+        } else {
+            writeln!(
+                &mut output,
+                "# Prefer a PEM file and set {jwt_secret_var}_FILE=/run/secrets/{jwt_secret_var}"
+            )
+            .unwrap();
+            writeln!(
+                &mut output,
+                "# {jwt_secret_var}=-----BEGIN PRIVATE KEY-----..."
+            )
+            .unwrap();
+        }
     }
     writeln!(&mut output).unwrap();
     if let Some(var_name) = &config.auth_email_env_var {
@@ -507,7 +531,8 @@ pub fn write_env_file(
     };
 
     let config = env_template_config(config_path)?;
-    let preserved_jwt_secret = existing_env_value(&existing_assignments, "JWT_SECRET").is_some();
+    let jwt_secret_var = config.jwt_secret_var.as_deref().unwrap_or("JWT_SECRET");
+    let preserved_jwt_secret = existing_env_value(&existing_assignments, jwt_secret_var).is_some();
     let preserved_turso_encryption_var = config
         .turso_encryption_var
         .as_ref()
@@ -531,7 +556,12 @@ pub fn write_env_file(
             None
         },
         preserved_turso_encryption_var,
-        generated_jwt_secret: mode.writes_live_secrets() && !preserved_jwt_secret,
+        generated_jwt_secret: mode.writes_live_secrets()
+            && config
+                .jwt_algorithm
+                .unwrap_or(AuthJwtAlgorithm::Hs256)
+                .is_symmetric()
+            && !preserved_jwt_secret,
         preserved_jwt_secret,
         mode,
     })
@@ -778,6 +808,47 @@ mod tests {
         assert!(content.contains("JWT_SECRET=preserve-jwt"));
         assert!(content.contains("TURSO_ENCRYPTION_KEY=preserve-key"));
         assert!(content.contains("EXTRA_TOKEN=keep-me"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rendered_env_template_prefers_file_hints_for_asymmetric_jwt() {
+        let root = temp_root("jwt_asymmetric_env");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config = root.join("api.eon");
+        fs::write(
+            &config,
+            r#"
+            module: "jwt_env_api"
+            security: {
+                auth: {
+                    jwt: {
+                        algorithm: EdDSA
+                        active_kid: "current"
+                        signing_key: { env_or_file: "JWT_SIGNING_KEY" }
+                        verification_keys: [
+                            { kid: "current", key: { env_or_file: "JWT_VERIFYING_KEY" } }
+                        ]
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64, id: true }]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+
+        let content = render_env_template(Some(&config)).expect("env template should render");
+        assert!(!content.contains("\nJWT_SIGNING_KEY="));
+        assert!(content.contains("# JWT_SIGNING_KEY=-----BEGIN PRIVATE KEY-----..."));
+        assert!(content.contains(
+            "# Prefer a PEM file and set JWT_SIGNING_KEY_FILE=/run/secrets/JWT_SIGNING_KEY"
+        ));
 
         let _ = fs::remove_dir_all(root);
     }

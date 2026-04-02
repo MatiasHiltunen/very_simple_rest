@@ -2294,6 +2294,14 @@ database: {
                 "Password-reset token lifetime in seconds.",
             ),
             row(
+                "security.auth.jwt",
+                "Map",
+                "None",
+                "No",
+                "See Auth JWT",
+                "Structured JWT signing/verification config with algorithm selection, key ids, and rotation support.",
+            ),
+            row(
                 "security.auth.jwt_secret",
                 "SecretRef",
                 format_option(
@@ -2304,7 +2312,7 @@ database: {
                 ),
                 "No",
                 "See Secret References",
-                "Controls how built-in auth resolves the JWT signing key. Prefer `{ env_or_file: \"JWT_SECRET\" }` for new configs.",
+                "Controls how built-in auth resolves the legacy shared-secret signing key. Prefer `security.auth.jwt` for new configs that need explicit algorithms or rotation.",
             ),
             row(
                 "security.auth.claims",
@@ -2359,6 +2367,72 @@ database: {
             workspace_id: "claim_workspace_id"
             staff: { column: "is_staff", type: Bool }
             plan: String
+        }
+    }
+}"#,
+    );
+
+    push_section(
+        &mut markdown,
+        "Auth JWT",
+        "Use `security.auth.jwt` for asymmetric keys or explicit rotation. Keep `security.auth.jwt_secret` only for the legacy shared-secret path.",
+        &[
+            row(
+                "security.auth.jwt.algorithm",
+                "Enum",
+                "EdDSA when the `jwt` block exists and `algorithm` is omitted",
+                "No",
+                "HS256, HS384, HS512, ES256, ES384, EdDSA",
+                "Selects the signing and verification algorithm for built-in auth tokens.",
+            ),
+            row(
+                "security.auth.jwt.active_kid",
+                "String",
+                "None",
+                "Required when `verification_keys` are configured",
+                "Non-empty string",
+                "Emitted in the JWT header as `kid` for newly-issued tokens.",
+            ),
+            row(
+                "security.auth.jwt.signing_key",
+                "SecretRef",
+                "None",
+                "Yes",
+                "See Secret References",
+                "Signing key for JWT issuance. Asymmetric algorithms expect a private PEM.",
+            ),
+            row(
+                "security.auth.jwt.verification_keys[].kid",
+                "String",
+                "None",
+                "Required for each verification key",
+                "Non-empty string",
+                "Key id matched against the incoming JWT header `kid`.",
+            ),
+            row(
+                "security.auth.jwt.verification_keys[].key",
+                "SecretRef",
+                "None",
+                "Required for each verification key",
+                "See Secret References",
+                "Verification key material. Asymmetric algorithms expect a public PEM.",
+            ),
+        ],
+    );
+
+    push_code_block(
+        &mut markdown,
+        "eon",
+        r#"security: {
+    auth: {
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "2026-04"
+            signing_key: { env_or_file: "JWT_SIGNING_KEY" }
+            verification_keys: [
+                { kid: "2026-04", key: { env_or_file: "JWT_VERIFYING_KEY" } }
+                { kid: "2026-03", key: { env_or_file: "JWT_VERIFYING_KEY_PREVIOUS" } }
+            ]
         }
     }
 }"#,
