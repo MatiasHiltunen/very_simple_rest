@@ -27,6 +27,7 @@ use syn::{parse_str, parse2};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
+use crate::commands::client;
 
 const LOCAL_DEP_PATH_ENV: &str = "VSR_LOCAL_DEP_PATH";
 const REPO_GIT_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest.git";
@@ -301,6 +302,9 @@ fn build_server_binary_from_resolved(
     {
         fs::remove_dir_all(build_root).map_err(Error::Io)?;
     }
+
+    client::generate_automated_typescript_client_for_build(input)
+        .map_err(|error| Error::Unknown(error.to_string()))?;
 
     println!(
         "{} {}",

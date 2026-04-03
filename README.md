@@ -578,10 +578,37 @@ resources and stays faithful to the currently published OpenAPI contract. Endpoi
 publish empty success responses are therefore typed as `void` until the OpenAPI surface grows
 richer response metadata.
 
-`.eon` services can also declare TypeScript client defaults under `clients.ts`. Output paths and
-package names resolve with this precedence: CLI override, then the declared env var override, then
-the literal `.eon` value, then the service-relative default. No client-generation env vars are
-read unless the `.eon` file explicitly names them.
+`.eon` services can also declare TypeScript client defaults and build automation under `clients.ts`.
+Output paths and package names resolve with this precedence: CLI override, then the declared env
+var override, then the literal `.eon` value, then the service-relative default. No
+client-generation env vars are read unless the `.eon` file explicitly names them.
+
+```eon
+clients: {
+    ts: {
+        output_dir: {
+            path: "web/src/gen/client"
+            env: "CMS_TS_CLIENT_OUT"
+        }
+        package_name: "@cms/api-client"
+        server_url: "/api"
+        include_builtin_auth: true
+        exclude_tables: ["audit_log"]
+        automation: {
+            on_build: true
+            self_test: true
+            self_test_report: {
+                path: "reports/client-self-test.json"
+            }
+        }
+    }
+}
+```
+
+When `clients.ts.automation.on_build` is enabled, `vsr build` and `vsr server build` regenerate
+the TypeScript client automatically after a successful server build. Automated client generation
+always refreshes the configured client output directory, and automated self-test runs the same
+dependency-free static checks as `vsr client ts --self-test`.
 
 When `--self-test` is enabled, VSR validates the generated client package automatically:
 

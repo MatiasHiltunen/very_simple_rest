@@ -36,7 +36,7 @@ pub fn generate_typescript_client(
     exclude_tables: &[String],
     package_name: Option<&str>,
     server_url: Option<&str>,
-    include_builtin_auth: bool,
+    include_builtin_auth: Option<bool>,
 ) -> Result<PathBuf> {
     Ok(generate_typescript_client_artifacts(
         input,
@@ -57,7 +57,7 @@ pub fn generate_typescript_client_with_self_test(
     exclude_tables: &[String],
     package_name: Option<&str>,
     server_url: Option<&str>,
-    include_builtin_auth: bool,
+    include_builtin_auth: Option<bool>,
     self_test: Option<TypescriptClientSelfTestOptions>,
 ) -> Result<PathBuf> {
     let generated = generate_typescript_client_artifacts(
@@ -86,6 +86,44 @@ pub fn generate_typescript_client_with_self_test(
     Ok(generated.output_dir)
 }
 
+pub fn generate_automated_typescript_client_for_build(input: &Path) -> Result<Option<PathBuf>> {
+    let service = load_client_generation_service(input, &[])?;
+    if !service.clients.ts.automation.on_build {
+        return Ok(None);
+    }
+
+    println!("{}", "Generating automated TypeScript client...".cyan().bold());
+
+    let self_test = if service.clients.ts.automation.self_test {
+        Some(TypescriptClientSelfTestOptions {
+            report_path: resolve_client_path_from_config(
+                input,
+                &service.clients.ts.automation.self_test_report,
+            )?,
+            runtime_base_url: None,
+            node_binary: None,
+            tsc_binary: None,
+            insecure_tls: false,
+            force: true,
+        })
+    } else {
+        None
+    };
+
+    let output_dir = generate_typescript_client_with_self_test(
+        input,
+        None,
+        true,
+        &[],
+        None,
+        None,
+        None,
+        self_test,
+    )?;
+
+    Ok(Some(output_dir))
+}
+
 fn generate_typescript_client_artifacts(
     input: &Path,
     output: Option<&Path>,
@@ -93,13 +131,14 @@ fn generate_typescript_client_artifacts(
     exclude_tables: &[String],
     package_name: Option<&str>,
     server_url: Option<&str>,
-    include_builtin_auth: bool,
+    include_builtin_auth: Option<bool>,
 ) -> Result<GeneratedClientArtifacts> {
-    let service = load_schema_service(input, exclude_tables)?;
+    let service = load_client_generation_service(input, exclude_tables)?;
     let output_dir = resolve_client_output_dir(input, &service, output)?;
     prepare_output_dir(&output_dir, force)?;
     let package_name = resolve_client_package_name(input, &service, package_name);
     let server_url = resolve_client_server_url(&service, server_url);
+    let include_builtin_auth = resolve_client_include_builtin_auth(&service, include_builtin_auth);
 
     let options = OpenApiSpecOptions::new(
         default_title(&service),
@@ -153,6 +192,59 @@ fn resolve_client_output_dir(
             ),
         },
     }
+}
+
+fn load_client_generation_service(
+    input: &Path,
+    cli_exclude_tables: &[String],
+) -> Result<compiler::ServiceSpec> {
+    let mut service = load_schema_service(input, &[])?;
+    let exclude_tables = merged_client_exclude_tables(&service, cli_exclude_tables);
+    apply_client_table_exclusions(&mut service, &exclude_tables, input)?;
+    Ok(service)
+}
+
+fn merged_client_exclude_tables(
+    service: &compiler::ServiceSpec,
+    cli_exclude_tables: &[String],
+) -> Vec<String> {
+    let mut merged = BTreeSet::new();
+    for table in &service.clients.ts.exclude_tables {
+        let trimmed = table.trim();
+        if !trimmed.is_empty() {
+            merged.insert(trimmed.to_owned());
+        }
+    }
+    for table in cli_exclude_tables {
+        let trimmed = table.trim();
+        if !trimmed.is_empty() {
+            merged.insert(trimmed.to_owned());
+        }
+    }
+    merged.into_iter().collect()
+}
+
+fn apply_client_table_exclusions(
+    service: &mut compiler::ServiceSpec,
+    exclude_tables: &[String],
+    input: &Path,
+) -> Result<()> {
+    if !exclude_tables.is_empty() {
+        service.resources.retain(|resource| {
+            !exclude_tables
+                .iter()
+                .any(|excluded| excluded == &resource.table_name)
+        });
+    }
+
+    if service.resources.is_empty() {
+        bail!(
+            "no resources remain after client exclusions for {}",
+            input.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
@@ -223,6 +315,13 @@ fn resolve_client_server_url(service: &compiler::ServiceSpec, server_url: Option
         .map(str::to_owned)
         .or_else(|| service.clients.ts.server_url.clone())
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned())
+}
+
+fn resolve_client_include_builtin_auth(
+    service: &compiler::ServiceSpec,
+    include_builtin_auth: Option<bool>,
+) -> bool {
+    include_builtin_auth.unwrap_or(service.clients.ts.include_builtin_auth)
 }
 
 fn resolve_client_path_from_config(
@@ -1963,7 +2062,7 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
 
-    use super::generate_typescript_client;
+    use super::{generate_automated_typescript_client_for_build, generate_typescript_client};
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2003,7 +2102,7 @@ mod tests {
             &[],
             Some("@demo/blog-client"),
             Some("/api"),
-            true,
+            Some(true),
         )
         .expect("client should generate");
 
@@ -2034,7 +2133,7 @@ mod tests {
             &[],
             None,
             Some("/api"),
-            true,
+            Some(true),
         )
         .expect("client should generate");
 
@@ -2055,7 +2154,7 @@ mod tests {
         let input = service_dir.join("todo_app.eon");
         fs::copy(fixture_path("blog_api.eon"), &input).expect("fixture should copy");
 
-        let output = generate_typescript_client(&input, None, false, &[], None, None, false)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
             .expect("client should generate");
 
         assert_eq!(output, service_dir.join("todo_app.client"));
@@ -2073,7 +2172,7 @@ mod tests {
             &[],
             Some("@demo/blog-client"),
             Some("/api"),
-            true,
+            Some(true),
         )
         .expect("client should generate");
 
@@ -2097,7 +2196,7 @@ mod tests {
             &[],
             None,
             Some("/api"),
-            false,
+            Some(false),
         )
         .expect("client should generate");
 
@@ -2136,7 +2235,7 @@ mod tests {
         )
         .expect("service should write");
 
-        let output = generate_typescript_client(&input, None, false, &[], None, None, false)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
             .expect("client should generate");
 
         assert_eq!(output, service_dir.join("web/src/gen/client"));
@@ -2147,6 +2246,102 @@ mod tests {
             read_to_string(&output.join("client.ts"))
                 .contains("const DEFAULT_SERVER_URL = \"/edge-api\";")
         );
+    }
+
+    #[test]
+    fn generate_typescript_client_respects_clients_config_auth_and_exclusions() {
+        let root = test_root();
+        let service_dir = root.join("service");
+        fs::create_dir_all(&service_dir).expect("service dir should exist");
+        let input = service_dir.join("client_api.eon");
+        fs::write(
+            &input,
+            r#"
+            module: "client_api"
+            clients: {
+                ts: {
+                    include_builtin_auth: false
+                    exclude_tables: ["audit_log"]
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+                {
+                    name: "AuditLog"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        )
+        .expect("service should write");
+
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
+            .expect("client should generate");
+        let operations = read_to_string(&output.join("operations.ts"));
+
+        assert!(!operations.contains("loginUser("));
+        assert!(!operations.contains("listAuditLog("));
+        assert!(operations.contains("listPost("));
+    }
+
+    #[test]
+    fn generate_automated_typescript_client_for_build_uses_automation_config() {
+        let root = test_root();
+        let service_dir = root.join("service");
+        fs::create_dir_all(&service_dir).expect("service dir should exist");
+        let input = service_dir.join("client_api.eon");
+        fs::write(
+            &input,
+            r#"
+            module: "client_api"
+            clients: {
+                ts: {
+                    output_dir: {
+                        path: "web/src/gen/client"
+                    }
+                    include_builtin_auth: false
+                    exclude_tables: ["audit_log"]
+                    automation: {
+                        on_build: true
+                        self_test: true
+                        self_test_report: {
+                            path: "reports/client-self-test.json"
+                        }
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+                {
+                    name: "AuditLog"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        )
+        .expect("service should write");
+
+        let output = generate_automated_typescript_client_for_build(&input)
+            .expect("automated client generation should succeed")
+            .expect("automation should be enabled");
+
+        assert_eq!(output, service_dir.join("web/src/gen/client"));
+        assert!(
+            service_dir
+                .join("reports/client-self-test.json")
+                .exists()
+        );
+
+        let operations = read_to_string(&output.join("operations.ts"));
+        assert!(!operations.contains("loginUser("));
+        assert!(!operations.contains("listAuditLog("));
+        assert!(operations.contains("listPost("));
     }
 
     #[test]
@@ -2189,7 +2384,7 @@ mod tests {
             std::env::set_var(&output_env, "env-client");
             std::env::set_var(&package_env, "@env/client-api");
         }
-        let output = generate_typescript_client(&input, None, false, &[], None, None, false)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
             .expect("client should generate");
         unsafe {
             std::env::remove_var(&output_env);

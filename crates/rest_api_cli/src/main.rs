@@ -1625,7 +1625,13 @@ async fn run_cli() -> Result<()> {
                 self_test_insecure_tls,
             } => {
                 println!("{}", "Generating TypeScript client...".green().bold());
-                let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+                let include_builtin_auth = if *without_auth {
+                    Some(false)
+                } else if *with_auth {
+                    Some(true)
+                } else {
+                    None
+                };
                 let self_test = if *self_test {
                     Some(commands::client::TypescriptClientSelfTestOptions {
                         report_path: self_test_report.clone(),

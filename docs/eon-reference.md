@@ -557,7 +557,7 @@ Build settings affect generated server projects and `vsr build` output without c
 
 ## Clients
 
-Client generation settings control `vsr client ts` defaults without changing the API contract.
+Client generation settings control `vsr client ts` defaults and optional build-time automation without changing the API contract.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -566,6 +566,12 @@ Client generation settings control `vsr client ts` defaults without changing the
 | clients.ts.package_name.value | String | <input-stem>-client | No | npm package name string | Default package name written to the generated `package.json` for `vsr client ts`. |
 | clients.ts.package_name.env | String | None | No | Environment variable name | Optional env var override for the generated client package name. `vsr` reads it only when this field is declared. |
 | clients.ts.server_url | String | /api | No | Relative API base path | Default server URL embedded in the generated TypeScript client when `--server-url` is not passed. |
+| clients.ts.include_builtin_auth | Bool | true | No | true, false | Controls whether built-in auth routes are included in the generated TypeScript client when the CLI does not explicitly pass `--without-auth`. |
+| clients.ts.exclude_tables | Array<String> | [] | No | Resource table names | Default resource tables excluded from generated TypeScript client operations. CLI `--exclude-table` values are added on top of this list. |
+| clients.ts.automation.on_build | Bool | false | No | true, false | When true, `vsr build` and `vsr server build` automatically regenerate the TypeScript client after a successful server build. |
+| clients.ts.automation.self_test | Bool | false | No | true, false | When `automation.on_build` is enabled, runs the generated client static self-test after regeneration and writes a JSON report. |
+| clients.ts.automation.self_test_report.path | String | <client-dir>/self-test-report.json | No | Relative or absolute file path | Overrides the automated client self-test report location. Relative paths resolve from the `.eon` file directory. |
+| clients.ts.automation.self_test_report.env | String | None | No | Environment variable name | Optional env var override for the automated client self-test report path. `vsr` reads it only when this field is declared. |
 
 ## Runtime
 

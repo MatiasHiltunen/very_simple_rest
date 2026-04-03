@@ -26,7 +26,8 @@ use super::model::{
     ResourceActionAssignmentSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
     ResourceActionMethod, ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec,
     ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
-    StaticCacheProfile, StaticMode, StaticMountSpec, TsClientConfig, WriteModelStyle,
+    StaticCacheProfile, StaticMode, StaticMountSpec, TsClientAutomationConfig, TsClientConfig,
+    WriteModelStyle,
     default_resource_module_ident, infer_generated_value, infer_sql_type, is_json_array_type,
     is_json_object_type, is_json_type, is_list_field, is_optional_type, is_typed_object_field,
     sanitize_module_ident, sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
@@ -467,6 +468,22 @@ struct TsClientDocument {
     package_name: Option<ClientValueDocument>,
     #[serde(default)]
     server_url: Option<String>,
+    #[serde(default)]
+    include_builtin_auth: Option<bool>,
+    #[serde(default)]
+    exclude_tables: Option<Vec<String>>,
+    #[serde(default)]
+    automation: Option<TsClientAutomationDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TsClientAutomationDocument {
+    #[serde(default)]
+    on_build: Option<bool>,
+    #[serde(default)]
+    self_test: Option<bool>,
+    #[serde(default)]
+    self_test_report: Option<BuildArtifactPathDocument>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3740,6 +3757,9 @@ fn parse_clients_document(document: Option<ClientsDocument>) -> ClientsConfig {
             output_dir: parse_build_artifact_path_document(ts.output_dir),
             package_name: parse_client_value_document(ts.package_name),
             server_url: ts.server_url,
+            include_builtin_auth: ts.include_builtin_auth.unwrap_or(true),
+            exclude_tables: ts.exclude_tables.unwrap_or_default(),
+            automation: parse_ts_client_automation_document(ts.automation),
         },
     }
 }
@@ -3755,6 +3775,17 @@ fn parse_client_value_document(document: Option<ClientValueDocument>) -> ClientV
             value: document.value,
             env: document.env,
         },
+    }
+}
+
+fn parse_ts_client_automation_document(
+    document: Option<TsClientAutomationDocument>,
+) -> TsClientAutomationConfig {
+    let document = document.unwrap_or_default();
+    TsClientAutomationConfig {
+        on_build: document.on_build.unwrap_or(false),
+        self_test: document.self_test.unwrap_or(false),
+        self_test_report: parse_build_artifact_path_document(document.self_test_report),
     }
 }
 
@@ -8975,6 +9006,16 @@ resources: [
                         env: "CMS_TS_CLIENT_PACKAGE"
                     }
                     server_url: "/edge-api"
+                    include_builtin_auth: false
+                    exclude_tables: ["audit_log", "internal_note"]
+                    automation: {
+                        on_build: true
+                        self_test: true
+                        self_test_report: {
+                            path: "reports/client-self-test.json"
+                            env: "CMS_TS_CLIENT_SELF_TEST_REPORT"
+                        }
+                    }
                 }
             }
             resources: [
@@ -9004,6 +9045,21 @@ resources: [
             Some("CMS_TS_CLIENT_PACKAGE")
         );
         assert_eq!(clients.ts.server_url.as_deref(), Some("/edge-api"));
+        assert!(!clients.ts.include_builtin_auth);
+        assert_eq!(
+            clients.ts.exclude_tables,
+            vec!["audit_log".to_owned(), "internal_note".to_owned()]
+        );
+        assert!(clients.ts.automation.on_build);
+        assert!(clients.ts.automation.self_test);
+        assert_eq!(
+            clients.ts.automation.self_test_report.path.as_deref(),
+            Some("reports/client-self-test.json")
+        );
+        assert_eq!(
+            clients.ts.automation.self_test_report.env.as_deref(),
+            Some("CMS_TS_CLIENT_SELF_TEST_REPORT")
+        );
     }
 
     #[test]
@@ -9033,6 +9089,34 @@ resources: [
             error
                 .to_string()
                 .contains("`clients.ts.package_name.env` cannot be empty")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_client_exclude_table_names() {
+        let document = parse_document(
+            r#"
+            clients: {
+                ts: {
+                    exclude_tables: ["audit_log", ""]
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+        let clients = parse_clients_document(document.clients);
+        let error = validate_clients_config(&clients, Span::call_site())
+            .expect_err("empty exclude table names should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("`clients.ts.exclude_tables` cannot contain empty table names")
         );
     }
 

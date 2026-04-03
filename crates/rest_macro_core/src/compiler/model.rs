@@ -639,10 +639,33 @@ pub struct ClientValueConfig {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TsClientAutomationConfig {
+    pub on_build: bool,
+    pub self_test: bool,
+    pub self_test_report: BuildArtifactPathConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TsClientConfig {
     pub output_dir: BuildArtifactPathConfig,
     pub package_name: ClientValueConfig,
     pub server_url: Option<String>,
+    pub include_builtin_auth: bool,
+    pub exclude_tables: Vec<String>,
+    pub automation: TsClientAutomationConfig,
+}
+
+impl Default for TsClientConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: BuildArtifactPathConfig::default(),
+            package_name: ClientValueConfig::default(),
+            server_url: None,
+            include_builtin_auth: true,
+            exclude_tables: Vec::new(),
+            automation: TsClientAutomationConfig::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2829,9 +2852,26 @@ pub fn validate_clients_config(clients: &ClientsConfig, span: Span) -> syn::Resu
             clients.ts.package_name.env.as_deref(),
         ),
         ("clients.ts.server_url", clients.ts.server_url.as_deref()),
+        (
+            "clients.ts.automation.self_test_report.path",
+            clients.ts.automation.self_test_report.path.as_deref(),
+        ),
+        (
+            "clients.ts.automation.self_test_report.env",
+            clients.ts.automation.self_test_report.env.as_deref(),
+        ),
     ] {
         if value.is_some_and(|value| value.trim().is_empty()) {
             return Err(syn::Error::new(span, format!("`{label}` cannot be empty")));
+        }
+    }
+
+    for excluded in &clients.ts.exclude_tables {
+        if excluded.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                "`clients.ts.exclude_tables` cannot contain empty table names",
+            ));
         }
     }
 
