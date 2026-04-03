@@ -77,10 +77,11 @@ async fn generated_handlers_expose_api_aliases_for_routes_payloads_and_queries()
         .await
         .expect("comment seed row should insert");
 
-    let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| api_name_alias_api::configure(cfg, pool.clone()))),
-    )
-    .await;
+    let app =
+        test::init_service(App::new().service(
+            scope("/api").configure(|cfg| api_name_alias_api::configure(cfg, pool.clone())),
+        ))
+        .await;
 
     let token = issue_token(1, &["user"]);
 
@@ -122,7 +123,9 @@ async fn generated_handlers_expose_api_aliases_for_routes_payloads_and_queries()
     let cursor_body: Value = test::read_body_json(cursor_response).await;
     assert_eq!(cursor_body["items"][0]["title"], "Gamma");
 
-    let nested_request = test::TestRequest::get().uri("/api/posts/1/comments").to_request();
+    let nested_request = test::TestRequest::get()
+        .uri("/api/posts/1/comments")
+        .to_request();
     let nested_response = test::call_service(&app, nested_request).await;
     assert_eq!(nested_response.status(), StatusCode::OK);
     let nested_body: Value = test::read_body_json(nested_response).await;

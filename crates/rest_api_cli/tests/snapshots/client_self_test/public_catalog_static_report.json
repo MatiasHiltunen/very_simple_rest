@@ -1,0 +1,47 @@
+{
+  "checks": [
+    {
+      "details": "Generated package.json does not declare external package dependencies.",
+      "kind": "static",
+      "name": "manifest.dependencies",
+      "status": "passed"
+    },
+    {
+      "details": "Generated client source files import only relative local modules.",
+      "kind": "static",
+      "metadata": {
+        "files_checked": 4
+      },
+      "name": "module.imports",
+      "status": "passed"
+    },
+    {
+      "details": "Node.js imported the generated client and created a runtime client instance.",
+      "kind": "runtime",
+      "metadata": {
+        "node_binary": "<node_binary>"
+      },
+      "name": "runtime.node_import_smoke",
+      "status": "passed"
+    },
+    {
+      "details": "Generated client compiled cleanly with `tsc -p`.",
+      "kind": "static",
+      "metadata": {
+        "tsc_binary": "<tsc_binary>"
+      },
+      "name": "typescript.compile",
+      "status": "passed"
+    }
+  ],
+  "client_dir": "<client_dir>",
+  "generated_at": "<generated_at>",
+  "package_name": "public_catalog_api-client",
+  "passed": true,
+  "schema_input": "<schema_input>",
+  "summary": {
+    "failed": 0,
+    "passed": 4,
+    "skipped": 0
+  }
+}

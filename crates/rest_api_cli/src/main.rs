@@ -1,8 +1,12 @@
-#[cfg(not(test))]
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(not(test))]
 use colored::Colorize;
+#[cfg(not(test))]
+use dialoguer::Confirm;
+#[cfg(not(test))]
+use std::io::IsTerminal;
+use std::path::Path;
 use std::path::PathBuf;
 use vsra::commands;
 
@@ -806,6 +810,10 @@ enum ClientCommand {
         #[arg(long, value_name = "URL")]
         server_url: Option<String>,
 
+        /// Emit browser-ready JavaScript modules alongside the generated TypeScript sources
+        #[arg(long)]
+        emit_js: bool,
+
         /// Deprecated compatibility flag; built-in auth is now included by default
         #[arg(long, hide = true, conflicts_with = "without_auth")]
         with_auth: bool,
@@ -1196,17 +1204,20 @@ enum AuthzHybridSourceArg {
 
 #[cfg(not(test))]
 async fn run_cli() -> Result<()> {
-    // Load .env file if present
-    let _ = dotenv::dotenv();
-
     let cli = Cli::parse();
     let config_path = resolve_config_path(cli.config.as_deref())?;
+    let skip_cwd_dotenv = matches!(
+        &cli.command,
+        Commands::Serve { .. }
+            | Commands::Server {
+                command: ServerCommand::Serve { .. }
+            }
+    );
+    if !skip_cwd_dotenv {
+        let _ = dotenv::dotenv();
+    }
     let cli_database_url = cli.database_url.clone();
-    let env_database_url = rest_macro_core::secret::load_optional_secret_from_env_or_file(
-        "DATABASE_URL",
-        "DATABASE_URL",
-    )
-    .map_err(|error| anyhow!(error))?;
+    let env_database_url = load_database_url_from_env()?;
 
     // Determine database URL from CLI args, environment, or an `.eon` service config.
     let database_url = if let Some(url) = cli_database_url.clone() {
@@ -1504,9 +1515,16 @@ async fn run_cli() -> Result<()> {
             } => {
                 println!("{}", "Starting native runtime server...".green().bold());
                 let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+                let serve_env_database_url = prepare_serve_environment(
+                    input,
+                    cli_database_url.as_ref(),
+                    &database_url,
+                    include_builtin_auth,
+                )
+                .await?;
                 let serve_database_url = database_url_for_service_input(
                     cli_database_url.as_ref(),
-                    env_database_url.as_ref(),
+                    serve_env_database_url.as_ref(),
                     config_path.as_deref(),
                     Some(input),
                     &database_url,
@@ -1566,11 +1584,18 @@ async fn run_cli() -> Result<()> {
                 .or_else(|| config_path.clone())
                 .ok_or_else(|| anyhow!("serve requires a `.eon` input path or --config"))?;
             let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+            let serve_env_database_url = prepare_serve_environment(
+                &input,
+                cli_database_url.as_ref(),
+                &database_url,
+                include_builtin_auth,
+            )
+            .await?;
             let serve_database_url = database_url_for_service_input(
                 cli_database_url.as_ref(),
-                env_database_url.as_ref(),
+                serve_env_database_url.as_ref(),
                 config_path.as_deref(),
-                Some(&input),
+                Some(input.as_path()),
                 &database_url,
             )?;
             commands::serve::serve_service(
@@ -1613,6 +1638,7 @@ async fn run_cli() -> Result<()> {
                 output,
                 package_name,
                 server_url,
+                emit_js,
                 with_auth,
                 without_auth,
                 exclude_tables,
@@ -1651,6 +1677,7 @@ async fn run_cli() -> Result<()> {
                     exclude_tables,
                     package_name.as_deref(),
                     server_url.as_deref(),
+                    Some(*emit_js).filter(|value| *value),
                     include_builtin_auth,
                     self_test,
                 )?;
@@ -2300,12 +2327,154 @@ fn include_builtin_auth(with_auth: bool, without_auth: bool) -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ServeBootstrapNeed {
+    missing_auth_secret: bool,
+    missing_turso_encryption_key: bool,
+    missing_default_dev_tls_assets: bool,
+}
+
+impl ServeBootstrapNeed {
+    fn is_empty(self) -> bool {
+        !self.missing_auth_secret
+            && !self.missing_turso_encryption_key
+            && !self.missing_default_dev_tls_assets
+    }
+}
+
+fn should_offer_serve_setup(need: ServeBootstrapNeed, interactive: bool) -> bool {
+    interactive && !need.is_empty()
+}
+
+fn detect_serve_bootstrap_need(
+    input: &Path,
+    include_builtin_auth: bool,
+) -> Result<ServeBootstrapNeed> {
+    let service = rest_macro_core::compiler::load_service_from_path(input)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let mut need = ServeBootstrapNeed::default();
+
+    if include_builtin_auth
+        && rest_macro_core::auth::ensure_jwt_secret_configured_with_settings(&service.security.auth)
+            .is_err()
+    {
+        need.missing_auth_secret = true;
+    }
+
+    if let rest_macro_core::database::DatabaseEngine::TursoLocal(engine) = &service.database.engine
+        && let Some(secret) = engine.encryption_key.as_ref()
+        && !rest_macro_core::secret::has_secret(secret)
+    {
+        need.missing_turso_encryption_key = true;
+    }
+
+    if service.tls.is_enabled()
+        && service.tls.cert_path.as_deref() == Some(rest_macro_core::tls::DEFAULT_TLS_CERT_PATH)
+        && service.tls.key_path.as_deref() == Some(rest_macro_core::tls::DEFAULT_TLS_KEY_PATH)
+    {
+        let base_dir = input.parent().unwrap_or_else(|| Path::new("."));
+        if let Ok(paths) = rest_macro_core::tls::resolve_tls_paths(&service.tls, base_dir)
+            && (!paths.cert_path.exists() || !paths.key_path.exists())
+        {
+            need.missing_default_dev_tls_assets = true;
+        }
+    }
+
+    Ok(need)
+}
+
+#[cfg(not(test))]
+fn describe_serve_bootstrap_need(need: ServeBootstrapNeed) -> String {
+    let mut reasons = Vec::new();
+    if need.missing_auth_secret {
+        reasons.push("built-in auth JWT signing secret");
+    }
+    if need.missing_turso_encryption_key {
+        reasons.push("local Turso encryption key");
+    }
+    if need.missing_default_dev_tls_assets {
+        reasons.push("default development TLS certificate files");
+    }
+
+    reasons.join(", ")
+}
+
+#[cfg(not(test))]
+fn load_database_url_from_env() -> Result<Option<String>> {
+    rest_macro_core::secret::load_optional_secret_from_env_or_file("DATABASE_URL", "DATABASE_URL")
+        .map_err(|error| anyhow!(error))
+}
+
+#[cfg(not(test))]
+async fn prepare_serve_environment(
+    input: &Path,
+    cli_database_url: Option<&String>,
+    fallback_database_url: &str,
+    include_builtin_auth: bool,
+) -> Result<Option<String>> {
+    let env_path =
+        commands::env::default_env_path(Some(input)).map_err(|error| anyhow!(error.to_string()))?;
+    if env_path.exists() {
+        commands::env::load_env_file(&env_path).map_err(|error| anyhow!(error.to_string()))?;
+        println!(
+            "{} {}",
+            "Loaded environment file:".green().bold(),
+            env_path.display()
+        );
+        return load_database_url_from_env();
+    }
+
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let env_database_url = load_database_url_from_env()?;
+    let bootstrap_need = detect_serve_bootstrap_need(input, include_builtin_auth)?;
+    if !should_offer_serve_setup(bootstrap_need, interactive) {
+        return Ok(env_database_url);
+    }
+
+    let prompt = format!(
+        "Local setup can resolve missing development inputs ({}) for {}. Run setup now before serving?",
+        describe_serve_bootstrap_need(bootstrap_need),
+        input.display()
+    );
+    let run_setup = Confirm::new()
+        .with_prompt(prompt)
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+    if !run_setup {
+        return Ok(env_database_url);
+    }
+
+    println!(
+        "{}",
+        "Running local setup bootstrap before serving..."
+            .green()
+            .bold()
+    );
+    let serve_database_url = database_url_for_service_input(
+        cli_database_url,
+        env_database_url.as_ref(),
+        None,
+        Some(input),
+        fallback_database_url,
+    )?;
+    commands::setup::run_setup_for_serve(
+        &serve_database_url,
+        input,
+        cli_database_url.is_some(),
+        include_builtin_auth,
+    )
+    .await
+    .map_err(|error| anyhow!(error.to_string()))?;
+    load_database_url_from_env()
+}
+
 #[cfg(not(test))]
 fn database_url_for_service_input(
     cli_database_url: Option<&String>,
     env_database_url: Option<&String>,
     config_path: Option<&std::path::Path>,
-    input: Option<&PathBuf>,
+    input: Option<&Path>,
     fallback_database_url: &str,
 ) -> Result<String> {
     if let Some(url) = cli_database_url {
@@ -2314,7 +2483,7 @@ fn database_url_for_service_input(
     if let Some(url) = env_database_url {
         return Ok(url.clone());
     }
-    if let Some(path) = config_path.or(input.map(PathBuf::as_path)) {
+    if let Some(path) = input.or(config_path) {
         return commands::db::database_url_from_service_config(path).map_err(Into::into);
     }
     Ok(fallback_database_url.to_owned())
@@ -2346,16 +2515,115 @@ fn autodiscover_config_path(dir: &std::path::Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, autodiscover_config_path, include_builtin_auth};
+    use super::{
+        Cli, ServeBootstrapNeed, autodiscover_config_path, detect_serve_bootstrap_need,
+        include_builtin_auth, should_offer_serve_setup,
+    };
     use clap::Parser;
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
     use uuid::Uuid;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
 
     #[test]
     fn include_builtin_auth_defaults_on() {
         assert!(include_builtin_auth(false, false));
         assert!(include_builtin_auth(true, false));
         assert!(!include_builtin_auth(false, true));
+    }
+
+    #[test]
+    fn serve_setup_prompt_only_appears_for_interactive_missing_local_env() {
+        assert!(should_offer_serve_setup(
+            ServeBootstrapNeed {
+                missing_auth_secret: true,
+                ..ServeBootstrapNeed::default()
+            },
+            true
+        ));
+        assert!(!should_offer_serve_setup(
+            ServeBootstrapNeed::default(),
+            true
+        ));
+        assert!(!should_offer_serve_setup(
+            ServeBootstrapNeed {
+                missing_turso_encryption_key: true,
+                ..ServeBootstrapNeed::default()
+            },
+            false
+        ));
+    }
+
+    #[test]
+    fn serve_bootstrap_detection_ignores_plain_static_services() {
+        let root = std::env::temp_dir().join(format!("vsr_static_sqlx_{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("temp root should exist");
+        fs::create_dir_all(root.join("static_site")).expect("static dir should exist");
+        fs::write(root.join("static_site/index.html"), "<!doctype html>")
+            .expect("static index should exist");
+        let config = root.join("api.eon");
+        fs::write(
+            &config,
+            r#"
+            module: "static_sqlx_api"
+            database: {
+                engine: {
+                    kind: Sqlx
+                }
+            }
+            static: {
+                mounts: [
+                    { mount: "/", dir: "static_site", mode: Spa }
+                ]
+            }
+            resources: [
+                {
+                    name: "Page"
+                    fields: [{ name: "id", type: I64, id: true }]
+                }
+            ]
+            "#,
+        )
+        .expect("config should write");
+        let need = detect_serve_bootstrap_need(&config, false).expect("static service should load");
+        assert_eq!(need, ServeBootstrapNeed::default());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn serve_bootstrap_detection_flags_missing_auth_and_turso_inputs() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("JWT_SECRET_FILE");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY_FILE");
+        }
+
+        let need = detect_serve_bootstrap_need(&fixture_path("authz_management_api.eon"), true)
+            .expect("authz service should load");
+        assert!(need.missing_auth_secret);
+        assert!(need.missing_turso_encryption_key);
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("JWT_SECRET_FILE");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY_FILE");
+        }
     }
 
     #[test]
@@ -2391,6 +2659,7 @@ mod tests {
                 "web/src/gen/client",
                 "--server-url",
                 "/api",
+                "--emit-js",
             ])
             .is_ok()
         );

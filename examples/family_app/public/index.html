@@ -6,45 +6,38 @@
     <title>Family Atlas</title>
     <meta
         name="description"
-        content="Family Atlas is a plain HTML, CSS, and JavaScript workspace for the family_app .eon API example."
+        content="Family Atlas is a browser-routed control room for the family_app .eon API example."
     >
-    <meta name="theme-color" content="#f4ede2">
+    <meta name="theme-color" content="#f1eadf">
     <link rel="stylesheet" href="/styles.css">
-    <script src="/app.js" defer></script>
+    <script src="/app.js" type="module"></script>
 </head>
 <body>
-    <div class="page-ambient" aria-hidden="true">
-        <div class="ambient-orb ambient-orb-a"></div>
-        <div class="ambient-orb ambient-orb-b"></div>
-        <div class="ambient-grid"></div>
+    <div class="scene" aria-hidden="true">
+        <div class="scene-glow scene-glow-a"></div>
+        <div class="scene-glow scene-glow-b"></div>
+        <div class="scene-lines"></div>
     </div>
 
-    <div class="shell">
-        <header class="hero">
-            <div class="hero-copy">
-                <p class="eyebrow">Family App Demo</p>
-                <h1>Family Atlas</h1>
-                <p class="hero-summary">
-                    A browser workspace for the policy-heavy <code>family_app.eon</code> example:
-                    registration, family bootstrap, runtime grants, and shared household tools.
+    <div class="app-shell">
+        <header class="masthead">
+            <a class="brandmark" href="/" data-route-link="/">
+                <span class="brandmark-label">Family App Example</span>
+                <span class="brandmark-title">Family Atlas</span>
+            </a>
+
+            <div class="masthead-copy">
+                <p id="routeEyebrow" class="route-eyebrow">Overview</p>
+                <h1 id="routeTitle">Shared family control room</h1>
+                <p id="routeSummary" class="route-summary">
+                    Register, create the family, open a household, then widen access through runtime grants.
                 </p>
-                <div class="hero-pills">
-                    <span class="pill">Built-in auth</span>
-                    <span class="pill">Create.require</span>
-                    <span class="pill">Hybrid runtime grants</span>
-                    <span class="pill">Relation-aware policies</span>
-                </div>
             </div>
 
-            <div class="hero-guide">
-                <h2>Suggested flow</h2>
-                <ol>
-                    <li>Register a guardian or caregiver account, then log in.</li>
-                    <li>Create a family and add family members immediately.</li>
-                    <li>Create a household inside the selected family.</li>
-                    <li>Log in as admin to grant a runtime template like <code>Caregiver@Family=42</code>.</li>
-                    <li>Use runtime assignments to widen access without changing static row policies.</li>
-                </ol>
+            <div class="masthead-links">
+                <a class="chrome-link" href="/api/auth/portal" target="_blank" rel="noreferrer">Portal</a>
+                <a class="chrome-link" href="/api/auth/admin" target="_blank" rel="noreferrer">Admin</a>
+                <a class="chrome-link" href="/openapi.json" target="_blank" rel="noreferrer">OpenAPI</a>
             </div>
         </header>
 
@@ -52,44 +45,77 @@
             Loading Family Atlas...
         </div>
 
-        <main class="layout">
-            <aside class="rail">
-                <section class="panel session-panel">
-                    <div class="panel-heading">
+        <div class="workspace-shell">
+            <aside class="nav-rail">
+                <nav class="route-nav" aria-label="Primary">
+                    <a class="route-link" href="/" data-route-link="/">
+                        <span class="route-link-label">Overview</span>
+                        <span class="route-link-meta">Start the flow</span>
+                    </a>
+                    <a class="route-link" href="/access" data-route-link="/access">
+                        <span class="route-link-label">Access</span>
+                        <span class="route-link-meta">Register and log in</span>
+                    </a>
+                    <a class="route-link" href="/family" data-route-link="/family">
+                        <span class="route-link-label">Family</span>
+                        <span class="route-link-meta">Create and select</span>
+                    </a>
+                    <a class="route-link" href="/households" data-route-link="/households">
+                        <span class="route-link-label">Households</span>
+                        <span class="route-link-meta">Nested spaces</span>
+                    </a>
+                    <a class="route-link" href="/shopping" data-route-link="/shopping">
+                        <span class="route-link-label">Shopping</span>
+                        <span class="route-link-meta">Shared list</span>
+                    </a>
+                    <a class="route-link" href="/calendar" data-route-link="/calendar">
+                        <span class="route-link-label">Calendar</span>
+                        <span class="route-link-meta">Household timeline</span>
+                    </a>
+                    <a class="route-link" href="/runtime" data-route-link="/runtime">
+                        <span class="route-link-label">Runtime</span>
+                        <span class="route-link-meta">Assignments and audit</span>
+                    </a>
+                </nav>
+
+                <section class="rail-panel identity-panel">
+                    <div class="section-heading">
                         <p class="eyebrow">Session</p>
-                        <h2>Current identity</h2>
+                        <h2>Identity</h2>
                     </div>
-                    <div class="session-meta">
-                        <div id="sessionSummary" class="identity-card">No active session.</div>
-                        <div class="chip-row">
-                            <span id="selectedFamilyChip" class="chip muted">No family selected</span>
-                            <span id="selectedHouseholdChip" class="chip muted">No household selected</span>
-                        </div>
+                    <div id="sessionSummary" class="identity-card">No active session.</div>
+                    <div class="chip-row">
+                        <span id="selectedFamilyChip" class="chip muted">No family selected</span>
+                        <span id="selectedHouseholdChip" class="chip muted">No household selected</span>
                     </div>
-                    <dl class="session-list">
+                    <dl class="session-metrics">
                         <div>
-                            <dt>Auth mode</dt>
+                            <dt>Token</dt>
                             <dd id="tokenState">No bearer token loaded</dd>
                         </div>
                         <div>
-                            <dt>Portal</dt>
-                            <dd><a href="/api/auth/portal" target="_blank" rel="noreferrer">/api/auth/portal</a></dd>
-                        </div>
-                        <div>
-                            <dt>Admin</dt>
-                            <dd><a href="/api/auth/admin" target="_blank" rel="noreferrer">/api/auth/admin</a></dd>
+                            <dt>Next step</dt>
+                            <dd id="routeSuggestion">Register or log in to begin.</dd>
                         </div>
                     </dl>
-                    <div class="claims-wrap">
-                        <h3>Session payload</h3>
-                        <pre id="sessionClaims" class="code-block">No session loaded yet.</pre>
+                    <div class="button-row">
+                        <button id="refreshSessionBtn" class="button secondary" type="button">Refresh</button>
+                        <button id="logoutBtn" class="button ghost" type="button">Log out</button>
                     </div>
                 </section>
 
-                <section class="panel">
-                    <div class="panel-heading">
+                <section class="rail-panel">
+                    <div class="section-heading">
+                        <p class="eyebrow">Payload</p>
+                        <h2>Session record</h2>
+                    </div>
+                    <pre id="sessionClaims" class="code-block">No session loaded yet.</pre>
+                </section>
+
+                <section class="rail-panel activity-panel">
+                    <div class="section-heading">
                         <p class="eyebrow">Activity</p>
-                        <h2>Timeline</h2>
+                        <h2>Recent events</h2>
                     </div>
                     <div id="activityLog" class="activity-log">
                         <div class="empty-state">Requests, selections, and policy hints will appear here.</div>
@@ -97,14 +123,70 @@
                 </section>
             </aside>
 
-            <div class="content">
-                <section class="panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Auth</p>
-                        <h2>Register and log in</h2>
+            <main class="stage">
+                <section class="view view-overview" data-view="overview">
+                    <div class="poster">
+                        <div class="poster-copy">
+                            <p class="eyebrow">Policy-heavy onboarding</p>
+                            <h2>One atlas for family membership, household routines, and scoped runtime access.</h2>
+                            <p class="poster-summary">
+                                This example stays honest to the API surface: built-in auth, relation-aware policies,
+                                `create.require`, nested resources, and runtime assignments in one browser-routed SPA.
+                            </p>
+                            <div class="button-row">
+                                <a class="button primary" href="/access" data-route-link="/access">Open access view</a>
+                                <a class="button ghost" href="/family" data-route-link="/family">Open family workspace</a>
+                            </div>
+                        </div>
+                        <div class="poster-atlas" aria-hidden="true">
+                            <div class="atlas-ring atlas-ring-a"></div>
+                            <div class="atlas-ring atlas-ring-b"></div>
+                            <div class="atlas-node atlas-node-a"></div>
+                            <div class="atlas-node atlas-node-b"></div>
+                            <div class="atlas-node atlas-node-c"></div>
+                            <div class="atlas-line atlas-line-a"></div>
+                            <div class="atlas-line atlas-line-b"></div>
+                        </div>
                     </div>
-                    <div class="form-grid two-up">
-                        <form id="registerForm" class="stack">
+
+                    <div id="overviewStats" class="metric-ribbon"></div>
+
+                    <div class="view-grid view-grid-two">
+                        <section class="sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Suggested flow</p>
+                                <h3>Work in order</h3>
+                            </div>
+                            <ol id="overviewChecklist" class="flow-list"></ol>
+                        </section>
+
+                        <section class="sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Current focus</p>
+                                <h3>Selected scope</h3>
+                            </div>
+                            <div id="overviewSelection" class="selection-story"></div>
+                        </section>
+                    </div>
+                </section>
+
+                <section class="view" data-view="auth" hidden>
+                    <div class="view-lead">
+                        <div>
+                            <p class="eyebrow">Access</p>
+                            <h2>Register and establish the active session</h2>
+                        </div>
+                        <p class="section-note">
+                            Built-in auth handles registration, login, JWT issuance, and the portal/admin surfaces linked above.
+                        </p>
+                    </div>
+
+                    <div class="view-grid view-grid-two">
+                        <form id="registerForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Credentials</p>
+                                <h3>Register or log in</h3>
+                            </div>
                             <label>
                                 <span>Email</span>
                                 <input id="authEmail" name="email" type="email" placeholder="guardian@example.com" required>
@@ -116,34 +198,43 @@
                             <div class="button-row">
                                 <button class="button primary" type="submit">Register</button>
                                 <button id="loginBtn" class="button secondary" type="button">Log in</button>
-                                <button id="refreshSessionBtn" class="button subtle" type="button">Refresh session</button>
-                                <button id="logoutBtn" class="button subtle" type="button">Log out</button>
                             </div>
                         </form>
 
-                        <div class="helper-card">
-                            <h3>Bootstrap reminder</h3>
+                        <section class="sheet prose-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Why this matters</p>
+                                <h3>The example stays claim-light</h3>
+                            </div>
                             <p>
-                                <code>vsr setup</code> creates the admin account, base auth tables, and the family
-                                example migrations. The SPA works against the same generated API and uses bearer tokens
-                                returned by <code>/api/auth/login</code>.
+                                Access decisions are driven by membership rows and runtime authz assignments, not custom
+                                claim mutations on the built-in auth account.
                             </p>
                             <p>
-                                This example keeps permissions in runtime authz tables rather than on the built-in
-                                <code>user</code> row. Family selection is local UI state, while elevated access comes
-                                from scoped runtime assignments.
+                                Once you have a token, the rest of the workspace operates against the same generated API
+                                routes that `vsr serve` exposes.
                             </p>
-                        </div>
+                        </section>
                     </div>
                 </section>
 
-                <section class="panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Bootstrap</p>
-                        <h2>Family creation and selection</h2>
+                <section class="view" data-view="family" hidden>
+                    <div class="view-lead">
+                        <div>
+                            <p class="eyebrow">Family</p>
+                            <h2>Create the family and add visible members</h2>
+                        </div>
+                        <p class="section-note">
+                            Owners can create a family and add membership rows immediately through relation-aware `create.require`.
+                        </p>
                     </div>
-                    <div class="form-grid two-up">
-                        <form id="familyCreateForm" class="stack">
+
+                    <div class="view-grid view-grid-two">
+                        <form id="familyCreateForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Bootstrap</p>
+                                <h3>Create a family</h3>
+                            </div>
                             <label>
                                 <span>Family slug</span>
                                 <input id="familySlug" name="slug" type="text" placeholder="helsinki-household" required>
@@ -158,32 +249,27 @@
                             </label>
                             <div class="button-row">
                                 <button class="button primary" type="submit">Create family</button>
-                                <button id="reloadFamiliesBtn" class="button subtle" type="button">Reload families</button>
+                                <button id="reloadFamiliesBtn" class="button ghost" type="button">Reload families</button>
                             </div>
-                            <p class="helper">
-                                Family owners can add family members immediately without mutating auth claims.
-                            </p>
                         </form>
 
-                        <div>
-                            <div class="inline-heading">
-                                <h3>Visible families</h3>
-                                <span class="helper">Selection drives the member, household, and runtime panels.</span>
+                        <section class="sheet stream-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Visible rows</p>
+                                <h3>Families in this session</h3>
                             </div>
-                            <div id="familiesList" class="card-list">
+                            <div id="familiesList" class="stream-list">
                                 <div class="empty-state">Log in to load families.</div>
                             </div>
-                        </div>
+                        </section>
                     </div>
-                </section>
 
-                <section class="panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">People</p>
-                        <h2>Family members</h2>
-                    </div>
-                    <div class="form-grid two-up">
-                        <form id="familyMemberForm" class="stack">
+                    <div class="view-grid view-grid-two">
+                        <form id="familyMemberForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Membership</p>
+                                <h3>Add a family member</h3>
+                            </div>
                             <label>
                                 <span>Selected family</span>
                                 <input id="memberFamilyPreview" type="text" value="No family selected" readonly>
@@ -211,33 +297,39 @@
                             </label>
                             <div class="button-row">
                                 <button class="button primary" type="submit">Add member</button>
-                                <button id="reloadMembersBtn" class="button subtle" type="button">Reload members</button>
+                                <button id="reloadMembersBtn" class="button ghost" type="button">Reload members</button>
                             </div>
-                            <p class="helper">
-                                This uses <code>FamilyMember.create.require</code> against the posted
-                                <code>family_id</code> and the current owner.
-                            </p>
                         </form>
 
-                        <div>
-                            <div class="inline-heading">
-                                <h3>Membership rows</h3>
-                                <span class="helper">Visibility changes with relation-aware row policies and family membership.</span>
+                        <section class="sheet stream-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Visible rows</p>
+                                <h3>Membership directory</h3>
                             </div>
-                            <div id="familyMembersList" class="card-list">
+                            <div id="familyMembersList" class="stream-list">
                                 <div class="empty-state">Select a family to load members.</div>
                             </div>
-                        </div>
+                        </section>
                     </div>
                 </section>
 
-                <section class="panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Family-scoped</p>
-                        <h2>Households and shared spaces</h2>
+                <section class="view" data-view="households" hidden>
+                    <div class="view-lead">
+                        <div>
+                            <p class="eyebrow">Households</p>
+                            <h2>Create the active household for the selected family</h2>
+                        </div>
+                        <p class="section-note">
+                            Nested household routes and selection drive both the shopping list and the calendar routes.
+                        </p>
                     </div>
-                    <div class="form-grid two-up">
-                        <form id="householdForm" class="stack">
+
+                    <div class="view-grid view-grid-two">
+                        <form id="householdForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Nested resource</p>
+                                <h3>Create a household</h3>
+                            </div>
                             <label>
                                 <span>Selected family</span>
                                 <input id="householdFamilyPreview" type="text" value="No family selected" readonly>
@@ -256,39 +348,45 @@
                             </label>
                             <div class="button-row">
                                 <button class="button primary" type="submit">Create household</button>
-                                <button id="reloadHouseholdsBtn" class="button subtle" type="button">Reload households</button>
+                                <button id="reloadHouseholdsBtn" class="button ghost" type="button">Reload households</button>
                             </div>
-                            <p class="helper">
-                                Household creation is authorized by relation-aware membership checks on the posted
-                                <code>family_id</code>.
-                            </p>
                         </form>
 
-                        <div>
-                            <div class="inline-heading">
-                                <h3>Household rows</h3>
-                                <span class="helper">Selection stays local to the SPA instead of mutating auth claims.</span>
+                        <section class="sheet stream-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Visible rows</p>
+                                <h3>Households</h3>
                             </div>
-                            <div id="householdsList" class="card-list">
-                                <div class="empty-state">Select a family to load households.</div>
+                            <div id="householdsList" class="stream-list">
+                                <div class="empty-state">Select a family first.</div>
                             </div>
-                        </div>
+                        </section>
                     </div>
                 </section>
 
-                <section class="panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Hybrid access</p>
-                        <h2>Shopping board</h2>
+                <section class="view" data-view="shopping" hidden>
+                    <div class="view-lead">
+                        <div>
+                            <p class="eyebrow">Shopping</p>
+                            <h2>Shared list for the current family or household</h2>
+                        </div>
+                        <p class="section-note">
+                            Hybrid runtime grants widen access here without changing the static row-policy model.
+                        </p>
                     </div>
-                    <div class="form-grid two-up">
-                        <form id="shoppingForm" class="stack">
+
+                    <div class="view-grid view-grid-two">
+                        <form id="shoppingForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Contribution</p>
+                                <h3>Create a shopping item</h3>
+                            </div>
                             <label>
-                                <span>Selected household</span>
+                                <span>Selected scope</span>
                                 <input id="shoppingHouseholdPreview" type="text" value="No household selected" readonly>
                             </label>
                             <label>
-                                <span>Item title</span>
+                                <span>Title</span>
                                 <input id="shoppingTitle" name="title" type="text" placeholder="Buy oat milk" required>
                             </label>
                             <label class="checkbox">
@@ -296,40 +394,46 @@
                                 <span>Create as completed</span>
                             </label>
                             <div class="button-row">
-                                <button class="button primary" type="submit">Add shopping item</button>
-                                <button id="reloadShoppingBtn" class="button subtle" type="button">Reload shopping</button>
+                                <button class="button primary" type="submit">Create item</button>
+                                <button id="reloadShoppingBtn" class="button ghost" type="button">Reload shopping</button>
                             </div>
-                            <p class="helper">
-                                <code>ShoppingItem</code> supports hybrid runtime create/read/update/delete when the
-                                selected family has a matching scoped grant.
-                            </p>
                         </form>
 
-                        <div>
-                            <div class="inline-heading">
-                                <h3>Shopping items</h3>
-                                <span class="helper">Toggle and delete call the generated CRUD endpoints.</span>
+                        <section class="sheet stream-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Visible rows</p>
+                                <h3>Shopping list</h3>
                             </div>
-                            <div id="shoppingList" class="card-list">
+                            <div id="shoppingList" class="stream-list">
                                 <div class="empty-state">Select a family or household to load shopping items.</div>
                             </div>
-                        </div>
+                        </section>
                     </div>
                 </section>
 
-                <section class="panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Schedule</p>
-                        <h2>Household calendar</h2>
+                <section class="view" data-view="calendar" hidden>
+                    <div class="view-lead">
+                        <div>
+                            <p class="eyebrow">Calendar</p>
+                            <h2>Household schedule for the selected household</h2>
+                        </div>
+                        <p class="section-note">
+                            Calendar rows stay household-scoped, so this route keeps the selected household front and center.
+                        </p>
                     </div>
-                    <div class="form-grid two-up">
-                        <form id="calendarForm" class="stack">
+
+                    <div class="view-grid view-grid-two">
+                        <form id="calendarForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Schedule</p>
+                                <h3>Create an event</h3>
+                            </div>
                             <label>
                                 <span>Selected household</span>
                                 <input id="calendarHouseholdPreview" type="text" value="No household selected" readonly>
                             </label>
                             <label>
-                                <span>Event title</span>
+                                <span>Title</span>
                                 <input id="calendarTitle" name="title" type="text" placeholder="School pickup" required>
                             </label>
                             <label>
@@ -342,67 +446,66 @@
                             </label>
                             <div class="button-row">
                                 <button class="button primary" type="submit">Create event</button>
-                                <button id="reloadCalendarBtn" class="button subtle" type="button">Reload events</button>
+                                <button id="reloadCalendarBtn" class="button ghost" type="button">Reload events</button>
                             </div>
-                            <p class="helper">
-                                <code>CalendarEvent</code> runtime grants widen read/update/delete. Create still follows
-                                the static family membership path.
-                            </p>
                         </form>
 
-                        <div>
-                            <div class="inline-heading">
+                        <section class="sheet stream-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Visible rows</p>
                                 <h3>Calendar events</h3>
-                                <span class="helper">Rendered from the nested household route.</span>
                             </div>
-                            <div id="calendarList" class="card-list">
+                            <div id="calendarList" class="stream-list">
                                 <div class="empty-state">Select a household to load events.</div>
                             </div>
-                        </div>
+                        </section>
                     </div>
                 </section>
 
-                <section class="panel admin-panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Admin</p>
-                        <h2>User directory and runtime targeting</h2>
+                <section class="view" data-view="runtime" hidden>
+                    <div class="view-lead">
+                        <div>
+                            <p class="eyebrow">Runtime authz</p>
+                            <h2>Assignments, audit trail, and access evaluation</h2>
+                        </div>
+                        <p class="section-note">
+                            This route is intentionally admin-facing: it manages scoped templates and permissions after the family exists.
+                        </p>
                     </div>
-                    <div class="form-grid two-up">
-                        <div class="stack">
-                            <div class="button-row">
+
+                    <div class="view-grid view-grid-two">
+                        <section class="sheet stream-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Targets</p>
+                                <h3>Built-in auth users</h3>
+                            </div>
+                            <div class="toolbar">
                                 <button id="reloadAdminUsersBtn" class="button primary" type="button">Load users</button>
-                            </div>
-                            <label>
-                                <span>Email filter</span>
                                 <input id="adminUserSearch" type="text" placeholder="guardian@example.com">
-                            </label>
-                            <div id="adminUsersList" class="card-list">
-                                <div class="empty-state">Admin users can list built-in accounts here.</div>
                             </div>
-                        </div>
-                    </div>
-                </section>
+                            <div id="adminUsersList" class="stream-list">
+                                <div class="empty-state">Admin login required to list users and manage runtime assignments.</div>
+                            </div>
+                        </section>
 
-                <section class="panel admin-panel">
-                    <div class="panel-heading">
-                        <p class="eyebrow">Runtime authz</p>
-                        <h2>Assignments, audit trail, and evaluation</h2>
-                    </div>
-                    <div class="form-grid three-up">
-                        <form id="runtimeAssignmentForm" class="stack">
+                        <form id="runtimeAssignmentForm" class="sheet form-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Assignment</p>
+                                <h3>Create a runtime grant</h3>
+                            </div>
                             <label>
                                 <span>User ID</span>
                                 <input id="assignmentUserId" name="user_id" type="number" min="1" placeholder="2" required>
                             </label>
                             <label>
-                                <span>Target kind</span>
+                                <span>Kind</span>
                                 <select id="assignmentKind" name="kind">
                                     <option value="template">template</option>
                                     <option value="permission">permission</option>
                                 </select>
                             </label>
                             <label>
-                                <span>Target name</span>
+                                <span>Name</span>
                                 <select id="assignmentName" name="name"></select>
                             </label>
                             <label>
@@ -417,83 +520,92 @@
                                 <input id="assignmentScopeValue" name="scope_value" type="text" placeholder="42" required>
                             </label>
                             <label>
-                                <span>Expires at (optional)</span>
+                                <span>Expires at</span>
                                 <input id="assignmentExpiresAt" name="expires_at" type="datetime-local">
                             </label>
                             <div class="button-row">
                                 <button class="button primary" type="submit">Create assignment</button>
-                                <button id="reloadAssignmentsBtn" class="button subtle" type="button">Load records</button>
+                                <button id="reloadAssignmentsBtn" class="button ghost" type="button">Load records</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div class="view-grid view-grid-two">
+                        <section class="sheet stream-sheet compact-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Assignments</p>
+                                <h3>Active rows</h3>
+                            </div>
+                            <div id="runtimeAssignmentsList" class="stream-list compact">
+                                <div class="empty-state">Load runtime assignments for a user target.</div>
+                            </div>
+                        </section>
+
+                        <section class="sheet stream-sheet compact-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Events</p>
+                                <h3>Audit trail</h3>
+                            </div>
+                            <div id="runtimeEventsList" class="stream-list compact">
+                                <div class="empty-state">Load a user target to inspect runtime event history.</div>
+                            </div>
+                        </section>
+                    </div>
+
+                    <div class="view-grid view-grid-two">
+                        <form id="runtimeEvaluateForm" class="sheet form-sheet evaluate-form">
+                            <div class="section-heading">
+                                <p class="eyebrow">Evaluation</p>
+                                <h3>Check effective access</h3>
+                            </div>
+                            <label>
+                                <span>User ID</span>
+                                <input id="evaluateUserId" type="number" min="1" placeholder="2" required>
+                            </label>
+                            <label>
+                                <span>Resource</span>
+                                <select id="evaluateResource">
+                                    <option value="ShoppingItem">ShoppingItem</option>
+                                    <option value="CalendarEvent">CalendarEvent</option>
+                                    <option value="CarePlan">CarePlan</option>
+                                    <option value="GuardianNote">GuardianNote</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Action</span>
+                                <select id="evaluateAction">
+                                    <option value="Read">Read</option>
+                                    <option value="Update">Update</option>
+                                    <option value="Delete">Delete</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Scope</span>
+                                <select id="evaluateScope">
+                                    <option value="Family">Family</option>
+                                    <option value="Household">Household</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Scope value</span>
+                                <input id="evaluateScopeValue" type="text" placeholder="42" required>
+                            </label>
+                            <div class="button-row">
+                                <button class="button primary" type="submit">Evaluate</button>
                             </div>
                         </form>
 
-                        <div class="stack">
-                            <div class="inline-heading">
-                                <h3>Current assignments</h3>
-                                <span class="helper">Revoke and renew are non-destructive.</span>
+                        <section class="sheet code-sheet">
+                            <div class="section-heading">
+                                <p class="eyebrow">Result</p>
+                                <h3>Evaluation payload</h3>
                             </div>
-                            <div id="runtimeAssignmentsList" class="card-list compact">
-                                <div class="empty-state">Load a user to inspect runtime assignments.</div>
-                            </div>
-                            <div class="inline-heading">
-                                <h3>Assignment events</h3>
-                                <span class="helper">Append-only history from the runtime authz tables.</span>
-                            </div>
-                            <div id="runtimeEventsList" class="card-list compact">
-                                <div class="empty-state">History will appear after loading assignments.</div>
-                            </div>
-                        </div>
-
-                        <div class="stack">
-                            <form id="runtimeEvaluateForm" class="stack evaluate-form">
-                                <label>
-                                    <span>User ID</span>
-                                    <input id="evaluateUserId" type="number" min="1" placeholder="2" required>
-                                </label>
-                                <label>
-                                    <span>Resource</span>
-                                    <select id="evaluateResource">
-                                        <option value="Family">Family</option>
-                                        <option value="Household">Household</option>
-                                        <option value="FamilyMember">FamilyMember</option>
-                                        <option value="FamilyDelegate">FamilyDelegate</option>
-                                        <option value="ChildProfile">ChildProfile</option>
-                                        <option value="CarePlan">CarePlan</option>
-                                        <option value="GuardianNote">GuardianNote</option>
-                                        <option value="HouseholdAnnouncement">HouseholdAnnouncement</option>
-                                        <option value="ShoppingItem">ShoppingItem</option>
-                                        <option value="CalendarEvent">CalendarEvent</option>
-                                    </select>
-                                </label>
-                                <label>
-                                    <span>Action</span>
-                                    <select id="evaluateAction">
-                                        <option value="read">read</option>
-                                        <option value="create">create</option>
-                                        <option value="update">update</option>
-                                        <option value="delete">delete</option>
-                                    </select>
-                                </label>
-                                <label>
-                                    <span>Scope</span>
-                                    <select id="evaluateScope">
-                                        <option value="Family">Family</option>
-                                        <option value="Household">Household</option>
-                                    </select>
-                                </label>
-                                <label>
-                                    <span>Scope value</span>
-                                    <input id="evaluateScopeValue" type="text" placeholder="42" required>
-                                </label>
-                                <div class="button-row">
-                                    <button class="button primary" type="submit">Evaluate runtime access</button>
-                                </div>
-                            </form>
                             <pre id="runtimeEvaluateResult" class="code-block">No runtime evaluation yet.</pre>
-                        </div>
+                        </section>
                     </div>
                 </section>
-            </div>
-        </main>
+            </main>
+        </div>
     </div>
 </body>
 </html>

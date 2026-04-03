@@ -51,10 +51,9 @@ async fn generated_handlers_serialize_computed_api_fields() {
         .await
         .expect("seed row should insert");
 
-    let app = test::init_service(
-        App::new()
-            .service(scope("/api").configure(|cfg| api_computed_fields_api::configure(cfg, pool.clone()))),
-    )
+    let app = test::init_service(App::new().service(
+        scope("/api").configure(|cfg| api_computed_fields_api::configure(cfg, pool.clone())),
+    ))
     .await;
     let token = issue_token(1, &["user"]);
 

@@ -531,16 +531,18 @@ pub fn write_env_file(
     };
 
     let config = env_template_config(config_path)?;
+    let preserved_assignments =
+        merge_preserved_assignments_with_current_env(&config, &existing_assignments);
     let jwt_secret_var = config.jwt_secret_var.as_deref().unwrap_or("JWT_SECRET");
-    let preserved_jwt_secret = existing_env_value(&existing_assignments, jwt_secret_var).is_some();
+    let preserved_jwt_secret = existing_env_value(&preserved_assignments, jwt_secret_var).is_some();
     let preserved_turso_encryption_var = config
         .turso_encryption_var
         .as_ref()
-        .filter(|var_name| existing_env_value(&existing_assignments, var_name.as_str()).is_some())
+        .filter(|var_name| existing_env_value(&preserved_assignments, var_name.as_str()).is_some())
         .cloned();
     let content = merge_env_template_with_existing(
         &render_env_template_with_config(&config, mode),
-        &existing_assignments,
+        &preserved_assignments,
     );
     std::fs::write(&env_path, content)?;
 
@@ -602,6 +604,37 @@ fn existing_env_value<'a>(
         .filter(|value| !value.trim().is_empty())
 }
 
+fn merge_preserved_assignments_with_current_env(
+    config: &EnvTemplateConfig,
+    existing_assignments: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut merged = existing_assignments.clone();
+    let mut candidate_keys = BTreeSet::new();
+    candidate_keys.insert("DATABASE_URL".to_owned());
+    if let Some(var_name) = &config.jwt_secret_var {
+        candidate_keys.insert(var_name.clone());
+    }
+    if let Some(var_name) = &config.turso_encryption_var {
+        candidate_keys.insert(var_name.clone());
+    }
+    if let Some(var_name) = &config.auth_email_env_var {
+        candidate_keys.insert(var_name.clone());
+    }
+
+    for key in candidate_keys {
+        if existing_env_value(&merged, &key).is_some() {
+            continue;
+        }
+        if let Ok(value) = std::env::var(&key)
+            && !value.trim().is_empty()
+        {
+            merged.insert(key, value);
+        }
+    }
+
+    merged
+}
+
 fn merge_env_template_with_existing(
     rendered: &str,
     existing_assignments: &BTreeMap<String, String>,
@@ -647,6 +680,7 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -661,6 +695,11 @@ mod tests {
             .expect("time should move forward")
             .as_nanos();
         std::env::temp_dir().join(format!("vsr_env_{prefix}_{stamp}"))
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn env_line_value<'a>(content: &'a str, key: &str) -> Option<&'a str> {
@@ -809,6 +848,47 @@ mod tests {
         assert!(content.contains("TURSO_ENCRYPTION_KEY=preserve-key"));
         assert!(content.contains("EXTRA_TOKEN=keep-me"));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_env_file_preserves_current_env_secret_values_when_creating_new_file() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", "keep-current-jwt");
+            std::env::set_var("TURSO_ENCRYPTION_KEY", "keep-current-turso");
+        }
+
+        let root = temp_root("preserve_current_env");
+        fs::create_dir_all(&root).expect("root should exist");
+        let config = root.join("api.eon");
+        fs::copy(fixture_path("turso_local_encrypted_api.eon"), &config)
+            .expect("fixture should copy");
+
+        let report = write_env_file(
+            None,
+            Some(&config),
+            false,
+            false,
+            EnvTemplateMode::Development,
+        )
+        .expect("env file should write");
+        let content = fs::read_to_string(root.join(".env")).expect("env file should exist");
+
+        assert!(report.preserved_jwt_secret);
+        assert!(!report.generated_jwt_secret);
+        assert_eq!(
+            report.preserved_turso_encryption_var.as_deref(),
+            Some("TURSO_ENCRYPTION_KEY")
+        );
+        assert_eq!(report.generated_turso_encryption_var, None);
+        assert!(content.contains("JWT_SECRET=keep-current-jwt"));
+        assert!(content.contains("TURSO_ENCRYPTION_KEY=keep-current-turso"));
+
+        unsafe {
+            std::env::remove_var("JWT_SECRET");
+            std::env::remove_var("TURSO_ENCRYPTION_KEY");
+        }
         let _ = fs::remove_dir_all(root);
     }
 

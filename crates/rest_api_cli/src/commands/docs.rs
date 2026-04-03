@@ -1976,6 +1976,14 @@ database: {
                 "Default server URL embedded in the generated TypeScript client when `--server-url` is not passed.",
             ),
             row(
+                "clients.ts.emit_js",
+                "Bool",
+                "false",
+                "No",
+                "true, false",
+                "When true, emits dependency-free browser-ready `.js` modules alongside the generated TypeScript sources.",
+            ),
+            row(
                 "clients.ts.include_builtin_auth",
                 "Bool",
                 "true",

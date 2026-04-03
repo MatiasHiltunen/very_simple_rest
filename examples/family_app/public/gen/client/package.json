@@ -1,0 +1,12 @@
+{
+  "name": "@examples/family-app-client",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "default": "./index.js"
+    }
+  }
+}

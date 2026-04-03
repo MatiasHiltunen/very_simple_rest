@@ -73,6 +73,38 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn example_path(name: &str) -> PathBuf {
+    repo_root().join("examples").join(name)
+}
+
+fn snapshot_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/snapshots/client_self_test")
+        .join(name)
+}
+
+fn assert_text_snapshot(snapshot: &Path, actual: &str) {
+    if std::env::var_os("VSR_UPDATE_SNAPSHOTS").is_some() {
+        if let Some(parent) = snapshot.parent() {
+            fs::create_dir_all(parent).expect("snapshot parent should be creatable");
+        }
+        fs::write(snapshot, actual).expect("snapshot should be writable");
+        return;
+    }
+
+    let expected = fs::read_to_string(snapshot).unwrap_or_else(|error| {
+        panic!(
+            "snapshot {} is missing or unreadable: {error}. Re-run with VSR_UPDATE_SNAPSHOTS=1 to create it.",
+            snapshot.display()
+        )
+    });
+    assert_eq!(
+        expected, actual,
+        "snapshot mismatch at {}",
+        snapshot.display()
+    );
+}
+
 fn find_tsc_binary() -> Option<PathBuf> {
     let candidate = repo_root().join("examples/cms/web/node_modules/.bin/tsc");
     candidate.is_file().then_some(candidate)
@@ -114,7 +146,8 @@ fn assert_dependency_free_client(output_dir: &Path) {
     for entry in fs::read_dir(output_dir).expect("client output dir should be readable") {
         let entry = entry.expect("directory entry should read");
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("ts") {
+        let extension = path.extension().and_then(|value| value.to_str());
+        if !matches!(extension, Some("ts" | "js")) {
             continue;
         }
         for specifier in collect_module_specifiers(&path) {
@@ -216,6 +249,33 @@ fn run_node_script(script_path: &Path, envs: &[(&str, &str)]) -> Output {
     command
         .output()
         .expect("node smoke script should execute successfully")
+}
+
+fn normalize_self_test_report(mut report: Value) -> Value {
+    report["generated_at"] = Value::String("<generated_at>".to_owned());
+    report["schema_input"] = Value::String("<schema_input>".to_owned());
+    report["client_dir"] = Value::String("<client_dir>".to_owned());
+
+    if let Some(checks) = report.get_mut("checks").and_then(Value::as_array_mut) {
+        for check in checks {
+            if let Some(metadata) = check.get_mut("metadata").and_then(Value::as_object_mut) {
+                if metadata.contains_key("node_binary") {
+                    metadata.insert(
+                        "node_binary".to_owned(),
+                        Value::String("<node_binary>".to_owned()),
+                    );
+                }
+                if metadata.contains_key("tsc_binary") {
+                    metadata.insert(
+                        "tsc_binary".to_owned(),
+                        Value::String("<tsc_binary>".to_owned()),
+                    );
+                }
+            }
+        }
+    }
+
+    report
 }
 
 #[test]
@@ -802,4 +862,153 @@ fn client_ts_self_test_produces_passing_report_against_live_server() {
     assert!(checks.iter().any(|check| {
         check["name"] == "runtime.openapi_reachable" && check["status"] == "passed"
     }));
+}
+
+#[test]
+fn client_ts_self_test_static_report_matches_snapshot() {
+    let Some(tsc_binary) = find_tsc_binary() else {
+        eprintln!("skipping generated client self-test snapshot because local tsc is unavailable");
+        return;
+    };
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("public_catalog_api.eon");
+    fs::copy(fixture_path("public_catalog_api.eon"), &config).expect("fixture should copy");
+
+    let client_dir = root.join("generated-client");
+    let report_path = root.join("client-self-test-report.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .arg("client")
+        .arg("ts")
+        .arg("--input")
+        .arg(&config)
+        .arg("--output")
+        .arg(&client_dir)
+        .arg("--force")
+        .arg("--without-auth")
+        .arg("--self-test")
+        .arg("--self-test-report")
+        .arg(&report_path)
+        .arg("--self-test-tsc")
+        .arg(tsc_binary)
+        .output()
+        .expect("vsr client ts self-test should execute");
+    assert!(
+        output.status.success(),
+        "generated client static self-test command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value =
+        serde_json::from_str(&read_to_string(&report_path)).expect("report should parse");
+    let normalized = normalize_self_test_report(report);
+    let rendered =
+        serde_json::to_string_pretty(&normalized).expect("normalized report should serialize")
+            + "\n";
+    assert_text_snapshot(
+        &snapshot_path("public_catalog_static_report.json"),
+        &rendered,
+    );
+}
+
+#[test]
+fn build_uses_clients_ts_automation_for_template_example_copy() {
+    let root = test_root();
+    let service_dir = root.join("template-example");
+    fs::create_dir_all(&service_dir).expect("service dir should exist");
+
+    let template = read_to_string(&example_path("template/api.eon"));
+    let automated = format!(
+        r#"{template}
+
+clients: {{
+    ts: {{
+        output_dir: {{
+            path: "web/src/gen/client"
+        }}
+        include_builtin_auth: false
+        automation: {{
+            on_build: true
+            self_test: true
+            self_test_report: {{
+                path: "reports/client-self-test.json"
+            }}
+        }}
+    }}
+}}
+"#
+    );
+    let input = service_dir.join("api.eon");
+    fs::write(&input, automated).expect("example copy should write");
+
+    let output = root.join("dist/template-example");
+    let build_dir = root.join("build-cache");
+    let command_output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .arg("build")
+        .arg(&input)
+        .arg("--without-auth")
+        .arg("--output")
+        .arg(&output)
+        .arg("--build-dir")
+        .arg(&build_dir)
+        .arg("--force")
+        .output()
+        .expect("vsr build should execute");
+    assert!(
+        command_output.status.success(),
+        "vsr build should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&command_output.stdout),
+        String::from_utf8_lossy(&command_output.stderr)
+    );
+
+    assert!(output.exists(), "built binary should exist");
+    assert!(
+        service_dir.join("web/src/gen/client/index.ts").exists(),
+        "automated client generation should emit the configured output directory"
+    );
+    assert!(
+        service_dir.join("reports/client-self-test.json").exists(),
+        "automated client self-test should write the configured report"
+    );
+}
+
+#[test]
+fn family_app_example_generates_browser_ready_client_modules() {
+    let root = test_root();
+    let service_dir = root.join("family_app");
+    fs::create_dir_all(&service_dir).expect("service dir should exist");
+
+    let source_dir = example_path("family_app");
+    fs::copy(source_dir.join("family_app.eon"), service_dir.join("family_app.eon"))
+        .expect("family app config should copy");
+
+    let public_dir = service_dir.join("public");
+    fs::create_dir_all(&public_dir).expect("public dir should exist");
+    fs::copy(source_dir.join("public/index.html"), public_dir.join("index.html"))
+        .expect("index.html should copy");
+    fs::copy(source_dir.join("public/styles.css"), public_dir.join("styles.css"))
+        .expect("styles.css should copy");
+    fs::copy(source_dir.join("public/app.js"), public_dir.join("app.js"))
+        .expect("app.js should copy");
+
+    generate_client(&service_dir.join("family_app.eon"), &service_dir.join("public/gen/client"));
+
+    let output_dir = service_dir.join("public/gen/client");
+    assert_dependency_free_client(&output_dir);
+    compile_generated_client(&output_dir);
+    assert!(output_dir.join("index.js").exists(), "browser JS entry should exist");
+    assert!(output_dir.join("client.js").exists(), "browser JS runtime should exist");
+    assert!(
+        output_dir.join("operations.js").exists(),
+        "browser JS operations should exist"
+    );
+
+    let app_js = read_to_string(&service_dir.join("public/app.js"));
+    assert!(
+        app_js.contains("from \"./gen/client/index.js\""),
+        "family app should import the generated browser client"
+    );
 }

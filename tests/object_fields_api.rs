@@ -55,10 +55,11 @@ async fn generated_handlers_support_typed_object_payloads() {
         .await
         .expect("seed row should insert");
 
-    let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| object_fields_api::configure(cfg, pool.clone()))),
-    )
-    .await;
+    let app =
+        test::init_service(App::new().service(
+            scope("/api").configure(|cfg| object_fields_api::configure(cfg, pool.clone())),
+        ))
+        .await;
 
     let token = issue_token(1, &["user"]);
 
@@ -83,7 +84,10 @@ async fn generated_handlers_support_typed_object_payloads() {
     assert_eq!(create_response.status(), StatusCode::CREATED);
     let created: object_fields_api::Entry = test::read_body_json(create_response).await;
     assert_eq!(created.title["raw"], "Typed object title");
-    assert_eq!(created.settings.as_ref().expect("settings should exist")["seo"]["slug"], "typed-object-title");
+    assert_eq!(
+        created.settings.as_ref().expect("settings should exist")["seo"]["slug"],
+        "typed-object-title"
+    );
 
     let list_request = test::TestRequest::get()
         .uri("/api/entry")
@@ -94,7 +98,13 @@ async fn generated_handlers_support_typed_object_payloads() {
     let list_page: object_fields_api::EntryListResponse = test::read_body_json(list_response).await;
     assert_eq!(list_page.total, 2);
     assert_eq!(list_page.items[0].title["rendered"], "<p>Hello world</p>");
-    assert_eq!(list_page.items[1].settings.as_ref().expect("settings should exist")["categories"][1], 8);
+    assert_eq!(
+        list_page.items[1]
+            .settings
+            .as_ref()
+            .expect("settings should exist")["categories"][1],
+        8
+    );
 
     let invalid_request = test::TestRequest::post()
         .uri("/api/entry")

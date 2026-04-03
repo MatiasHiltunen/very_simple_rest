@@ -19,7 +19,8 @@ async fn generated_handlers_serve_s3_compatible_storage_routes() {
     let _ = fs::remove_dir_all(&uploads_dir);
     fs::create_dir_all(&uploads_dir).expect("uploads dir should exist");
 
-    let app = test::init_service(App::new().configure(storage_s3_compat_api::configure_static)).await;
+    let app =
+        test::init_service(App::new().configure(storage_s3_compat_api::configure_static)).await;
 
     let put = test::TestRequest::put()
         .uri("/_s3/media/logo.txt")
@@ -52,7 +53,9 @@ async fn generated_handlers_serve_s3_compatible_storage_routes() {
         "generated-test"
     );
 
-    let get = test::TestRequest::get().uri("/_s3/media/logo.txt").to_request();
+    let get = test::TestRequest::get()
+        .uri("/_s3/media/logo.txt")
+        .to_request();
     let get_response = test::call_service(&app, get).await;
     assert_eq!(get_response.status(), StatusCode::OK);
     let body = test::read_body(get_response).await;
@@ -67,7 +70,9 @@ async fn generated_handlers_serve_s3_compatible_storage_routes() {
         .expect("list response should be utf-8");
     assert!(list_body.contains("<Key>logo.txt</Key>"));
 
-    let delete = test::TestRequest::delete().uri("/_s3/media/logo.txt").to_request();
+    let delete = test::TestRequest::delete()
+        .uri("/_s3/media/logo.txt")
+        .to_request();
     let delete_response = test::call_service(&app, delete).await;
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
     assert!(

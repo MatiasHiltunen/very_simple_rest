@@ -80,14 +80,91 @@ pub async fn run_setup(
         .map_err(|error| Error::Config(format!("{error:#}")))?;
     println!("{}", "✓ Schema migrated/verified".green());
 
+    ensure_admin_user(
+        &effective_database_url,
+        config_path,
+        &pool,
+        non_interactive,
+        true,
+    )
+    .await?;
+
+    println!("\n{}", "Setup completed successfully!".green().bold());
+    print_setup_summary(&bootstrap);
+    println!("You can now start your API server.");
+
+    Ok(())
+}
+
+pub async fn run_setup_for_serve(
+    database_url: &str,
+    config_path: &Path,
+    database_url_is_explicit: bool,
+    include_builtin_auth: bool,
+) -> Result<()> {
+    println!(
+        "{}",
+        "=== very_simple_rest API Setup Wizard ===".cyan().bold()
+    );
+
+    println!("\n{}", "Step 1: Preparing local environment".cyan().bold());
+    let bootstrap = bootstrap_setup_environment(Some(config_path), true, false)?;
+    let effective_database_url = if database_url_is_explicit {
+        database_url.to_owned()
+    } else {
+        load_optional_secret_from_env_or_file("DATABASE_URL", "DATABASE_URL")
+            .map_err(|error| Error::Config(error.to_string()))?
+            .unwrap_or_else(|| database_url.to_owned())
+    };
+
+    println!("\n{}", "Step 2: Checking database connection".cyan().bold());
+    let pool = connect_database(&effective_database_url, Some(config_path)).await?;
+    println!("{}", "✓ Database connection successful".green());
+
+    println!("\n{}", "Step 3: Setting up database schema".cyan().bold());
+    apply_setup_migrations(&effective_database_url, Some(config_path))
+        .await
+        .map_err(|error| Error::Config(format!("{error:#}")))?;
+    println!("{}", "✓ Schema migrated/verified".green());
+
+    ensure_admin_user(
+        &effective_database_url,
+        Some(config_path),
+        &pool,
+        false,
+        include_builtin_auth,
+    )
+    .await?;
+
+    println!(
+        "\n{}",
+        "Serve bootstrap completed successfully!".green().bold()
+    );
+    print_setup_summary(&bootstrap);
+    println!("Continuing to `vsr serve` with the prepared environment.");
+
+    Ok(())
+}
+
+async fn ensure_admin_user(
+    database_url: &str,
+    config_path: Option<&Path>,
+    pool: &rest_macro_core::db::DbPool,
+    non_interactive: bool,
+    include_builtin_auth: bool,
+) -> Result<()> {
+    if !include_builtin_auth {
+        return Ok(());
+    }
+
     println!("\n{}", "Step 4: Verifying admin user".cyan().bold());
     let auth_backend =
-        AuthDbBackend::from_database_url(&effective_database_url).unwrap_or(AuthDbBackend::Sqlite);
+        AuthDbBackend::from_database_url(database_url).unwrap_or(AuthDbBackend::Sqlite);
     let admin_exists = query_scalar::<sqlx::Any, i64>(&format!(
         "SELECT COUNT(*) FROM {} WHERE role = 'admin'",
         auth_user_table_ident(auth_backend)
     ))
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
 
     if admin_exists > 0 {
@@ -102,42 +179,35 @@ pub async fn run_setup(
 
             if create_another {
                 let (email, password) = prompt_admin_credentials().await?;
-                create_admin(&effective_database_url, config_path, email, password).await?;
+                create_admin(database_url, config_path, email, password).await?;
             }
         }
-    } else {
-        println!(
-            "{}",
-            "No admin user found. You need to create an admin user.".yellow()
-        );
 
-        let env_email = std::env::var("ADMIN_EMAIL").ok();
-        let env_password = std::env::var("ADMIN_PASSWORD").ok();
-
-        if non_interactive {
-            if let (Some(email), Some(password)) = (env_email, env_password) {
-                println!("Using admin credentials from environment variables");
-                create_admin_with_options(
-                    &effective_database_url,
-                    config_path,
-                    email,
-                    password,
-                    false,
-                )
-                .await?;
-            } else {
-                println!("{}", "Warning: Cannot create admin user in non-interactive mode without ADMIN_EMAIL and ADMIN_PASSWORD environment variables.".yellow());
-            }
-        } else {
-            let (email, password) = prompt_admin_credentials().await?;
-            create_admin_with_options(&effective_database_url, config_path, email, password, true)
-                .await?;
-        }
+        return Ok(());
     }
 
-    println!("\n{}", "Setup completed successfully!".green().bold());
-    print_setup_summary(&bootstrap);
-    println!("You can now start your API server.");
+    println!(
+        "{}",
+        "No admin user found. You need to create an admin user.".yellow()
+    );
+
+    let env_email = std::env::var("ADMIN_EMAIL").ok();
+    let env_password = std::env::var("ADMIN_PASSWORD").ok();
+
+    if non_interactive {
+        if let (Some(email), Some(password)) = (env_email, env_password) {
+            println!("Using admin credentials from environment variables");
+            create_admin_with_options(database_url, config_path, email, password, false).await?;
+        } else {
+            println!(
+                "{}",
+                "Warning: Cannot create admin user in non-interactive mode without ADMIN_EMAIL and ADMIN_PASSWORD environment variables.".yellow()
+            );
+        }
+    } else {
+        let (email, password) = prompt_admin_credentials().await?;
+        create_admin_with_options(database_url, config_path, email, password, true).await?;
+    }
 
     Ok(())
 }

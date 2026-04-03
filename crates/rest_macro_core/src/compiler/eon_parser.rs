@@ -469,6 +469,8 @@ struct TsClientDocument {
     #[serde(default)]
     server_url: Option<String>,
     #[serde(default)]
+    emit_js: Option<bool>,
+    #[serde(default)]
     include_builtin_auth: Option<bool>,
     #[serde(default)]
     exclude_tables: Option<Vec<String>>,
@@ -3757,6 +3759,7 @@ fn parse_clients_document(document: Option<ClientsDocument>) -> ClientsConfig {
             output_dir: parse_build_artifact_path_document(ts.output_dir),
             package_name: parse_client_value_document(ts.package_name),
             server_url: ts.server_url,
+            emit_js: ts.emit_js.unwrap_or(false),
             include_builtin_auth: ts.include_builtin_auth.unwrap_or(true),
             exclude_tables: ts.exclude_tables.unwrap_or_default(),
             automation: parse_ts_client_automation_document(ts.automation),
@@ -9006,6 +9009,7 @@ resources: [
                         env: "CMS_TS_CLIENT_PACKAGE"
                     }
                     server_url: "/edge-api"
+                    emit_js: true
                     include_builtin_auth: false
                     exclude_tables: ["audit_log", "internal_note"]
                     automation: {
@@ -9045,6 +9049,7 @@ resources: [
             Some("CMS_TS_CLIENT_PACKAGE")
         );
         assert_eq!(clients.ts.server_url.as_deref(), Some("/edge-api"));
+        assert!(clients.ts.emit_js);
         assert!(!clients.ts.include_builtin_auth);
         assert_eq!(
             clients.ts.exclude_tables,

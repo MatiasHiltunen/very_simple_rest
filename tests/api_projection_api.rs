@@ -55,10 +55,11 @@ async fn generated_handlers_apply_resource_api_field_projections() {
     .await
     .expect("seed row should insert");
 
-    let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| api_projection_api::configure(cfg, pool.clone()))),
-    )
-    .await;
+    let app =
+        test::init_service(App::new().service(
+            scope("/api").configure(|cfg| api_projection_api::configure(cfg, pool.clone())),
+        ))
+        .await;
 
     let token = issue_token(1, &["user"]);
 

@@ -384,6 +384,98 @@ fn vsr_serve_starts_native_runtime_from_eon() {
 }
 
 #[test]
+fn vsr_serve_loads_service_local_env_from_config_directory() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("DATABASE_URL_FILE");
+        std::env::remove_var("JWT_SECRET");
+        std::env::remove_var("JWT_SECRET_FILE");
+        std::env::remove_var("ADMIN_EMAIL");
+        std::env::remove_var("ADMIN_PASSWORD");
+    }
+
+    let root = test_root();
+    let service_dir = root.join("service");
+    let launch_dir = root.join("launch");
+    fs::create_dir_all(&service_dir).expect("service directory should exist");
+    fs::create_dir_all(&launch_dir).expect("launch directory should exist");
+
+    let config = service_dir.join("authz_management_api.eon");
+    fs::copy(fixture_path("authz_management_api.eon"), &config).expect("fixture should copy");
+    fs::write(
+        service_dir.join(".env"),
+        "JWT_SECRET=service-local-serve-secret\nADMIN_EMAIL=admin@example.com\nADMIN_PASSWORD=password123\n",
+    )
+    .expect("service env file should write");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize auth-enabled service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-service-env.stdout.log");
+    let stderr_log = root.join("serve-service-env.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&launch_dir)
+        .arg("serve")
+        .arg(&config)
+        .arg("--bind-addr")
+        .arg(&bind_addr)
+        .env_remove("DATABASE_URL")
+        .env_remove("DATABASE_URL_FILE")
+        .env_remove("JWT_SECRET")
+        .env_remove("JWT_SECRET_FILE")
+        .env_remove("ADMIN_EMAIL")
+        .env_remove("ADMIN_PASSWORD")
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve with service-local env never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("login should respond");
+    assert!(login_response.status().is_success(), "{}", server.logs());
+
+    unsafe {
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("DATABASE_URL_FILE");
+        std::env::remove_var("JWT_SECRET");
+        std::env::remove_var("JWT_SECRET_FILE");
+        std::env::remove_var("ADMIN_EMAIL");
+        std::env::remove_var("ADMIN_PASSWORD");
+    }
+}
+
+#[test]
 fn vsr_serve_supports_builtin_auth_and_authz_management() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {
@@ -963,7 +1055,10 @@ fn vsr_serve_supports_admin_verification_resend_and_auth_email_pages() {
         }))
         .send()
         .expect("new password login should succeed");
-    assert_eq!(new_password_login_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        new_password_login_response.status(),
+        reqwest::StatusCode::OK
+    );
 }
 
 #[test]
@@ -1347,8 +1442,8 @@ fn vsr_serve_supports_storage_uploads_and_public_mounts() {
     let openapi: Value = openapi_response.json().expect("openapi should decode");
     assert!(openapi["paths"].get("/uploads").is_some());
     assert_eq!(
-        openapi["paths"]["/uploads"]["post"]["responses"]["201"]["content"]["application/json"]
-            ["schema"]["$ref"],
+        openapi["paths"]["/uploads"]["post"]["responses"]["201"]["content"]["application/json"]["schema"]
+            ["$ref"],
         "#/components/schemas/StorageUploadResponse"
     );
 
@@ -1362,7 +1457,9 @@ fn vsr_serve_supports_storage_uploads_and_public_mounts() {
         .send()
         .expect("upload should succeed");
     assert_eq!(upload_response.status(), reqwest::StatusCode::CREATED);
-    let uploaded: Value = upload_response.json().expect("upload response should decode");
+    let uploaded: Value = upload_response
+        .json()
+        .expect("upload response should decode");
     assert_eq!(uploaded["backend"], "uploads");
     assert_eq!(uploaded["file_name"], "notes.txt");
     assert_eq!(uploaded["size_bytes"], 12);
@@ -1428,10 +1525,12 @@ fn vsr_serve_applies_computed_api_fields_in_spawned_process() {
             .execute(&pool)
             .await
             .expect("schema should apply");
-            query("INSERT INTO post (id, slug, title, summary) VALUES (1, 'alpha', 'Alpha', 'Intro')")
-                .execute(&pool)
-                .await
-                .expect("seed row should insert");
+            query(
+                "INSERT INTO post (id, slug, title, summary) VALUES (1, 'alpha', 'Alpha', 'Intro')",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed row should insert");
         });
 
     let bind_addr = free_bind_addr();
@@ -1720,8 +1819,8 @@ fn vsr_serve_lists_many_to_many_routes_in_spawned_process() {
         "parent_id"
     );
     assert_eq!(
-        openapi["paths"]["/posts/{parent_id}/tags"]["get"]["responses"]["200"]["content"]
-            ["application/json"]["schema"]["$ref"],
+        openapi["paths"]["/posts/{parent_id}/tags"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
         "#/components/schemas/TagListResponse"
     );
 
@@ -1730,7 +1829,9 @@ fn vsr_serve_lists_many_to_many_routes_in_spawned_process() {
         .send()
         .expect("many-to-many list should load");
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
-    let list_body: Value = list_response.json().expect("many-to-many list should decode");
+    let list_body: Value = list_response
+        .json()
+        .expect("many-to-many list should decode");
     assert_eq!(list_body["total"], 2);
     assert_eq!(list_body["items"][0]["name"], "alpha");
     assert_eq!(list_body["items"][1]["name"], "beta");
@@ -1861,7 +1962,11 @@ fn vsr_serve_supports_public_catalog_routes_in_spawned_process() {
     let openapi: Value = openapi_response.json().expect("openapi should decode");
     assert!(openapi["paths"].get("/organization").is_some());
     assert!(openapi["paths"].get("/organization/{id}").is_some());
-    assert!(openapi["paths"].get("/organization/{parent_id}/interest").is_some());
+    assert!(
+        openapi["paths"]
+            .get("/organization/{parent_id}/interest")
+            .is_some()
+    );
     assert!(openapi["paths"]["/organization"]["get"]["security"].is_null());
 
     let list_response = client
@@ -1869,16 +1974,22 @@ fn vsr_serve_supports_public_catalog_routes_in_spawned_process() {
         .send()
         .expect("public organization list should load");
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
-    let list_body: Value = list_response.json().expect("public organization list should decode");
+    let list_body: Value = list_response
+        .json()
+        .expect("public organization list should decode");
     assert_eq!(list_body["total"], 2);
     assert_eq!(list_body["items"][0]["name"], "Nordic Bridge Institute");
 
     let contains_response = client
-        .get(format!("{base_url}/api/organization?filter_name_contains=BRIDGE"))
+        .get(format!(
+            "{base_url}/api/organization?filter_name_contains=BRIDGE"
+        ))
         .send()
         .expect("contains search should load");
     assert_eq!(contains_response.status(), reqwest::StatusCode::OK);
-    let contains_body: Value = contains_response.json().expect("contains search should decode");
+    let contains_body: Value = contains_response
+        .json()
+        .expect("contains search should decode");
     assert_eq!(contains_body["total"], 1);
     assert_eq!(contains_body["items"][0]["country"], "Finland");
 
@@ -1889,7 +2000,9 @@ fn vsr_serve_supports_public_catalog_routes_in_spawned_process() {
         .send()
         .expect("nested public list should load");
     assert_eq!(nested_response.status(), reqwest::StatusCode::OK);
-    let nested_body: Value = nested_response.json().expect("nested public list should decode");
+    let nested_body: Value = nested_response
+        .json()
+        .expect("nested public list should decode");
     assert_eq!(nested_body["total"], 1);
     assert_eq!(nested_body["items"][0]["title"], "AI Thesis Co-Creation");
 
@@ -1998,9 +2111,14 @@ fn vsr_serve_supports_object_field_shapes_in_spawned_process() {
         .send()
         .expect("object-field list should load");
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
-    let list_body: Value = list_response.json().expect("object-field list should decode");
+    let list_body: Value = list_response
+        .json()
+        .expect("object-field list should decode");
     assert_eq!(list_body["total"], 1);
-    assert_eq!(list_body["items"][0]["title"]["rendered"], "<p>Hello world</p>");
+    assert_eq!(
+        list_body["items"][0]["title"]["rendered"],
+        "<p>Hello world</p>"
+    );
     assert_eq!(list_body["items"][0]["settings"]["categories"][1], 2);
 
     let token = issue_hs256_token("serve-cli-object-fields-secret", 1, &["user"]);
@@ -2021,9 +2139,14 @@ fn vsr_serve_supports_object_field_shapes_in_spawned_process() {
         .send()
         .expect("object-field create should succeed");
     assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
-    let created_body: Value = create_response.json().expect("object-field create should decode");
+    let created_body: Value = create_response
+        .json()
+        .expect("object-field create should decode");
     assert_eq!(created_body["title"]["raw"], "Typed object title");
-    assert_eq!(created_body["settings"]["seo"]["slug"], "typed-object-title");
+    assert_eq!(
+        created_body["settings"]["seo"]["slug"],
+        "typed-object-title"
+    );
 }
 
 #[test]
@@ -2137,7 +2260,9 @@ fn vsr_serve_supports_list_field_shapes_in_spawned_process() {
         .send()
         .expect("list-field create should succeed");
     assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
-    let created_body: Value = create_response.json().expect("list-field create should decode");
+    let created_body: Value = create_response
+        .json()
+        .expect("list-field create should decode");
     assert_eq!(created_body["categories"][0], 5);
     assert_eq!(created_body["tags"][1], "ai");
     assert_eq!(created_body["blocks"][0]["name"], "core/heading");
@@ -2235,7 +2360,10 @@ fn vsr_serve_supports_enum_field_shapes_in_spawned_process() {
         .get(format!("{base_url}/api/posts?filter_status=invalid"))
         .send()
         .expect("invalid enum filter should respond");
-    assert_eq!(invalid_filter_response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_filter_response.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
 
     let contains_response = client
         .get(format!("{base_url}/api/posts?filter_status_contains=pub"))
@@ -2436,22 +2564,26 @@ fn vsr_serve_supports_api_name_aliases_in_spawned_process() {
             .await
             .expect("comment schema should apply");
 
-            query("INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)")
-                .bind(1_i64)
-                .bind("Alpha")
-                .bind(7_i64)
-                .bind("2026-03-26T10:00:00Z")
-                .execute(&pool)
-                .await
-                .expect("first seed row should insert");
-            query("INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)")
-                .bind(2_i64)
-                .bind("Beta")
-                .bind(9_i64)
-                .bind("2026-03-26T11:00:00Z")
-                .execute(&pool)
-                .await
-                .expect("second seed row should insert");
+            query(
+                "INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(1_i64)
+            .bind("Alpha")
+            .bind(7_i64)
+            .bind("2026-03-26T10:00:00Z")
+            .execute(&pool)
+            .await
+            .expect("first seed row should insert");
+            query(
+                "INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(2_i64)
+            .bind("Beta")
+            .bind(9_i64)
+            .bind("2026-03-26T11:00:00Z")
+            .execute(&pool)
+            .await
+            .expect("second seed row should insert");
             query("INSERT INTO comment_row (id, body_text, post_id) VALUES (?, ?, ?)")
                 .bind(1_i64)
                 .bind("First comment")
@@ -2500,7 +2632,11 @@ fn vsr_serve_supports_api_name_aliases_in_spawned_process() {
     assert!(openapi_response.status().is_success());
     let openapi: Value = openapi_response.json().expect("openapi should decode");
     assert!(openapi["paths"].get("/posts").is_some());
-    assert!(openapi["paths"].get("/posts/{parent_id}/comments").is_some());
+    assert!(
+        openapi["paths"]
+            .get("/posts/{parent_id}/comments")
+            .is_some()
+    );
     assert!(openapi["paths"].get("/blog_post").is_none());
     assert_eq!(
         openapi["components"]["schemas"]["Post"]["properties"]["createdAt"]["format"],
@@ -2526,7 +2662,9 @@ fn vsr_serve_supports_api_name_aliases_in_spawned_process() {
     assert!(created.get("author_id").is_none());
 
     let list_response = client
-        .get(format!("{base_url}/api/posts?filter_author=7&sort=title&limit=1"))
+        .get(format!(
+            "{base_url}/api/posts?filter_author=7&sort=title&limit=1"
+        ))
         .send()
         .expect("alias list should load");
     assert_eq!(list_response.status(), reqwest::StatusCode::OK);
@@ -2544,7 +2682,9 @@ fn vsr_serve_supports_api_name_aliases_in_spawned_process() {
         .send()
         .expect("alias cursor page should load");
     assert_eq!(cursor_response.status(), reqwest::StatusCode::OK);
-    let cursor_body: Value = cursor_response.json().expect("alias cursor page should decode");
+    let cursor_body: Value = cursor_response
+        .json()
+        .expect("alias cursor page should decode");
     assert_eq!(cursor_body["items"][0]["title"], "Gamma");
 
     let nested_response = client
@@ -2552,7 +2692,9 @@ fn vsr_serve_supports_api_name_aliases_in_spawned_process() {
         .send()
         .expect("alias nested route should load");
     assert_eq!(nested_response.status(), reqwest::StatusCode::OK);
-    let nested_body: Value = nested_response.json().expect("alias nested route should decode");
+    let nested_body: Value = nested_response
+        .json()
+        .expect("alias nested route should decode");
     assert_eq!(nested_body["items"][0]["body"], "First comment");
     assert_eq!(nested_body["items"][0]["post"], 1);
 }
@@ -2663,7 +2805,9 @@ fn vsr_serve_applies_api_projections_in_spawned_process() {
         .send()
         .expect("projection create should succeed");
     assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
-    let created: Value = create_response.json().expect("projection create should decode");
+    let created: Value = create_response
+        .json()
+        .expect("projection create should decode");
     assert_eq!(created["title"], "Gamma");
     assert_eq!(created["author"], 7);
     assert!(created.get("title_text").is_none());

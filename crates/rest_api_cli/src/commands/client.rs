@@ -36,6 +36,7 @@ pub fn generate_typescript_client(
     exclude_tables: &[String],
     package_name: Option<&str>,
     server_url: Option<&str>,
+    emit_js: Option<bool>,
     include_builtin_auth: Option<bool>,
 ) -> Result<PathBuf> {
     Ok(generate_typescript_client_artifacts(
@@ -45,6 +46,7 @@ pub fn generate_typescript_client(
         exclude_tables,
         package_name,
         server_url,
+        emit_js,
         include_builtin_auth,
     )?
     .output_dir)
@@ -57,6 +59,7 @@ pub fn generate_typescript_client_with_self_test(
     exclude_tables: &[String],
     package_name: Option<&str>,
     server_url: Option<&str>,
+    emit_js: Option<bool>,
     include_builtin_auth: Option<bool>,
     self_test: Option<TypescriptClientSelfTestOptions>,
 ) -> Result<PathBuf> {
@@ -67,6 +70,7 @@ pub fn generate_typescript_client_with_self_test(
         exclude_tables,
         package_name,
         server_url,
+        emit_js,
         include_builtin_auth,
     )?;
 
@@ -118,6 +122,7 @@ pub fn generate_automated_typescript_client_for_build(input: &Path) -> Result<Op
         None,
         None,
         None,
+        None,
         self_test,
     )?;
 
@@ -131,6 +136,7 @@ fn generate_typescript_client_artifacts(
     exclude_tables: &[String],
     package_name: Option<&str>,
     server_url: Option<&str>,
+    emit_js: Option<bool>,
     include_builtin_auth: Option<bool>,
 ) -> Result<GeneratedClientArtifacts> {
     let service = load_client_generation_service(input, exclude_tables)?;
@@ -138,6 +144,7 @@ fn generate_typescript_client_artifacts(
     prepare_output_dir(&output_dir, force)?;
     let package_name = resolve_client_package_name(input, &service, package_name);
     let server_url = resolve_client_server_url(&service, server_url);
+    let emit_js = resolve_client_emit_js(&service, emit_js);
     let include_builtin_auth = resolve_client_include_builtin_auth(&service, include_builtin_auth);
 
     let options = OpenApiSpecOptions::new(
@@ -153,7 +160,7 @@ fn generate_typescript_client_artifacts(
         serde_json::from_str(&document_json).context("generated OpenAPI JSON was invalid")?;
     let ir = ClientDocument::from_openapi(&document)?;
 
-    write_generated_client(&output_dir, &package_name, &ir)?;
+    write_generated_client(&output_dir, &package_name, &ir, emit_js)?;
 
     println!(
         "{} {}",
@@ -192,6 +199,13 @@ fn resolve_client_output_dir(
             ),
         },
     }
+}
+
+pub(crate) fn resolve_configured_client_output_dir(
+    input: &Path,
+    service: &compiler::ServiceSpec,
+) -> Result<PathBuf> {
+    resolve_client_output_dir(input, service, None)
 }
 
 fn load_client_generation_service(
@@ -317,6 +331,10 @@ fn resolve_client_server_url(service: &compiler::ServiceSpec, server_url: Option
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned())
 }
 
+fn resolve_client_emit_js(service: &compiler::ServiceSpec, emit_js: Option<bool>) -> bool {
+    emit_js.unwrap_or(service.clients.ts.emit_js)
+}
+
 fn resolve_client_include_builtin_auth(
     service: &compiler::ServiceSpec,
     include_builtin_auth: Option<bool>,
@@ -345,6 +363,21 @@ fn resolve_client_path_from_config(
         .as_deref()
         .map(|path| resolve_config_relative_path(input, Path::new(path)))
         .transpose()
+}
+
+pub(crate) fn resolve_configured_client_self_test_report_path(
+    input: &Path,
+    service: &compiler::ServiceSpec,
+    output_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    if !service.clients.ts.automation.self_test {
+        return Ok(None);
+    }
+
+    match resolve_client_path_from_config(input, &service.clients.ts.automation.self_test_report)? {
+        Some(path) => Ok(Some(path)),
+        None => Ok(Some(output_dir.join("self-test-report.json"))),
+    }
 }
 
 fn resolve_client_value_from_config(config: &ClientValueConfig) -> Option<String> {
@@ -377,10 +410,11 @@ fn write_generated_client(
     output_dir: &Path,
     package_name: &str,
     document: &ClientDocument,
+    emit_js: bool,
 ) -> Result<()> {
     write_file(
         &output_dir.join("package.json"),
-        &render_package_json(package_name),
+        &render_package_json(package_name, emit_js),
     )?;
     write_file(&output_dir.join("tsconfig.json"), &render_tsconfig_json())?;
     write_file(&output_dir.join("index.ts"), &render_index_ts())?;
@@ -396,6 +430,17 @@ fn write_generated_client(
         &output_dir.join("operations.ts"),
         &render_operations_ts(document),
     )?;
+    if emit_js {
+        write_file(&output_dir.join("index.js"), &render_index_js())?;
+        write_file(
+            &output_dir.join("client.js"),
+            &render_client_js(&document.server_url),
+        )?;
+        write_file(
+            &output_dir.join("operations.js"),
+            &render_operations_js(document),
+        )?;
+    }
     Ok(())
 }
 
@@ -787,7 +832,13 @@ enum ResponseKind {
     Void,
 }
 
-fn render_package_json(package_name: &str) -> String {
+fn render_package_json(package_name: &str, emit_js: bool) -> String {
+    if emit_js {
+        return format!(
+            "{{\n  \"name\": \"{package_name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"sideEffects\": false,\n  \"exports\": {{\n    \".\": {{\n      \"types\": \"./index.ts\",\n      \"default\": \"./index.js\"\n    }}\n  }}\n}}\n"
+        );
+    }
+
     format!(
         "{{\n  \"name\": \"{package_name}\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"sideEffects\": false,\n  \"exports\": {{\n    \".\": \"./index.ts\"\n  }}\n}}\n"
     )
@@ -816,6 +867,15 @@ fn render_index_ts() -> String {
         "export * from \"./client.ts\";",
         "export * from \"./types.ts\";",
         "export * from \"./operations.ts\";",
+        "",
+    ]
+    .join("\n")
+}
+
+fn render_index_js() -> String {
+    [
+        "export * from \"./client.js\";",
+        "export * from \"./operations.js\";",
         "",
     ]
     .join("\n")
@@ -892,7 +952,7 @@ export function createClient(config: ClientConfig = {{}}): VsrClient {{
   const resolvedConfig: ResolvedClientConfig = {{
     baseUrl: config.baseUrl ?? "",
     serverUrl: config.serverUrl ?? DEFAULT_SERVER_URL,
-    fetch: config.fetch ?? fetch,
+    fetch: bindFetch(config.fetch ?? globalThis.fetch),
     defaultHeaders: config.defaultHeaders,
     credentials: config.credentials ?? "include",
     getAccessToken: config.getAccessToken,
@@ -963,6 +1023,13 @@ export function createClient(config: ClientConfig = {{}}): VsrClient {{
       return parsedBody as TResponse;
     }},
   }};
+}}
+
+function bindFetch(fetchImpl: typeof fetch | undefined): typeof fetch {{
+  if (typeof fetchImpl !== "function") {{
+    throw new Error("No fetch implementation is available for the generated client.");
+  }}
+  return fetchImpl.bind(globalThis);
 }}
 
 function buildUrl(config: ResolvedClientConfig, path: string, query?: QueryParams): string {{
@@ -1086,6 +1153,222 @@ async function parseResponseBody(response: Response): Promise<unknown> {{
     )
 }
 
+fn render_client_js(server_url: &str) -> String {
+    format!(
+        r#"export class ApiError extends Error {{
+  constructor(message, status, body, headers) {{
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+    this.headers = headers;
+  }}
+}}
+
+const DEFAULT_SERVER_URL = {server_url:?};
+
+export function createClient(config = {{}}) {{
+  const resolvedConfig = {{
+    baseUrl: config.baseUrl ?? "",
+    serverUrl: config.serverUrl ?? DEFAULT_SERVER_URL,
+    fetch: bindFetch(config.fetch ?? globalThis.fetch),
+    defaultHeaders: config.defaultHeaders,
+    credentials: config.credentials ?? "include",
+    getAccessToken: config.getAccessToken,
+    getCsrfToken: config.getCsrfToken,
+    csrfHeaderName: config.csrfHeaderName ?? "x-csrf-token",
+  }};
+
+  return {{
+    config: resolvedConfig,
+    async request(request) {{
+      const headers = new Headers(resolvedConfig.defaultHeaders ?? undefined);
+      if (request.headers) {{
+        new Headers(request.headers).forEach((value, key) => headers.set(key, value));
+      }}
+
+      if (request.requiresBearerAuth && resolvedConfig.getAccessToken) {{
+        const token = await resolvedConfig.getAccessToken();
+        if (token) {{
+          headers.set("authorization", `Bearer ${{token}}`);
+        }}
+      }}
+
+      let body;
+      if (request.body !== undefined) {{
+        if (request.contentType === "multipart/form-data") {{
+          body = request.body instanceof FormData ? request.body : objectToFormData(request.body);
+        }} else if (request.contentType === "application/json") {{
+          headers.set("content-type", "application/json");
+          body = JSON.stringify(request.body);
+        }} else if (request.contentType === "text/plain") {{
+          headers.set("content-type", "text/plain");
+          body = typeof request.body === "string" ? request.body : String(request.body);
+        }} else {{
+          if (request.contentType) {{
+            headers.set("content-type", request.contentType);
+          }}
+          body = request.body;
+        }}
+      }}
+
+      if (body !== undefined && resolvedConfig.getCsrfToken) {{
+        const csrfToken = await resolvedConfig.getCsrfToken();
+        if (csrfToken) {{
+          headers.set(resolvedConfig.csrfHeaderName, csrfToken);
+        }}
+      }}
+
+      const response = await resolvedConfig.fetch(buildUrl(resolvedConfig, request.path, request.query), {{
+        method: request.method,
+        headers,
+        body,
+        signal: request.signal,
+        credentials: resolvedConfig.credentials,
+      }});
+
+      const parsedBody = await parseResponseBody(response);
+      if (!response.ok) {{
+        const message =
+          typeof parsedBody === "object" &&
+          parsedBody !== null &&
+          "message" in parsedBody &&
+          typeof parsedBody.message === "string"
+            ? parsedBody.message
+            : `${{response.status}} ${{response.statusText}}`;
+        throw new ApiError(message, response.status, parsedBody, response.headers);
+      }}
+
+      return parsedBody;
+    }},
+  }};
+}}
+
+function bindFetch(fetchImpl) {{
+  if (typeof fetchImpl !== "function") {{
+    throw new Error("No fetch implementation is available for the generated client.");
+  }}
+  return fetchImpl.bind(globalThis);
+}}
+
+function buildUrl(config, path, query) {{
+  const base = `${{trimTrailingSlash(config.baseUrl)}}${{ensureLeadingSlash(config.serverUrl)}}${{ensureLeadingSlash(path)}}`;
+  const url = new URL(base, base.startsWith("http://") || base.startsWith("https://") ? undefined : "http://localhost");
+  if (query) {{
+    appendQuery(url.searchParams, query);
+  }}
+
+  if (!config.baseUrl) {{
+    return `${{url.pathname}}${{url.search}}${{url.hash}}`;
+  }}
+
+  return url.toString();
+}}
+
+function trimTrailingSlash(value) {{
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}}
+
+function ensureLeadingSlash(value) {{
+  if (!value) {{
+    return "";
+  }}
+  return value.startsWith("/") ? value : `/${{value}}`;
+}}
+
+export function interpolatePath(template, params) {{
+  return template.replace(/\{{([^}}]+)\}}/g, (_, key) => {{
+    const value = params?.[key];
+    if (value === undefined || value === null) {{
+      throw new Error(`Missing required path parameter: ${{key}}`);
+    }}
+    return encodeURIComponent(String(value));
+  }});
+}}
+
+function appendQuery(searchParams, query) {{
+  for (const [key, value] of Object.entries(query)) {{
+    if (value === undefined || value === null) {{
+      continue;
+    }}
+    if (Array.isArray(value)) {{
+      for (const item of value) {{
+        if (item !== undefined && item !== null) {{
+          searchParams.append(key, stringifyQueryValue(item));
+        }}
+      }}
+      continue;
+    }}
+    if (value instanceof Blob) {{
+      continue;
+    }}
+    searchParams.append(key, stringifyQueryValue(value));
+  }}
+}}
+
+function stringifyQueryValue(value) {{
+  return typeof value === "string" ? value : String(value);
+}}
+
+function objectToFormData(value) {{
+  if (value instanceof FormData) {{
+    return value;
+  }}
+  const formData = new FormData();
+  if (!value || typeof value !== "object") {{
+    return formData;
+  }}
+  for (const [key, entry] of Object.entries(value)) {{
+    appendFormDataValue(formData, key, entry);
+  }}
+  return formData;
+}}
+
+function appendFormDataValue(formData, key, value) {{
+  if (value === undefined || value === null) {{
+    return;
+  }}
+  if (Array.isArray(value)) {{
+    for (const item of value) {{
+      appendFormDataValue(formData, key, item);
+    }}
+    return;
+  }}
+  if (value instanceof Blob) {{
+    formData.append(key, value);
+    return;
+  }}
+  if (typeof value === "string") {{
+    formData.append(key, value);
+    return;
+  }}
+  if (typeof value === "number" || typeof value === "boolean") {{
+    formData.append(key, String(value));
+    return;
+  }}
+  formData.append(key, JSON.stringify(value));
+}}
+
+async function parseResponseBody(response) {{
+  if (response.status === 204 || response.status === 205) {{
+    return undefined;
+  }}
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {{
+    const text = await response.text();
+    return text ? JSON.parse(text) : undefined;
+  }}
+  if (contentType.startsWith("text/")) {{
+    return response.text();
+  }}
+  const text = await response.text();
+  return text ? text : undefined;
+}}
+"#
+    )
+}
+
 fn render_types_ts(schemas: &BTreeMap<String, Value>) -> String {
     let mut output = String::from("// Generated by `vsr client ts`\n\n");
     for (name, schema) in schemas {
@@ -1136,7 +1419,40 @@ fn render_operations_ts(document: &ClientDocument) -> String {
         output.push_str(&format!(
             "  return client.request<{}>({});\n",
             response_type_name,
-            render_request_config_literal(operation)
+            render_request_config_literal(operation, false)
+        ));
+        output.push_str("}\n\n");
+    }
+
+    if document.operations.is_empty() {
+        output.push_str("export {};\n");
+    }
+
+    output
+}
+
+fn render_operations_js(document: &ClientDocument) -> String {
+    let mut output = String::from(
+        "// Generated by `vsr client ts`\n\nimport { interpolatePath } from \"./client.js\";\n\n",
+    );
+
+    for operation in &document.operations {
+        if let Some(summary) = operation.summary.as_deref() {
+            output.push_str(&format!("/** {} */\n", escape_js_doc(summary)));
+        }
+        let params_default = if operation_has_required_inputs(operation) {
+            ""
+        } else {
+            " = {}"
+        };
+        output.push_str(&format!(
+            "export async function {}(client, params{}) {{\n",
+            sanitize_identifier(&operation.operation_id),
+            params_default
+        ));
+        output.push_str(&format!(
+            "  return client.request({});\n",
+            render_request_config_literal(operation, true)
         ));
         output.push_str("}\n\n");
     }
@@ -1208,7 +1524,7 @@ fn render_parameter_object_type(parameters: &[ClientParameter]) -> String {
     render_type_literal(&fields, 0)
 }
 
-fn render_request_config_literal(operation: &ClientOperation) -> String {
+fn render_request_config_literal(operation: &ClientOperation, javascript: bool) -> String {
     let mut fields = vec![format!("method: {:?}", operation.method)];
     if operation.path_params.is_empty() {
         fields.push(format!("path: {:?}", operation.path));
@@ -1219,7 +1535,11 @@ fn render_request_config_literal(operation: &ClientOperation) -> String {
         ));
     }
     if !operation.query_params.is_empty() {
-        fields.push("query: params.query as QueryParams | undefined".to_owned());
+        fields.push(if javascript {
+            "query: params.query".to_owned()
+        } else {
+            "query: params.query as QueryParams | undefined".to_owned()
+        });
     }
     if !operation.header_params.is_empty() {
         fields.push("headers: params.headers".to_owned());
@@ -1541,10 +1861,10 @@ fn check_generated_client_manifest(output_dir: &Path) -> Result<ClientSelfTestCh
 }
 
 fn check_generated_client_import_graph(output_dir: &Path) -> Result<ClientSelfTestCheck> {
-    let ts_files = collect_generated_ts_files(output_dir)?;
+    let source_files = collect_generated_client_source_files(output_dir)?;
     let mut bare_imports = Vec::new();
 
-    for path in &ts_files {
+    for path in &source_files {
         for specifier in collect_module_specifiers(path)? {
             if !(specifier.starts_with("./") || specifier.starts_with("../")) {
                 bare_imports.push(serde_json::json!({
@@ -1560,9 +1880,10 @@ fn check_generated_client_import_graph(output_dir: &Path) -> Result<ClientSelfTe
             name: "module.imports".to_owned(),
             kind: ClientSelfTestKind::Static,
             status: ClientSelfTestStatus::Passed,
-            details: "Generated TypeScript files import only relative local modules.".to_owned(),
+            details: "Generated client source files import only relative local modules."
+                .to_owned(),
             metadata: Some(serde_json::json!({
-                "files_checked": ts_files.len(),
+                "files_checked": source_files.len(),
             })),
         }
     } else {
@@ -1573,7 +1894,7 @@ fn check_generated_client_import_graph(output_dir: &Path) -> Result<ClientSelfTe
             details: "Generated TypeScript files imported external or bare module specifiers."
                 .to_owned(),
             metadata: Some(serde_json::json!({
-                "files_checked": ts_files.len(),
+                "files_checked": source_files.len(),
                 "bare_imports": bare_imports,
             })),
         }
@@ -1604,7 +1925,7 @@ fn run_node_import_smoke_check(
         });
     };
 
-    let module_url = file_url_string(&output_dir.join("index.ts"))?;
+    let module_url = file_url_string(&preferred_runtime_module_path(output_dir))?;
     let script_path = temp_self_test_script_path("import-smoke")?;
     fs::write(
         &script_path,
@@ -1863,14 +2184,28 @@ fn print_self_test_summary(report: &ClientSelfTestReport, report_path: &Path) {
     println!("{} {}", "Self-test report:".green().bold(), report_path.display());
 }
 
-fn collect_generated_ts_files(output_dir: &Path) -> Result<Vec<PathBuf>> {
+fn collect_generated_client_source_files(output_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = fs::read_dir(output_dir)
         .with_context(|| format!("failed to read {}", output_dir.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("ts"))
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("ts" | "js")
+            )
+        })
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)
+}
+
+fn preferred_runtime_module_path(output_dir: &Path) -> PathBuf {
+    let js_path = output_dir.join("index.js");
+    if js_path.is_file() {
+        js_path
+    } else {
+        output_dir.join("index.ts")
+    }
 }
 
 fn collect_module_specifiers(path: &Path) -> Result<Vec<String>> {
@@ -1937,7 +2272,7 @@ fn file_url_string(path: &Path) -> Result<String> {
 }
 
 fn render_runtime_probe_script(output_dir: &Path, probes: &[ClientOperation]) -> Result<String> {
-    let module_url = file_url_string(&output_dir.join("index.ts"))?;
+    let module_url = file_url_string(&preferred_runtime_module_path(output_dir))?;
     let mut import_names = vec!["createClient".to_owned()];
     import_names.extend(
         probes
@@ -2102,6 +2437,7 @@ mod tests {
             &[],
             Some("@demo/blog-client"),
             Some("/api"),
+            None,
             Some(true),
         )
         .expect("client should generate");
@@ -2133,6 +2469,7 @@ mod tests {
             &[],
             None,
             Some("/api"),
+            None,
             Some(true),
         )
         .expect("client should generate");
@@ -2147,6 +2484,36 @@ mod tests {
     }
 
     #[test]
+    fn generate_typescript_client_emits_browser_js_when_requested() {
+        let root = test_root();
+        let output = root.join("blog-client-js");
+        generate_typescript_client(
+            &fixture_path("blog_api.eon"),
+            Some(&output),
+            false,
+            &[],
+            Some("@demo/blog-client"),
+            Some("/api"),
+            Some(true),
+            Some(true),
+        )
+        .expect("client should generate");
+
+        let package_json = read_to_string(&output.join("package.json"));
+        let index_js = read_to_string(&output.join("index.js"));
+        let client_js = read_to_string(&output.join("client.js"));
+        let operations_js = read_to_string(&output.join("operations.js"));
+
+        assert!(package_json.contains("\"default\": \"./index.js\""));
+        assert!(package_json.contains("\"types\": \"./index.ts\""));
+        assert!(index_js.contains("export * from \"./client.js\";"));
+        assert!(client_js.contains("export function createClient"));
+        assert!(client_js.contains("bind(globalThis)"));
+        assert!(operations_js.contains("export async function listPost"));
+        assert!(!operations_js.contains("import type"));
+    }
+
+    #[test]
     fn generate_typescript_client_defaults_output_next_to_service_file() {
         let root = test_root();
         let service_dir = root.join("service");
@@ -2154,7 +2521,7 @@ mod tests {
         let input = service_dir.join("todo_app.eon");
         fs::copy(fixture_path("blog_api.eon"), &input).expect("fixture should copy");
 
-        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None, None)
             .expect("client should generate");
 
         assert_eq!(output, service_dir.join("todo_app.client"));
@@ -2172,6 +2539,7 @@ mod tests {
             &[],
             Some("@demo/blog-client"),
             Some("/api"),
+            None,
             Some(true),
         )
         .expect("client should generate");
@@ -2196,6 +2564,7 @@ mod tests {
             &[],
             None,
             Some("/api"),
+            None,
             Some(false),
         )
         .expect("client should generate");
@@ -2223,6 +2592,7 @@ mod tests {
                     }
                     package_name: "@demo/client-api"
                     server_url: "/edge-api"
+                    emit_js: true
                 }
             }
             resources: [
@@ -2235,7 +2605,7 @@ mod tests {
         )
         .expect("service should write");
 
-        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None, None)
             .expect("client should generate");
 
         assert_eq!(output, service_dir.join("web/src/gen/client"));
@@ -2246,6 +2616,7 @@ mod tests {
             read_to_string(&output.join("client.ts"))
                 .contains("const DEFAULT_SERVER_URL = \"/edge-api\";")
         );
+        assert!(output.join("index.js").exists());
     }
 
     #[test]
@@ -2278,7 +2649,7 @@ mod tests {
         )
         .expect("service should write");
 
-        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None, None)
             .expect("client should generate");
         let operations = read_to_string(&output.join("operations.ts"));
 
@@ -2384,7 +2755,7 @@ mod tests {
             std::env::set_var(&output_env, "env-client");
             std::env::set_var(&package_env, "@env/client-api");
         }
-        let output = generate_typescript_client(&input, None, false, &[], None, None, None)
+        let output = generate_typescript_client(&input, None, false, &[], None, None, None, None)
             .expect("client should generate");
         unsafe {
             std::env::remove_var(&output_env);

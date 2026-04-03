@@ -455,6 +455,12 @@ vsr build tests/fixtures/blog_api.eon --release
 `.eon` file, including `/openapi.json`, `/docs`, static mounts, built-in auth, runtime authz
 management routes, compiled database settings, and TLS when configured.
 
+When you run `vsr serve <service.eon>`, the CLI now also loads the `.env` next to that service
+before starting, even if your current shell directory is elsewhere. In an interactive terminal,
+`vsr serve` offers a one-shot local `setup` only when that service is missing development inputs
+that setup can actually fix, such as a built-in auth signing secret, a local Turso encryption key,
+or the default dev TLS certificate files.
+
 The emitted project includes:
 
 - `Cargo.toml` with the required runtime dependencies
@@ -572,6 +578,8 @@ The generated package currently includes:
 - `types.ts` generated from OpenAPI component schemas
 - `operations.ts` with one typed function per OpenAPI operation
 - `index.ts`, a minimal `package.json`, and a dependency-free `tsconfig.json`
+- optional browser-ready `index.js`, `client.js`, and `operations.js` when `--emit-js` or
+  `clients.ts.emit_js` is enabled
 
 Like `vsr openapi`, this generator works from either `.eon` services or derive-based Rust
 resources and stays faithful to the currently published OpenAPI contract. Endpoints that currently
@@ -592,6 +600,7 @@ clients: {
         }
         package_name: "@cms/api-client"
         server_url: "/api"
+        emit_js: true
         include_builtin_auth: true
         exclude_tables: ["audit_log"]
         automation: {
@@ -613,7 +622,7 @@ dependency-free static checks as `vsr client ts --self-test`.
 When `--self-test` is enabled, VSR validates the generated client package automatically:
 
 - `package.json` must stay dependency-free
-- generated `.ts` files must only import relative local modules
+- generated `.ts` and `.js` files must only import relative local modules
 - `tsc -p <client-dir>` runs when a TypeScript compiler is available
 - a Node.js import smoke test verifies the generated runtime can be loaded
 - when `--self-test-base-url` is provided, VSR also probes safe anonymous `GET` operations

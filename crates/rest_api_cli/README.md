@@ -233,6 +233,12 @@ This is the fastest local development loop. The runtime serves the compiled API 
 from the `.eon` file, including `/openapi.json`, `/docs`, static mounts, built-in auth, runtime
 authorization management routes, compiled database engine settings, and TLS when configured.
 
+`vsr serve` also loads the `.env` next to the selected `.eon` service before startup, even when
+you launch the command from another working directory. In an interactive terminal, it offers to
+run local `setup` only when the selected service is missing development inputs that setup can
+actually fix, such as a built-in auth signing secret, a local Turso encryption key, or the
+default dev TLS certificate files.
+
 Built-in auth is enabled by default. If the `.eon` service already defines a `user` table, re-run
 with `--without-auth` because the built-in auth migration owns that table name:
 
@@ -374,6 +380,8 @@ The current generator writes:
 - `types.ts` from OpenAPI component schemas
 - `operations.ts` with one typed function per OpenAPI operation
 - `index.ts`, a minimal `package.json`, and a dependency-free `tsconfig.json`
+- optional browser-ready `index.js`, `client.js`, and `operations.js` when `--emit-js` or
+  `clients.ts.emit_js` is enabled
 
 It works from either `.eon` services or derive-based Rust resources and follows the same OpenAPI
 surface that `vsr openapi` publishes. That means endpoints that currently advertise empty success
@@ -393,6 +401,7 @@ clients: {
         }
         package_name: "@cms/api-client"
         server_url: "/api"
+        emit_js: true
         include_builtin_auth: true
         exclude_tables: ["audit_log"]
         automation: {
@@ -415,7 +424,7 @@ dependency-free static checks as `vsr client ts --self-test`.
 JSON report. The self-test currently checks:
 
 - dependency-free `package.json`
-- relative-only module imports inside generated `.ts` files
+- relative-only module imports inside generated `.ts` and `.js` files
 - `tsc -p <client-dir>` when a TypeScript compiler is available
 - Node.js import smoke for the generated runtime
 - safe anonymous `GET` operation probes through the generated client when

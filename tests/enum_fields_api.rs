@@ -52,7 +52,8 @@ async fn generated_handlers_validate_and_filter_enum_fields() {
         .expect("seed row should insert");
 
     let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| enum_fields_api::configure(cfg, pool.clone()))),
+        App::new()
+            .service(scope("/api").configure(|cfg| enum_fields_api::configure(cfg, pool.clone()))),
     )
     .await;
     let token = issue_token(1, &["user"]);

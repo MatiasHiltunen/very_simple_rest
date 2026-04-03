@@ -58,7 +58,8 @@ async fn generated_handlers_support_typed_list_payloads() {
         .expect("seed row should insert");
 
     let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| list_fields_api::configure(cfg, pool.clone()))),
+        App::new()
+            .service(scope("/api").configure(|cfg| list_fields_api::configure(cfg, pool.clone()))),
     )
     .await;
 
@@ -101,7 +102,10 @@ async fn generated_handlers_support_typed_list_payloads() {
     let list_page: list_fields_api::EntryListResponse = test::read_body_json(list_response).await;
     assert_eq!(list_page.total, 2);
     assert_eq!(list_page.items[0].categories, vec![1, 2]);
-    assert_eq!(list_page.items[1].tags, vec!["news".to_owned(), "ai".to_owned()]);
+    assert_eq!(
+        list_page.items[1].tags,
+        vec!["news".to_owned(), "ai".to_owned()]
+    );
 
     let invalid_filter_request = test::TestRequest::get()
         .uri("/api/entry?filter_categories=1")

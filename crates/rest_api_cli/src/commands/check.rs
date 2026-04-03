@@ -17,6 +17,9 @@ use rest_macro_core::{
 use url::Url;
 
 use crate::commands::{
+    client::{
+        resolve_configured_client_output_dir, resolve_configured_client_self_test_report_path,
+    },
     schema::load_schema_service,
     server::{
         resolve_binary_output_path, resolve_build_cache_root, resolve_bundle_output_path,
@@ -128,6 +131,7 @@ fn collect_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
     findings.extend(unused_authorization_scope_findings(service));
     findings.extend(explicit_index_findings(service));
     findings.extend(build_artifact_findings(input, service));
+    findings.extend(client_generation_findings(input, service));
     findings.extend(storage_path_findings(service));
     findings.extend(tls_path_findings(input, service));
     findings
@@ -152,22 +156,40 @@ fn auth_email_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
             .parse::<IpAddr>()
             .map(|ip| ip.is_loopback() || ip.is_unspecified())
             .unwrap_or(false);
-    if !is_local {
-        return Vec::new();
+
+    let mut findings = Vec::new();
+    if is_local {
+        findings.push(CheckFinding {
+            code: "security.auth.email.public_base_url_is_local".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "security.auth.email.public_base_url".to_owned(),
+            message: format!(
+                "auth email public base URL `{public_base_url}` points at a local-only host"
+            ),
+            suggestion: Some(
+                "Use a publicly reachable HTTPS origin for email verification and password-reset links. Localhost and loopback URLs are fine for development, but they are not safe production defaults."
+                    .to_owned(),
+            ),
+        });
+        return findings;
     }
 
-    vec![CheckFinding {
-        code: "security.auth.email.public_base_url_is_local".to_owned(),
-        severity: CheckSeverity::Warning,
-        path: "security.auth.email.public_base_url".to_owned(),
-        message: format!(
-            "auth email public base URL `{public_base_url}` points at a local-only host"
-        ),
-        suggestion: Some(
-            "Use a publicly reachable HTTPS origin for email verification and password-reset links. Localhost and loopback URLs are fine for development, but they are not safe production defaults."
-                .to_owned(),
-        ),
-    }]
+    if parsed.scheme() != "https" {
+        findings.push(CheckFinding {
+            code: "security.auth.email.public_base_url_not_https".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "security.auth.email.public_base_url".to_owned(),
+            message: format!(
+                "auth email public base URL `{public_base_url}` does not use HTTPS"
+            ),
+            suggestion: Some(
+                "Use an `https://` public base URL for verification and password-reset links so email-driven auth flows do not downgrade users onto insecure origins."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    findings
 }
 
 fn jwt_configuration_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
@@ -532,6 +554,176 @@ fn build_artifact_env_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
             ),
             suggestion: Some(format!(
                 "Unset `{env_name}` or give it a non-empty path value. When it is empty, `vsr` falls back to the literal `.eon` path or service-relative default."
+            )),
+        });
+    }
+
+    findings
+}
+
+fn client_generation_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = client_generation_env_findings(service);
+
+    if !service.clients.ts.automation.on_build {
+        return findings;
+    }
+
+    let Ok(package_name) = resolve_generated_package_name(input, None) else {
+        return findings;
+    };
+    let Ok(binary_output) = resolve_binary_output_path(input, service, None, Some(&package_name))
+    else {
+        return findings;
+    };
+    let Ok(bundle_output) = resolve_bundle_output_path(input, service, &binary_output, false)
+    else {
+        return findings;
+    };
+    let Ok(build_root) = resolve_build_cache_root(input, service, &package_name, None) else {
+        return findings;
+    };
+    let Ok(client_output) = resolve_configured_client_output_dir(input, service) else {
+        return findings;
+    };
+
+    if paths_overlap(&client_output, &build_root) {
+        findings.push(CheckFinding {
+            code: "clients.ts.output_dir_overlaps_build_cache".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "clients.ts.output_dir".to_owned(),
+            message: format!(
+                "automated client output `{}` overlaps the build cache `{}`",
+                client_output.display(),
+                build_root.display()
+            ),
+            suggestion: Some(
+                "Move `clients.ts.output_dir` outside `.vsr-build`. Build-cache cleanup and regeneration should not share the same path tree."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if paths_overlap(&client_output, &bundle_output) {
+        findings.push(CheckFinding {
+            code: "clients.ts.output_dir_overlaps_bundle".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "clients.ts.output_dir".to_owned(),
+            message: format!(
+                "automated client output `{}` overlaps the server bundle `{}`",
+                client_output.display(),
+                bundle_output.display()
+            ),
+            suggestion: Some(
+                "Move `clients.ts.output_dir` outside the bundle directory. `vsr build --force` recreates the bundle and can remove overlapping client artifacts."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if paths_overlap(&client_output, &binary_output) {
+        findings.push(CheckFinding {
+            code: "clients.ts.output_dir_overlaps_binary".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "clients.ts.output_dir".to_owned(),
+            message: format!(
+                "automated client output `{}` overlaps the built binary path `{}`",
+                client_output.display(),
+                binary_output.display()
+            ),
+            suggestion: Some(
+                "Place `clients.ts.output_dir` in a separate directory so client generation cannot collide with the server executable."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let Ok(self_test_report_path) =
+        resolve_configured_client_self_test_report_path(input, service, &client_output)
+    else {
+        return findings;
+    };
+    let Some(self_test_report_path) = self_test_report_path else {
+        return findings;
+    };
+
+    for generated_name in [
+        "index.ts",
+        "client.ts",
+        "types.ts",
+        "operations.ts",
+        "package.json",
+        "tsconfig.json",
+        "self-test-report.json",
+    ] {
+        let generated_path = client_output.join(generated_name);
+        if paths_equal(&self_test_report_path, &generated_path) {
+            findings.push(CheckFinding {
+                code: "clients.ts.self_test_report_path_collides_with_generated_file".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: "clients.ts.automation.self_test_report".to_owned(),
+                message: format!(
+                    "automated client self-test report path `{}` collides with generated client file `{generated_name}`",
+                    self_test_report_path.display()
+                ),
+                suggestion: Some(
+                    "Move `clients.ts.automation.self_test_report` to a separate filename such as `reports/client-self-test.json`."
+                        .to_owned(),
+                ),
+            });
+            break;
+        }
+    }
+
+    findings
+}
+
+fn client_generation_env_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = Vec::new();
+
+    for (path, env_name, code, label) in [
+        (
+            "clients.ts.output_dir.env",
+            service.clients.ts.output_dir.env.as_deref(),
+            "clients.ts.output_dir_env_override_empty",
+            "client output directory",
+        ),
+        (
+            "clients.ts.package_name.env",
+            service.clients.ts.package_name.env.as_deref(),
+            "clients.ts.package_name_env_override_empty",
+            "client package name",
+        ),
+        (
+            "clients.ts.automation.self_test_report.env",
+            service
+                .clients
+                .ts
+                .automation
+                .self_test_report
+                .env
+                .as_deref(),
+            "clients.ts.self_test_report_env_override_empty",
+            "client self-test report path",
+        ),
+    ] {
+        let Some(env_name) = env_name else {
+            continue;
+        };
+        let Some(value) = std::env::var_os(env_name) else {
+            continue;
+        };
+        if !value.to_string_lossy().trim().is_empty() {
+            continue;
+        }
+        findings.push(CheckFinding {
+            code: code.to_owned(),
+            severity: CheckSeverity::Warning,
+            path: path.to_owned(),
+            message: format!(
+                "declared env override `{env_name}` is set, but it resolves to an empty {label}"
+            ),
+            suggestion: Some(format!(
+                "Unset `{env_name}` or give it a non-empty value. When it is empty, `vsr` falls back to the literal `.eon` value or service-relative default."
             )),
         });
     }
@@ -1410,6 +1602,134 @@ resources: [
     }
 
     #[test]
+    fn check_report_warns_for_client_automation_path_overlaps_and_empty_env_overrides() {
+        let root = temp_dir("client-automation-overlap");
+        let config = root.join("client_overlap_api.eon");
+        let output_env = format!(
+            "VSR_TEST_CLIENT_OUTPUT_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should advance")
+                .as_nanos()
+        );
+        let package_env = format!(
+            "VSR_TEST_CLIENT_PACKAGE_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should advance")
+                .as_nanos()
+        );
+        let report_env = format!(
+            "VSR_TEST_CLIENT_REPORT_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should advance")
+                .as_nanos()
+        );
+        fs::write(
+            &config,
+            format!(
+                r#"
+module: "client_overlap_api"
+clients: {{
+    ts: {{
+        output_dir: {{
+            path: ".vsr-build/client-overlap-api"
+            env: "{output_env}"
+        }}
+        package_name: {{
+            value: "@demo/client-overlap-api"
+            env: "{package_env}"
+        }}
+        automation: {{
+            on_build: true
+            self_test: true
+            self_test_report: {{
+                path: ".vsr-build/client-overlap-api/package.json"
+                env: "{report_env}"
+            }}
+        }}
+    }}
+}}
+resources: [
+    {{
+        name: "Asset"
+        fields: [
+            {{ name: "id", type: I64, id: true }}
+            {{ name: "title", type: String }}
+        ]
+    }}
+]
+"#
+            ),
+        )
+        .expect("fixture should write");
+
+        unsafe {
+            std::env::set_var(&output_env, "   ");
+            std::env::set_var(&package_env, "   ");
+            std::env::set_var(&report_env, "   ");
+        }
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        unsafe {
+            std::env::remove_var(&output_env);
+            std::env::remove_var(&package_env);
+            std::env::remove_var(&report_env);
+        }
+
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"clients.ts.output_dir_env_override_empty"));
+        assert!(codes.contains(&"clients.ts.package_name_env_override_empty"));
+        assert!(codes.contains(&"clients.ts.self_test_report_env_override_empty"));
+        assert!(codes.contains(&"clients.ts.output_dir_overlaps_build_cache"));
+        assert!(codes.contains(&"clients.ts.self_test_report_path_collides_with_generated_file"));
+    }
+
+    #[test]
+    fn check_report_warns_for_client_automation_output_overlapping_bundle() {
+        let root = temp_dir("client-automation-bundle-overlap");
+        let config = root.join("client_bundle_overlap_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "client_bundle_overlap_api"
+clients: {
+    ts: {
+        output_dir: {
+            path: "client-bundle-overlap-api.bundle/generated-client"
+        }
+        automation: {
+            on_build: true
+        }
+    }
+}
+resources: [
+    {
+        name: "Asset"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"clients.ts.output_dir_overlaps_bundle"));
+    }
+
+    #[test]
     fn check_report_warns_for_storage_backend_root_that_is_not_directory() {
         let root = temp_dir("storage-backend-root-file");
         let blocking_path = root.join("var/uploads");
@@ -1657,6 +1977,48 @@ resources: [
             .map(|finding| finding.code.as_str())
             .collect::<Vec<_>>();
         assert!(codes.contains(&"security.auth.email.public_base_url_is_local"));
+    }
+
+    #[test]
+    fn check_report_warns_for_non_https_auth_email_public_base_url() {
+        let root = temp_dir("non-https-auth-email-base");
+        let config = root.join("non_https_auth_email_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "non_https_auth_email_api"
+security: {
+    auth: {
+        require_email_verification: true
+        email: {
+            from_email: "noreply@example.com"
+            public_base_url: "http://example.com"
+            provider: {
+                kind: Resend
+                api_key_env: "RESEND_API_KEY"
+            }
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"security.auth.email.public_base_url_not_https"));
     }
 
     #[test]

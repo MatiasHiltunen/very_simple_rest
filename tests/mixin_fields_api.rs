@@ -57,7 +57,8 @@ async fn generated_handlers_expand_local_mixins_into_runtime_schema() {
     .expect("seed row should insert");
 
     let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| mixin_fields_api::configure(cfg, pool.clone()))),
+        App::new()
+            .service(scope("/api").configure(|cfg| mixin_fields_api::configure(cfg, pool.clone()))),
     )
     .await;
     let token = issue_token(1, &["user"]);

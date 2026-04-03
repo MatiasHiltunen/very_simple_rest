@@ -52,7 +52,8 @@ async fn generated_handlers_apply_response_contexts_over_projected_fields() {
         .expect("seed row should insert");
 
     let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| api_contexts_api::configure(cfg, pool.clone()))),
+        App::new()
+            .service(scope("/api").configure(|cfg| api_contexts_api::configure(cfg, pool.clone()))),
     )
     .await;
     let token = issue_token(1, &["user"]);
@@ -72,7 +73,9 @@ async fn generated_handlers_apply_response_contexts_over_projected_fields() {
     let edit_body: Value = test::read_body_json(edit_response).await;
     assert_eq!(edit_body["secret"], "secret alpha");
 
-    let list_request = test::TestRequest::get().uri("/api/posts?sort=title").to_request();
+    let list_request = test::TestRequest::get()
+        .uri("/api/posts?sort=title")
+        .to_request();
     let list_response = test::call_service(&app, list_request).await;
     assert_eq!(list_response.status(), StatusCode::OK);
     let list_body: Value = test::read_body_json(list_response).await;

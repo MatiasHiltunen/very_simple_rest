@@ -51,10 +51,24 @@ first, then applies the example-specific runtime-authz and family-schema migrati
 
 This example now ships a same-origin plain HTML, CSS, and JavaScript SPA in
 [public/](/Users/mh/Projects/very_simple_rest/examples/family_app/public). The `.eon` config
-mounts it at `/`, so once the generated family-app server is running you can open:
+mounts it at `/`, and the SPA now imports the VSR-generated client from
+[public/gen/client/](/Users/mh/Projects/very_simple_rest/examples/family_app/public/gen/client).
+Once the generated family-app server is running you can open:
 
 ```text
 http://127.0.0.1:8080/
+```
+
+The workspace uses browser-side SPA routes, so these deep links also load directly when the server
+is running:
+
+```text
+http://127.0.0.1:8080/access
+http://127.0.0.1:8080/family
+http://127.0.0.1:8080/households
+http://127.0.0.1:8080/shopping
+http://127.0.0.1:8080/calendar
+http://127.0.0.1:8080/runtime
 ```
 
 The SPA covers the current real flow:
@@ -68,6 +82,16 @@ The SPA covers the current real flow:
 It is intentionally demo-oriented rather than exhaustive: it focuses on the onboarding,
 claim-free relation-policy and hybrid runtime-grant paths that are hardest to understand from curl
 examples alone.
+
+If you change the schema and want to refresh the checked-in browser client manually, run:
+
+```bash
+cd examples/family_app
+vsr client ts --input family_app.eon --force
+```
+
+The example also enables `clients.ts.automation.on_build`, so `vsr build family_app.eon` refreshes
+the client automatically and writes a static self-test report to `reports/client-self-test.json`.
 
 ## Verify The Policy Model
 

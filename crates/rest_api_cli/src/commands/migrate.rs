@@ -1018,18 +1018,13 @@ fn required_index_names(
                 .name_for_table(resource.table_name.as_str())
             }),
     );
-    indexes.extend(
-        resource
-            .policies
-            .iter_assignments()
-            .map(|(_, policy)| {
-                compiler::IndexSpec {
-                    fields: vec![policy.field.clone()],
-                    unique: false,
-                }
-                .name_for_table(resource.table_name.as_str())
-            }),
-    );
+    indexes.extend(resource.policies.iter_assignments().map(|(_, policy)| {
+        compiler::IndexSpec {
+            fields: vec![policy.field.clone()],
+            unique: false,
+        }
+        .name_for_table(resource.table_name.as_str())
+    }));
     indexes.extend(
         resource
             .indexes
@@ -1301,12 +1296,12 @@ enum ApplyResult {
 #[cfg(test)]
 mod tests {
     use crate::commands::db::{connect_database, database_url_from_service_config};
-    use rest_macro_core::compiler;
     use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
     use rest_macro_core::authorization::{
         AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE, AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE,
         authorization_runtime_migration_sql,
     };
+    use rest_macro_core::compiler;
     use rest_macro_core::db::query_scalar;
     use sqlx::Row;
     use std::{

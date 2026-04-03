@@ -77,11 +77,11 @@ async fn generated_handlers_accept_storage_uploads() {
         .await
         .expect("database should connect");
 
-    let app = test::init_service(
-        App::new()
-            .service(scope("/api").configure(|cfg| storage_upload_api::configure(cfg, pool.clone()))),
-    )
-    .await;
+    let app =
+        test::init_service(App::new().service(
+            scope("/api").configure(|cfg| storage_upload_api::configure(cfg, pool.clone())),
+        ))
+        .await;
 
     let token = issue_token(1, &["user"]);
     let (content_type, payload) = multipart_upload_payload("notes.txt", b"hello upload");
@@ -96,10 +96,16 @@ async fn generated_handlers_accept_storage_uploads() {
     let body: StorageUploadResponse = test::read_body_json(response).await;
     assert_eq!(body.backend, "uploads");
     assert_eq!(body.file_name, "notes.txt");
-    assert_eq!(body.public_url.as_deref().unwrap_or(""), &format!("/uploads/{}", body.object_key));
+    assert_eq!(
+        body.public_url.as_deref().unwrap_or(""),
+        &format!("/uploads/{}", body.object_key)
+    );
     assert_eq!(body.size_bytes, 12);
     let stored_path = uploads_dir.join(&body.object_key);
-    assert!(stored_path.is_file(), "uploaded object should exist on disk");
+    assert!(
+        stored_path.is_file(),
+        "uploaded object should exist on disk"
+    );
 
     let (forbidden_content_type, forbidden_payload) = multipart_upload_payload("notes.txt", b"x");
     let forbidden_request = test::TestRequest::post()

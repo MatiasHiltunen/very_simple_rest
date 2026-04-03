@@ -1,4 +1,33 @@
-const API_BASE = "/api";
+import {
+  createCalendarEvent,
+  createClient,
+  createFamily,
+  createFamilyMember,
+  createHousehold,
+  createRuntimeAuthorizationAssignment,
+  createShoppingItem,
+  deleteCalendarEvent as deleteCalendarEventOperation,
+  deleteRuntimeAuthorizationAssignment,
+  deleteShoppingItem as deleteShoppingItemOperation,
+  evaluateRuntimeAuthorizationAccess,
+  getAuthenticatedAccount,
+  listBuiltinAuthUsers,
+  listCalendarEventByHousehold,
+  listFamily,
+  listFamilyMemberByFamily,
+  listHouseholdByFamily,
+  listRuntimeAuthorizationAssignmentEvents,
+  listRuntimeAuthorizationAssignments,
+  listShoppingItemByFamily,
+  listShoppingItemByHousehold,
+  loginUser,
+  logoutUser,
+  registerUser,
+  renewRuntimeAuthorizationAssignment,
+  revokeRuntimeAuthorizationAssignment,
+  updateShoppingItem,
+} from "./gen/client/index.js";
+
 const STORAGE_KEY = "vsr_family_atlas_state_v1";
 const ASSIGNMENT_CATALOG = {
   template: [
@@ -52,7 +81,60 @@ const ASSIGNMENT_CATALOG = {
   ],
 };
 
+const ROUTES = {
+  "/": {
+    view: "overview",
+    eyebrow: "Overview",
+    title: "Shared family control room",
+    summary:
+      "Register, create the family, open a household, then widen access through runtime grants.",
+  },
+  "/access": {
+    view: "auth",
+    eyebrow: "Access",
+    title: "Establish the live session",
+    summary:
+      "Built-in auth covers registration, login, JWT issuance, and the linked account/admin surfaces.",
+  },
+  "/family": {
+    view: "family",
+    eyebrow: "Family",
+    title: "Shape the family record",
+    summary:
+      "Create a family, pick the active scope, and add visible membership rows with relation-aware policy checks.",
+  },
+  "/households": {
+    view: "households",
+    eyebrow: "Households",
+    title: "Open the shared spaces",
+    summary:
+      "Nested household rows turn one family into concrete day-to-day spaces with separate timelines.",
+  },
+  "/shopping": {
+    view: "shopping",
+    eyebrow: "Shopping",
+    title: "Run the shared list",
+    summary:
+      "Shopping items inherit family and household scope so the list feels collaborative instead of global.",
+  },
+  "/calendar": {
+    view: "calendar",
+    eyebrow: "Calendar",
+    title: "Map the household rhythm",
+    summary:
+      "Calendar events are household-scoped and are the cleanest way to see the policy model in motion.",
+  },
+  "/runtime": {
+    view: "runtime",
+    eyebrow: "Runtime authz",
+    title: "Grant and audit runtime access",
+    summary:
+      "Templates, permissions, evaluations, and event history expose the full runtime authorization model.",
+  },
+};
+
 const state = {
+  route: "/",
   token: "",
   currentUser: null,
   families: [],
@@ -76,8 +158,17 @@ const state = {
   activity: [],
 };
 
+const apiClient = createClient({
+  credentials: "same-origin",
+  getAccessToken: () => state.token || undefined,
+});
+
 const refs = {
   statusBanner: document.getElementById("statusBanner"),
+  routeEyebrow: document.getElementById("routeEyebrow"),
+  routeTitle: document.getElementById("routeTitle"),
+  routeSummary: document.getElementById("routeSummary"),
+  routeSuggestion: document.getElementById("routeSuggestion"),
   sessionSummary: document.getElementById("sessionSummary"),
   selectedFamilyChip: document.getElementById("selectedFamilyChip"),
   selectedHouseholdChip: document.getElementById("selectedHouseholdChip"),
@@ -136,8 +227,15 @@ const refs = {
   evaluateScope: document.getElementById("evaluateScope"),
   evaluateScopeValue: document.getElementById("evaluateScopeValue"),
   runtimeEvaluateResult: document.getElementById("runtimeEvaluateResult"),
+  overviewStats: document.getElementById("overviewStats"),
+  overviewChecklist: document.getElementById("overviewChecklist"),
+  overviewSelection: document.getElementById("overviewSelection"),
+  routeLinks: Array.from(document.querySelectorAll("[data-route-link]")),
+  views: Array.from(document.querySelectorAll("[data-view]")),
 };
 
+window.addEventListener("popstate", handlePopState);
+document.addEventListener("click", handleRouteLinkClick);
 document.addEventListener("click", handleActionClick);
 document.getElementById("registerForm").addEventListener("submit", handleRegister);
 document.getElementById("familyCreateForm").addEventListener("submit", handleCreateFamily);
@@ -191,6 +289,7 @@ refs.adminUserSearch.addEventListener("keydown", (event) => {
 bootstrap();
 
 async function bootstrap() {
+  state.route = normalizeRoute(window.location.pathname);
   loadPersistedState();
   seedDefaultDatetimes();
   syncAssignmentNameOptions();
@@ -198,6 +297,9 @@ async function bootstrap() {
   pushActivity("The SPA booted and is checking for a stored bearer token.");
   renderAll();
   await refreshSession({ silent: true });
+  if (!state.token && !state.currentUser) {
+    setBanner("Guest mode ready. Open Access to create a session and start the family workflow.", "info");
+  }
 }
 
 function loadPersistedState() {
@@ -227,7 +329,11 @@ function persistState() {
 }
 
 function renderAll() {
+  syncPreviews();
+  renderRoute();
   renderSession();
+  renderRouteSuggestion();
+  renderOverview();
   renderActivity();
   renderFamilies();
   renderFamilyMembers();
@@ -238,7 +344,116 @@ function renderAll() {
   renderRuntimeAssignments();
   renderRuntimeEvents();
   renderRuntimeEvaluation();
-  syncPreviews();
+}
+
+function renderRoute() {
+  const route = ROUTES[state.route] || ROUTES["/"];
+  const family = getSelectedFamily();
+  const household = getSelectedHousehold();
+  let summary = route.summary;
+
+  if (state.route === "/access" && state.currentUser) {
+    summary = `Session live for ${state.currentUser.email || `user #${state.currentUser.id}`}. Continue into the family workspace or inspect the claims rail.`;
+  } else if (state.route === "/family" && family) {
+    summary = `Selected family #${family.id} (${family.name}). Add members here, then move into households or shared shopping.`;
+  } else if (state.route === "/households" && !family) {
+    summary = "Start by selecting or creating a family, then create one or more household spaces under it.";
+  } else if (state.route === "/households" && household) {
+    summary = `Household #${household.id} (${household.label}) is active inside ${family ? family.name : "the selected family"}.`;
+  } else if (state.route === "/shopping" && household) {
+    summary = `Shopping list is scoped to household #${household.id} (${household.label}) while remaining family-visible.`;
+  } else if (state.route === "/shopping" && family) {
+    summary = `Family-wide shopping view is active for ${family.name}. Select a household to narrow the scope.`;
+  } else if (state.route === "/calendar" && !household) {
+    summary = "Select a household first. Calendar events are household-scoped and only appear when that scope is active.";
+  } else if (state.route === "/calendar" && household) {
+    summary = `Calendar timeline is focused on household #${household.id} (${household.label}).`;
+  } else if (state.route === "/runtime" && !isAdmin()) {
+    summary = "Runtime authorization tools are visible here, but the management workflow requires an admin session.";
+  } else if (state.route === "/runtime" && isAdmin()) {
+    summary = "Choose a user target, apply templates or permissions, then evaluate effective access and inspect the audit trail.";
+  }
+
+  refs.routeEyebrow.textContent = route.eyebrow;
+  refs.routeTitle.textContent = route.title;
+  refs.routeSummary.textContent = summary;
+  document.title = `${route.title} | Family Atlas`;
+
+  refs.routeLinks.forEach((link) => {
+    const isActive = normalizeRoute(link.dataset.routeLink || link.getAttribute("href") || "/") === state.route;
+    link.classList.toggle("is-active", isActive);
+    if (isActive) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  });
+
+  refs.views.forEach((view) => {
+    const isActive = view.dataset.view === route.view;
+    view.hidden = !isActive;
+  });
+}
+
+function renderRouteSuggestion() {
+  refs.routeSuggestion.textContent = getNextStep().label;
+}
+
+function renderOverview() {
+  const openShoppingItems = state.shoppingItems.filter((item) => !item.completed).length;
+  const metrics = [
+    {
+      value: state.currentUser ? (isAdmin() ? "Admin" : "Live") : "Guest",
+      label: "Session state",
+    },
+    {
+      value: formatMetricValue(state.families.length),
+      label: "Visible family rows",
+    },
+    {
+      value: formatMetricValue(state.households.length),
+      label: "Visible households",
+    },
+    {
+      value: `${openShoppingItems}/${state.calendarEvents.length}`,
+      label: "Open shopping / events",
+    },
+  ];
+
+  refs.overviewStats.innerHTML = metrics
+    .map(
+      (metric) => `
+        <article class="metric">
+          <span class="metric-value">${escapeHtml(metric.value)}</span>
+          <span class="metric-label">${escapeHtml(metric.label)}</span>
+        </article>
+      `,
+    )
+    .join("");
+
+  refs.overviewChecklist.innerHTML = buildOverviewChecklist()
+    .map(
+      (item) => `
+        <li>
+          <strong>${escapeHtml(item.title)}</strong>
+          <div>${escapeHtml(item.copy)}</div>
+          <div>${escapeHtml(item.status)}</div>
+        </li>
+      `,
+    )
+    .join("");
+
+  refs.overviewSelection.innerHTML = buildSelectionStory()
+    .map(
+      (entry) => `
+        <article class="selection-block">
+          <div class="selection-label">${escapeHtml(entry.label)}</div>
+          <div class="selection-value">${escapeHtml(entry.value)}</div>
+          <div class="selection-note">${escapeHtml(entry.note)}</div>
+        </article>
+      `,
+    )
+    .join("");
 }
 
 function setBanner(message, kind = "info") {
@@ -305,7 +520,8 @@ function renderSession() {
     ? state.currentUser.roles.join(", ")
     : "none";
   refs.sessionSummary.innerHTML = `
-    <strong>User #${escapeHtml(state.currentUser.id)}</strong><br>
+    <strong>${escapeHtml(state.currentUser.email || `User #${state.currentUser.id}`)}</strong><br>
+    User #${escapeHtml(state.currentUser.id)}<br>
     Roles: ${escapeHtml(roles)}
   `;
   const selectedFamily = getSelectedFamily();
@@ -764,8 +980,7 @@ async function handleRegister(event) {
   }
 
   try {
-    await apiFetch("/auth/register", {
-      method: "POST",
+    await registerUser(apiClient, {
       body: { email, password },
     });
     setBanner("Registration succeeded. Log in with the same credentials.", "success");
@@ -784,8 +999,7 @@ async function handleLogin() {
   }
 
   try {
-    const response = await apiFetch("/auth/login", {
-      method: "POST",
+    const response = await loginUser(apiClient, {
       body: { email, password },
     });
     state.token = response.token || "";
@@ -793,6 +1007,7 @@ async function handleLogin() {
     pushActivity(`Logged in as ${email}.`, "success");
     setBanner("Login succeeded. Loading your workspace...", "success");
     await refreshSession({ silent: true });
+    navigateToRoute(getNextStep().route);
   } catch (error) {
     handleRequestError(`Login failed for ${email}.`, error);
   }
@@ -806,7 +1021,7 @@ async function handleLogout() {
   }
 
   try {
-    await apiFetch("/auth/logout", { method: "POST" });
+    await logoutUser(apiClient);
   } catch (error) {
     pushActivity(`Logout endpoint returned an error: ${error.message}`, "error");
   }
@@ -814,6 +1029,7 @@ async function handleLogout() {
   clearSession();
   setBanner("Logged out and cleared the stored bearer token.", "success");
   pushActivity("Logged out.", "success");
+  navigateToRoute("/access");
 }
 
 async function refreshSession({ silent = false } = {}) {
@@ -826,7 +1042,7 @@ async function refreshSession({ silent = false } = {}) {
   }
 
   try {
-    state.currentUser = await apiFetch("/auth/me");
+    state.currentUser = await getAuthenticatedAccount(apiClient);
     if (!silent) {
       setBanner("Session refreshed.", "success");
     }
@@ -894,7 +1110,9 @@ async function loadFamilies({ announce = false } = {}) {
   }
 
   try {
-    const response = await apiFetch("/family?sort=name&order=asc");
+    const response = await listFamily(apiClient, {
+      query: { sort: "name", order: "asc" },
+    });
     state.families = Array.isArray(response.items) ? response.items : [];
     state.selectedFamilyId = pickFamilySelection(state.families);
     persistState();
@@ -906,8 +1124,7 @@ async function loadFamilies({ announce = false } = {}) {
     state.families = [];
     handleRequestError("Failed to load families.", error);
   }
-  renderFamilies();
-  syncPreviews();
+  renderAll();
 }
 
 function pickFamilySelection(families) {
@@ -929,7 +1146,10 @@ async function loadFamilyMembers({ announce = false } = {}) {
     return;
   }
   try {
-    const response = await apiFetch(`/family/${state.selectedFamilyId}/family_member?sort=display_name&order=asc`);
+    const response = await listFamilyMemberByFamily(apiClient, {
+      path: { parent_id: state.selectedFamilyId },
+      query: { sort: "display_name", order: "asc" },
+    });
     state.familyMembers = Array.isArray(response.items) ? response.items : [];
     state.familyMembersError = "";
     if (announce) {
@@ -942,7 +1162,7 @@ async function loadFamilyMembers({ announce = false } = {}) {
       setBanner(`Family member load failed: ${error.message}`, "error");
     }
   }
-  renderFamilyMembers();
+  renderAll();
 }
 
 async function loadHouseholds({ announce = false } = {}) {
@@ -953,7 +1173,10 @@ async function loadHouseholds({ announce = false } = {}) {
     return;
   }
   try {
-    const response = await apiFetch(`/family/${state.selectedFamilyId}/household?sort=label&order=asc`);
+    const response = await listHouseholdByFamily(apiClient, {
+      path: { parent_id: state.selectedFamilyId },
+      query: { sort: "label", order: "asc" },
+    });
     state.households = Array.isArray(response.items) ? response.items : [];
     state.householdsError = "";
     state.selectedHouseholdId = pickHouseholdSelection(state.households);
@@ -969,8 +1192,7 @@ async function loadHouseholds({ announce = false } = {}) {
       setBanner(`Household load failed: ${error.message}`, "error");
     }
   }
-  renderHouseholds();
-  syncPreviews();
+  renderAll();
 }
 
 function pickHouseholdSelection(households) {
@@ -994,12 +1216,16 @@ async function loadShoppingItems({ announce = false } = {}) {
     return;
   }
 
-  const path = state.selectedHouseholdId
-    ? `/household/${state.selectedHouseholdId}/shopping_item?sort=title&order=asc`
-    : `/family/${state.selectedFamilyId}/shopping_item?sort=title&order=asc`;
-
   try {
-    const response = await apiFetch(path);
+    const response = state.selectedHouseholdId
+      ? await listShoppingItemByHousehold(apiClient, {
+          path: { parent_id: state.selectedHouseholdId },
+          query: { sort: "title", order: "asc" },
+        })
+      : await listShoppingItemByFamily(apiClient, {
+          path: { parent_id: state.selectedFamilyId },
+          query: { sort: "title", order: "asc" },
+        });
     state.shoppingItems = Array.isArray(response.items) ? response.items : [];
     state.shoppingError = "";
     if (announce) {
@@ -1012,7 +1238,7 @@ async function loadShoppingItems({ announce = false } = {}) {
       setBanner(`Shopping load failed: ${error.message}`, "error");
     }
   }
-  renderShoppingItems();
+  renderAll();
 }
 
 async function loadCalendarEvents({ announce = false } = {}) {
@@ -1023,7 +1249,10 @@ async function loadCalendarEvents({ announce = false } = {}) {
     return;
   }
   try {
-    const response = await apiFetch(`/household/${state.selectedHouseholdId}/calendar_event?sort=starts_at&order=asc`);
+    const response = await listCalendarEventByHousehold(apiClient, {
+      path: { parent_id: state.selectedHouseholdId },
+      query: { sort: "starts_at", order: "asc" },
+    });
     state.calendarEvents = Array.isArray(response.items) ? response.items : [];
     state.calendarError = "";
     if (announce) {
@@ -1036,20 +1265,20 @@ async function loadCalendarEvents({ announce = false } = {}) {
       setBanner(`Calendar load failed: ${error.message}`, "error");
     }
   }
-  renderCalendarEvents();
+  renderAll();
 }
 
 async function loadAdminUsers({ announce = false } = {}) {
   if (!isAdmin()) {
     return;
   }
-  const query = new URLSearchParams();
-  query.set("limit", "50");
-  if (refs.adminUserSearch.value.trim()) {
-    query.set("email", refs.adminUserSearch.value.trim());
-  }
   try {
-    const response = await apiFetch(`/auth/admin/users?${query.toString()}`);
+    const response = await listBuiltinAuthUsers(apiClient, {
+      query: {
+        limit: 50,
+        ...(refs.adminUserSearch.value.trim() ? { email: refs.adminUserSearch.value.trim() } : {}),
+      },
+    });
     state.adminUsers = Array.isArray(response.items) ? response.items : [];
     state.adminUsersError = "";
     if (announce) {
@@ -1062,7 +1291,7 @@ async function loadAdminUsers({ announce = false } = {}) {
       setBanner(`Admin user load failed: ${error.message}`, "error");
     }
   }
-  renderAdminUsers();
+  renderAll();
 }
 
 async function loadRuntimeAssignmentWorkspace({ announce = false } = {}) {
@@ -1081,7 +1310,9 @@ async function loadRuntimeAssignmentWorkspace({ announce = false } = {}) {
 
 async function loadRuntimeAssignments(userId, announce = false) {
   try {
-    const response = await apiFetch(`/authz/runtime/assignments?user_id=${encodeURIComponent(userId)}`);
+    const response = await listRuntimeAuthorizationAssignments(apiClient, {
+      query: { user_id: Number(userId) },
+    });
     state.runtimeAssignments = Array.isArray(response) ? response : [];
     state.runtimeAssignmentsError = "";
     if (announce) {
@@ -1094,12 +1325,14 @@ async function loadRuntimeAssignments(userId, announce = false) {
       setBanner(`Runtime assignment load failed: ${error.message}`, "error");
     }
   }
-  renderRuntimeAssignments();
+  renderAll();
 }
 
 async function loadRuntimeEvents(userId, announce = false) {
   try {
-    const response = await apiFetch(`/authz/runtime/assignment-events?user_id=${encodeURIComponent(userId)}`);
+    const response = await listRuntimeAuthorizationAssignmentEvents(apiClient, {
+      query: { user_id: Number(userId) },
+    });
     state.runtimeEvents = Array.isArray(response) ? response : [];
     state.runtimeEventsError = "";
     if (announce) {
@@ -1112,7 +1345,7 @@ async function loadRuntimeEvents(userId, announce = false) {
       setBanner(`Runtime event load failed: ${error.message}`, "error");
     }
   }
-  renderRuntimeEvents();
+  renderAll();
 }
 
 async function handleCreateFamily(event) {
@@ -1123,8 +1356,7 @@ async function handleCreateFamily(event) {
   }
 
   try {
-    const created = await apiFetch("/family", {
-      method: "POST",
+    const created = await createFamily(apiClient, {
       body: {
         slug: refs.familySlug.value.trim(),
         name: refs.familyName.value.trim(),
@@ -1139,6 +1371,7 @@ async function handleCreateFamily(event) {
     pushActivity(`Created family ${created.name} (#${created.id}).`, "success");
     await loadFamilies();
     await Promise.all([loadFamilyMembers(), loadHouseholds(), loadShoppingItems()]);
+    navigateToRoute("/households");
   } catch (error) {
     handleRequestError("Family creation failed.", error);
   }
@@ -1151,8 +1384,7 @@ async function handleCreateFamilyMember(event) {
     return;
   }
   try {
-    const created = await apiFetch("/family_member", {
-      method: "POST",
+    const created = await createFamilyMember(apiClient, {
       body: {
         family_id: state.selectedFamilyId,
         user_id: Number(refs.memberUserId.value),
@@ -1182,8 +1414,7 @@ async function handleCreateHousehold(event) {
     return;
   }
   try {
-    const created = await apiFetch("/household", {
-      method: "POST",
+    const created = await createHousehold(apiClient, {
       body: {
         family_id: state.selectedFamilyId,
         slug: refs.householdSlug.value.trim(),
@@ -1199,6 +1430,7 @@ async function handleCreateHousehold(event) {
     pushActivity(`Created household ${created.label} (#${created.id}).`, "success");
     await loadHouseholds();
     await Promise.all([loadShoppingItems(), loadCalendarEvents()]);
+    navigateToRoute("/shopping");
   } catch (error) {
     handleRequestError("Household creation failed.", error);
   }
@@ -1211,8 +1443,7 @@ async function handleCreateShoppingItem(event) {
     return;
   }
   try {
-    const created = await apiFetch("/shopping_item", {
-      method: "POST",
+    const created = await createShoppingItem(apiClient, {
       body: {
         family_id: state.selectedFamilyId,
         household_id: state.selectedHouseholdId,
@@ -1237,8 +1468,7 @@ async function handleCreateCalendarEvent(event) {
     return;
   }
   try {
-    const created = await apiFetch("/calendar_event", {
-      method: "POST",
+    const created = await createCalendarEvent(apiClient, {
       body: {
         family_id: state.selectedFamilyId,
         household_id: state.selectedHouseholdId,
@@ -1280,10 +1510,7 @@ async function handleCreateRuntimeAssignment(event) {
   }
 
   try {
-    const created = await apiFetch("/authz/runtime/assignments", {
-      method: "POST",
-      body: payload,
-    });
+    const created = await createRuntimeAuthorizationAssignment(apiClient, { body: payload });
     setBanner("Runtime assignment created.", "success");
     pushActivity(
       `Created ${renderAssignmentTarget(created.target)} for user ${created.user_id} at ${created.scope.scope} ${created.scope.value}.`,
@@ -1303,8 +1530,7 @@ async function handleEvaluateRuntimeAccess(event) {
   }
 
   try {
-    state.runtimeEvaluation = await apiFetch("/authz/runtime/evaluate", {
-      method: "POST",
+    state.runtimeEvaluation = await evaluateRuntimeAuthorizationAccess(apiClient, {
       body: {
         resource: refs.evaluateResource.value,
         action: refs.evaluateAction.value,
@@ -1340,10 +1566,7 @@ async function handleActionClick(event) {
     state.selectedHouseholdId = null;
     persistState();
     syncPreviews();
-    renderFamilies();
-    renderHouseholds();
-    renderShoppingItems();
-    renderCalendarEvents();
+    renderAll();
     pushActivity(`Selected family ${state.selectedFamilyId}.`);
     await loadFamilyMembers();
     await loadHouseholds();
@@ -1356,7 +1579,7 @@ async function handleActionClick(event) {
     state.selectedHouseholdId = Number(actionTarget.dataset.householdId);
     persistState();
     syncPreviews();
-    renderHouseholds();
+    renderAll();
     pushActivity(`Selected household ${state.selectedHouseholdId}.`);
     await Promise.all([loadShoppingItems(), loadCalendarEvents()]);
     return;
@@ -1368,6 +1591,7 @@ async function handleActionClick(event) {
       refs.memberDisplayName.value = actionTarget.dataset.displayName;
     }
     setBanner("Copied the selected user ID into the family member form.", "info");
+    navigateToRoute("/family");
     return;
   }
 
@@ -1376,6 +1600,7 @@ async function handleActionClick(event) {
     refs.assignmentUserId.value = userId;
     refs.evaluateUserId.value = userId;
     setBanner("Copied the selected user ID into the runtime authz forms.", "info");
+    renderOverview();
     return;
   }
 
@@ -1415,8 +1640,8 @@ async function toggleShoppingItem(itemId) {
     return;
   }
   try {
-    await apiFetch(`/shopping_item/${itemId}`, {
-      method: "PUT",
+    await updateShoppingItem(apiClient, {
+      path: { id: itemId },
       body: {
         household_id: item.household_id,
         title: item.title,
@@ -1433,7 +1658,7 @@ async function toggleShoppingItem(itemId) {
 
 async function deleteShoppingItem(itemId) {
   try {
-    await apiFetch(`/shopping_item/${itemId}`, { method: "DELETE" });
+    await deleteShoppingItemOperation(apiClient, { path: { id: itemId } });
     setBanner("Shopping item deleted.", "success");
     pushActivity(`Deleted shopping item ${itemId}.`, "success");
     await loadShoppingItems();
@@ -1444,7 +1669,7 @@ async function deleteShoppingItem(itemId) {
 
 async function deleteCalendarEvent(eventId) {
   try {
-    await apiFetch(`/calendar_event/${eventId}`, { method: "DELETE" });
+    await deleteCalendarEventOperation(apiClient, { path: { id: eventId } });
     setBanner("Calendar event deleted.", "success");
     pushActivity(`Deleted calendar event ${eventId}.`, "success");
     await loadCalendarEvents();
@@ -1455,8 +1680,8 @@ async function deleteCalendarEvent(eventId) {
 
 async function revokeRuntimeAssignment(assignmentId) {
   try {
-    await apiFetch(`/authz/runtime/assignments/${assignmentId}/revoke`, {
-      method: "POST",
+    await revokeRuntimeAuthorizationAssignment(apiClient, {
+      path: { id: assignmentId },
       body: {
         reason: "revoked from Family Atlas",
       },
@@ -1471,8 +1696,8 @@ async function revokeRuntimeAssignment(assignmentId) {
 
 async function renewRuntimeAssignment(assignmentId) {
   try {
-    await apiFetch(`/authz/runtime/assignments/${assignmentId}/renew`, {
-      method: "POST",
+    await renewRuntimeAuthorizationAssignment(apiClient, {
+      path: { id: assignmentId },
       body: {
         expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         reason: "renewed from Family Atlas",
@@ -1488,64 +1713,13 @@ async function renewRuntimeAssignment(assignmentId) {
 
 async function deleteRuntimeAssignment(assignmentId) {
   try {
-    await apiFetch(`/authz/runtime/assignments/${assignmentId}`, { method: "DELETE" });
+    await deleteRuntimeAuthorizationAssignment(apiClient, { path: { id: assignmentId } });
     setBanner("Runtime assignment deleted.", "success");
     pushActivity(`Deleted runtime assignment ${assignmentId}.`, "success");
     await loadRuntimeAssignmentWorkspace();
   } catch (error) {
     handleRequestError(`Runtime assignment deletion failed for ${assignmentId}.`, error);
   }
-}
-
-async function apiFetch(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  const method = String(options.method || "GET").toUpperCase();
-  let body = options.body;
-
-  if (body !== undefined && body !== null && !(body instanceof FormData) && typeof body !== "string") {
-    headers.set("Content-Type", "application/json");
-    body = JSON.stringify(body);
-  } else if (typeof body === "string" && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  if (state.token && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${state.token}`);
-  }
-
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    body,
-    headers,
-    credentials: "same-origin",
-  });
-
-  const contentType = response.headers.get("content-type") || "";
-  const responseBody = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
-
-  if (!response.ok) {
-    const message = extractErrorMessage(responseBody, response.status);
-    throw new Error(message);
-  }
-
-  return responseBody;
-}
-
-function extractErrorMessage(payload, status) {
-  if (typeof payload === "string") {
-    return payload || `HTTP ${status}`;
-  }
-  if (payload && typeof payload === "object") {
-    if (typeof payload.message === "string") {
-      return payload.message;
-    }
-    if (typeof payload.code === "string") {
-      return payload.code;
-    }
-  }
-  return `HTTP ${status}`;
 }
 
 function getSelectedFamily() {
@@ -1561,6 +1735,193 @@ function getSelectedHousehold() {
 
 function isAdmin() {
   return Boolean(state.currentUser && Array.isArray(state.currentUser.roles) && state.currentUser.roles.includes("admin"));
+}
+
+function handlePopState() {
+  state.route = normalizeRoute(window.location.pathname);
+  renderAll();
+}
+
+function handleRouteLinkClick(event) {
+  const link = event.target.closest("[data-route-link]");
+  if (!link || event.defaultPrevented) {
+    return;
+  }
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  if (link.target && link.target !== "_self") {
+    return;
+  }
+  event.preventDefault();
+  navigateToRoute(link.dataset.routeLink || link.getAttribute("href") || "/");
+}
+
+function navigateToRoute(route, { replace = false, preserveScroll = false } = {}) {
+  const normalized = normalizeRoute(route);
+  const method = replace ? "replaceState" : "pushState";
+  if (window.location.pathname !== normalized) {
+    window.history[method]({}, "", normalized);
+  }
+  if (state.route === normalized) {
+    if (!preserveScroll) {
+      window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+    }
+    return;
+  }
+  state.route = normalized;
+  renderAll();
+  if (!preserveScroll) {
+    window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+  }
+}
+
+function normalizeRoute(pathname) {
+  const clean = String(pathname || "/")
+    .replace(/[#?].*$/, "")
+    .replace(/\/+$/, "") || "/";
+  if (clean === "/") {
+    return "/";
+  }
+  const firstSegment = `/${clean.split("/").filter(Boolean)[0]}`;
+  return ROUTES[firstSegment] ? firstSegment : "/";
+}
+
+function getNextStep() {
+  if (!state.currentUser) {
+    return {
+      route: "/access",
+      label: "Next: open Access and create a session before touching the family workspace.",
+    };
+  }
+  if (!state.selectedFamilyId) {
+    return {
+      route: "/family",
+      label: "Next: create or select a family so nested resources and runtime scopes have a home.",
+    };
+  }
+  if (state.familyMembers.length === 0) {
+    return {
+      route: "/family",
+      label: "Next: add visible family members so the relation-aware policy graph has real participants.",
+    };
+  }
+  if (!state.selectedHouseholdId) {
+    return {
+      route: "/households",
+      label: "Next: create or select a household to unlock calendar moderation and scoped shopping views.",
+    };
+  }
+  if (state.shoppingItems.length === 0) {
+    return {
+      route: "/shopping",
+      label: "Next: add the first shopping item to prove the family and household scopes are stitched together.",
+    };
+  }
+  if (state.calendarEvents.length === 0) {
+    return {
+      route: "/calendar",
+      label: "Next: add a household event to light up the calendar timeline.",
+    };
+  }
+  if (isAdmin() && state.runtimeAssignments.length === 0) {
+    return {
+      route: "/runtime",
+      label: "Next: grant a runtime template or permission, then inspect the event history and access evaluation.",
+    };
+  }
+  return {
+    route: state.route,
+    label: "Workspace is live. Refresh the session, switch scopes, or review runtime access to keep exploring.",
+  };
+}
+
+function buildOverviewChecklist() {
+  return [
+    {
+      title: "1. Access",
+      copy: "Register or log in with built-in auth so the rest of the workspace can use a real bearer token.",
+      status: state.currentUser ? "Done: session active." : "Pending: no active session yet.",
+    },
+    {
+      title: "2. Family",
+      copy: "Create the family row, select it, and add visible family members with relation-aware create rules.",
+      status: state.selectedFamilyId
+        ? `Done: family #${state.selectedFamilyId} is active.`
+        : "Pending: family scope has not been established.",
+    },
+    {
+      title: "3. Household",
+      copy: "Open a household under the family to unlock scoped shopping and calendar operations.",
+      status: state.selectedHouseholdId
+        ? `Done: household #${state.selectedHouseholdId} is active.`
+        : "Pending: no active household scope.",
+    },
+    {
+      title: "4. Runtime",
+      copy: "Use runtime authz templates and permissions when you want elevated access without mutating auth claims.",
+      status: isAdmin()
+        ? state.runtimeAssignments.length > 0
+          ? `Done: ${state.runtimeAssignments.length} runtime assignments loaded.`
+          : "Ready: admin session can issue runtime access now."
+        : "Locked until an admin session is active.",
+    },
+  ];
+}
+
+function buildSelectionStory() {
+  const selectedFamily = getSelectedFamily();
+  const selectedHousehold = getSelectedHousehold();
+  const runtimeUserId = refs.assignmentUserId.value || refs.evaluateUserId.value;
+  const nextStep = getNextStep();
+  const story = [
+    {
+      label: "Route",
+      value: ROUTES[state.route].title,
+      note: ROUTES[state.route].summary,
+    },
+    {
+      label: "Session",
+      value: state.currentUser
+        ? state.currentUser.email || `User #${state.currentUser.id}`
+        : "Guest explorer",
+      note: state.currentUser
+        ? `Roles: ${Array.isArray(state.currentUser.roles) && state.currentUser.roles.length > 0 ? state.currentUser.roles.join(", ") : "user"}`
+        : "Register or log in to unlock the data workspace.",
+    },
+    {
+      label: "Family scope",
+      value: selectedFamily ? selectedFamily.name : "No family selected",
+      note: selectedFamily
+        ? `Family #${selectedFamily.id}, slug ${selectedFamily.slug}, timezone ${selectedFamily.timezone}.`
+        : "Family selection will anchor every nested route after auth.",
+    },
+    {
+      label: "Household scope",
+      value: selectedHousehold ? selectedHousehold.label : "No household selected",
+      note: selectedHousehold
+        ? `Household #${selectedHousehold.id} under family #${selectedHousehold.family_id}.`
+        : "Household scope is required for the calendar and narrows the shopping list.",
+    },
+  ];
+
+  if (isAdmin()) {
+    story.push({
+      label: "Runtime target",
+      value: runtimeUserId ? `User #${runtimeUserId}` : "No runtime target selected",
+      note: runtimeUserId
+        ? "The runtime forms will reuse this user when issuing or evaluating assignments."
+        : "Pick a user from the admin directory before issuing runtime grants.",
+    });
+  } else {
+    story.push({
+      label: "Next move",
+      value: ROUTES[nextStep.route].eyebrow,
+      note: nextStep.label,
+    });
+  }
+
+  return story;
 }
 
 function handleRequestError(prefix, error) {
@@ -1637,6 +1998,13 @@ function formatTimestamp(value) {
 
 function formatJson(value) {
   return JSON.stringify(value, null, 2);
+}
+
+function formatMetricValue(value) {
+  if (typeof value === "number") {
+    return String(value).padStart(2, "0");
+  }
+  return String(value);
 }
 
 function toNullableInt(value) {

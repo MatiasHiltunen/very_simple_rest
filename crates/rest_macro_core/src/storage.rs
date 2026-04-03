@@ -1,14 +1,13 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt,
-    fs,
+    fmt, fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
-use actix_multipart::Multipart;
 use actix_files::NamedFile;
+use actix_multipart::Multipart;
 use actix_web::{
     HttpRequest, HttpResponse,
     http::{StatusCode, header},
@@ -16,21 +15,12 @@ use actix_web::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use object_store::{
-    local::LocalFileSystem,
-    path::Path as ObjectPath,
-    ObjectStoreExt,
-};
+use object_store::{ObjectStoreExt, local::LocalFileSystem, path::Path as ObjectPath};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{
-    auth::UserContext,
-    errors,
-    runtime::RuntimeConfig,
-    static_files::StaticCacheProfile,
-};
+use crate::{auth::UserContext, errors, runtime::RuntimeConfig, static_files::StaticCacheProfile};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageBackendKind {
@@ -310,7 +300,11 @@ impl StorageRegistry {
 }
 
 impl StorageBackendHandle {
-    async fn put_bytes(&self, object_path: &ObjectPath, bytes: Vec<u8>) -> Result<(), StorageError> {
+    async fn put_bytes(
+        &self,
+        object_path: &ObjectPath,
+        bytes: Vec<u8>,
+    ) -> Result<(), StorageError> {
         match self {
             StorageBackendHandle::Local(backend) => backend
                 .store
@@ -334,12 +328,9 @@ impl StorageBackendHandle {
         user_metadata: BTreeMap<String, String>,
     ) -> Result<StorageObjectInfo, StorageError> {
         match self {
-            StorageBackendHandle::Local(backend) => backend.put_bytes_with_metadata(
-                object_path,
-                bytes,
-                content_type,
-                user_metadata,
-            ),
+            StorageBackendHandle::Local(backend) => {
+                backend.put_bytes_with_metadata(object_path, bytes, content_type, user_metadata)
+            }
         }
     }
 
@@ -379,7 +370,9 @@ impl LocalStorageBackend {
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
-            .map_err(|error| StorageError::new(format!("failed to resolve local object path: {error}")))?;
+            .map_err(|error| {
+                StorageError::new(format!("failed to resolve local object path: {error}"))
+            })?;
         if let Some(parent) = filesystem_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 StorageError::new(format!(
@@ -395,7 +388,8 @@ impl LocalStorageBackend {
             ))
         })?;
 
-        let info = build_storage_object_info(&filesystem_path, content_type, user_metadata, Some(&bytes))?;
+        let info =
+            build_storage_object_info(&filesystem_path, content_type, user_metadata, Some(&bytes))?;
         self.write_metadata(object_path, &info)?;
         Ok(info)
     }
@@ -404,7 +398,9 @@ impl LocalStorageBackend {
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
-            .map_err(|error| StorageError::new(format!("failed to resolve local object path: {error}")))?;
+            .map_err(|error| {
+                StorageError::new(format!("failed to resolve local object path: {error}"))
+            })?;
         fs::read(&filesystem_path).map_err(|error| {
             StorageError::new(format!(
                 "failed to read local storage object `{}`: {error}",
@@ -417,7 +413,9 @@ impl LocalStorageBackend {
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
-            .map_err(|error| StorageError::new(format!("failed to resolve local object path: {error}")))?;
+            .map_err(|error| {
+                StorageError::new(format!("failed to resolve local object path: {error}"))
+            })?;
         let metadata = fs::metadata(&filesystem_path).map_err(|error| {
             StorageError::new(format!(
                 "failed to stat local storage object `{}`: {error}",
@@ -442,7 +440,9 @@ impl LocalStorageBackend {
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
-            .map_err(|error| StorageError::new(format!("failed to resolve local object path: {error}")))?;
+            .map_err(|error| {
+                StorageError::new(format!("failed to resolve local object path: {error}"))
+            })?;
         let deleted = match fs::remove_file(&filesystem_path) {
             Ok(()) => true,
             Err(error) if error.kind() == ErrorKind::NotFound => false,
@@ -450,7 +450,7 @@ impl LocalStorageBackend {
                 return Err(StorageError::new(format!(
                     "failed to delete local storage object `{}`: {error}",
                     filesystem_path.display()
-                )))
+                )));
             }
         };
         let metadata_path = self.metadata_path(object_path)?;
@@ -461,7 +461,7 @@ impl LocalStorageBackend {
                 return Err(StorageError::new(format!(
                     "failed to delete local storage metadata `{}`: {error}",
                     metadata_path.display()
-                )))
+                )));
             }
         }
         Ok(deleted)
@@ -469,7 +469,12 @@ impl LocalStorageBackend {
 
     fn list_objects(&self, prefix: &str) -> Result<Vec<(String, StorageObjectInfo)>, StorageError> {
         let mut objects = Vec::new();
-        self.walk_objects(self.root_dir.as_path(), PathBuf::new(), prefix.trim_matches('/'), &mut objects)?;
+        self.walk_objects(
+            self.root_dir.as_path(),
+            PathBuf::new(),
+            prefix.trim_matches('/'),
+            &mut objects,
+        )?;
         objects.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(objects)
     }
@@ -488,7 +493,7 @@ impl LocalStorageBackend {
                 return Err(StorageError::new(format!(
                     "failed to read local storage directory `{}`: {error}",
                     current_dir.display()
-                )))
+                )));
             }
         };
 
@@ -525,8 +530,9 @@ impl LocalStorageBackend {
             if !prefix.is_empty() && !key.starts_with(prefix) {
                 continue;
             }
-            let object_path = parse_object_path(&key)
-                .map_err(|error| StorageError::new(format!("invalid local storage key `{key}`: {error}")))?;
+            let object_path = parse_object_path(&key).map_err(|error| {
+                StorageError::new(format!("invalid local storage key `{key}`: {error}"))
+            })?;
             objects.push((key, self.object_info(&object_path)?));
         }
 
@@ -553,8 +559,9 @@ impl LocalStorageBackend {
             size_bytes: info.size_bytes,
             etag: info.etag.clone(),
         };
-        let bytes = serde_json::to_vec(&payload)
-            .map_err(|error| StorageError::new(format!("failed to serialize object metadata: {error}")))?;
+        let bytes = serde_json::to_vec(&payload).map_err(|error| {
+            StorageError::new(format!("failed to serialize object metadata: {error}"))
+        })?;
         fs::write(&metadata_path, bytes).map_err(|error| {
             StorageError::new(format!(
                 "failed to write local storage metadata `{}`: {error}",
@@ -563,25 +570,36 @@ impl LocalStorageBackend {
         })
     }
 
-    fn read_metadata(&self, object_path: &ObjectPath) -> Result<StoredObjectMetadata, StorageError> {
+    fn read_metadata(
+        &self,
+        object_path: &ObjectPath,
+    ) -> Result<StoredObjectMetadata, StorageError> {
         let metadata_path = self.metadata_path(object_path)?;
         match fs::read(&metadata_path) {
-            Ok(bytes) => serde_json::from_slice::<StoredObjectMetadata>(&bytes)
-                .map_err(|error| StorageError::new(format!("failed to parse object metadata: {error}"))),
+            Ok(bytes) => serde_json::from_slice::<StoredObjectMetadata>(&bytes).map_err(|error| {
+                StorageError::new(format!("failed to parse object metadata: {error}"))
+            }),
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                let filesystem_path = self
-                    .store
-                    .path_to_filesystem(object_path)
-                    .map_err(|path_error| {
-                        StorageError::new(format!("failed to resolve local object path: {path_error}"))
-                    })?;
+                let filesystem_path =
+                    self.store
+                        .path_to_filesystem(object_path)
+                        .map_err(|path_error| {
+                            StorageError::new(format!(
+                                "failed to resolve local object path: {path_error}"
+                            ))
+                        })?;
                 let bytes = fs::read(&filesystem_path).map_err(|read_error| {
                     StorageError::new(format!(
                         "failed to read local storage object `{}`: {read_error}",
                         filesystem_path.display()
                     ))
                 })?;
-                let info = build_storage_object_info(&filesystem_path, None, BTreeMap::new(), Some(&bytes))?;
+                let info = build_storage_object_info(
+                    &filesystem_path,
+                    None,
+                    BTreeMap::new(),
+                    Some(&bytes),
+                )?;
                 Ok(StoredObjectMetadata {
                     content_type: info.content_type,
                     user_metadata: info.user_metadata,
@@ -600,14 +618,21 @@ impl LocalStorageBackend {
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
-            .map_err(|error| StorageError::new(format!("failed to resolve local object path: {error}")))?;
-        let relative = filesystem_path.strip_prefix(&self.root_dir).map_err(|error| {
-            StorageError::new(format!(
-                "failed to resolve local metadata path for `{}`: {error}",
-                filesystem_path.display()
-            ))
-        })?;
-        Ok(self.root_dir.join(".vsr-meta").join(format!("{}.json", relative.display())))
+            .map_err(|error| {
+                StorageError::new(format!("failed to resolve local object path: {error}"))
+            })?;
+        let relative = filesystem_path
+            .strip_prefix(&self.root_dir)
+            .map_err(|error| {
+                StorageError::new(format!(
+                    "failed to resolve local metadata path for `{}`: {error}",
+                    filesystem_path.display()
+                ))
+            })?;
+        Ok(self
+            .root_dir
+            .join(".vsr-meta")
+            .join(format!("{}.json", relative.display())))
     }
 }
 
@@ -630,14 +655,12 @@ fn build_storage_object_info(
         .unwrap_or_else(|_| Utc::now());
     let etag = match bytes {
         Some(bytes) => quoted_sha256(bytes),
-        None => quoted_sha256(
-            &fs::read(filesystem_path).map_err(|error| {
-                StorageError::new(format!(
-                    "failed to read local storage object `{}`: {error}",
-                    filesystem_path.display()
-                ))
-            })?,
-        ),
+        None => quoted_sha256(&fs::read(filesystem_path).map_err(|error| {
+            StorageError::new(format!(
+                "failed to read local storage object `{}`: {error}",
+                filesystem_path.display()
+            ))
+        })?),
     };
     Ok(StorageObjectInfo {
         content_type,
@@ -751,31 +774,37 @@ pub fn configure_s3_compat_with_runtime(
     );
     cfg.service(
         web::resource(object_path)
-            .route(web::get().to(move |req: HttpRequest, tail: web::Path<(String, String)>| {
-                handle_s3_get_object(
-                    req,
-                    storage_for_object_get.clone(),
-                    object_get_config.clone(),
-                    tail,
-                )
-            }))
-            .route(web::head().to(move |req: HttpRequest, tail: web::Path<(String, String)>| {
-                handle_s3_head_object(
-                    req,
-                    storage_for_object_head.clone(),
-                    object_head_config.clone(),
-                    tail,
-                )
-            }))
-            .route(web::put().to(move |req: HttpRequest, body: web::Bytes, tail: web::Path<(String, String)>| {
-                handle_s3_put_object(
-                    req,
-                    body,
-                    storage_for_object_put.clone(),
-                    object_put_config.clone(),
-                    tail,
-                )
-            }))
+            .route(
+                web::get().to(move |req: HttpRequest, tail: web::Path<(String, String)>| {
+                    handle_s3_get_object(
+                        req,
+                        storage_for_object_get.clone(),
+                        object_get_config.clone(),
+                        tail,
+                    )
+                }),
+            )
+            .route(
+                web::head().to(move |req: HttpRequest, tail: web::Path<(String, String)>| {
+                    handle_s3_head_object(
+                        req,
+                        storage_for_object_head.clone(),
+                        object_head_config.clone(),
+                        tail,
+                    )
+                }),
+            )
+            .route(web::put().to(
+                move |req: HttpRequest, body: web::Bytes, tail: web::Path<(String, String)>| {
+                    handle_s3_put_object(
+                        req,
+                        body,
+                        storage_for_object_put.clone(),
+                        object_put_config.clone(),
+                        tail,
+                    )
+                },
+            ))
             .route(web::delete().to(move |tail: web::Path<(String, String)>| {
                 handle_s3_delete_object(
                     storage_for_object_delete.clone(),
@@ -853,17 +882,19 @@ fn register_upload_endpoint(
     let storage_for_post = storage.clone();
     let mounts_for_post = public_mounts.clone();
     let upload_for_post = upload.clone();
-    cfg.service(web::resource(format!("/{}", upload.path)).route(web::post().to(
-        move |user: Option<UserContext>, multipart: Multipart| {
-            handle_upload(
-                user,
-                multipart,
-                storage_for_post.clone(),
-                mounts_for_post.clone(),
-                upload_for_post.clone(),
-            )
-        },
-    )));
+    cfg.service(
+        web::resource(format!("/{}", upload.path)).route(web::post().to(
+            move |user: Option<UserContext>, multipart: Multipart| {
+                handle_upload(
+                    user,
+                    multipart,
+                    storage_for_post.clone(),
+                    mounts_for_post.clone(),
+                    upload_for_post.clone(),
+                )
+            },
+        )),
+    );
 }
 
 async fn handle_upload(
@@ -958,7 +989,11 @@ async fn handle_upload(
     Ok(HttpResponse::Created().json(StorageUploadResponse {
         backend,
         object_key: object_key.clone(),
-        public_url: public_url_for_object(public_mounts.as_slice(), &object_key, upload.backend.as_str()),
+        public_url: public_url_for_object(
+            public_mounts.as_slice(),
+            &object_key,
+            upload.backend.as_str(),
+        ),
         file_name,
         content_type: content_type.map(|value| value.to_string()),
         size_bytes: bytes.len(),
@@ -1015,7 +1050,14 @@ async fn handle_s3_bucket_request(
     let next_token = normalized
         .get(start_index.saturating_add(slice.len()))
         .map(|(key, _)| key.clone());
-    let body = render_list_objects_v2_xml(bucket_name, prefix, continuation_token.as_str(), max_keys, slice.as_slice(), next_token.as_deref());
+    let body = render_list_objects_v2_xml(
+        bucket_name,
+        prefix,
+        continuation_token.as_str(),
+        max_keys,
+        slice.as_slice(),
+        next_token.as_deref(),
+    );
 
     Ok(HttpResponse::Ok()
         .insert_header((header::CONTENT_TYPE, "application/xml"))
@@ -1048,7 +1090,9 @@ async fn handle_s3_get_object(
     let object_key = s3_object_key(bucket, tail.as_str())?;
     let bytes = match storage.read_bytes(bucket.backend.as_str(), object_key.as_str()) {
         Ok(bytes) => bytes,
-        Err(error) if error.to_string().contains("No such file") => return Ok(HttpResponse::NotFound().finish()),
+        Err(error) if error.to_string().contains("No such file") => {
+            return Ok(HttpResponse::NotFound().finish());
+        }
         Err(error) => return Err(actix_web::error::ErrorInternalServerError(error)),
     };
     let info = storage
@@ -1071,7 +1115,9 @@ async fn handle_s3_head_object(
     let object_key = s3_object_key(bucket, tail.as_str())?;
     let info = match storage.object_info(bucket.backend.as_str(), object_key.as_str()) {
         Ok(info) => info,
-        Err(error) if error.to_string().contains("No such file") => return Ok(HttpResponse::NotFound().finish()),
+        Err(error) if error.to_string().contains("No such file") => {
+            return Ok(HttpResponse::NotFound().finish());
+        }
         Err(error) => return Err(actix_web::error::ErrorInternalServerError(error)),
     };
     Ok(s3_object_response(Vec::new(), &info, true))
@@ -1129,11 +1175,7 @@ async fn handle_s3_delete_object(
     Ok(HttpResponse::NoContent().finish())
 }
 
-fn s3_object_response(
-    bytes: Vec<u8>,
-    info: &StorageObjectInfo,
-    head_only: bool,
-) -> HttpResponse {
+fn s3_object_response(bytes: Vec<u8>, info: &StorageObjectInfo, head_only: bool) -> HttpResponse {
     let mut builder = HttpResponse::Ok();
     builder.insert_header((header::ETAG, info.etag.clone()));
     builder.insert_header((header::CONTENT_LENGTH, info.size_bytes.to_string()));
@@ -1259,7 +1301,11 @@ fn authorize_upload(
 }
 
 fn build_upload_object_key(upload: &StorageUploadEndpoint, file_name: &str) -> String {
-    let object_name = format!("{}-{}", Uuid::new_v4().simple(), sanitize_file_name(file_name));
+    let object_name = format!(
+        "{}-{}",
+        Uuid::new_v4().simple(),
+        sanitize_file_name(file_name)
+    );
     if upload.key_prefix.is_empty() {
         object_name
     } else {
@@ -1348,7 +1394,12 @@ fn extract_s3_user_metadata(headers: &header::HeaderMap) -> BTreeMap<String, Str
         .filter_map(|(name, value)| {
             name.as_str()
                 .strip_prefix("x-amz-meta-")
-                .and_then(|suffix| value.to_str().ok().map(|value| (suffix.to_owned(), value.to_owned())))
+                .and_then(|suffix| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (suffix.to_owned(), value.to_owned()))
+                })
         })
         .collect::<BTreeMap<_, _>>()
 }
@@ -1372,7 +1423,11 @@ fn render_list_objects_v2_xml(
     body.push_str("</KeyCount><MaxKeys>");
     body.push_str(max_keys.to_string().as_str());
     body.push_str("</MaxKeys><IsTruncated>");
-    body.push_str(if next_token.is_some() { "true" } else { "false" });
+    body.push_str(if next_token.is_some() {
+        "true"
+    } else {
+        "false"
+    });
     body.push_str("</IsTruncated>");
     if !continuation_token.is_empty() {
         body.push_str("<ContinuationToken>");
@@ -1460,7 +1515,11 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use actix_web::{App, http::{StatusCode, header}, test};
+    use actix_web::{
+        App,
+        http::{StatusCode, header},
+        test,
+    };
 
     use super::{
         StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
@@ -1553,9 +1612,7 @@ mod tests {
         }))
         .await;
 
-        let hidden = test::TestRequest::get()
-            .uri("/uploads/.env")
-            .to_request();
+        let hidden = test::TestRequest::get().uri("/uploads/.env").to_request();
         let hidden_response = test::call_service(&app, hidden).await;
         assert_eq!(hidden_response.status(), StatusCode::NOT_FOUND);
 

@@ -25,8 +25,18 @@ jobs:
         with:
           components: clippy
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: examples/cms/web/package-lock.json
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install TypeScript Tooling For Generated Client Checks
+        run: npm ci --prefix examples/cms/web
 
       - name: Check Compiler Crate
         run: cargo check -p rest_macro_core
@@ -68,6 +78,18 @@ jobs:
           cargo run -p vsra -- check --input examples/template/api.eon --strict
           cargo run -p vsra -- check --input examples/cms/api.eon --strict
           cargo run -p vsra -- check --input examples/family_app/family_app.eon --strict
+
+      - name: Verify Generated Client Report Snapshot
+        run: cargo test -p vsra --test client_cli client_ts_self_test_static_report_matches_snapshot -- --nocapture
+
+      - name: Verify Generated Client Integration Tests
+        run: cargo test -p vsra --test client_cli -- --nocapture
+
+      - name: Verify Example Generated Clients Pass Static Self-Tests
+        run: ./scripts/client_self_test_examples.sh --mode static
+
+      - name: Verify Example Generated Clients Pass Live Self-Tests
+        run: ./scripts/client_self_test_examples.sh --mode live
 
       - name: Verify Generated Projects Are Warning Clean
         run: cargo test -p vsra warning_clean -- --ignored --nocapture

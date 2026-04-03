@@ -76,7 +76,8 @@ async fn generated_handlers_list_many_to_many_routes_via_join_resources() {
         .expect("join rows should insert");
 
     let app = test::init_service(
-        App::new().service(scope("/api").configure(|cfg| many_to_many_api::configure(cfg, pool.clone()))),
+        App::new()
+            .service(scope("/api").configure(|cfg| many_to_many_api::configure(cfg, pool.clone()))),
     )
     .await;
 
@@ -99,7 +100,9 @@ async fn generated_handlers_list_many_to_many_routes_via_join_resources() {
     assert_eq!(filtered_body["total"], 1);
     assert_eq!(filtered_body["items"][0]["name"], "beta");
 
-    let second_post_request = test::TestRequest::get().uri("/api/posts/2/tags").to_request();
+    let second_post_request = test::TestRequest::get()
+        .uri("/api/posts/2/tags")
+        .to_request();
     let second_post_response = test::call_service(&app, second_post_request).await;
     assert_eq!(second_post_response.status(), StatusCode::OK);
     let second_post_body: Value = test::read_body_json(second_post_response).await;
