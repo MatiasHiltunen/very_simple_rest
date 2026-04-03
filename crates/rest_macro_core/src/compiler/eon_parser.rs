@@ -16,25 +16,25 @@ use uuid::Uuid;
 
 use super::model::{
     BuildArtifactPathConfig, BuildArtifactsConfig, BuildCacheArtifactConfig,
-    BuildCacheCleanupStrategy, BuildConfig, BuildLtoMode, DbBackend, EnumSpec, FieldSpec,
-    FieldTransform, FieldValidation, GENERATED_DATE_ALIAS, GENERATED_DATETIME_ALIAS,
-    GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS, GENERATED_JSON_ARRAY_ALIAS,
-    GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS, GENERATED_UUID_ALIAS, GeneratedValue,
-    IndexSpec, ListConfig, NumericBound, PolicyAssignment, PolicyExistsCondition,
-    PolicyExistsFilter, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
-    PolicyValueSource, ReferentialAction, ReleaseBuildConfig, ResourceActionAssignmentSpec,
-    ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
-    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceSpec,
-    ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
-    StaticCacheProfile, StaticMode, StaticMountSpec, WriteModelStyle,
+    BuildCacheCleanupStrategy, BuildConfig, BuildLtoMode, ClientValueConfig, ClientsConfig,
+    DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation, GENERATED_DATE_ALIAS,
+    GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
+    GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
+    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
+    PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
+    PolicyFilterOperator, PolicyValueSource, ReferentialAction, ReleaseBuildConfig,
+    ResourceActionAssignmentSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
+    ResourceActionMethod, ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec,
+    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    StaticCacheProfile, StaticMode, StaticMountSpec, TsClientConfig, WriteModelStyle,
     default_resource_module_ident, infer_generated_value, infer_sql_type, is_json_array_type,
     is_json_object_type, is_json_type, is_list_field, is_optional_type, is_typed_object_field,
     sanitize_module_ident, sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
-    validate_authorization_contract, validate_build_config, validate_field_transforms,
-    validate_field_validations, validate_list_config, validate_logging_config,
-    validate_policy_claim_sources, validate_relations, validate_row_policies,
-    validate_runtime_config, validate_security_config, validate_sql_identifier,
-    validate_tls_config,
+    validate_authorization_contract, validate_build_config, validate_clients_config,
+    validate_field_transforms, validate_field_validations, validate_list_config,
+    validate_logging_config, validate_policy_claim_sources, validate_relations,
+    validate_row_policies, validate_runtime_config, validate_security_config,
+    validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
@@ -90,6 +90,8 @@ struct ServiceDocument {
     database: Option<DatabaseDocument>,
     #[serde(default)]
     build: Option<BuildDocument>,
+    #[serde(default)]
+    clients: Option<ClientsDocument>,
     #[serde(default)]
     logging: Option<LoggingDocument>,
     #[serde(default)]
@@ -447,6 +449,37 @@ struct BuildArtifactsDocument {
 struct BuildArtifactPathDocument {
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    env: Option<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ClientsDocument {
+    #[serde(default)]
+    ts: Option<TsClientDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TsClientDocument {
+    #[serde(default)]
+    output_dir: Option<BuildArtifactPathDocument>,
+    #[serde(default)]
+    package_name: Option<ClientValueDocument>,
+    #[serde(default)]
+    server_url: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ClientValueDocument {
+    Value(String),
+    Config(ClientValueConfigDocument),
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ClientValueConfigDocument {
+    #[serde(default)]
+    value: Option<String>,
     #[serde(default)]
     env: Option<String>,
 }
@@ -1715,12 +1748,14 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         span,
     )?;
     let build = parse_build_document(document.build)?;
+    let clients = parse_clients_document(document.clients);
     let logging = parse_logging_document(document.logging)?;
     let runtime = parse_runtime_document(document.runtime);
     let authorization = parse_authorization_document(document.authorization)?;
     let tls = parse_tls_document(document.tls)?;
     let security = parse_security_document(document.security, span)?;
     validate_build_config(&build, span)?;
+    validate_clients_config(&clients, span)?;
     validate_logging_config(&logging, span)?;
     validate_runtime_config(&runtime, span)?;
     validate_tls_config(&tls, span)?;
@@ -1749,6 +1784,7 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
             storage,
             database,
             build,
+            clients,
             logging,
             runtime,
             security,
@@ -3689,6 +3725,36 @@ fn parse_build_artifact_path_document(
     BuildArtifactPathConfig {
         path: document.path,
         env: document.env,
+    }
+}
+
+fn parse_clients_document(document: Option<ClientsDocument>) -> ClientsConfig {
+    let Some(document) = document else {
+        return ClientsConfig::default();
+    };
+
+    let ts = document.ts.unwrap_or_default();
+
+    ClientsConfig {
+        ts: TsClientConfig {
+            output_dir: parse_build_artifact_path_document(ts.output_dir),
+            package_name: parse_client_value_document(ts.package_name),
+            server_url: ts.server_url,
+        },
+    }
+}
+
+fn parse_client_value_document(document: Option<ClientValueDocument>) -> ClientValueConfig {
+    match document {
+        None => ClientValueConfig::default(),
+        Some(ClientValueDocument::Value(value)) => ClientValueConfig {
+            value: Some(value),
+            env: None,
+        },
+        Some(ClientValueDocument::Config(document)) => ClientValueConfig {
+            value: document.value,
+            env: document.env,
+        },
     }
 }
 
@@ -7971,6 +8037,7 @@ resources: [
                 )
                 .expect("database config should parse"),
                 build: BuildConfig::default(),
+                clients: ClientsConfig::default(),
                 logging: LoggingConfig::default(),
                 runtime: RuntimeConfig::default(),
                 security: SecurityConfig::default(),
@@ -8890,6 +8957,82 @@ resources: [
             error
                 .to_string()
                 .contains("`build.artifacts.binary.env` cannot be empty")
+        );
+    }
+
+    #[test]
+    fn parses_clients_config_from_eon() {
+        let document = parse_document(
+            r#"
+            clients: {
+                ts: {
+                    output_dir: {
+                        path: "web/src/gen/client"
+                        env: "CMS_TS_CLIENT_OUT"
+                    }
+                    package_name: {
+                        value: "@cms/api-client"
+                        env: "CMS_TS_CLIENT_PACKAGE"
+                    }
+                    server_url: "/edge-api"
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+
+        let clients = parse_clients_document(document.clients);
+        assert_eq!(
+            clients.ts.output_dir.path.as_deref(),
+            Some("web/src/gen/client")
+        );
+        assert_eq!(
+            clients.ts.output_dir.env.as_deref(),
+            Some("CMS_TS_CLIENT_OUT")
+        );
+        assert_eq!(
+            clients.ts.package_name.value.as_deref(),
+            Some("@cms/api-client")
+        );
+        assert_eq!(
+            clients.ts.package_name.env.as_deref(),
+            Some("CMS_TS_CLIENT_PACKAGE")
+        );
+        assert_eq!(clients.ts.server_url.as_deref(), Some("/edge-api"));
+    }
+
+    #[test]
+    fn rejects_empty_client_config_values() {
+        let document = parse_document(
+            r#"
+            clients: {
+                ts: {
+                    package_name: {
+                        env: ""
+                    }
+                }
+            }
+            resources: [
+                {
+                    name: "Post"
+                    fields: [{ name: "id", type: I64 }]
+                }
+            ]
+            "#,
+        );
+        let clients = parse_clients_document(document.clients);
+        let error = validate_clients_config(&clients, Span::call_site())
+            .expect_err("empty client env should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("`clients.ts.package_name.env` cannot be empty")
         );
     }
 

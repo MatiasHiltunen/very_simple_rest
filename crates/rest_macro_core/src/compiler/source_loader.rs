@@ -74,6 +74,7 @@ pub fn load_derive_service_from_path(path: &Path) -> syn::Result<ServiceSpec> {
         storage: StorageConfig::default(),
         database: DatabaseConfig::default(),
         build: BuildConfig::default(),
+        clients: crate::compiler::ClientsConfig::default(),
         logging: LoggingConfig::default(),
         runtime: RuntimeConfig::default(),
         security: crate::security::SecurityConfig::default(),

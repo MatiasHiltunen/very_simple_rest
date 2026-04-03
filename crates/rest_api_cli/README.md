@@ -21,6 +21,7 @@ vsr serve api.eon
 vsr server expand --input api.eon --output api.expanded.rs
 vsr server emit --input api.eon --output-dir generated-api
 vsr build api.eon --release
+vsr client ts --input api.eon --output web/src/gen/client
 vsr openapi --input api.eon --output openapi.json
 vsr docs --output docs/eon-reference.md
 ```
@@ -208,7 +209,8 @@ The first strict slice reports high-confidence warnings for:
 - legacy `security.auth.jwt_secret` usage when the service could move to asymmetric JWT config
 - asymmetric JWT setups that publish only a single verification key and therefore have no rotation
   overlap window
-- auth email `public_base_url` values that still point at localhost or loopback hosts
+- auth email `public_base_url` values that still point at localhost/loopback hosts or use a
+  non-HTTPS public origin
 - built-in auth portal/admin UI paths that overlap generated `/api` namespaces or root-level
   static mounts
 - row-policy, nested-route, `exists`, or hybrid scope lookup fields that rely on inferred indexes
@@ -351,6 +353,52 @@ Useful options:
   `/auth/me` grouped under `Account` in Swagger
 - `--without-auth` removes those built-in auth/account routes from the document
 - `--exclude-table` removes specific tables from the document
+
+### TypeScript Client Generation
+
+Generate a fetch-based TypeScript client package from the same service contract:
+
+```bash
+vsr client ts --input api.eon
+vsr client ts --input api.eon --output web/src/gen/client
+vsr client ts --input api.eon --without-auth
+vsr client ts --input api.eon --self-test
+vsr client ts --input public_catalog_api.eon --without-auth --self-test --self-test-base-url http://127.0.0.1:8080
+vsr client ts --input bridgeboard.eon --self-test --self-test-base-url https://127.0.0.1:8080 --self-test-insecure-tls
+```
+
+The current generator writes:
+
+- `client.ts` with `createClient`, bearer-token support, CSRF header injection, multipart upload
+  helpers, and `ApiError`
+- `types.ts` from OpenAPI component schemas
+- `operations.ts` with one typed function per OpenAPI operation
+- `index.ts`, a minimal `package.json`, and a dependency-free `tsconfig.json`
+
+It works from either `.eon` services or derive-based Rust resources and follows the same OpenAPI
+surface that `vsr openapi` publishes. That means endpoints that currently advertise empty success
+responses are typed as `void`.
+
+`.eon` services can also declare TypeScript client defaults under `clients.ts`. Output paths and
+package names resolve with this precedence: CLI override, then the declared env var override, then
+the literal `.eon` value, then the service-relative default. No client-generation env vars are
+read unless the `.eon` file explicitly names them.
+
+`--self-test` adds an optional automated validation pass for the generated client and writes a
+JSON report. The self-test currently checks:
+
+- dependency-free `package.json`
+- relative-only module imports inside generated `.ts` files
+- `tsc -p <client-dir>` when a TypeScript compiler is available
+- Node.js import smoke for the generated runtime
+- safe anonymous `GET` operation probes through the generated client when
+  `--self-test-base-url` is provided
+- optional insecure TLS acceptance for those runtime probes when
+  `--self-test-insecure-tls` is set
+
+The report defaults to `<client-dir>/self-test-report.json`, or you can override it with
+`--self-test-report`. If any self-test check fails, VSR still writes the report and then exits
+nonzero so the command can be used directly in CI.
 
 ### `.eon` Reference Docs
 

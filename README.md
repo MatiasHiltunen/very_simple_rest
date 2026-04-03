@@ -32,6 +32,7 @@ vsr serve api.eon
 vsr server expand --input api.eon --output api.expanded.rs
 vsr server emit --input api.eon --output-dir generated-api
 vsr build api.eon --release
+vsr client ts --input api.eon --output web/src/gen/client
 vsr docs --output docs/eon-reference.md
 ```
 
@@ -42,6 +43,8 @@ Core CLI workflows:
 - `vsr server expand ...` writes the fully expanded Rust module source so you can inspect the compiler output directly
 - `vsr server emit ...` exports an inspectable Rust server project
 - `vsr build ...` produces a standalone binary plus a `<binary>.bundle/` runtime bundle
+- `vsr client ts ...` emits a typed fetch-based TypeScript client from the same published API contract
+- `vsr client ts ... --self-test` validates the emitted client and writes a JSON report
 - `vsr openapi ...`, `vsr docs ...`, `vsr authz ...`, and `vsr backup ...` generate docs, diagnostics, and deployment guidance from the same service contract
 
 See the full command reference in [crates/rest_api_cli/README.md](crates/rest_api_cli/README.md).
@@ -423,12 +426,12 @@ generated Infisical scaffold directory is complete. See [docs/infisical.md](docs
 `vsr check` now runs compiler-facing diagnostics over `.eon` or derive-backed schema sources.
 The first strict slice focuses on high-confidence issues: TLS file paths that do not exist,
 authorization contracts that do not affect generated runtime behavior, unused declared scopes,
-auth email links that still point at localhost, and policy, nested-route, `exists`, and hybrid
-lookup fields that rely on inferred indexes without an explicit `.eon` declaration. It also flags
-build-artifact misconfigurations such as empty declared env overrides, binary/bundle path
-collisions, and resolved cache/output overlaps, plus built-in auth portal/admin UI paths that
-overlap generated `/api` namespaces or root-level static mounts. Add `--strict` to fail the
-command when any warning is reported.
+auth email links that still point at localhost or non-HTTPS origins, and policy, nested-route,
+`exists`, and hybrid lookup fields that rely on inferred indexes without an explicit `.eon`
+declaration. It also flags build-artifact misconfigurations such as empty declared env overrides,
+binary/bundle path collisions, and resolved cache/output overlaps, plus built-in auth
+portal/admin UI paths that overlap generated `/api` namespaces or root-level static mounts. Add
+`--strict` to fail the command when any warning is reported.
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 
@@ -529,6 +532,70 @@ current-user endpoint appears under `Account`. Generated server projects reuse t
 Collection and nested collection routes also document their typed list query parameters and their
 paged response envelopes, including pagination, sorting, cursor pagination, exact-match field
 filters, `total`, `next_offset`, and `next_cursor`.
+
+## TypeScript Client Generation
+
+You can also generate a fetch-based TypeScript client package from the same compiled OpenAPI
+surface:
+
+```bash
+# Generate a client next to the service file
+vsr client ts --input tests/fixtures/blog_api.eon
+
+# Write to an explicit output directory
+vsr client ts --input tests/fixtures/blog_api.eon --output web/src/gen/client
+
+# Omit built-in auth/account routes from the generated client
+vsr client ts --input tests/fixtures/blog_api.eon --without-auth
+
+# Run static generated-client self-tests and emit a JSON report
+vsr client ts --input tests/fixtures/blog_api.eon --self-test
+
+# Add live runtime probes against a running server
+vsr client ts --input tests/fixtures/public_catalog_api.eon \
+  --without-auth \
+  --self-test \
+  --self-test-base-url http://127.0.0.1:8080 \
+  --self-test-report reports/public-catalog-client.json
+
+# Allow self-test runtime probes against a local HTTPS server with a self-signed cert
+vsr client ts --input examples/bridgeboard/bridgeboard.eon \
+  --self-test \
+  --self-test-base-url https://127.0.0.1:8080 \
+  --self-test-insecure-tls
+```
+
+The generated package currently includes:
+
+- `client.ts` with `createClient`, bearer-token support, CSRF header injection, multipart upload
+  helpers, and `ApiError`
+- `types.ts` generated from OpenAPI component schemas
+- `operations.ts` with one typed function per OpenAPI operation
+- `index.ts`, a minimal `package.json`, and a dependency-free `tsconfig.json`
+
+Like `vsr openapi`, this generator works from either `.eon` services or derive-based Rust
+resources and stays faithful to the currently published OpenAPI contract. Endpoints that currently
+publish empty success responses are therefore typed as `void` until the OpenAPI surface grows
+richer response metadata.
+
+`.eon` services can also declare TypeScript client defaults under `clients.ts`. Output paths and
+package names resolve with this precedence: CLI override, then the declared env var override, then
+the literal `.eon` value, then the service-relative default. No client-generation env vars are
+read unless the `.eon` file explicitly names them.
+
+When `--self-test` is enabled, VSR validates the generated client package automatically:
+
+- `package.json` must stay dependency-free
+- generated `.ts` files must only import relative local modules
+- `tsc -p <client-dir>` runs when a TypeScript compiler is available
+- a Node.js import smoke test verifies the generated runtime can be loaded
+- when `--self-test-base-url` is provided, VSR also probes safe anonymous `GET` operations
+  through the generated client and records the results
+- `--self-test-insecure-tls` allows those runtime probes to connect to a local HTTPS server with
+  a self-signed or otherwise invalid certificate
+
+The self-test report defaults to `<client-dir>/self-test-report.json`. The command still writes
+the report before exiting nonzero if any self-test check fails, so it can be used directly in CI.
 
 ## `.eon` Reference Docs
 

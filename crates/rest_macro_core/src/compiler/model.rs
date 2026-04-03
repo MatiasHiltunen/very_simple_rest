@@ -632,6 +632,24 @@ pub struct BuildArtifactPathConfig {
     pub env: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClientValueConfig {
+    pub value: Option<String>,
+    pub env: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TsClientConfig {
+    pub output_dir: BuildArtifactPathConfig,
+    pub package_name: ClientValueConfig,
+    pub server_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClientsConfig {
+    pub ts: TsClientConfig,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildCacheCleanupStrategy {
     #[default]
@@ -857,6 +875,7 @@ pub struct ServiceSpec {
     pub storage: StorageConfig,
     pub database: DatabaseConfig,
     pub build: BuildConfig,
+    pub clients: ClientsConfig,
     pub logging: LoggingConfig,
     pub runtime: RuntimeConfig,
     pub security: SecurityConfig,
@@ -973,6 +992,7 @@ impl std::fmt::Debug for ServiceSpec {
             .field("storage", &self.storage)
             .field("database", &self.database)
             .field("build", &self.build)
+            .field("clients", &self.clients)
             .field("logging", &self.logging)
             .field("runtime", &self.runtime)
             .field("security", &self.security)
@@ -2781,6 +2801,34 @@ pub fn validate_build_config(build: &BuildConfig, span: Span) -> syn::Result<()>
             "build.artifacts.cache.env",
             build.artifacts.cache.env.as_deref(),
         ),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(syn::Error::new(span, format!("`{label}` cannot be empty")));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_clients_config(clients: &ClientsConfig, span: Span) -> syn::Result<()> {
+    for (label, value) in [
+        (
+            "clients.ts.output_dir.path",
+            clients.ts.output_dir.path.as_deref(),
+        ),
+        (
+            "clients.ts.output_dir.env",
+            clients.ts.output_dir.env.as_deref(),
+        ),
+        (
+            "clients.ts.package_name.value",
+            clients.ts.package_name.value.as_deref(),
+        ),
+        (
+            "clients.ts.package_name.env",
+            clients.ts.package_name.env.as_deref(),
+        ),
+        ("clients.ts.server_url", clients.ts.server_url.as_deref()),
     ] {
         if value.is_some_and(|value| value.trim().is_empty()) {
             return Err(syn::Error::new(span, format!("`{label}` cannot be empty")));

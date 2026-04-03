@@ -555,6 +555,18 @@ Build settings affect generated server projects and `vsr build` output without c
 | build.artifacts.cache.env | String | None | No | Environment variable name | Optional env var override for the build cache root. `vsr` reads it only when this field is declared. |
 | build.artifacts.cache.cleanup | Enum | Reuse | No | Reuse, CleanBeforeBuild, RemoveOnSuccess | Controls reusable build-cache lifecycle for `vsr build`. `CleanBeforeBuild` clears the resolved cache root first; `RemoveOnSuccess` deletes it after a successful build unless `--keep-build-dir` is used. |
 
+## Clients
+
+Client generation settings control `vsr client ts` defaults without changing the API contract.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| clients.ts.output_dir.path | String | Service-relative `<input-stem>.client` | No | Relative or absolute directory path | Controls the default output directory for `vsr client ts`. Relative paths resolve from the `.eon` file directory. |
+| clients.ts.output_dir.env | String | None | No | Environment variable name | Optional env var override for the TypeScript client output directory. `vsr` reads it only when this field is declared. |
+| clients.ts.package_name.value | String | <input-stem>-client | No | npm package name string | Default package name written to the generated `package.json` for `vsr client ts`. |
+| clients.ts.package_name.env | String | None | No | Environment variable name | Optional env var override for the generated client package name. `vsr` reads it only when this field is declared. |
+| clients.ts.server_url | String | /api | No | Relative API base path | Default server URL embedded in the generated TypeScript client when `--server-url` is not passed. |
+
 ## Runtime
 
 Runtime settings affect server behavior without changing the data model.

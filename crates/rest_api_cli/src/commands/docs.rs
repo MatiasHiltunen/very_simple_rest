@@ -1932,6 +1932,54 @@ database: {
 
     push_section(
         &mut markdown,
+        "Clients",
+        "Client generation settings control `vsr client ts` defaults without changing the API contract.",
+        &[
+            row(
+                "clients.ts.output_dir.path",
+                "String",
+                "Service-relative `<input-stem>.client`",
+                "No",
+                "Relative or absolute directory path",
+                "Controls the default output directory for `vsr client ts`. Relative paths resolve from the `.eon` file directory.",
+            ),
+            row(
+                "clients.ts.output_dir.env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "Optional env var override for the TypeScript client output directory. `vsr` reads it only when this field is declared.",
+            ),
+            row(
+                "clients.ts.package_name.value",
+                "String",
+                "<input-stem>-client",
+                "No",
+                "npm package name string",
+                "Default package name written to the generated `package.json` for `vsr client ts`.",
+            ),
+            row(
+                "clients.ts.package_name.env",
+                "String",
+                "None",
+                "No",
+                "Environment variable name",
+                "Optional env var override for the generated client package name. `vsr` reads it only when this field is declared.",
+            ),
+            row(
+                "clients.ts.server_url",
+                "String",
+                "/api",
+                "No",
+                "Relative API base path",
+                "Default server URL embedded in the generated TypeScript client when `--server-url` is not passed.",
+            ),
+        ],
+    );
+
+    push_section(
+        &mut markdown,
         "Runtime",
         "Runtime settings affect server behavior without changing the data model.",
         &[
@@ -3071,6 +3119,7 @@ mod tests {
         assert!(markdown.contains("build.release.lto"));
         assert!(markdown.contains("build.target_cpu_native"));
         assert!(markdown.contains("build.artifacts.binary.path"));
+        assert!(markdown.contains("clients.ts.output_dir.path"));
         assert!(markdown.contains("runtime.compression.static_precompressed"));
         assert!(markdown.contains("security.auth.claims.<claim_name>"));
         assert!(markdown.contains("fields: {"));

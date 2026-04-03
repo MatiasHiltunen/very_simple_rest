@@ -2,6 +2,7 @@ pub mod admin;
 pub mod authz;
 pub mod backup;
 pub mod check;
+pub mod client;
 pub mod db;
 pub mod docs;
 pub mod env;

@@ -233,6 +233,12 @@ enum Commands {
         force: bool,
     },
 
+    /// Generate a TypeScript client library from a `.eon` service or derive-based Rust sources
+    Client {
+        #[command(subcommand)]
+        command: ClientCommand,
+    },
+
     /// Generate a .env file template, optionally derived from `--config`
     GenEnv {
         /// Path to the environment file
@@ -777,6 +783,68 @@ enum ServerCommand {
         /// Exclude built-in auth routes
         #[arg(long, alias = "no-auth")]
         without_auth: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClientCommand {
+    /// Generate a fetch-based TypeScript client package
+    Ts {
+        /// Schema source (`.eon`, `.rs`, or a Rust source directory)
+        #[arg(short, long, value_name = "PATH")]
+        input: PathBuf,
+
+        /// Output directory for the generated client package; defaults next to the service file
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+
+        /// Package name written to the generated `package.json`
+        #[arg(long, value_name = "NAME")]
+        package_name: Option<String>,
+
+        /// Server URL mounted in the generated client; otherwise `.eon` client config or `/api` is used
+        #[arg(long, value_name = "URL")]
+        server_url: Option<String>,
+
+        /// Deprecated compatibility flag; built-in auth is now included by default
+        #[arg(long, hide = true, conflicts_with = "without_auth")]
+        with_auth: bool,
+
+        /// Exclude built-in auth routes from the generated client
+        #[arg(long, alias = "no-auth")]
+        without_auth: bool,
+
+        /// Exclude a table from the generated client
+        #[arg(long = "exclude-table", value_name = "TABLE")]
+        exclude_tables: Vec<String>,
+
+        /// Overwrite the output directory if it already exists
+        #[arg(long)]
+        force: bool,
+
+        /// Run the generated client self-test after generation and emit a JSON report
+        #[arg(long)]
+        self_test: bool,
+
+        /// Base URL for live runtime probes during self-test; when omitted, only static checks run
+        #[arg(long, value_name = "URL", requires = "self_test")]
+        self_test_base_url: Option<String>,
+
+        /// Output file for the self-test JSON report; defaults to `<client-dir>/self-test-report.json`
+        #[arg(long, value_name = "FILE", requires = "self_test")]
+        self_test_report: Option<PathBuf>,
+
+        /// Override the Node.js binary used for generated-client import and runtime probe checks
+        #[arg(long, value_name = "BIN", requires = "self_test")]
+        self_test_node: Option<PathBuf>,
+
+        /// Override the TypeScript compiler used for `tsc -p` validation
+        #[arg(long, value_name = "BIN", requires = "self_test")]
+        self_test_tsc: Option<PathBuf>,
+
+        /// Allow runtime self-test probes to connect to HTTPS servers with self-signed or otherwise invalid certificates
+        #[arg(long, requires = "self_test")]
+        self_test_insecure_tls: bool,
     },
 }
 
@@ -1539,6 +1607,50 @@ async fn run_cli() -> Result<()> {
             )?;
         }
 
+        Commands::Client { command } => match command {
+            ClientCommand::Ts {
+                input,
+                output,
+                package_name,
+                server_url,
+                with_auth,
+                without_auth,
+                exclude_tables,
+                force,
+                self_test,
+                self_test_base_url,
+                self_test_report,
+                self_test_node,
+                self_test_tsc,
+                self_test_insecure_tls,
+            } => {
+                println!("{}", "Generating TypeScript client...".green().bold());
+                let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
+                let self_test = if *self_test {
+                    Some(commands::client::TypescriptClientSelfTestOptions {
+                        report_path: self_test_report.clone(),
+                        runtime_base_url: self_test_base_url.clone(),
+                        node_binary: self_test_node.clone(),
+                        tsc_binary: self_test_tsc.clone(),
+                        insecure_tls: *self_test_insecure_tls,
+                        force: *force,
+                    })
+                } else {
+                    None
+                };
+                commands::client::generate_typescript_client_with_self_test(
+                    input,
+                    output.as_deref(),
+                    *force,
+                    exclude_tables,
+                    package_name.as_deref(),
+                    server_url.as_deref(),
+                    include_builtin_auth,
+                    self_test,
+                )?;
+            }
+        },
+
         Commands::GenEnv { path, production } => {
             println!("{}", "Generating environment file...".green().bold());
             commands::gen_env::generate_env_file(
@@ -2258,6 +2370,46 @@ mod tests {
     #[test]
     fn build_command_accepts_positional_service_input() {
         assert!(Cli::try_parse_from(["vsr", "build", "todo_app.eon"]).is_ok());
+    }
+
+    #[test]
+    fn client_ts_command_accepts_input_and_output() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "client",
+                "ts",
+                "--input",
+                "api.eon",
+                "--output",
+                "web/src/gen/client",
+                "--server-url",
+                "/api",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn client_ts_command_accepts_self_test_flags() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "client",
+                "ts",
+                "--input",
+                "api.eon",
+                "--self-test",
+                "--self-test-base-url",
+                "http://127.0.0.1:8080",
+                "--self-test-report",
+                "report.json",
+                "--self-test-tsc",
+                "/usr/bin/tsc",
+                "--self-test-insecure-tls",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
