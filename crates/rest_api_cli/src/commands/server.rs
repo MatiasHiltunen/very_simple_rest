@@ -1399,7 +1399,12 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
 
 fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth: bool) -> String {
     let auth_config = if include_builtin_auth {
-        "                    .configure(|cfg| auth::auth_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
+        "                    .configure(|cfg| auth::auth_api_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
+    } else {
+        ""
+    };
+    let public_auth_config = if include_builtin_auth {
+        "            .configure(|cfg| auth::public_auth_discovery_routes_with_settings(cfg, api_security.auth.clone()))\n"
     } else {
         ""
     };
@@ -1525,7 +1530,7 @@ async fn main() -> std::io::Result<()> {{
             .wrap(very_simple_rest::core::security::security_headers_middleware(&api_security))
             .route("/openapi.json", web::get().to(openapi_spec))
             .route("/docs", web::get().to(swagger_ui))
-            .service(
+{public_auth_config}            .service(
                 scope("/api")
 {auth_config}                    .configure(|cfg| generated::{module_name}::configure(cfg, server_pool.clone()))
             )
@@ -2962,7 +2967,8 @@ resources: [
         assert!(root.join("migrations/0001_auth_management.sql").exists());
         assert!(root.join("migrations/0002_service.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("auth::auth_routes_with_settings"));
+        assert!(main_rs.contains("auth::auth_api_routes_with_settings"));
+        assert!(main_rs.contains("auth::public_auth_discovery_routes_with_settings"));
         assert!(main_rs.contains("ensure_jwt_secret_configured"));
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"/auth/login\""));

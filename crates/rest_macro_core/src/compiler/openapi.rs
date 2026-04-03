@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
+use crate::auth::AuthClaimType;
+
 use super::model::{
     ComputedFieldSpec, FieldSpec, GeneratedValue, PolicyValueSource, ResourceActionMethod,
     ResourceActionTarget, ResourceSpec, ServiceSpec, is_list_field, is_optional_type,
@@ -72,7 +74,10 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
 
     schemas.insert("ApiErrorResponse".to_owned(), api_error_schema());
     if !service.storage.uploads.is_empty() {
-        schemas.insert("StorageUploadResponse".to_owned(), storage_upload_response_schema());
+        schemas.insert(
+            "StorageUploadResponse".to_owned(),
+            storage_upload_response_schema(),
+        );
         tags.push(json!({ "name": "Storage" }));
     }
 
@@ -156,13 +161,25 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
     }
 
     for upload in &service.storage.uploads {
-        paths.insert(format!("/{}", upload.path), storage_upload_path_item(upload));
+        paths.insert(
+            format!("/{}", upload.path),
+            storage_upload_path_item(upload),
+        );
     }
 
     if options.include_builtin_auth {
         tags.push(json!({ "name": "Auth" }));
         tags.push(json!({ "name": "Account" }));
-        append_builtin_auth_components(&mut schemas, &mut paths);
+        append_builtin_auth_components(service, &mut schemas, &mut paths);
+    }
+
+    if service.authorization.management_api.enabled {
+        tags.push(json!({ "name": "Authorization" }));
+        append_authorization_management_components(
+            &mut schemas,
+            &mut paths,
+            service.authorization.management_api.mount.as_str(),
+        );
     }
 
     json!({
@@ -392,9 +409,20 @@ fn many_to_many_collection_path_item(
 }
 
 fn append_builtin_auth_components(
+    service: &ServiceSpec,
     schemas: &mut Map<String, Value>,
     paths: &mut Map<String, Value>,
 ) {
+    let claim_properties = auth_claim_properties(service);
+    let managed_claims_schema = if claim_properties.is_empty() {
+        None
+    } else {
+        Some(json!({
+            "type": "object",
+            "properties": claim_properties,
+            "additionalProperties": false
+        }))
+    };
     schemas.insert(
         "RegisterInput".to_owned(),
         json!({
@@ -430,18 +458,7 @@ fn append_builtin_auth_components(
     );
     schemas.insert(
         "AuthMeResponse".to_owned(),
-        json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "integer", "format": "int64" },
-                "roles": {
-                    "type": "array",
-                    "items": { "type": "string" }
-                }
-            },
-            "required": ["id", "roles"],
-            "additionalProperties": true
-        }),
+        auth_me_response_schema(&claim_properties),
     );
     schemas.insert(
         "VerifyEmailInput".to_owned(),
@@ -497,13 +514,7 @@ fn append_builtin_auth_components(
     );
     schemas.insert(
         "ManagedUserPatchInput".to_owned(),
-        json!({
-            "type": "object",
-            "properties": {
-                "role": { "type": "string" },
-                "email_verified": { "type": "boolean" }
-            }
-        }),
+        managed_user_patch_input_schema(managed_claims_schema.clone()),
     );
     schemas.insert(
         "ManagedUserCreateInput".to_owned(),
@@ -521,21 +532,7 @@ fn append_builtin_auth_components(
     );
     schemas.insert(
         "AuthAccountResponse".to_owned(),
-        json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "integer", "format": "int64" },
-                "email": { "type": "string", "format": "email" },
-                "role": { "type": "string" },
-                "roles": { "type": "array", "items": { "type": "string" } },
-                "email_verified": { "type": "boolean" },
-                "email_verified_at": { "type": "string", "format": "date-time" },
-                "created_at": { "type": "string", "format": "date-time" },
-                "updated_at": { "type": "string", "format": "date-time" }
-            },
-            "required": ["id", "email", "role", "roles", "email_verified"],
-            "additionalProperties": true
-        }),
+        auth_account_response_schema(&claim_properties),
     );
     schemas.insert(
         "AuthAdminUserListResponse".to_owned(),
@@ -552,6 +549,53 @@ fn append_builtin_auth_components(
             "required": ["items", "limit", "offset"]
         }),
     );
+    if service
+        .security
+        .auth
+        .jwt
+        .as_ref()
+        .is_some_and(|jwt| !jwt.algorithm.is_symmetric() && !jwt.verification_keys.is_empty())
+    {
+        schemas.insert(
+            "JwksResponse".to_owned(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                },
+                "required": ["keys"]
+            }),
+        );
+    }
+
+    if service
+        .security
+        .auth
+        .jwt
+        .as_ref()
+        .is_some_and(|jwt| !jwt.algorithm.is_symmetric() && !jwt.verification_keys.is_empty())
+    {
+        paths.insert(
+            "/.well-known/jwks.json".to_owned(),
+            json!({
+                "get": {
+                    "tags": ["Auth"],
+                    "summary": "Get the public JWKS for JWT verification",
+                    "operationId": "getJsonWebKeySet",
+                    "responses": {
+                        "200": json_response("OK", schema_ref("JwksResponse")),
+                        "500": api_error_response("Internal server error")
+                    }
+                }
+            }),
+        );
+    }
 
     paths.insert(
         "/auth/register".to_owned(),
@@ -635,6 +679,39 @@ fn append_builtin_auth_components(
             }
         }),
     );
+    if let Some(portal) = service.security.auth.portal.as_ref() {
+        paths.insert(
+            portal.path.clone(),
+            json!({
+                "get": {
+                    "tags": ["Account"],
+                    "summary": "Open the built-in account portal page",
+                    "operationId": "openBuiltinAccountPortal",
+                    "responses": {
+                        "200": plain_response("Account portal page")
+                    }
+                }
+            }),
+        );
+    }
+    if let Some(admin_dashboard) = service.security.auth.admin_dashboard.as_ref() {
+        paths.insert(
+            admin_dashboard.path.clone(),
+            json!({
+                "get": {
+                    "tags": ["Admin"],
+                    "summary": "Open the built-in admin dashboard page",
+                    "operationId": "openBuiltinAdminDashboard",
+                    "security": bearer_security(),
+                    "responses": {
+                        "200": plain_response("Admin dashboard page"),
+                        "401": api_error_response("Authentication required"),
+                        "403": api_error_response("Admin role required")
+                    }
+                }
+            }),
+        );
+    }
     paths.insert(
         "/auth/account/password".to_owned(),
         json!({
@@ -780,13 +857,22 @@ fn append_builtin_auth_components(
                         "name": "limit",
                         "in": "query",
                         "required": false,
-                        "schema": { "type": "integer", "format": "int32" }
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32",
+                            "minimum": 1,
+                            "maximum": 100
+                        }
                     },
                     {
                         "name": "offset",
                         "in": "query",
                         "required": false,
-                        "schema": { "type": "integer", "format": "int32" }
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32",
+                            "minimum": 0
+                        }
                     },
                     {
                         "name": "email",
@@ -798,7 +884,8 @@ fn append_builtin_auth_components(
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthAdminUserListResponse")),
                     "401": api_error_response("Authentication required"),
-                    "403": api_error_response("Admin role required")
+                    "403": api_error_response("Admin role required"),
+                    "500": api_error_response("Internal server error")
                 }
             },
             "post": {
@@ -808,11 +895,19 @@ fn append_builtin_auth_components(
                 "security": bearer_security(),
                 "requestBody": json_request_body("ManagedUserCreateInput"),
                 "responses": {
-                    "201": json_response("Created", schema_ref("AuthAccountResponse")),
+                    "201": json_response_with_headers("Created", schema_ref("AuthAccountResponse"), json!({
+                        "Location": {
+                            "description": "Canonical URL of the created built-in auth user",
+                            "schema": { "type": "string" }
+                        }
+                    })),
                     "400": api_error_response("Invalid request body"),
+                    "413": api_error_response("Payload too large"),
+                    "415": api_error_response("Unsupported media type"),
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required"),
                     "409": api_error_response("Email already exists"),
+                    "500": api_error_response("Internal server error"),
                     "503": api_error_response("Email delivery unavailable")
                 }
             }
@@ -831,7 +926,8 @@ fn append_builtin_auth_components(
                     "200": json_response("OK", schema_ref("AuthAccountResponse")),
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required"),
-                    "404": api_error_response("User not found")
+                    "404": api_error_response("User not found"),
+                    "500": api_error_response("Internal server error")
                 }
             },
             "patch": {
@@ -844,9 +940,12 @@ fn append_builtin_auth_components(
                 "responses": {
                     "200": json_response("OK", schema_ref("AuthAccountResponse")),
                     "400": api_error_response("Invalid request body"),
+                    "413": api_error_response("Payload too large"),
+                    "415": api_error_response("Unsupported media type"),
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required"),
-                    "404": api_error_response("User not found")
+                    "404": api_error_response("User not found"),
+                    "500": api_error_response("Internal server error")
                 }
             },
             "delete": {
@@ -860,7 +959,8 @@ fn append_builtin_auth_components(
                     "400": api_error_response("Invalid delete request"),
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required"),
-                    "404": api_error_response("User not found")
+                    "404": api_error_response("User not found"),
+                    "500": api_error_response("Internal server error")
                 }
             }
         }),
@@ -880,7 +980,543 @@ fn append_builtin_auth_components(
                     "401": api_error_response("Authentication required"),
                     "403": api_error_response("Admin role required"),
                     "404": api_error_response("User not found"),
+                    "500": api_error_response("Internal server error"),
                     "503": api_error_response("Email delivery unavailable")
+                }
+            }
+        }),
+    );
+}
+
+fn auth_claim_properties(service: &ServiceSpec) -> Map<String, Value> {
+    service
+        .security
+        .auth
+        .claims
+        .iter()
+        .map(|(name, mapping)| (name.clone(), auth_claim_value_schema(mapping.ty)))
+        .collect()
+}
+
+fn auth_claim_value_schema(ty: AuthClaimType) -> Value {
+    match ty {
+        AuthClaimType::I64 => json!({
+            "type": "integer",
+            "format": "int64"
+        }),
+        AuthClaimType::String => json!({
+            "type": "string"
+        }),
+        AuthClaimType::Bool => json!({
+            "type": "boolean"
+        }),
+    }
+}
+
+fn auth_me_response_schema(claim_properties: &Map<String, Value>) -> Value {
+    let mut properties = Map::new();
+    properties.insert(
+        "id".to_owned(),
+        json!({
+            "type": "integer",
+            "format": "int64"
+        }),
+    );
+    properties.insert(
+        "roles".to_owned(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" }
+        }),
+    );
+    for (name, schema) in claim_properties {
+        properties.insert(name.clone(), schema.clone());
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["id", "roles"],
+        "additionalProperties": true
+    })
+}
+
+fn managed_user_patch_input_schema(managed_claims_schema: Option<Value>) -> Value {
+    let mut properties = Map::new();
+    properties.insert("role".to_owned(), json!({ "type": "string" }));
+    properties.insert("email_verified".to_owned(), json!({ "type": "boolean" }));
+    if let Some(claims) = managed_claims_schema {
+        properties.insert("claims".to_owned(), claims);
+    }
+    json!({
+        "type": "object",
+        "properties": properties
+    })
+}
+
+fn auth_account_response_schema(claim_properties: &Map<String, Value>) -> Value {
+    let mut properties = Map::new();
+    properties.insert(
+        "id".to_owned(),
+        json!({
+            "type": "integer",
+            "format": "int64"
+        }),
+    );
+    properties.insert(
+        "email".to_owned(),
+        json!({
+            "type": "string",
+            "format": "email"
+        }),
+    );
+    properties.insert("role".to_owned(), json!({ "type": "string" }));
+    properties.insert(
+        "roles".to_owned(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" }
+        }),
+    );
+    properties.insert("email_verified".to_owned(), json!({ "type": "boolean" }));
+    properties.insert(
+        "email_verified_at".to_owned(),
+        json!({
+            "type": "string",
+            "format": "date-time"
+        }),
+    );
+    properties.insert(
+        "created_at".to_owned(),
+        json!({
+            "type": "string",
+            "format": "date-time"
+        }),
+    );
+    properties.insert(
+        "updated_at".to_owned(),
+        json!({
+            "type": "string",
+            "format": "date-time"
+        }),
+    );
+    for (name, schema) in claim_properties {
+        properties.insert(name.clone(), schema.clone());
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["id", "email", "role", "roles", "email_verified"],
+        "additionalProperties": true
+    })
+}
+
+fn append_authorization_management_components(
+    schemas: &mut Map<String, Value>,
+    paths: &mut Map<String, Value>,
+    mount: &str,
+) {
+    schemas.insert(
+        "AuthorizationAction".to_owned(),
+        json!({
+            "type": "string",
+            "enum": ["read", "create", "update", "delete"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopeBinding".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "scope": { "type": "string" },
+                "value": { "type": "string" }
+            },
+            "required": ["scope", "value"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentPermissionTarget".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["permission"] },
+                "name": { "type": "string" }
+            },
+            "required": ["kind", "name"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentTemplateTarget".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["template"] },
+                "name": { "type": "string" }
+            },
+            "required": ["kind", "name"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentTarget".to_owned(),
+        json!({
+            "oneOf": [
+                schema_ref("AuthorizationScopedAssignmentPermissionTarget"),
+                schema_ref("AuthorizationScopedAssignmentTemplateTarget")
+            ]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentCreateInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "user_id": { "type": "integer", "format": "int64" },
+                "target": schema_ref("AuthorizationScopedAssignmentTarget"),
+                "scope": schema_ref("AuthorizationScopeBinding"),
+                "expires_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                }
+            },
+            "required": ["user_id", "target", "scope"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentRecord".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "user_id": { "type": "integer", "format": "int64" },
+                "target": schema_ref("AuthorizationScopedAssignmentTarget"),
+                "scope": schema_ref("AuthorizationScopeBinding"),
+                "created_at": { "type": "string", "format": "date-time" },
+                "created_by_user_id": {
+                    "type": "integer",
+                    "format": "int64",
+                    "nullable": true
+                },
+                "expires_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                }
+            },
+            "required": ["id", "user_id", "target", "scope", "created_at"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentEventKind".to_owned(),
+        json!({
+            "type": "string",
+            "enum": ["created", "revoked", "renewed", "deleted"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentEventRecord".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "assignment_id": { "type": "string" },
+                "user_id": { "type": "integer", "format": "int64" },
+                "event": schema_ref("AuthorizationScopedAssignmentEventKind"),
+                "occurred_at": { "type": "string", "format": "date-time" },
+                "actor_user_id": {
+                    "type": "integer",
+                    "format": "int64",
+                    "nullable": true
+                },
+                "target": schema_ref("AuthorizationScopedAssignmentTarget"),
+                "scope": schema_ref("AuthorizationScopeBinding"),
+                "expires_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                },
+                "reason": {
+                    "type": "string",
+                    "nullable": true
+                }
+            },
+            "required": [
+                "id",
+                "assignment_id",
+                "user_id",
+                "event",
+                "occurred_at",
+                "target",
+                "scope"
+            ]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentRevokeInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "nullable": true
+                }
+            }
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentRenewInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "expires_at": { "type": "string", "format": "date-time" },
+                "reason": {
+                    "type": "string",
+                    "nullable": true
+                }
+            },
+            "required": ["expires_at"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationScopedAssignmentTrace".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "target": schema_ref("AuthorizationScopedAssignmentTarget"),
+                "scope": schema_ref("AuthorizationScopeBinding"),
+                "scope_matched": { "type": "boolean" },
+                "target_matched": { "type": "boolean" },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                },
+                "created_by_user_id": {
+                    "type": "integer",
+                    "format": "int64",
+                    "nullable": true
+                },
+                "expires_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                },
+                "expired": { "type": "boolean" },
+                "resolved_permissions": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "resolved_template": {
+                    "type": "string",
+                    "nullable": true
+                }
+            },
+            "required": [
+                "id",
+                "target",
+                "scope",
+                "scope_matched",
+                "target_matched",
+                "expired",
+                "resolved_permissions"
+            ]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationRuntimeAccessInput".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "resource": { "type": "string" },
+                "action": schema_ref("AuthorizationAction"),
+                "scope": schema_ref("AuthorizationScopeBinding"),
+                "user_id": {
+                    "type": "integer",
+                    "format": "int64",
+                    "nullable": true
+                }
+            },
+            "required": ["resource", "action", "scope"]
+        }),
+    );
+    schemas.insert(
+        "AuthorizationRuntimeAccessResult".to_owned(),
+        json!({
+            "type": "object",
+            "properties": {
+                "user_id": { "type": "integer", "format": "int64" },
+                "resource_id": { "type": "string" },
+                "resource": { "type": "string" },
+                "action_id": { "type": "string" },
+                "action": schema_ref("AuthorizationAction"),
+                "scope": schema_ref("AuthorizationScopeBinding"),
+                "allowed": { "type": "boolean" },
+                "resolved_permissions": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "resolved_templates": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "runtime_assignments": {
+                    "type": "array",
+                    "items": schema_ref("AuthorizationScopedAssignmentTrace")
+                },
+                "notes": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            },
+            "required": [
+                "user_id",
+                "resource_id",
+                "resource",
+                "action_id",
+                "action",
+                "scope",
+                "allowed",
+                "resolved_permissions",
+                "resolved_templates",
+                "runtime_assignments",
+                "notes"
+            ]
+        }),
+    );
+
+    let mount = normalized_openapi_mount(mount);
+    paths.insert(
+        openapi_join_mount_path(&mount, "evaluate"),
+        json!({
+            "post": {
+                "tags": ["Authorization"],
+                "summary": "Evaluate runtime authorization access",
+                "operationId": "evaluateRuntimeAuthorizationAccess",
+                "security": bearer_security(),
+                "requestBody": json_request_body("AuthorizationRuntimeAccessInput"),
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthorizationRuntimeAccessResult")),
+                    "400": api_error_response("Invalid runtime authorization access request"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role is required to evaluate another user"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        openapi_join_mount_path(&mount, "assignments"),
+        json!({
+            "get": {
+                "tags": ["Authorization"],
+                "summary": "List runtime authorization assignments for a user",
+                "operationId": "listRuntimeAuthorizationAssignments",
+                "security": bearer_security(),
+                "parameters": [user_id_query_parameter()],
+                "responses": {
+                    "200": json_response("OK", json!({
+                        "type": "array",
+                        "items": schema_ref("AuthorizationScopedAssignmentRecord")
+                    })),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "500": api_error_response("Internal server error")
+                }
+            },
+            "post": {
+                "tags": ["Authorization"],
+                "summary": "Create a runtime authorization assignment",
+                "operationId": "createRuntimeAuthorizationAssignment",
+                "security": bearer_security(),
+                "requestBody": json_request_body("AuthorizationScopedAssignmentCreateInput"),
+                "responses": {
+                    "201": json_response("Created", schema_ref("AuthorizationScopedAssignmentRecord")),
+                    "400": api_error_response("Invalid runtime authorization assignment"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        openapi_join_mount_path(&mount, "assignment-events"),
+        json!({
+            "get": {
+                "tags": ["Authorization"],
+                "summary": "List runtime authorization assignment events for a user",
+                "operationId": "listRuntimeAuthorizationAssignmentEvents",
+                "security": bearer_security(),
+                "parameters": [user_id_query_parameter()],
+                "responses": {
+                    "200": json_response("OK", json!({
+                        "type": "array",
+                        "items": schema_ref("AuthorizationScopedAssignmentEventRecord")
+                    })),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        openapi_join_mount_path(&mount, "assignments/{id}"),
+        json!({
+            "delete": {
+                "tags": ["Authorization"],
+                "summary": "Delete a runtime authorization assignment",
+                "operationId": "deleteRuntimeAuthorizationAssignment",
+                "security": bearer_security(),
+                "parameters": [string_path_parameter("id", "runtime authorization assignment")],
+                "responses": {
+                    "204": plain_response("Assignment deleted"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("Runtime authorization assignment not found"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        openapi_join_mount_path(&mount, "assignments/{id}/revoke"),
+        json!({
+            "post": {
+                "tags": ["Authorization"],
+                "summary": "Revoke a runtime authorization assignment",
+                "operationId": "revokeRuntimeAuthorizationAssignment",
+                "security": bearer_security(),
+                "parameters": [string_path_parameter("id", "runtime authorization assignment")],
+                "requestBody": json_request_body("AuthorizationScopedAssignmentRevokeInput"),
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthorizationScopedAssignmentRecord")),
+                    "400": api_error_response("Invalid runtime authorization assignment"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("Runtime authorization assignment not found"),
+                    "500": api_error_response("Internal server error")
+                }
+            }
+        }),
+    );
+    paths.insert(
+        openapi_join_mount_path(&mount, "assignments/{id}/renew"),
+        json!({
+            "post": {
+                "tags": ["Authorization"],
+                "summary": "Renew a runtime authorization assignment",
+                "operationId": "renewRuntimeAuthorizationAssignment",
+                "security": bearer_security(),
+                "parameters": [string_path_parameter("id", "runtime authorization assignment")],
+                "requestBody": json_request_body("AuthorizationScopedAssignmentRenewInput"),
+                "responses": {
+                    "200": json_response("OK", schema_ref("AuthorizationScopedAssignmentRecord")),
+                    "400": api_error_response("Invalid runtime authorization assignment"),
+                    "401": api_error_response("Authentication required"),
+                    "403": api_error_response("Admin role required"),
+                    "404": api_error_response("Runtime authorization assignment not found"),
+                    "500": api_error_response("Internal server error")
                 }
             }
         }),
@@ -987,6 +1623,12 @@ fn json_response(description: &'static str, schema: Value) -> Value {
     })
 }
 
+fn json_response_with_headers(description: &'static str, schema: Value, headers: Value) -> Value {
+    let mut response = json_response(description, schema);
+    response["headers"] = headers;
+    response
+}
+
 fn plain_response(description: &'static str) -> Value {
     json!({
         "description": description,
@@ -1052,12 +1694,55 @@ fn schema_ref(name: impl Into<String>) -> Value {
     })
 }
 
+fn normalized_openapi_mount(mount: &str) -> String {
+    if mount == "/" {
+        String::new()
+    } else {
+        mount.trim_end_matches('/').to_owned()
+    }
+}
+
+fn openapi_join_mount_path(mount: &str, suffix: &str) -> String {
+    let suffix = suffix.trim_start_matches('/');
+    if mount.is_empty() {
+        format!("/{suffix}")
+    } else if suffix.is_empty() {
+        mount.to_owned()
+    } else {
+        format!("{mount}/{suffix}")
+    }
+}
+
 fn id_parameter(name: &str, description: &str) -> Value {
     json!({
         "name": name,
         "in": "path",
         "required": true,
         "description": format!("Path parameter for `{description}`"),
+        "schema": {
+            "type": "integer",
+            "format": "int64"
+        }
+    })
+}
+
+fn string_path_parameter(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "in": "path",
+        "required": true,
+        "description": format!("Path parameter for `{description}`"),
+        "schema": {
+            "type": "string"
+        }
+    })
+}
+
+fn user_id_query_parameter() -> Value {
+    json!({
+        "name": "user_id",
+        "in": "query",
+        "required": true,
         "schema": {
             "type": "integer",
             "format": "int64"
@@ -1651,6 +2336,37 @@ mod tests {
         std::env::temp_dir().join(format!("{name}_{stamp}"))
     }
 
+    fn snapshot_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/snapshots/openapi")
+            .join(name)
+    }
+
+    fn assert_json_snapshot(snapshot: &PathBuf, actual: &Value) {
+        let rendered =
+            serde_json::to_string_pretty(actual).expect("snapshot json should serialize");
+        if std::env::var_os("VSR_UPDATE_SNAPSHOTS").is_some() {
+            if let Some(parent) = snapshot.parent() {
+                fs::create_dir_all(parent).expect("snapshot parent should be creatable");
+            }
+            fs::write(snapshot, rendered).expect("snapshot should be writable");
+            return;
+        }
+
+        let expected = fs::read_to_string(snapshot).unwrap_or_else(|error| {
+            panic!(
+                "snapshot {} is missing or unreadable: {error}. Re-run with VSR_UPDATE_SNAPSHOTS=1 to create it.",
+                snapshot.display()
+            )
+        });
+        assert_eq!(
+            expected.trim_end_matches('\n'),
+            rendered.trim_end_matches('\n'),
+            "snapshot mismatch at {}",
+            snapshot.display()
+        );
+    }
+
     #[test]
     fn renders_openapi_for_eon_service_with_nested_routes_and_policy_trimmed_dtos() {
         let service =
@@ -1770,6 +2486,17 @@ mod tests {
                 ["schema"]["$ref"],
             "#/components/schemas/TagListResponse"
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts/{parent_id}/tags": document["paths"]["/posts/{parent_id}/tags"].clone()
+            },
+            "schemas": {
+                "Tag": document["components"]["schemas"]["Tag"].clone(),
+                "TagListResponse": document["components"]["schemas"]["TagListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("many_to_many_surface.json"), &snapshot);
     }
 
     #[test]
@@ -1819,6 +2546,19 @@ mod tests {
             document["paths"]["/posts/{id}/purge"]["post"]["responses"]["200"]["description"],
             "Deleted"
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts/{id}/go-live": document["paths"]["/posts/{id}/go-live"].clone(),
+                "/posts/{id}/rename": document["paths"]["/posts/{id}/rename"].clone(),
+                "/posts/{id}/purge": document["paths"]["/posts/{id}/purge"].clone()
+            },
+            "schemas": {
+                "PostRenameActionInput": document["components"]["schemas"]["PostRenameActionInput"].clone(),
+                "ApiErrorResponse": document["components"]["schemas"]["ApiErrorResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("resource_actions_surface.json"), &snapshot);
     }
 
     #[test]
@@ -1863,6 +2603,21 @@ mod tests {
                 .expect("contains description should be a string")
                 .contains("treated literally")
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/organization": document["paths"]["/organization"].clone(),
+                "/organization/{id}": document["paths"]["/organization/{id}"].clone(),
+                "/organization/{parent_id}/interest": document["paths"]["/organization/{parent_id}/interest"].clone()
+            },
+            "schemas": {
+                "Organization": document["components"]["schemas"]["Organization"].clone(),
+                "OrganizationListResponse": document["components"]["schemas"]["OrganizationListResponse"].clone(),
+                "InterestListResponse": document["components"]["schemas"]["InterestListResponse"].clone(),
+                "ApiErrorResponse": document["components"]["schemas"]["ApiErrorResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("public_catalog_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2040,6 +2795,19 @@ mod tests {
             document["components"]["schemas"]["Entry"]["properties"]["blocks"]["items"]["type"],
             json!("object")
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/entry": document["paths"]["/entry"].clone(),
+                "/entry/{id}": document["paths"]["/entry/{id}"].clone()
+            },
+            "schemas": {
+                "Entry": document["components"]["schemas"]["Entry"].clone(),
+                "EntryCreate": document["components"]["schemas"]["EntryCreate"].clone(),
+                "EntryListResponse": document["components"]["schemas"]["EntryListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("list_fields_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2085,6 +2853,19 @@ mod tests {
                 ["additionalProperties"],
             json!(false)
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/entry": document["paths"]["/entry"].clone(),
+                "/entry/{id}": document["paths"]["/entry/{id}"].clone()
+            },
+            "schemas": {
+                "Entry": document["components"]["schemas"]["Entry"].clone(),
+                "EntryCreate": document["components"]["schemas"]["EntryCreate"].clone(),
+                "EntryListResponse": document["components"]["schemas"]["EntryListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("object_fields_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2124,6 +2905,19 @@ mod tests {
                 .all(|parameter| parameter["name"] != "filter_status_contains"),
             "enum fields should not advertise contains filters"
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts": document["paths"]["/posts"].clone(),
+                "/posts/{id}": document["paths"]["/posts/{id}"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone(),
+                "PostListResponse": document["components"]["schemas"]["PostListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("enum_fields_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2184,6 +2978,21 @@ mod tests {
             document["paths"]["/posts"]["get"]["parameters"][3]["schema"]["enum"],
             json!(["id", "title", "author", "createdAt"])
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts": document["paths"]["/posts"].clone(),
+                "/posts/{id}": document["paths"]["/posts/{id}"].clone(),
+                "/posts/{parent_id}/comments": document["paths"]["/posts/{parent_id}/comments"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone(),
+                "PostListResponse": document["components"]["schemas"]["PostListResponse"].clone(),
+                "CommentListResponse": document["components"]["schemas"]["CommentListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("api_alias_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2232,6 +3041,103 @@ mod tests {
             document["paths"]["/posts"]["get"]["parameters"][3]["schema"]["enum"],
             json!(["id", "title", "author"])
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts": document["paths"]["/posts"].clone(),
+                "/posts/{id}": document["paths"]["/posts/{id}"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone(),
+                "PostListResponse": document["components"]["schemas"]["PostListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("api_projection_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_field_transform_resource_surface() {
+        let service = load_service_from_path(&fixture_path("field_transforms_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Field Transforms API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["status"]["enum"],
+            json!(["draft", "published"])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["title"]["type"],
+            json!("object")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["PostCreate"]["properties"]["slug"]["type"],
+            json!("string")
+        );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts": document["paths"]["/posts"].clone(),
+                "/posts/{id}": document["paths"]["/posts/{id}"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone(),
+                "PostListResponse": document["components"]["schemas"]["PostListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("field_transforms_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_mixin_expanded_resource_surface() {
+        let service = load_service_from_path(&fixture_path("mixin_fields_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Mixin Fields API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["tenant_id"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["slug"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["created_at"]["format"],
+            json!("date-time")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["Post"]["properties"]["updated_at"]["format"],
+            json!("date-time")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["PostListResponse"]["properties"]["items"]["items"]["$ref"],
+            json!("#/components/schemas/Post")
+        );
+
+        let snapshot = json!({
+            "paths": {
+                "/post": document["paths"]["/post"].clone(),
+                "/post/{id}": document["paths"]["/post/{id}"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone(),
+                "PostListResponse": document["components"]["schemas"]["PostListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("mixin_fields_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2265,6 +3171,18 @@ mod tests {
                 .iter()
                 .all(|parameter| parameter["name"] != "filter_permalink")
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/posts": document["paths"]["/posts"].clone(),
+                "/posts/{id}": document["paths"]["/posts/{id}"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("computed_fields_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2306,6 +3224,19 @@ mod tests {
         );
         assert_eq!(post_parameters[0]["name"], "context");
         assert_eq!(post_parameters[0]["schema"]["default"], json!("view"));
+
+        let snapshot = json!({
+            "paths": {
+                "/posts": document["paths"]["/posts"].clone(),
+                "/posts/{id}": document["paths"]["/posts/{id}"].clone()
+            },
+            "schemas": {
+                "Post": document["components"]["schemas"]["Post"].clone(),
+                "PostCreate": document["components"]["schemas"]["PostCreate"].clone(),
+                "PostListResponse": document["components"]["schemas"]["PostListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("response_contexts_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2334,9 +3265,20 @@ mod tests {
             json!([])
         );
         assert_eq!(
-            document["components"]["schemas"]["StorageUploadResponse"]["properties"]["public_url"]["nullable"],
+            document["components"]["schemas"]["StorageUploadResponse"]["properties"]["public_url"]
+                ["nullable"],
             json!(true)
         );
+
+        let snapshot = json!({
+            "paths": {
+                "/uploads": document["paths"]["/uploads"].clone()
+            },
+            "schemas": {
+                "StorageUploadResponse": document["components"]["schemas"]["StorageUploadResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("storage_upload_surface.json"), &snapshot);
     }
 
     #[test]
@@ -2560,6 +3502,309 @@ mod tests {
                 .expect("tags should be an array")
                 .iter()
                 .any(|tag| tag["name"] == "Account")
+        );
+    }
+
+    #[test]
+    fn renders_openapi_with_authorization_management_routes_when_enabled() {
+        let service = load_service_from_path(&fixture_path("authz_management_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Authorization Management API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert!(
+            document["paths"]["/authz/runtime/evaluate"]["post"].is_object(),
+            "evaluate endpoint should be rendered"
+        );
+        assert!(
+            document["paths"]["/authz/runtime/assignments"]["get"].is_object(),
+            "assignments list endpoint should be rendered"
+        );
+        assert!(
+            document["paths"]["/authz/runtime/assignments"]["post"].is_object(),
+            "assignments create endpoint should be rendered"
+        );
+        assert!(
+            document["paths"]["/authz/runtime/assignment-events"]["get"].is_object(),
+            "assignment events endpoint should be rendered"
+        );
+        assert!(
+            document["paths"]["/authz/runtime/assignments/{id}"]["delete"].is_object(),
+            "assignment delete endpoint should be rendered"
+        );
+        assert!(
+            document["paths"]["/authz/runtime/assignments/{id}/revoke"]["post"].is_object(),
+            "assignment revoke endpoint should be rendered"
+        );
+        assert!(
+            document["paths"]["/authz/runtime/assignments/{id}/renew"]["post"].is_object(),
+            "assignment renew endpoint should be rendered"
+        );
+        assert_eq!(
+            document["paths"]["/authz/runtime/evaluate"]["post"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/authz/runtime/assignments"]["get"]["parameters"][0]["name"],
+            "user_id"
+        );
+        assert_eq!(
+            document["paths"]["/authz/runtime/assignments/{id}"]["delete"]["parameters"][0]["schema"]
+                ["type"],
+            "string"
+        );
+        assert_eq!(
+            document["paths"]["/authz/runtime/evaluate"]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/AuthorizationRuntimeAccessInput"
+        );
+        assert_eq!(
+            document["paths"]["/authz/runtime/evaluate"]["post"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/AuthorizationRuntimeAccessResult"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["AuthorizationAction"]["enum"],
+            json!(["read", "create", "update", "delete"])
+        );
+        assert!(
+            document["components"]["schemas"]["AuthorizationScopedAssignmentRecord"].is_object()
+        );
+        assert!(
+            document["components"]["schemas"]["AuthorizationScopedAssignmentEventRecord"]
+                .is_object()
+        );
+        assert!(
+            document["tags"]
+                .as_array()
+                .expect("tags should be an array")
+                .iter()
+                .any(|tag| tag["name"] == "Authorization")
+        );
+
+        let snapshot = json!({
+            "paths": {
+                "/authz/runtime/evaluate": document["paths"]["/authz/runtime/evaluate"].clone(),
+                "/authz/runtime/assignments": document["paths"]["/authz/runtime/assignments"].clone(),
+                "/authz/runtime/assignment-events": document["paths"]["/authz/runtime/assignment-events"].clone(),
+                "/authz/runtime/assignments/{id}": document["paths"]["/authz/runtime/assignments/{id}"].clone(),
+                "/authz/runtime/assignments/{id}/revoke": document["paths"]["/authz/runtime/assignments/{id}/revoke"].clone(),
+                "/authz/runtime/assignments/{id}/renew": document["paths"]["/authz/runtime/assignments/{id}/renew"].clone()
+            },
+            "schemas": {
+                "AuthorizationAction": document["components"]["schemas"]["AuthorizationAction"].clone(),
+                "AuthorizationRuntimeAccessInput": document["components"]["schemas"]["AuthorizationRuntimeAccessInput"].clone(),
+                "AuthorizationRuntimeAccessResult": document["components"]["schemas"]["AuthorizationRuntimeAccessResult"].clone(),
+                "AuthorizationScopedAssignmentRecord": document["components"]["schemas"]["AuthorizationScopedAssignmentRecord"].clone(),
+                "AuthorizationScopedAssignmentEventRecord": document["components"]["schemas"]["AuthorizationScopedAssignmentEventRecord"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("authz_management_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_builtin_auth_claim_schemas_from_service_config() {
+        let service = load_service_from_path(&fixture_path("auth_claims_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Auth Claims API", "1.0.0", "/api").with_builtin_auth(true),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["components"]["schemas"]["ManagedUserPatchInput"]["properties"]["claims"]["properties"]
+                ["tenant_id"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ManagedUserPatchInput"]["properties"]["claims"]["properties"]
+                ["tenant_id"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ManagedUserPatchInput"]["properties"]["claims"]["properties"]
+                ["staff"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ManagedUserPatchInput"]["properties"]["claims"]["properties"]
+                ["plan"]["type"],
+            "string"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ManagedUserPatchInput"]["properties"]["claims"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["AuthMeResponse"]["properties"]["workspace_id"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["AuthAccountResponse"]["properties"]["staff"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["AuthAccountResponse"]["properties"]["plan"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn renders_openapi_builtin_auth_jwks_route_for_asymmetric_jwt() {
+        let service = load_service_from_path(&fixture_path("asymmetric_jwt_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Asymmetric JWT API", "1.0.0", "/api").with_builtin_auth(true),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert!(document["paths"]["/.well-known/jwks.json"]["get"].is_object());
+        assert_eq!(
+            document["paths"]["/.well-known/jwks.json"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/JwksResponse"
+        );
+        assert!(document["components"]["schemas"]["JwksResponse"].is_object());
+
+        let snapshot = json!({
+            "paths": {
+                "/.well-known/jwks.json": document["paths"]["/.well-known/jwks.json"].clone(),
+                "/auth/login": document["paths"]["/auth/login"].clone(),
+                "/auth/me": document["paths"]["/auth/me"].clone()
+            },
+            "schemas": {
+                "JwksResponse": document["components"]["schemas"]["JwksResponse"].clone(),
+                "AuthMeResponse": document["components"]["schemas"]["AuthMeResponse"].clone(),
+                "AuthTokenResponse": document["components"]["schemas"]["AuthTokenResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("asymmetric_jwt_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_builtin_auth_admin_routes_match_runtime_surface() {
+        let service = load_service_from_path(&fixture_path("auth_claims_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Auth Claims API", "1.0.0", "/api").with_builtin_auth(true),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["paths"]["/auth/admin/users"]["get"]["parameters"][0]["schema"]["minimum"],
+            json!(1)
+        );
+        assert_eq!(
+            document["paths"]["/auth/admin/users"]["get"]["parameters"][0]["schema"]["maximum"],
+            json!(100)
+        );
+        assert_eq!(
+            document["paths"]["/auth/admin/users"]["post"]["responses"]["201"]["headers"]["Location"]
+                ["schema"]["type"],
+            "string"
+        );
+        assert!(document["paths"]["/auth/admin/users"]["post"]["responses"]["413"].is_object());
+        assert!(document["paths"]["/auth/admin/users"]["post"]["responses"]["415"].is_object());
+        assert!(
+            document["paths"]["/auth/admin/users/{id}"]["patch"]["responses"]["500"].is_object()
+        );
+        assert!(
+            document["paths"]["/auth/admin/users/{id}/verification"]["post"]["responses"]["500"]
+                .is_object()
+        );
+
+        let snapshot = json!({
+            "paths": {
+                "/auth/admin/users": document["paths"]["/auth/admin/users"].clone(),
+                "/auth/admin/users/{id}": document["paths"]["/auth/admin/users/{id}"].clone(),
+                "/auth/admin/users/{id}/verification": document["paths"]["/auth/admin/users/{id}/verification"].clone()
+            },
+            "schemas": {
+                "ManagedUserCreateInput": document["components"]["schemas"]["ManagedUserCreateInput"].clone(),
+                "ManagedUserPatchInput": document["components"]["schemas"]["ManagedUserPatchInput"].clone(),
+                "AuthAccountResponse": document["components"]["schemas"]["AuthAccountResponse"].clone(),
+                "AuthAdminUserListResponse": document["components"]["schemas"]["AuthAdminUserListResponse"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("builtin_auth_admin_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_builtin_auth_email_routes_match_runtime_surface() {
+        let service = load_service_from_path(&fixture_path("auth_management_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Auth Management API", "1.0.0", "/api")
+                .with_builtin_auth(true),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["paths"]["/auth/account/verification"]["post"]["responses"]["202"]["description"],
+            "Verification email sent"
+        );
+        assert_eq!(
+            document["paths"]["/auth/verify-email"]["post"]["responses"]["204"]["description"],
+            "Email verified"
+        );
+        assert_eq!(
+            document["paths"]["/auth/password-reset/request"]["post"]["responses"]["202"]["description"],
+            "Password reset email sent"
+        );
+
+        let snapshot = json!({
+            "paths": {
+                "/auth/account/verification": document["paths"]["/auth/account/verification"].clone(),
+                "/auth/verify-email": document["paths"]["/auth/verify-email"].clone(),
+                "/auth/verification/resend": document["paths"]["/auth/verification/resend"].clone(),
+                "/auth/password-reset": document["paths"]["/auth/password-reset"].clone(),
+                "/auth/password-reset/request": document["paths"]["/auth/password-reset/request"].clone(),
+                "/auth/password-reset/confirm": document["paths"]["/auth/password-reset/confirm"].clone()
+            },
+            "schemas": {
+                "VerifyEmailInput": document["components"]["schemas"]["VerifyEmailInput"].clone(),
+                "VerificationResendInput": document["components"]["schemas"]["VerificationResendInput"].clone(),
+                "PasswordResetRequestInput": document["components"]["schemas"]["PasswordResetRequestInput"].clone(),
+                "PasswordResetConfirmInput": document["components"]["schemas"]["PasswordResetConfirmInput"].clone()
+            }
+        });
+        assert_json_snapshot(&snapshot_path("builtin_auth_email_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_builtin_auth_ui_routes_when_configured() {
+        let service = load_service_from_path(&fixture_path("auth_management_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Auth Management API", "1.0.0", "/api")
+                .with_builtin_auth(true),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert!(document["paths"]["/auth/portal"]["get"].is_object());
+        assert!(document["paths"]["/auth/admin"]["get"].is_object());
+        assert_eq!(
+            document["paths"]["/auth/admin"]["get"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/auth/admin"]["get"]["responses"]["403"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/ApiErrorResponse"
         );
     }
 }

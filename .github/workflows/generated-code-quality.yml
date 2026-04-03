@@ -34,6 +34,35 @@ jobs:
       - name: Verify Expanded Output Snapshots
         run: cargo test -p vsra expand_server_code_ -- --nocapture
 
+      - name: Verify Schema Check Snapshots And Rules
+        run: |
+          cargo test -p vsra commands::check::tests:: -- --nocapture
+          cargo test -p vsra check_command_accepts_strict_and_json_format -- --nocapture
+
+      - name: Verify Representative OpenAPI Parity Surfaces
+        run: |
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_with_authorization_management_routes_when_enabled -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_builtin_auth_admin_routes_match_runtime_surface -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_builtin_auth_email_routes_match_runtime_surface -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_builtin_auth_jwks_route_for_asymmetric_jwt -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_storage_upload_paths -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_resource_action_paths -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_api_aliases_for_paths_properties_and_query_parameters -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_resource_api_field_projections -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_field_transform_resource_surface -- --nocapture
+          cargo test -p rest_macro_core --features codegen compiler::openapi::tests::renders_openapi_mixin_expanded_resource_surface -- --nocapture
+
+      - name: Verify Representative Spawned-Server Runtime Parity
+        run: |
+          cargo test -p vsra --test serve_cli vsr_serve_supports_builtin_auth_portal_dashboard_and_admin_users -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_exposes_jwks_for_asymmetric_jwt -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_supports_storage_uploads_and_public_mounts -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_applies_resource_actions_in_spawned_process -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_supports_api_name_aliases_in_spawned_process -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_applies_api_projections_in_spawned_process -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_applies_field_transforms_in_spawned_process -- --nocapture
+          cargo test -p vsra --test serve_cli vsr_serve_expands_mixin_fields_in_spawned_process -- --nocapture
+
       - name: Verify Representative Examples Pass Strict Schema Checks
         run: |
           cargo run -p vsra -- check --input examples/template/api.eon --strict

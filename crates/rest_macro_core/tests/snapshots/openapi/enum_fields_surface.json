@@ -1,0 +1,640 @@
+{
+  "paths": {
+    "/posts": {
+      "get": {
+        "operationId": "listPost",
+        "parameters": [
+          {
+            "description": "Maximum number of rows to return",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "format": "int64",
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Rows to skip before returning results. Requires `limit`.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor for keyset pagination. Cannot be combined with `offset`, `sort`, or `order`.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Field to sort by",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "enum": [
+                "id",
+                "title",
+                "status"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort direction. Requires `sort`.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact-match filter for `id`",
+            "in": "query",
+            "name": "filter_id",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Exact-match filter for `title`",
+            "in": "query",
+            "name": "filter_title",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring filter for `title`. `%`, `_`, and `\\` are treated literally.",
+            "in": "query",
+            "name": "filter_title_contains",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact-match filter for `status`",
+            "in": "query",
+            "name": "filter_status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid query parameters"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "List Post",
+        "tags": [
+          "Post"
+        ]
+      },
+      "post": {
+        "operationId": "createPost",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request body or validation error"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Payload too large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported media type"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create Post",
+        "tags": [
+          "Post"
+        ]
+      }
+    },
+    "/posts/{id}": {
+      "delete": {
+        "operationId": "deletePost",
+        "parameters": [
+          {
+            "description": "Path parameter for `id`",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid path parameters"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete Post",
+        "tags": [
+          "Post"
+        ]
+      },
+      "get": {
+        "operationId": "getPost",
+        "parameters": [
+          {
+            "description": "Path parameter for `id`",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Post"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid path parameters"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Get Post",
+        "tags": [
+          "Post"
+        ]
+      },
+      "put": {
+        "operationId": "updatePost",
+        "parameters": [
+          {
+            "description": "Path parameter for `id`",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request body or validation error"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Payload too large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported media type"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update Post",
+        "tags": [
+          "Post"
+        ]
+      }
+    }
+  },
+  "schemas": {
+    "Post": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "published",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "workflow": {
+          "additionalProperties": false,
+          "nullable": true,
+          "properties": {
+            "current": {
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "previous": {
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ],
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "current"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "title",
+        "status"
+      ],
+      "type": "object"
+    },
+    "PostCreate": {
+      "properties": {
+        "status": {
+          "enum": [
+            "draft",
+            "published",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "workflow": {
+          "additionalProperties": false,
+          "nullable": true,
+          "properties": {
+            "current": {
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "previous": {
+              "enum": [
+                "draft",
+                "published",
+                "archived"
+              ],
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "current"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "title",
+        "status"
+      ],
+      "type": "object"
+    },
+    "PostListResponse": {
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/Post"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "minimum": 1,
+          "nullable": true,
+          "type": "integer"
+        },
+        "next_cursor": {
+          "nullable": true,
+          "type": "string"
+        },
+        "next_offset": {
+          "format": "int64",
+          "minimum": 0,
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "count",
+        "offset"
+      ],
+      "type": "object"
+    }
+  }
+}

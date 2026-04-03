@@ -1,0 +1,220 @@
+{
+  "paths": {
+    "/posts/{parent_id}/tags": {
+      "get": {
+        "operationId": "listTagByPostsTags",
+        "parameters": [
+          {
+            "description": "Path parameter for `tags`",
+            "in": "path",
+            "name": "parent_id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum number of rows to return",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Rows to skip before returning results. Requires `limit`.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor for keyset pagination. Cannot be combined with `offset`, `sort`, or `order`.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Field to sort by",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "enum": [
+                "id",
+                "name"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort direction. Requires `sort`.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact-match filter for `id`",
+            "in": "query",
+            "name": "filter_id",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Exact-match filter for `name`",
+            "in": "query",
+            "name": "filter_name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring filter for `name`. `%`, `_`, and `\\` are treated literally.",
+            "in": "query",
+            "name": "filter_name_contains",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagListResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid path parameters"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "List Tag by posts",
+        "tags": [
+          "Tag"
+        ]
+      }
+    }
+  },
+  "schemas": {
+    "Tag": {
+      "properties": {
+        "id": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "TagListResponse": {
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/Tag"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "minimum": 1,
+          "nullable": true,
+          "type": "integer"
+        },
+        "next_cursor": {
+          "nullable": true,
+          "type": "string"
+        },
+        "next_offset": {
+          "format": "int64",
+          "minimum": 0,
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "count",
+        "offset"
+      ],
+      "type": "object"
+    }
+  }
+}

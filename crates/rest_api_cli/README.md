@@ -205,6 +205,12 @@ The first strict slice reports high-confidence warnings for:
 - TLS certificate/key paths that do not exist yet
 - authorization contracts that do not affect generated runtime behavior
 - declared authorization scopes that are not referenced anywhere else
+- legacy `security.auth.jwt_secret` usage when the service could move to asymmetric JWT config
+- asymmetric JWT setups that publish only a single verification key and therefore have no rotation
+  overlap window
+- auth email `public_base_url` values that still point at localhost or loopback hosts
+- built-in auth portal/admin UI paths that overlap generated `/api` namespaces or root-level
+  static mounts
 - row-policy, nested-route, `exists`, or hybrid scope lookup fields that rely on inferred indexes
   without an explicit `.eon` index declaration
 - empty declared build-artifact env overrides, binary/bundle path collisions, and cache/output
@@ -767,6 +773,19 @@ The CLI tool respects the following environment variables:
 | `ADMIN_PASSWORD` | Default admin password | None |
 | `ADMIN_<COLUMN_NAME>` | Optional built-in auth claim column value, for example `ADMIN_TENANT_ID` or `ADMIN_IS_STAFF` | None |
 | `JWT_SECRET` / `JWT_SECRET_FILE` | Legacy shared-secret JWT signing key or mounted file containing it | Required only when built-in auth uses the legacy `security.auth.jwt_secret` path |
+
+For asymmetric `security.auth.jwt` configs, prefer `JWT_SIGNING_KEY_FILE` plus one file-backed
+environment variable for each public verification key, for example
+`JWT_PUBLIC_KEY_FILE` and `JWT_PUBLIC_KEY_PREVIOUS_FILE`. The built-in auth runtime exposes
+`/.well-known/jwks.json` from those verification keys, so the safest rotation sequence is:
+
+1. add the new public key to `verification_keys`
+2. switch `active_kid` and `signing_key` to the new keypair
+3. deploy and wait for the old token TTL window to pass
+4. remove the old verification key
+
+`vsr check --strict` warns when an asymmetric config still has only one verification key and
+therefore has no overlap window for safe rotation.
 
 ## Examples
 

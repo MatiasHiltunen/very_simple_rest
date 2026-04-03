@@ -6,8 +6,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::blocking::Client;
 use rest_macro_core::db::query;
+use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 use vsra::commands::db::{connect_database, database_url_from_service_config};
@@ -16,6 +18,16 @@ use vsra::commands::setup::run_setup;
 use vsra::commands::tls::generate_self_signed_certificate;
 
 const TEST_TURSO_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const TEST_ED25519_PRIVATE_KEY_CURRENT: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEICan3gTz94CxAFR90FubWnI1S7Hu81HAawRP0JnhgJd1\n-----END PRIVATE KEY-----\n";
+const TEST_ED25519_PUBLIC_KEY_CURRENT: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6SXZeouSZ6gAAGu0fq5MlKZt7T0z0mf3pK1NmaIWqi4=\n-----END PUBLIC KEY-----\n";
+const TEST_ED25519_PUBLIC_KEY_PREVIOUS: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMtHpnFKVCrgrEn+eT5L9XptGRw7nq2RZy5ZsM6TdS1Q=\n-----END PUBLIC KEY-----\n";
+
+#[derive(Serialize)]
+struct TestBearerClaims {
+    sub: i64,
+    roles: Vec<String>,
+    exp: usize,
+}
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -105,6 +117,25 @@ fn read_to_string(path: &Path) -> String {
     fs::read_to_string(path).expect("capture file should be readable")
 }
 
+fn write_secret_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, contents).expect("secret file should write");
+    path
+}
+
+fn issue_hs256_token(secret: &str, user_id: i64, roles: &[&str]) -> String {
+    encode(
+        &Header::default(),
+        &TestBearerClaims {
+            sub: user_id,
+            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+            exp: 4_102_444_800,
+        },
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .expect("test token should encode")
+}
+
 fn capture_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = fs::read_dir(dir)
         .expect("capture directory should exist")
@@ -147,6 +178,20 @@ fn path_and_query_from_url(url: &str) -> String {
         Some(index) => url[index..].to_owned(),
         None => "/".to_owned(),
     }
+}
+
+fn multipart_upload_payload(file_name: &str, body: &[u8]) -> (String, Vec<u8>) {
+    let boundary = "----vsr-storage-upload";
+    let mut payload = Vec::new();
+    payload.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: text/plain\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    payload.extend_from_slice(body);
+    payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), payload)
 }
 
 fn token_from_capture(path: &Path) -> String {
@@ -471,6 +516,2174 @@ fn vsr_serve_supports_builtin_auth_and_authz_management() {
 }
 
 #[test]
+fn vsr_serve_supports_builtin_auth_portal_dashboard_and_admin_users() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-auth-management-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("auth_management_api.eon");
+    fs::copy(fixture_path("auth_management_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize auth management service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-auth-management.stdout.log");
+    let stderr_log = root.join("serve-auth-management.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-auth-management-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve auth management flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/auth/portal").is_some());
+    assert!(openapi["paths"].get("/auth/admin").is_some());
+    assert!(openapi["paths"].get("/auth/admin/users").is_some());
+    assert!(openapi["paths"].get("/auth/admin/users/{id}").is_some());
+    assert!(
+        openapi["paths"]
+            .get("/auth/admin/users/{id}/verification")
+            .is_some()
+    );
+
+    let portal_response = client
+        .get(format!("{base_url}/api/auth/portal"))
+        .send()
+        .expect("account portal should load");
+    assert_eq!(portal_response.status(), reqwest::StatusCode::OK);
+    let portal_body = portal_response.text().expect("portal body should read");
+    assert!(portal_body.contains("Account Portal"));
+
+    let unauthorized_admin_page = client
+        .get(format!("{base_url}/api/auth/admin"))
+        .send()
+        .expect("admin page should respond");
+    assert_eq!(
+        unauthorized_admin_page.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "admin@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(login_response.status(), reqwest::StatusCode::OK);
+    let login_body: Value = login_response.json().expect("login body should decode");
+    let token = login_body["token"]
+        .as_str()
+        .expect("login should return a token")
+        .to_owned();
+
+    let admin_page_response = client
+        .get(format!("{base_url}/api/auth/admin"))
+        .bearer_auth(&token)
+        .send()
+        .expect("admin dashboard should load");
+    assert_eq!(admin_page_response.status(), reqwest::StatusCode::OK);
+    let admin_page_body = admin_page_response
+        .text()
+        .expect("admin dashboard body should read");
+    assert!(admin_page_body.contains("Admin Dashboard"));
+    assert!(admin_page_body.contains("Create user"));
+
+    let create_response = client
+        .post(format!("{base_url}/api/auth/admin/users"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "email": "carol@example.com",
+            "password": "password789",
+            "role": "reviewer",
+            "email_verified": false,
+            "send_verification_email": false
+        }))
+        .send()
+        .expect("managed user create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let location = create_response
+        .headers()
+        .get("Location")
+        .and_then(|value| value.to_str().ok())
+        .expect("managed user create should expose Location")
+        .to_owned();
+    let created_user: Value = create_response
+        .json()
+        .expect("managed user response should decode");
+    let created_id = created_user["id"]
+        .as_i64()
+        .expect("created managed user should include id");
+    assert_eq!(created_user["email"], "carol@example.com");
+    assert_eq!(created_user["role"], "reviewer");
+    assert_eq!(created_user["email_verified"], false);
+    assert_eq!(location, format!("/api/auth/admin/users/{created_id}"));
+
+    let list_response = client
+        .get(format!(
+            "{base_url}/api/auth/admin/users?email=carol@example.com&limit=10&offset=0"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .expect("managed user list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let listed: Value = list_response
+        .json()
+        .expect("managed user list should decode");
+    let listed_items = listed["items"]
+        .as_array()
+        .expect("managed user list should be an array");
+    assert_eq!(listed["limit"], 10);
+    assert_eq!(listed["offset"], 0);
+    assert_eq!(listed_items.len(), 1);
+    assert_eq!(listed_items[0]["id"], created_id);
+
+    let patch_response = client
+        .patch(format!("{base_url}/api/auth/admin/users/{created_id}"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "role": "moderator",
+            "email_verified": true
+        }))
+        .send()
+        .expect("managed user update should succeed");
+    assert_eq!(patch_response.status(), reqwest::StatusCode::OK);
+    let patched_user: Value = patch_response
+        .json()
+        .expect("managed user update should decode");
+    assert_eq!(patched_user["id"], created_id);
+    assert_eq!(patched_user["role"], "moderator");
+    assert_eq!(patched_user["email_verified"], true);
+
+    let get_response = client
+        .get(format!("{base_url}/api/auth/admin/users/{created_id}"))
+        .bearer_auth(&token)
+        .send()
+        .expect("managed user should load");
+    assert_eq!(get_response.status(), reqwest::StatusCode::OK);
+    let loaded_user: Value = get_response.json().expect("managed user should decode");
+    assert_eq!(loaded_user["id"], created_id);
+    assert_eq!(loaded_user["role"], "moderator");
+    assert_eq!(loaded_user["email_verified"], true);
+
+    let delete_response = client
+        .delete(format!("{base_url}/api/auth/admin/users/{created_id}"))
+        .bearer_auth(&token)
+        .send()
+        .expect("managed user delete should succeed");
+    assert_eq!(delete_response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let missing_response = client
+        .get(format!("{base_url}/api/auth/admin/users/{created_id}"))
+        .bearer_auth(&token)
+        .send()
+        .expect("deleted managed user lookup should respond");
+    assert_eq!(missing_response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn vsr_serve_supports_admin_verification_resend_and_auth_email_pages() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let root = test_root();
+    let capture_dir = root.join("capture");
+    fs::create_dir_all(&capture_dir).expect("capture directory should exist");
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-auth-email-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+        std::env::set_var("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir);
+    }
+
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("auth_management_api.eon");
+    fs::copy(fixture_path("auth_management_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize auth management service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-auth-email.stdout.log");
+    let stderr_log = root.join("serve-auth-email.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-auth-email-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .env("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve auth email flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    for path in [
+        "/auth/account/verification",
+        "/auth/verify-email",
+        "/auth/verification/resend",
+        "/auth/password-reset",
+        "/auth/password-reset/request",
+        "/auth/password-reset/confirm",
+    ] {
+        assert!(
+            openapi["paths"].get(path).is_some(),
+            "openapi should document {path}"
+        );
+    }
+
+    let login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "admin@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(login_response.status(), reqwest::StatusCode::OK);
+    let login_body: Value = login_response.json().expect("login body should decode");
+    let token = login_body["token"]
+        .as_str()
+        .expect("login should return a token")
+        .to_owned();
+
+    let create_response = client
+        .post(format!("{base_url}/api/auth/admin/users"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "email": "pending@example.com",
+            "password": "password789",
+            "role": "reviewer",
+            "email_verified": false,
+            "send_verification_email": false
+        }))
+        .send()
+        .expect("managed user create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created_user: Value = create_response
+        .json()
+        .expect("managed user response should decode");
+    let created_id = created_user["id"]
+        .as_i64()
+        .expect("created managed user should include id");
+
+    let resend_response = client
+        .post(format!(
+            "{base_url}/api/auth/admin/users/{created_id}/verification"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .expect("managed user verification resend should succeed");
+    assert_eq!(resend_response.status(), reqwest::StatusCode::ACCEPTED);
+
+    let captured = wait_for_capture_count(&capture_dir, 1, Duration::from_secs(10));
+    let verification_url = url_from_capture(&captured[0]);
+    let verification_path = path_and_query_from_url(&verification_url);
+    assert!(
+        verification_path.starts_with("/api/auth/verify-email?token="),
+        "unexpected verification url: {verification_url}"
+    );
+
+    let verify_page_response = client
+        .get(format!("{base_url}{verification_path}"))
+        .send()
+        .expect("verify email page should load");
+    assert_eq!(verify_page_response.status(), reqwest::StatusCode::OK);
+    let verify_page_body = verify_page_response
+        .text()
+        .expect("verify email page body should read");
+    assert!(verify_page_body.contains("Email Verified"));
+
+    let verified_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "pending@example.com",
+            "password": "password789"
+        }))
+        .send()
+        .expect("verified managed user login should succeed");
+    assert_eq!(verified_login_response.status(), reqwest::StatusCode::OK);
+    let verified_login_body: Value = verified_login_response
+        .json()
+        .expect("verified managed user login should decode");
+    let verified_token = verified_login_body["token"]
+        .as_str()
+        .expect("verified managed user login should return a token")
+        .to_owned();
+
+    let account_resend_response = client
+        .post(format!("{base_url}/api/auth/account/verification"))
+        .bearer_auth(&verified_token)
+        .send()
+        .expect("authenticated account resend should respond");
+    assert_eq!(
+        account_resend_response.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    let password_reset_response = client
+        .post(format!("{base_url}/api/auth/password-reset/request"))
+        .json(&serde_json::json!({
+            "email": "pending@example.com"
+        }))
+        .send()
+        .expect("password reset request should succeed");
+    assert_eq!(
+        password_reset_response.status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+
+    let captured = wait_for_capture_count(&capture_dir, 2, Duration::from_secs(10));
+    let reset_capture = captured
+        .iter()
+        .find(|path| url_from_capture(path).contains("/password-reset?token="))
+        .expect("reset email should be captured");
+    let reset_token = token_from_capture(reset_capture);
+    let reset_url = url_from_capture(reset_capture);
+    let reset_path = path_and_query_from_url(&reset_url);
+    assert!(
+        reset_path.starts_with("/api/auth/password-reset?token="),
+        "unexpected password reset url: {reset_url}"
+    );
+
+    let reset_page_response = client
+        .get(format!("{base_url}{reset_path}"))
+        .send()
+        .expect("password reset page should load");
+    assert_eq!(reset_page_response.status(), reqwest::StatusCode::OK);
+    let reset_page_body = reset_page_response
+        .text()
+        .expect("password reset page body should read");
+    assert!(reset_page_body.contains("Choose A New Password"));
+
+    let confirm_reset_response = client
+        .post(format!("{base_url}/api/auth/password-reset/confirm"))
+        .json(&serde_json::json!({
+            "token": reset_token,
+            "new_password": "password456"
+        }))
+        .send()
+        .expect("password reset confirmation should succeed");
+    assert_eq!(
+        confirm_reset_response.status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+
+    let old_password_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "pending@example.com",
+            "password": "password789"
+        }))
+        .send()
+        .expect("old password login should respond");
+    assert_eq!(
+        old_password_login_response.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let new_password_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "pending@example.com",
+            "password": "password456"
+        }))
+        .send()
+        .expect("new password login should succeed");
+    assert_eq!(new_password_login_response.status(), reqwest::StatusCode::OK);
+}
+
+#[test]
+fn vsr_serve_supports_public_verification_resend_for_unverified_users() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let root = test_root();
+    let capture_dir = root.join("capture");
+    fs::create_dir_all(&capture_dir).expect("capture directory should exist");
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-public-verification-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+        std::env::set_var("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir);
+    }
+
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("auth_management_api.eon");
+    fs::copy(fixture_path("auth_management_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize auth management service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-public-verification.stdout.log");
+    let stderr_log = root.join("serve-public-verification.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-public-verification-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .env("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve public verification flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let register_response = client
+        .post(format!("{base_url}/api/auth/register"))
+        .json(&serde_json::json!({
+            "email": "alice@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("user registration should succeed");
+    assert_eq!(register_response.status(), reqwest::StatusCode::CREATED);
+
+    let captured = wait_for_capture_count(&capture_dir, 1, Duration::from_secs(10));
+    let first_verification_url = url_from_capture(&captured[0]);
+    assert!(
+        first_verification_url.contains("/api/auth/verify-email?token="),
+        "unexpected initial verification url: {first_verification_url}"
+    );
+
+    let login_before_verify_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "alice@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("pre-verification login should respond");
+    assert_eq!(
+        login_before_verify_response.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    let login_before_verify_body: Value = login_before_verify_response
+        .json()
+        .expect("pre-verification login error should decode");
+    assert_eq!(login_before_verify_body["code"], "email_not_verified");
+
+    let resend_response = client
+        .post(format!("{base_url}/api/auth/verification/resend"))
+        .json(&serde_json::json!({
+            "email": "alice@example.com"
+        }))
+        .send()
+        .expect("public verification resend should respond");
+    assert_eq!(resend_response.status(), reqwest::StatusCode::ACCEPTED);
+
+    let captured = wait_for_capture_count(&capture_dir, 2, Duration::from_secs(10));
+    let resend_capture = captured
+        .iter()
+        .rev()
+        .find(|path| url_from_capture(path).contains("/verify-email?token="))
+        .expect("resent verification email should be captured");
+    let resent_verification_url = url_from_capture(resend_capture);
+    let resent_verification_path = path_and_query_from_url(&resent_verification_url);
+    assert!(
+        resent_verification_path.starts_with("/api/auth/verify-email?token="),
+        "unexpected resent verification url: {resent_verification_url}"
+    );
+
+    let verify_page_response = client
+        .get(format!("{base_url}{resent_verification_path}"))
+        .send()
+        .expect("verify email page should load");
+    assert_eq!(verify_page_response.status(), reqwest::StatusCode::OK);
+    let verify_page_body = verify_page_response
+        .text()
+        .expect("verify email page body should read");
+    assert!(verify_page_body.contains("Email Verified"));
+
+    let login_after_verify_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "alice@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("verified user login should succeed");
+    assert_eq!(
+        login_after_verify_response.status(),
+        reqwest::StatusCode::OK
+    );
+}
+
+#[test]
+fn vsr_serve_exposes_jwks_for_asymmetric_jwt() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let signing_key_path = write_secret_file(
+        &root,
+        "jwt-signing-key.pem",
+        TEST_ED25519_PRIVATE_KEY_CURRENT,
+    );
+    let current_public_key_path = write_secret_file(
+        &root,
+        "jwt-current-public.pem",
+        TEST_ED25519_PUBLIC_KEY_CURRENT,
+    );
+    let previous_public_key_path = write_secret_file(
+        &root,
+        "jwt-previous-public.pem",
+        TEST_ED25519_PUBLIC_KEY_PREVIOUS,
+    );
+
+    unsafe {
+        std::env::set_var("JWT_SIGNING_KEY_FILE", &signing_key_path);
+        std::env::set_var("JWT_PUBLIC_KEY_FILE", &current_public_key_path);
+        std::env::set_var("JWT_PUBLIC_KEY_PREVIOUS_FILE", &previous_public_key_path);
+    }
+
+    let config = root.join("asymmetric_jwt_api.eon");
+    fs::write(
+        &config,
+        r#"module: "asymmetric_jwt_api"
+security: {
+    auth: {
+        issuer: "serve_cli_asymmetric_jwt_tests"
+        audience: "serve_cli_clients"
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "current"
+            signing_key: { env_or_file: "JWT_SIGNING_KEY" }
+            verification_keys: [
+                {
+                    kid: "current"
+                    key: { env_or_file: "JWT_PUBLIC_KEY" }
+                }
+                {
+                    kid: "previous"
+                    key: { env_or_file: "JWT_PUBLIC_KEY_PREVIOUS" }
+                }
+            ]
+        }
+    }
+}
+resources: [
+    {
+        name: "Doc"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+    )
+    .expect("config should write");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize asymmetric auth service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-jwks.stdout.log");
+    let stderr_log = root.join("serve-jwks.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .env("JWT_SIGNING_KEY_FILE", &signing_key_path)
+        .env("JWT_PUBLIC_KEY_FILE", &current_public_key_path)
+        .env("JWT_PUBLIC_KEY_PREVIOUS_FILE", &previous_public_key_path)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/.well-known/jwks.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve asymmetric auth flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/auth/login").is_some());
+    assert!(openapi["paths"].get("/.well-known/jwks.json").is_some());
+
+    let jwks_response = client
+        .get(format!("{base_url}/.well-known/jwks.json"))
+        .send()
+        .expect("jwks should load");
+    assert_eq!(jwks_response.status(), reqwest::StatusCode::OK);
+    let jwks_body: Value = jwks_response.json().expect("jwks should decode");
+    let keys = jwks_body["keys"]
+        .as_array()
+        .expect("jwks should contain keys");
+    assert_eq!(keys.len(), 2);
+    assert!(keys.iter().any(|key| {
+        key["kid"] == "current"
+            && key["alg"] == "EdDSA"
+            && key["kty"] == "OKP"
+            && key["crv"] == "Ed25519"
+            && key.get("d").is_none()
+    }));
+    assert!(keys.iter().any(|key| {
+        key["kid"] == "previous"
+            && key["alg"] == "EdDSA"
+            && key["kty"] == "OKP"
+            && key["crv"] == "Ed25519"
+            && key.get("d").is_none()
+    }));
+
+    let login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&serde_json::json!({
+            "email": "admin@example.com",
+            "password": "password123"
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(login_response.status(), reqwest::StatusCode::OK);
+    let login_body: Value = login_response.json().expect("login body should decode");
+    let token = login_body["token"]
+        .as_str()
+        .expect("login should return a token")
+        .to_owned();
+
+    let me_response = client
+        .get(format!("{base_url}/api/auth/me"))
+        .bearer_auth(&token)
+        .send()
+        .expect("auth me should load");
+    assert_eq!(me_response.status(), reqwest::StatusCode::OK);
+    let me_body: Value = me_response.json().expect("auth me should decode");
+    let roles = me_body["roles"]
+        .as_array()
+        .expect("auth me should include roles");
+    assert!(roles.iter().any(|value| value == "admin"));
+}
+
+#[test]
+fn vsr_serve_supports_storage_uploads_and_public_mounts() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-storage-upload-secret");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(root.join("var/uploads")).expect("uploads dir should exist");
+
+    let config = root.join("storage_upload_api.eon");
+    fs::copy(fixture_path("storage_upload_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize storage upload service");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-storage.stdout.log");
+    let stderr_log = root.join("serve-storage.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-storage-upload-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve storage upload flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/uploads").is_some());
+    assert_eq!(
+        openapi["paths"]["/uploads"]["post"]["responses"]["201"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/StorageUploadResponse"
+    );
+
+    let token = issue_hs256_token("serve-cli-storage-upload-secret", 1, &["user"]);
+    let (content_type, payload) = multipart_upload_payload("notes.txt", b"hello upload");
+    let upload_response = client
+        .post(format!("{base_url}/api/uploads"))
+        .bearer_auth(&token)
+        .header("Content-Type", content_type)
+        .body(payload)
+        .send()
+        .expect("upload should succeed");
+    assert_eq!(upload_response.status(), reqwest::StatusCode::CREATED);
+    let uploaded: Value = upload_response.json().expect("upload response should decode");
+    assert_eq!(uploaded["backend"], "uploads");
+    assert_eq!(uploaded["file_name"], "notes.txt");
+    assert_eq!(uploaded["size_bytes"], 12);
+    let object_key = uploaded["object_key"]
+        .as_str()
+        .expect("upload should include object key");
+    let public_url = uploaded["public_url"]
+        .as_str()
+        .expect("upload should expose a public url");
+    assert_eq!(public_url, format!("/uploads/{object_key}"));
+
+    let public_response = client
+        .get(format!("{base_url}{public_url}"))
+        .send()
+        .expect("uploaded public object should load");
+    assert_eq!(public_response.status(), reqwest::StatusCode::OK);
+    let public_body = public_response
+        .bytes()
+        .expect("uploaded public object should read");
+    assert_eq!(public_body.as_ref(), b"hello upload");
+
+    let forbidden_token = issue_hs256_token("serve-cli-storage-upload-secret", 2, &["viewer"]);
+    let (forbidden_content_type, forbidden_payload) = multipart_upload_payload("notes.txt", b"x");
+    let forbidden_response = client
+        .post(format!("{base_url}/api/uploads"))
+        .bearer_auth(&forbidden_token)
+        .header("Content-Type", forbidden_content_type)
+        .body(forbidden_payload)
+        .send()
+        .expect("forbidden upload should respond");
+    assert_eq!(forbidden_response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn vsr_serve_applies_computed_api_fields_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("api_computed_fields_api.eon");
+    fs::copy(fixture_path("api_computed_fields_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE post (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("schema should apply");
+            query("INSERT INTO post (id, slug, title, summary) VALUES (1, 'alpha', 'Alpha', 'Intro')")
+                .execute(&pool)
+                .await
+                .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-computed.stdout.log");
+    let stderr_log = root.join("serve-computed.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve computed-field flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["permalink"]["type"],
+        "string"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["preview"]["nullable"],
+        true
+    );
+
+    let item_response = client
+        .get(format!("{base_url}/api/posts/1"))
+        .send()
+        .expect("item should load");
+    assert_eq!(item_response.status(), reqwest::StatusCode::OK);
+    let item_body: Value = item_response.json().expect("item body should decode");
+    assert_eq!(item_body["permalink"], "/posts/alpha");
+    assert_eq!(item_body["preview"], "alpha:Intro");
+
+    let compact_response = client
+        .get(format!("{base_url}/api/posts?context=compact"))
+        .send()
+        .expect("compact list should load");
+    assert_eq!(compact_response.status(), reqwest::StatusCode::OK);
+    let compact_body: Value = compact_response.json().expect("compact body should decode");
+    assert_eq!(compact_body["items"][0]["id"], 1);
+    assert_eq!(compact_body["items"][0]["permalink"], "/posts/alpha");
+    assert!(compact_body["items"][0].get("title").is_none());
+}
+
+#[test]
+fn vsr_serve_applies_response_contexts_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("api_contexts_api.eon");
+    fs::copy(fixture_path("api_contexts_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE blog_post (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title_text TEXT NOT NULL,
+                    author_id INTEGER NOT NULL,
+                    draft_body TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("schema should apply");
+            query(
+                "INSERT INTO blog_post (id, title_text, author_id, draft_body) VALUES (1, 'Alpha', 7, 'secret alpha')",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-contexts.stdout.log");
+    let stderr_log = root.join("serve-contexts.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve response-context flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    let list_parameters = openapi["paths"]["/posts"]["get"]["parameters"]
+        .as_array()
+        .expect("list parameters should exist");
+    let context_parameter = list_parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "context")
+        .expect("context parameter should exist");
+    assert_eq!(context_parameter["schema"]["enum"], json!(["view", "edit"]));
+    assert_eq!(context_parameter["schema"]["default"], json!("view"));
+
+    let item_response = client
+        .get(format!("{base_url}/api/posts/1"))
+        .send()
+        .expect("item should load");
+    assert_eq!(item_response.status(), reqwest::StatusCode::OK);
+    let item_body: Value = item_response.json().expect("item body should decode");
+    assert_eq!(item_body["title"], "Alpha");
+    assert!(item_body.get("secret").is_none());
+
+    let edit_response = client
+        .get(format!("{base_url}/api/posts/1?context=edit"))
+        .send()
+        .expect("edit item should load");
+    assert_eq!(edit_response.status(), reqwest::StatusCode::OK);
+    let edit_body: Value = edit_response.json().expect("edit body should decode");
+    assert_eq!(edit_body["secret"], "secret alpha");
+
+    let invalid_response = client
+        .get(format!("{base_url}/api/posts/1?context=unknown"))
+        .send()
+        .expect("invalid context request should respond");
+    assert_eq!(invalid_response.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn vsr_serve_lists_many_to_many_routes_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("many_to_many_api.eon");
+    fs::copy(fixture_path("many_to_many_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE post (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("post schema should apply");
+            query(
+                "CREATE TABLE tag (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("tag schema should apply");
+            query(
+                "CREATE TABLE post_tag (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    post_id INTEGER NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    FOREIGN KEY (post_id) REFERENCES post(id) ON DELETE CASCADE,
+                    FOREIGN KEY (tag_id) REFERENCES tag(id) ON DELETE CASCADE
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("join schema should apply");
+
+            query("INSERT INTO post (id, title) VALUES (1, 'First'), (2, 'Second')")
+                .execute(&pool)
+                .await
+                .expect("posts should insert");
+            query("INSERT INTO tag (id, name) VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')")
+                .execute(&pool)
+                .await
+                .expect("tags should insert");
+            query("INSERT INTO post_tag (post_id, tag_id) VALUES (1, 1), (1, 2), (2, 3)")
+                .execute(&pool)
+                .await
+                .expect("join rows should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-many-to-many.stdout.log");
+    let stderr_log = root.join("serve-many-to-many.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve many-to-many flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/posts/{parent_id}/tags").is_some());
+    assert_eq!(
+        openapi["paths"]["/posts/{parent_id}/tags"]["get"]["parameters"][0]["name"],
+        "parent_id"
+    );
+    assert_eq!(
+        openapi["paths"]["/posts/{parent_id}/tags"]["get"]["responses"]["200"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/TagListResponse"
+    );
+
+    let list_response = client
+        .get(format!("{base_url}/api/posts/1/tags?sort=name"))
+        .send()
+        .expect("many-to-many list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("many-to-many list should decode");
+    assert_eq!(list_body["total"], 2);
+    assert_eq!(list_body["items"][0]["name"], "alpha");
+    assert_eq!(list_body["items"][1]["name"], "beta");
+
+    let filtered_response = client
+        .get(format!("{base_url}/api/posts/1/tags?filter_name=beta"))
+        .send()
+        .expect("filtered many-to-many list should load");
+    assert_eq!(filtered_response.status(), reqwest::StatusCode::OK);
+    let filtered_body: Value = filtered_response
+        .json()
+        .expect("filtered many-to-many body should decode");
+    assert_eq!(filtered_body["total"], 1);
+    assert_eq!(filtered_body["items"][0]["name"], "beta");
+
+    let second_post_response = client
+        .get(format!("{base_url}/api/posts/2/tags"))
+        .send()
+        .expect("second many-to-many list should load");
+    assert_eq!(second_post_response.status(), reqwest::StatusCode::OK);
+    let second_post_body: Value = second_post_response
+        .json()
+        .expect("second many-to-many body should decode");
+    assert_eq!(second_post_body["total"], 1);
+    assert_eq!(second_post_body["items"][0]["name"], "gamma");
+}
+
+#[test]
+fn vsr_serve_supports_public_catalog_routes_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("public_catalog_api.eon");
+    fs::copy(fixture_path("public_catalog_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE organization (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    country TEXT NOT NULL,
+                    website_url TEXT NOT NULL,
+                    summary TEXT NOT NULL
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("organization schema should apply");
+            query(
+                "CREATE TABLE interest (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    organization_id INTEGER NOT NULL
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("interest schema should apply");
+
+            query(
+                "INSERT INTO organization (name, country, website_url, summary) VALUES
+                    ('Nordic Bridge Institute', 'Finland', 'https://nordic.example', 'Cross-border education and industry matching'),
+                    ('Baltic Industry Lab', 'Estonia', 'https://baltic.example', 'Applied industrial collaboration partner')",
+            )
+            .execute(&pool)
+            .await
+            .expect("organization seed data should insert");
+            query(
+                "INSERT INTO interest (title, summary, organization_id) VALUES
+                    ('AI Thesis Co-Creation', 'Seeking thesis topics on trustworthy AI and shared supervision', 1),
+                    ('Mobility Pilot Ideas', 'Open to data-sharing pilots across campuses and ports', 1),
+                    ('Green Manufacturing Topics', 'Looking for thesis work on industrial decarbonization', 2)",
+            )
+            .execute(&pool)
+            .await
+            .expect("interest seed data should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-public-catalog.stdout.log");
+    let stderr_log = root.join("serve-public-catalog.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve public catalog flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/organization").is_some());
+    assert!(openapi["paths"].get("/organization/{id}").is_some());
+    assert!(openapi["paths"].get("/organization/{parent_id}/interest").is_some());
+    assert!(openapi["paths"]["/organization"]["get"]["security"].is_null());
+
+    let list_response = client
+        .get(format!("{base_url}/api/organization"))
+        .send()
+        .expect("public organization list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("public organization list should decode");
+    assert_eq!(list_body["total"], 2);
+    assert_eq!(list_body["items"][0]["name"], "Nordic Bridge Institute");
+
+    let contains_response = client
+        .get(format!("{base_url}/api/organization?filter_name_contains=BRIDGE"))
+        .send()
+        .expect("contains search should load");
+    assert_eq!(contains_response.status(), reqwest::StatusCode::OK);
+    let contains_body: Value = contains_response.json().expect("contains search should decode");
+    assert_eq!(contains_body["total"], 1);
+    assert_eq!(contains_body["items"][0]["country"], "Finland");
+
+    let nested_response = client
+        .get(format!(
+            "{base_url}/api/organization/1/interest?filter_summary_contains=THESIS"
+        ))
+        .send()
+        .expect("nested public list should load");
+    assert_eq!(nested_response.status(), reqwest::StatusCode::OK);
+    let nested_body: Value = nested_response.json().expect("nested public list should decode");
+    assert_eq!(nested_body["total"], 1);
+    assert_eq!(nested_body["items"][0]["title"], "AI Thesis Co-Creation");
+
+    let create_response = client
+        .post(format!("{base_url}/api/organization"))
+        .json(&json!({
+            "name": "Unauthorized Org",
+            "country": "Sweden",
+            "website_url": "https://unauthorized.example",
+            "summary": "Should not be created anonymously"
+        }))
+        .send()
+        .expect("anonymous create should respond");
+    assert_eq!(create_response.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn vsr_serve_supports_object_field_shapes_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-object-fields-secret");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("object_fields_api.eon");
+    fs::copy(fixture_path("object_fields_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE entry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    settings TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("schema should apply");
+            query("INSERT INTO entry (title, settings) VALUES (?, ?)")
+                .bind(r#"{"raw":"Hello world","rendered":"<p>Hello world</p>"}"#)
+                .bind(r#"{"featured":true,"categories":[1,2],"seo":{"slug":"hello-world"}}"#)
+                .execute(&pool)
+                .await
+                .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-object-fields.stdout.log");
+    let stderr_log = root.join("serve-object-fields.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-object-fields-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve object-field flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert_eq!(
+        openapi["components"]["schemas"]["Entry"]["properties"]["title"]["type"],
+        "object"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Entry"]["properties"]["title"]["additionalProperties"],
+        false
+    );
+
+    let list_response = client
+        .get(format!("{base_url}/api/entry"))
+        .send()
+        .expect("object-field list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("object-field list should decode");
+    assert_eq!(list_body["total"], 1);
+    assert_eq!(list_body["items"][0]["title"]["rendered"], "<p>Hello world</p>");
+    assert_eq!(list_body["items"][0]["settings"]["categories"][1], 2);
+
+    let token = issue_hs256_token("serve-cli-object-fields-secret", 1, &["user"]);
+    let create_response = client
+        .post(format!("{base_url}/api/entry"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "title": {
+                "raw": "Typed object title",
+                "rendered": "<p>Typed object title</p>"
+            },
+            "settings": {
+                "featured": false,
+                "categories": [5, 8],
+                "seo": { "slug": "typed-object-title" }
+            }
+        }))
+        .send()
+        .expect("object-field create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created_body: Value = create_response.json().expect("object-field create should decode");
+    assert_eq!(created_body["title"]["raw"], "Typed object title");
+    assert_eq!(created_body["settings"]["seo"]["slug"], "typed-object-title");
+}
+
+#[test]
+fn vsr_serve_supports_list_field_shapes_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-list-fields-secret");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("list_fields_api.eon");
+    fs::copy(fixture_path("list_fields_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE entry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    categories TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    blocks TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("schema should apply");
+            query("INSERT INTO entry (categories, tags, blocks) VALUES (?, ?, ?)")
+                .bind("[1,2]")
+                .bind(r#"["alpha","beta"]"#)
+                .bind(r#"[{"name":"core/paragraph"}]"#)
+                .execute(&pool)
+                .await
+                .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-list-fields.stdout.log");
+    let stderr_log = root.join("serve-list-fields.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-list-fields-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve list-field flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert_eq!(
+        openapi["components"]["schemas"]["Entry"]["properties"]["categories"]["type"],
+        "array"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Entry"]["properties"]["blocks"]["items"]["type"],
+        "object"
+    );
+
+    let list_response = client
+        .get(format!("{base_url}/api/entry"))
+        .send()
+        .expect("list-field list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("list-field list should decode");
+    assert_eq!(list_body["total"], 1);
+    assert_eq!(list_body["items"][0]["categories"][1], 2);
+    assert_eq!(list_body["items"][0]["tags"][0], "alpha");
+
+    let token = issue_hs256_token("serve-cli-list-fields-secret", 1, &["user"]);
+    let create_response = client
+        .post(format!("{base_url}/api/entry"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "categories": [5, 8],
+            "tags": ["news", "ai"],
+            "blocks": [{ "name": "core/heading", "level": 2 }]
+        }))
+        .send()
+        .expect("list-field create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created_body: Value = create_response.json().expect("list-field create should decode");
+    assert_eq!(created_body["categories"][0], 5);
+    assert_eq!(created_body["tags"][1], "ai");
+    assert_eq!(created_body["blocks"][0]["name"], "core/heading");
+}
+
+#[test]
+fn vsr_serve_supports_enum_field_shapes_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-enum-fields-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("enum_fields_api.eon");
+    fs::copy(fixture_path("enum_fields_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize enum field service");
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query("INSERT INTO blog_post (id, title, status, workflow) VALUES (?, ?, ?, ?)")
+                .bind(1_i64)
+                .bind("Alpha")
+                .bind("published")
+                .bind(r#"{"current":"published","previous":"draft"}"#)
+                .execute(&pool)
+                .await
+                .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-enum-fields.stdout.log");
+    let stderr_log = root.join("serve-enum-fields.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-enum-fields-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve enum-field flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["status"]["enum"],
+        json!(["draft", "published", "archived"])
+    );
+
+    let list_response = client
+        .get(format!("{base_url}/api/posts?filter_status=published"))
+        .send()
+        .expect("enum list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("enum list should decode");
+    assert_eq!(list_body["items"][0]["status"], "published");
+    assert_eq!(list_body["items"][0]["workflow"]["current"], "published");
+
+    let invalid_filter_response = client
+        .get(format!("{base_url}/api/posts?filter_status=invalid"))
+        .send()
+        .expect("invalid enum filter should respond");
+    assert_eq!(invalid_filter_response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let contains_response = client
+        .get(format!("{base_url}/api/posts?filter_status_contains=pub"))
+        .send()
+        .expect("invalid enum contains should respond");
+    assert_eq!(contains_response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let token = issue_hs256_token("serve-cli-enum-fields-secret", 1, &["user"]);
+    let create_response = client
+        .post(format!("{base_url}/api/posts"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "title": "Beta",
+            "status": "draft",
+            "workflow": { "current": "draft" }
+        }))
+        .send()
+        .expect("enum create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let create_body: Value = create_response.json().expect("enum create should decode");
+    assert_eq!(create_body["status"], "draft");
+}
+
+#[test]
+fn vsr_serve_expands_mixin_fields_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-mixin-fields-secret");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("mixin_fields_api.eon");
+    fs::copy(fixture_path("mixin_fields_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE post (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id INTEGER NOT NULL,
+                    slug TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now')),
+                    updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%f000+00:00', 'now'))
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("schema should apply");
+            query(
+                "INSERT INTO post (tenant_id, slug, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(7_i64)
+            .bind("alpha")
+            .bind("Alpha")
+            .bind("2026-03-27T09:00:00Z")
+            .bind("2026-03-27T09:15:00Z")
+            .execute(&pool)
+            .await
+            .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-mixin-fields.stdout.log");
+    let stderr_log = root.join("serve-mixin-fields.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-mixin-fields-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve mixin-fields flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/post").is_some());
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["tenant_id"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["slug"]["type"],
+        "string"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["created_at"]["format"],
+        "date-time"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["updated_at"]["format"],
+        "date-time"
+    );
+
+    let token = issue_hs256_token("serve-cli-mixin-fields-secret", 1, &["user"]);
+    let create_response = client
+        .post(format!("{base_url}/api/post"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "tenant_id": 7,
+            "slug": "beta",
+            "title": "Beta"
+        }))
+        .send()
+        .expect("mixin create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created: Value = create_response.json().expect("mixin create should decode");
+    assert_eq!(created["slug"], "beta");
+    assert_eq!(created["tenant_id"], 7);
+    assert!(created["created_at"].is_string());
+    assert!(created["updated_at"].is_string());
+
+    let list_response = client
+        .get(format!("{base_url}/api/post?filter_tenant_id=7&sort=slug"))
+        .bearer_auth(&token)
+        .send()
+        .expect("mixin list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("mixin list should decode");
+    assert_eq!(list_body["total"], 2);
+    assert_eq!(list_body["items"][0]["slug"], "alpha");
+    assert_eq!(list_body["items"][1]["slug"], "beta");
+}
+
+#[test]
+fn vsr_serve_supports_api_name_aliases_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-api-alias-secret");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("api_name_alias_api.eon");
+    fs::copy(fixture_path("api_name_alias_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE blog_post (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title_text TEXT NOT NULL,
+                    author_id INTEGER NOT NULL,
+                    created_at TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("post schema should apply");
+            query(
+                "CREATE TABLE comment_row (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    body_text TEXT NOT NULL,
+                    post_id INTEGER NOT NULL
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("comment schema should apply");
+
+            query("INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)")
+                .bind(1_i64)
+                .bind("Alpha")
+                .bind(7_i64)
+                .bind("2026-03-26T10:00:00Z")
+                .execute(&pool)
+                .await
+                .expect("first seed row should insert");
+            query("INSERT INTO blog_post (id, title_text, author_id, created_at) VALUES (?, ?, ?, ?)")
+                .bind(2_i64)
+                .bind("Beta")
+                .bind(9_i64)
+                .bind("2026-03-26T11:00:00Z")
+                .execute(&pool)
+                .await
+                .expect("second seed row should insert");
+            query("INSERT INTO comment_row (id, body_text, post_id) VALUES (?, ?, ?)")
+                .bind(1_i64)
+                .bind("First comment")
+                .bind(1_i64)
+                .execute(&pool)
+                .await
+                .expect("comment seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-api-alias.stdout.log");
+    let stderr_log = root.join("serve-api-alias.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-api-alias-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve api-alias flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/posts").is_some());
+    assert!(openapi["paths"].get("/posts/{parent_id}/comments").is_some());
+    assert!(openapi["paths"].get("/blog_post").is_none());
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["createdAt"]["format"],
+        "date-time"
+    );
+
+    let token = issue_hs256_token("serve-cli-api-alias-secret", 1, &["user"]);
+    let create_response = client
+        .post(format!("{base_url}/api/posts"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "title": "Gamma",
+            "author": 7,
+            "createdAt": "2026-03-26T12:00:00Z"
+        }))
+        .send()
+        .expect("alias create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created: Value = create_response.json().expect("alias create should decode");
+    assert_eq!(created["title"], "Gamma");
+    assert_eq!(created["author"], 7);
+    assert!(created.get("title_text").is_none());
+    assert!(created.get("author_id").is_none());
+
+    let list_response = client
+        .get(format!("{base_url}/api/posts?filter_author=7&sort=title&limit=1"))
+        .send()
+        .expect("alias list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("alias list should decode");
+    assert_eq!(list_body["total"], 2);
+    assert_eq!(list_body["items"][0]["title"], "Alpha");
+    let next_cursor = list_body["next_cursor"]
+        .as_str()
+        .expect("next cursor should exist");
+
+    let cursor_response = client
+        .get(format!(
+            "{base_url}/api/posts?filter_author=7&limit=1&cursor={next_cursor}"
+        ))
+        .send()
+        .expect("alias cursor page should load");
+    assert_eq!(cursor_response.status(), reqwest::StatusCode::OK);
+    let cursor_body: Value = cursor_response.json().expect("alias cursor page should decode");
+    assert_eq!(cursor_body["items"][0]["title"], "Gamma");
+
+    let nested_response = client
+        .get(format!("{base_url}/api/posts/1/comments"))
+        .send()
+        .expect("alias nested route should load");
+    assert_eq!(nested_response.status(), reqwest::StatusCode::OK);
+    let nested_body: Value = nested_response.json().expect("alias nested route should decode");
+    assert_eq!(nested_body["items"][0]["body"], "First comment");
+    assert_eq!(nested_body["items"][0]["post"], 1);
+}
+
+#[test]
+fn vsr_serve_applies_api_projections_in_spawned_process() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "serve-cli-api-projection-secret");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("api_projection_api.eon");
+    fs::copy(fixture_path("api_projection_api.eon"), &config).expect("fixture should copy");
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query(
+                "CREATE TABLE blog_post (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title_text TEXT NOT NULL,
+                    author_id INTEGER NOT NULL,
+                    draft_body TEXT,
+                    internal_note TEXT
+                )",
+            )
+            .execute(&pool)
+            .await
+            .expect("schema should apply");
+            query(
+                "INSERT INTO blog_post (id, title_text, author_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(1_i64)
+            .bind("Alpha")
+            .bind(7_i64)
+            .bind("secret draft")
+            .bind("internal only")
+            .execute(&pool)
+            .await
+            .expect("seed row should insert");
+        });
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve-api-projection.stdout.log");
+    let stderr_log = root.join("serve-api-projection.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "serve-cli-api-projection-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve api-projection flow never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["title"]["type"],
+        "string"
+    );
+    assert!(
+        openapi["components"]["schemas"]["Post"]["properties"]
+            .get("draft_body")
+            .is_none()
+    );
+
+    let token = issue_hs256_token("serve-cli-api-projection-secret", 1, &["user"]);
+    let create_response = client
+        .post(format!("{base_url}/api/posts"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "title": "Gamma",
+            "author": 7
+        }))
+        .send()
+        .expect("projection create should succeed");
+    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
+    let created: Value = create_response.json().expect("projection create should decode");
+    assert_eq!(created["title"], "Gamma");
+    assert_eq!(created["author"], 7);
+    assert!(created.get("title_text").is_none());
+    assert!(created.get("draft_body").is_none());
+    assert!(created.get("internal_note").is_none());
+
+    let list_response = client
+        .get(format!("{base_url}/api/posts?filter_author=7&sort=title"))
+        .send()
+        .expect("projection list should load");
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_body: Value = list_response.json().expect("projection list should decode");
+    assert_eq!(list_body["total"], 2);
+    assert_eq!(list_body["items"][0]["title"], "Alpha");
+    assert_eq!(list_body["items"][1]["title"], "Gamma");
+    assert!(list_body["items"][0].get("draft_body").is_none());
+    assert!(list_body["items"][0].get("internal_note").is_none());
+}
+
+#[test]
 fn vsr_serve_applies_field_transforms_in_spawned_process() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {
@@ -526,6 +2739,23 @@ fn vsr_serve_applies_field_transforms_in_spawned_process() {
             server.logs()
         );
     }
+
+    let openapi_response = client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi spec should load");
+    assert!(openapi_response.status().is_success());
+    let openapi: Value = openapi_response.json().expect("openapi should decode");
+    assert!(openapi["paths"].get("/posts").is_some());
+    assert!(openapi["paths"].get("/posts/{id}").is_some());
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["status"]["enum"],
+        json!(["draft", "published"])
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["Post"]["properties"]["title"]["type"],
+        "object"
+    );
 
     let login_response = client
         .post(format!("{base_url}/api/auth/login"))

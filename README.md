@@ -291,6 +291,23 @@ The runtime no longer generates a random fallback secret, so tokens remain valid
 and multi-instance deployments only when you provide explicit signing material. For asymmetric
 algorithms, prefer PEM files via `*_FILE` or direct file paths instead of inline env values.
 
+When built-in auth uses an asymmetric `security.auth.jwt` configuration with public
+`verification_keys`, it also exposes `/.well-known/jwks.json` so external verifiers can discover
+the active public keys. `vsr check --strict` now warns if you keep using the legacy
+`security.auth.jwt_secret` path or if an asymmetric configuration only publishes a single
+verification key with no rotation overlap window.
+
+Recommended rotation sequence:
+
+1. Generate a new signing keypair.
+2. Add the new public key to `verification_keys`, keep the previous public key present, and switch
+   `active_kid` plus `signing_key` to the new keypair.
+3. Deploy and allow enough time for old access tokens to expire.
+4. Remove the old verification key only after that overlap window has passed.
+
+That keeps new tokens signing with the active key while `/.well-known/jwks.json` and server-side
+verification continue to accept tokens issued before the rollout.
+
 For production, prefer secret files or a secret manager over inline `.env` values. The current
 production-secrets plan is in
 [docs/production-secrets-roadmap.md](docs/production-secrets-roadmap.md).
@@ -405,11 +422,13 @@ generated Infisical scaffold directory is complete. See [docs/infisical.md](docs
 
 `vsr check` now runs compiler-facing diagnostics over `.eon` or derive-backed schema sources.
 The first strict slice focuses on high-confidence issues: TLS file paths that do not exist,
-authorization contracts that do not affect generated runtime behavior, unused declared scopes, and
-policy, nested-route, `exists`, and hybrid lookup fields that rely on inferred indexes without an
-explicit `.eon` declaration. It also flags build-artifact misconfigurations such as empty declared
-env overrides, binary/bundle path collisions, and resolved cache/output overlaps.
-Add `--strict` to fail the command when any warning is reported.
+authorization contracts that do not affect generated runtime behavior, unused declared scopes,
+auth email links that still point at localhost, and policy, nested-route, `exists`, and hybrid
+lookup fields that rely on inferred indexes without an explicit `.eon` declaration. It also flags
+build-artifact misconfigurations such as empty declared env overrides, binary/bundle path
+collisions, and resolved cache/output overlaps, plus built-in auth portal/admin UI paths that
+overlap generated `/api` namespaces or root-level static mounts. Add `--strict` to fail the
+command when any warning is reported.
 
 For detailed instructions on using the CLI tool, see the [CLI Tool Documentation](crates/rest_api_cli/README.md).
 

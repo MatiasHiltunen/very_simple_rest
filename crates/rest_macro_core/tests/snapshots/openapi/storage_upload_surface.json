@@ -1,0 +1,134 @@
+{
+  "paths": {
+    "/uploads": {
+      "post": {
+        "operationId": "uploadAssetUpload",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageUploadResponse"
+                }
+              }
+            },
+            "description": "Upload created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid multipart upload"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Upload is not allowed for the current user"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Uploaded file exceeds the configured limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "Unexpected server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Upload file to asset_upload",
+        "tags": [
+          "Storage"
+        ]
+      }
+    }
+  },
+  "schemas": {
+    "StorageUploadResponse": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "content_type": {
+          "nullable": true,
+          "type": "string"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "object_key": {
+          "type": "string"
+        },
+        "public_url": {
+          "nullable": true,
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "int64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "backend",
+        "object_key",
+        "file_name",
+        "size_bytes"
+      ],
+      "type": "object"
+    }
+  }
+}

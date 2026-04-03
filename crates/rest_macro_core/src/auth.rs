@@ -5,9 +5,15 @@ use actix_web::{
     http::Method,
 };
 use actix_web::{HttpResponse, Responder, web};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bcrypt::{hash, verify};
 use chrono::{Duration, SecondsFormat, Utc};
 use dotenv::dotenv;
+use jsonwebtoken::jwk::{
+    AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
+    EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, OctetKeyPairParameters, OctetKeyPairType,
+    PublicKeyUse,
+};
 use jsonwebtoken::{
     Algorithm as JsonWebTokenAlgorithm, DecodingKey, EncodingKey, Header, Validation, decode,
     decode_header, encode,
@@ -673,6 +679,96 @@ pub fn ensure_jwt_secret_configured_with_settings(settings: &AuthSettings) -> Re
         }
     }
     Ok(())
+}
+
+fn configured_public_jwks(settings: &AuthSettings) -> Result<Option<JwkSet>, String> {
+    let Some(jwt) = &settings.jwt else {
+        return Ok(None);
+    };
+    if jwt.algorithm.is_symmetric() || jwt.verification_keys.is_empty() {
+        return Ok(None);
+    }
+
+    let mut keys = Vec::with_capacity(jwt.verification_keys.len());
+    for verification_key in &jwt.verification_keys {
+        keys.push(configured_public_jwk(jwt.algorithm, verification_key)?);
+    }
+    Ok(Some(JwkSet { keys }))
+}
+
+fn configured_public_jwk(
+    algorithm: AuthJwtAlgorithm,
+    verification_key: &AuthJwtVerificationKey,
+) -> Result<Jwk, String> {
+    let decoding_key =
+        load_jwt_decoding_key(algorithm, &verification_key.key, "JWT verification key")?;
+    let common = CommonParameters {
+        public_key_use: Some(PublicKeyUse::Signature),
+        key_algorithm: Some(jwk_key_algorithm(algorithm)),
+        key_id: Some(verification_key.kid.clone()),
+        ..Default::default()
+    };
+
+    let algorithm = match algorithm {
+        AuthJwtAlgorithm::Es256 => {
+            let (x, y) = extract_ec_public_coordinates(decoding_key.as_bytes(), 32, "ES256")?;
+            AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+                key_type: EllipticCurveKeyType::EC,
+                curve: EllipticCurve::P256,
+                x,
+                y,
+            })
+        }
+        AuthJwtAlgorithm::Es384 => {
+            let (x, y) = extract_ec_public_coordinates(decoding_key.as_bytes(), 48, "ES384")?;
+            AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+                key_type: EllipticCurveKeyType::EC,
+                curve: EllipticCurve::P384,
+                x,
+                y,
+            })
+        }
+        AuthJwtAlgorithm::EdDsa => AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+            key_type: OctetKeyPairType::OctetKeyPair,
+            curve: EllipticCurve::Ed25519,
+            x: URL_SAFE_NO_PAD.encode(decoding_key.as_bytes()),
+        }),
+        AuthJwtAlgorithm::Hs256 | AuthJwtAlgorithm::Hs384 | AuthJwtAlgorithm::Hs512 => {
+            return Err(format!(
+                "public JWKS is not available for symmetric `{}` JWT configuration",
+                algorithm_name(algorithm)
+            ));
+        }
+    };
+
+    Ok(Jwk { common, algorithm })
+}
+
+fn jwk_key_algorithm(algorithm: AuthJwtAlgorithm) -> KeyAlgorithm {
+    match algorithm {
+        AuthJwtAlgorithm::Hs256 => KeyAlgorithm::HS256,
+        AuthJwtAlgorithm::Hs384 => KeyAlgorithm::HS384,
+        AuthJwtAlgorithm::Hs512 => KeyAlgorithm::HS512,
+        AuthJwtAlgorithm::Es256 => KeyAlgorithm::ES256,
+        AuthJwtAlgorithm::Es384 => KeyAlgorithm::ES384,
+        AuthJwtAlgorithm::EdDsa => KeyAlgorithm::EdDSA,
+    }
+}
+
+fn extract_ec_public_coordinates(
+    public_key: &[u8],
+    coordinate_len: usize,
+    label: &str,
+) -> Result<(String, String), String> {
+    let expected_len = 1 + coordinate_len * 2;
+    if public_key.len() != expected_len || public_key.first().copied() != Some(0x04) {
+        return Err(format!(
+            "JWT verification key must be an uncompressed {label} public key"
+        ));
+    }
+    let x = &public_key[1..1 + coordinate_len];
+    let y = &public_key[1 + coordinate_len..];
+    Ok((URL_SAFE_NO_PAD.encode(x), URL_SAFE_NO_PAD.encode(y)))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4362,7 +4458,36 @@ pub fn auth_routes(cfg: &mut web::ServiceConfig, db: impl Into<DbPool>) {
     auth_routes_with_settings(cfg, db, AuthSettings::default());
 }
 
+pub fn public_auth_discovery_routes(cfg: &mut web::ServiceConfig) {
+    public_auth_discovery_routes_with_settings(cfg, AuthSettings::default());
+}
+
+pub fn public_auth_discovery_routes_with_settings(
+    cfg: &mut web::ServiceConfig,
+    settings: AuthSettings,
+) {
+    let settings = web::Data::new(settings);
+    cfg.app_data(settings.clone());
+    if settings
+        .get_ref()
+        .jwt
+        .as_ref()
+        .is_some_and(|jwt| !jwt.algorithm.is_symmetric() && !jwt.verification_keys.is_empty())
+    {
+        cfg.route("/.well-known/jwks.json", web::get().to(jwks));
+    }
+}
+
 pub fn auth_routes_with_settings(
+    cfg: &mut web::ServiceConfig,
+    db: impl Into<DbPool>,
+    settings: AuthSettings,
+) {
+    public_auth_discovery_routes_with_settings(cfg, settings.clone());
+    auth_api_routes_with_settings(cfg, db, settings);
+}
+
+pub fn auth_api_routes_with_settings(
     cfg: &mut web::ServiceConfig,
     db: impl Into<DbPool>,
     settings: AuthSettings,
@@ -4440,6 +4565,15 @@ fn security_from_request(req: &HttpRequest) -> SecurityConfig {
             security.auth = auth_settings_from_request(req);
             security
         })
+}
+
+async fn jwks(req: HttpRequest) -> impl Responder {
+    let settings = auth_settings_from_request(&req);
+    match configured_public_jwks(&settings) {
+        Ok(Some(jwks)) => HttpResponse::Ok().json(jwks),
+        Ok(None) => errors::not_found("JWKS is not configured for this service"),
+        Err(message) => errors::internal_error(message),
+    }
 }
 
 fn enforce_auth_rate_limit(req: &HttpRequest, scope: AuthRateLimitScope) -> Option<HttpResponse> {
@@ -4529,8 +4663,9 @@ mod tests {
         AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
         AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings, Claims,
         LoginInput, auth_claim_migration_sql, auth_management_migration_sql, auth_migration_sql,
-        build_public_auth_url, ensure_admin_exists_with_settings_and_claim_prompt_mode,
-        load_jwt_secret, login_with_settings, validate_auth_claim_mappings,
+        build_public_auth_url, configured_public_jwks,
+        ensure_admin_exists_with_settings_and_claim_prompt_mode, load_jwt_secret,
+        login_with_settings, validate_auth_claim_mappings,
     };
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
@@ -4538,10 +4673,13 @@ mod tests {
     use crate::db::connect_with_config;
     use crate::db::{connect, query, query_scalar};
     use crate::secret::SecretRef;
-    use actix_web::test::TestRequest;
-    use actix_web::{body::to_bytes, http::StatusCode, web};
+    use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
+    use actix_web::{App, body::to_bytes, http::StatusCode, web};
     use chrono::{Duration, Utc};
-    use jsonwebtoken::encode;
+    use jsonwebtoken::{
+        DecodingKey, encode,
+        jwk::{AlgorithmParameters, EllipticCurve, KeyAlgorithm},
+    };
     use sqlx::Row;
     use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
@@ -4838,6 +4976,91 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn configured_public_jwks_returns_eddsa_verification_keys() {
+        let public_key =
+            write_temp_secret_file("jwt_jwks_current_public", TEST_ED25519_PUBLIC_KEY_CURRENT);
+        let settings = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "current".to_owned(),
+                    key: SecretRef::File {
+                        path: public_key.clone(),
+                    },
+                }],
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+
+        let jwks = configured_public_jwks(&settings)
+            .expect("jwks should resolve")
+            .expect("jwks should be present");
+        assert_eq!(jwks.keys.len(), 1);
+        assert_eq!(jwks.keys[0].common.key_id.as_deref(), Some("current"));
+        assert_eq!(jwks.keys[0].common.key_algorithm, Some(KeyAlgorithm::EdDSA));
+        match &jwks.keys[0].algorithm {
+            AlgorithmParameters::OctetKeyPair(params) => {
+                assert_eq!(params.curve, EllipticCurve::Ed25519);
+                assert!(!params.x.is_empty());
+                let decoding_key =
+                    DecodingKey::from_jwk(&jwks.keys[0]).expect("returned jwk should decode");
+                assert_eq!(decoding_key.as_bytes().len(), 32);
+            }
+            other => panic!("expected Ed25519 octet key pair, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(public_key);
+    }
+
+    #[actix_web::test]
+    async fn auth_routes_expose_public_jwks_for_asymmetric_jwt() {
+        let public_key =
+            write_temp_secret_file("jwt_jwks_route_public", TEST_ED25519_PUBLIC_KEY_CURRENT);
+        let settings = AuthSettings {
+            jwt: Some(AuthJwtSettings {
+                algorithm: AuthJwtAlgorithm::EdDsa,
+                active_kid: Some("current".to_owned()),
+                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                verification_keys: vec![AuthJwtVerificationKey {
+                    kid: "current".to_owned(),
+                    key: SecretRef::File {
+                        path: public_key.clone(),
+                    },
+                }],
+            }),
+            jwt_secret: None,
+            ..AuthSettings::default()
+        };
+
+        let app = init_service(
+            App::new()
+                .app_data(web::Data::new(settings))
+                .route("/.well-known/jwks.json", web::get().to(super::jwks)),
+        )
+        .await;
+
+        let response = call_service(
+            &app,
+            TestRequest::get()
+                .uri("/.well-known/jwks.json")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = read_body_json(response).await;
+        assert_eq!(body["keys"][0]["kid"], "current");
+        assert_eq!(body["keys"][0]["alg"], "EdDSA");
+        assert_eq!(body["keys"][0]["kty"], "OKP");
+        assert_eq!(body["keys"][0]["crv"], "Ed25519");
+        assert!(body["keys"][0]["x"].is_string());
+
+        let _ = std::fs::remove_file(public_key);
     }
 
     #[test]

@@ -1,0 +1,27 @@
+module: "asymmetric_jwt_api"
+security: {
+    auth: {
+        issuer: "asymmetric_jwt_tests"
+        audience: "asymmetric_jwt_clients"
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "current"
+            signing_key: { systemd_credential: "jwt_signing_key" }
+            verification_keys: [
+                {
+                    kid: "current"
+                    key: { systemd_credential: "jwt_public_key" }
+                }
+            ]
+        }
+    }
+}
+resources: [
+    {
+        name: "Doc"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]

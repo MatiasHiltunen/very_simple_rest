@@ -127,6 +127,7 @@ pub async fn serve_service(
             let storage_s3_compat = dynamic_service.storage_s3_compat.clone();
             let docs_html = dynamic_service.docs_html.clone();
             let openapi_json = dynamic_service.openapi_json.clone();
+            let include_builtin_auth = dynamic_service.include_builtin_auth;
 
             App::new()
                 .app_data(web::Data::new(dynamic_service.clone()))
@@ -161,6 +162,14 @@ pub async fn serve_service(
                         }
                     }),
                 )
+                .configure(move |cfg| {
+                    if include_builtin_auth {
+                        auth::public_auth_discovery_routes_with_settings(
+                            cfg,
+                            api_security.auth.clone(),
+                        );
+                    }
+                })
                 .service(build_api_scope(dynamic_service.clone(), state.clone()))
                 .configure(move |cfg| {
                     configure_public_mounts_with_runtime(
@@ -807,7 +816,7 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
             &dynamic_service.runtime,
         );
         if dynamic_service.include_builtin_auth {
-            auth::auth_routes_with_settings(
+            auth::auth_api_routes_with_settings(
                 cfg,
                 pool.clone(),
                 dynamic_service.security.auth.clone(),

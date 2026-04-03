@@ -1,16 +1,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    net::IpAddr,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use rest_macro_core::{
+    auth::AuthJwtAlgorithm,
     compiler::{ResourceSpec, ServiceSpec, supports_declared_index},
     database::service_base_dir_from_config_path,
+    secret::SecretRef,
     tls,
 };
+use url::Url;
 
 use crate::commands::{
     schema::load_schema_service,
@@ -118,12 +122,285 @@ pub fn build_service_check_report(
 fn collect_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
     let mut findings = Vec::new();
     findings.extend(authorization_surface_findings(service));
+    findings.extend(jwt_configuration_findings(service));
+    findings.extend(auth_email_findings(service));
+    findings.extend(auth_ui_path_findings(service));
     findings.extend(unused_authorization_scope_findings(service));
     findings.extend(explicit_index_findings(service));
     findings.extend(build_artifact_findings(input, service));
     findings.extend(storage_path_findings(service));
     findings.extend(tls_path_findings(input, service));
     findings
+}
+
+fn auth_email_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
+    let Some(email) = service.security.auth.email.as_ref() else {
+        return Vec::new();
+    };
+    let Some(public_base_url) = email.public_base_url.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(parsed) = Url::parse(public_base_url) else {
+        return Vec::new();
+    };
+    let Some(host) = parsed.host_str() else {
+        return Vec::new();
+    };
+
+    let is_local = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback() || ip.is_unspecified())
+            .unwrap_or(false);
+    if !is_local {
+        return Vec::new();
+    }
+
+    vec![CheckFinding {
+        code: "security.auth.email.public_base_url_is_local".to_owned(),
+        severity: CheckSeverity::Warning,
+        path: "security.auth.email.public_base_url".to_owned(),
+        message: format!(
+            "auth email public base URL `{public_base_url}` points at a local-only host"
+        ),
+        suggestion: Some(
+            "Use a publicly reachable HTTPS origin for email verification and password-reset links. Localhost and loopback URLs are fine for development, but they are not safe production defaults."
+                .to_owned(),
+        ),
+    }]
+}
+
+fn jwt_configuration_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = Vec::new();
+    let auth = &service.security.auth;
+
+    if auth
+        .jwt_secret
+        .as_ref()
+        .is_some_and(|secret| secret != &SecretRef::env_or_file("JWT_SECRET"))
+    {
+        findings.push(CheckFinding {
+            code: "security.auth.legacy_jwt_secret_configured".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "security.auth.jwt_secret".to_owned(),
+            message: "legacy symmetric `security.auth.jwt_secret` is configured".to_owned(),
+            suggestion: Some(
+                "Prefer `security.auth.jwt` with asymmetric signing keys so key rotation and JWKS publication are first-class."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    let Some(jwt) = &auth.jwt else {
+        return findings;
+    };
+
+    if !jwt.algorithm.is_symmetric() && jwt.verification_keys.len() < 2 {
+        findings.push(CheckFinding {
+            code: "security.auth.jwt_rotation_overlap_missing".to_owned(),
+            severity: CheckSeverity::Warning,
+            path: "security.auth.jwt.verification_keys".to_owned(),
+            message: format!(
+                "asymmetric `{}` JWT configuration exposes only {} verification key, so rotation has no overlap window",
+                jwt_algorithm_label(jwt.algorithm),
+                jwt.verification_keys.len()
+            ),
+            suggestion: Some(
+                "Keep both the current and previous public verification keys in `security.auth.jwt.verification_keys` during rotations, then remove the old key after issued tokens expire."
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if !jwt.algorithm.is_symmetric() {
+        for verification_key in &jwt.verification_keys {
+            if verification_key.key == jwt.signing_key {
+                findings.push(CheckFinding {
+                    code: "security.auth.jwt_verification_key_matches_signing_key".to_owned(),
+                    severity: CheckSeverity::Warning,
+                    path: format!(
+                        "security.auth.jwt.verification_keys.{}",
+                        verification_key.kid
+                    ),
+                    message: format!(
+                        "verification key `{}` resolves from the same secret reference as `security.auth.jwt.signing_key`",
+                        verification_key.kid
+                    ),
+                    suggestion: Some(
+                        "Point verification keys at public key material. Reusing the signing-key secret usually means the runtime will try to verify tokens with a private key source."
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+
+    findings
+}
+
+fn jwt_algorithm_label(algorithm: AuthJwtAlgorithm) -> &'static str {
+    match algorithm {
+        AuthJwtAlgorithm::Hs256 => "HS256",
+        AuthJwtAlgorithm::Hs384 => "HS384",
+        AuthJwtAlgorithm::Hs512 => "HS512",
+        AuthJwtAlgorithm::Es256 => "ES256",
+        AuthJwtAlgorithm::Es384 => "ES384",
+        AuthJwtAlgorithm::EdDsa => "EdDSA",
+    }
+}
+
+fn auth_ui_path_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
+    let mut findings = Vec::new();
+
+    for (label, path) in [
+        (
+            "portal",
+            service
+                .security
+                .auth
+                .portal
+                .as_ref()
+                .map(|page| page.path.as_str()),
+        ),
+        (
+            "admin_dashboard",
+            service
+                .security
+                .auth
+                .admin_dashboard
+                .as_ref()
+                .map(|page| page.path.as_str()),
+        ),
+    ] {
+        let Some(path) = path else {
+            continue;
+        };
+        let external_path = auth_ui_external_path(path);
+
+        if let Some(resource_name) = auth_ui_resource_namespace_overlap(service, path) {
+            findings.push(CheckFinding {
+                code: "security.auth.ui_path_overlaps_resource_namespace".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("security.auth.{label}.path"),
+                message: format!(
+                    "built-in auth UI path `{path}` shares the `/api/{}` namespace with resource `{}`",
+                    resource_name, resource_name
+                ),
+                suggestion: Some(
+                    "Move the auth UI path outside resource namespaces, for example under `/auth/...`, so built-in pages do not shadow generated resource routes."
+                        .to_owned(),
+                ),
+            });
+        }
+
+        if let Some(upload_name) = auth_ui_upload_namespace_overlap(service, path) {
+            findings.push(CheckFinding {
+                code: "security.auth.ui_path_overlaps_upload_namespace".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("security.auth.{label}.path"),
+                message: format!(
+                    "built-in auth UI path `{path}` shares the `/api` namespace used by storage upload `{upload_name}`",
+                ),
+                suggestion: Some(
+                    "Move the auth UI path or the upload route so each owns a distinct first path segment inside `/api`."
+                        .to_owned(),
+                ),
+            });
+        }
+
+        if service.authorization.management_api.enabled
+            && auth_ui_matches_or_overlaps(
+                path,
+                service.authorization.management_api.mount.as_str(),
+            )
+        {
+            findings.push(CheckFinding {
+                code: "security.auth.ui_path_overlaps_authorization_management".to_owned(),
+                severity: CheckSeverity::Warning,
+                path: format!("security.auth.{label}.path"),
+                message: format!(
+                    "built-in auth UI path `{path}` overlaps the authorization management mount `{}` inside `/api`",
+                    service.authorization.management_api.mount
+                ),
+                suggestion: Some(
+                    "Keep auth UI pages and runtime authorization management under separate `/api` prefixes."
+                        .to_owned(),
+                ),
+            });
+        }
+
+        for mount in &service.static_mounts {
+            if auth_ui_matches_or_overlaps(external_path.as_str(), mount.mount_path.as_str()) {
+                findings.push(CheckFinding {
+                    code: "security.auth.ui_path_overlaps_static_mount".to_owned(),
+                    severity: CheckSeverity::Warning,
+                    path: format!("security.auth.{label}.path"),
+                    message: format!(
+                        "built-in auth UI path `{external_path}` overlaps static mount `{}`",
+                        mount.mount_path
+                    ),
+                    suggestion: Some(
+                        "Move the static mount or auth UI page so a root-level static handler cannot shadow the built-in auth UI route."
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+
+    findings
+}
+
+fn auth_ui_external_path(path: &str) -> String {
+    if path == "/" {
+        "/api".to_owned()
+    } else {
+        format!("/api{path}")
+    }
+}
+
+fn auth_ui_resource_namespace_overlap(service: &ServiceSpec, path: &str) -> Option<String> {
+    let first_segment = first_path_segment(path)?;
+    service
+        .resources
+        .iter()
+        .find(|resource| resource.api_name() == first_segment)
+        .map(|resource| resource.api_name().to_owned())
+}
+
+fn auth_ui_upload_namespace_overlap(service: &ServiceSpec, path: &str) -> Option<String> {
+    let first_segment = first_path_segment(path)?;
+    service
+        .storage
+        .uploads
+        .iter()
+        .find(|upload| {
+            upload
+                .path
+                .split('/')
+                .next()
+                .map(|segment| segment == first_segment)
+                .unwrap_or(false)
+        })
+        .map(|upload| upload.name.clone())
+}
+
+fn first_path_segment(path: &str) -> Option<&str> {
+    path.trim_matches('/')
+        .split('/')
+        .find(|segment| !segment.is_empty())
+}
+
+fn auth_ui_matches_or_overlaps(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
+        || right
+            .strip_prefix(left)
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
 }
 
 fn build_artifact_findings(input: &Path, service: &ServiceSpec) -> Vec<CheckFinding> {
@@ -1260,6 +1537,327 @@ resources: [
             .map(|finding| finding.code.as_str())
             .collect::<Vec<_>>();
         assert!(codes.contains(&"storage.upload_roles_without_auth"));
+    }
+
+    #[test]
+    fn check_report_warns_for_legacy_jwt_secret_configuration() {
+        let root = temp_dir("legacy-jwt-secret");
+        let config = root.join("legacy_jwt_secret_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "legacy_jwt_secret_api"
+security: {
+    auth: {
+        jwt_secret: { systemd_credential: "jwt_secret" }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"security.auth.legacy_jwt_secret_configured"));
+    }
+
+    #[test]
+    fn check_report_warns_for_asymmetric_jwt_without_rotation_overlap() {
+        let root = temp_dir("single-jwt-verification-key");
+        let config = root.join("single_jwt_verification_key_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "single_jwt_verification_key_api"
+security: {
+    auth: {
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "current"
+            signing_key: { systemd_credential: "jwt_signing_key" }
+            verification_keys: [
+                {
+                    kid: "current"
+                    key: { systemd_credential: "jwt_public_key" }
+                }
+            ]
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"security.auth.jwt_rotation_overlap_missing"));
+    }
+
+    #[test]
+    fn check_report_warns_for_localhost_auth_email_public_base_url() {
+        let root = temp_dir("localhost-auth-email-base");
+        let config = root.join("localhost_auth_email_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "localhost_auth_email_api"
+security: {
+    auth: {
+        require_email_verification: true
+        email: {
+            from_email: "noreply@example.com"
+            public_base_url: "http://127.0.0.1:8082"
+            provider: {
+                kind: Resend
+                api_key_env: "RESEND_API_KEY"
+            }
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"security.auth.email.public_base_url_is_local"));
+    }
+
+    #[test]
+    fn check_report_warns_when_asymmetric_verification_key_reuses_signing_secret_ref() {
+        let root = temp_dir("jwt-shared-secret-ref");
+        let config = root.join("jwt_shared_secret_ref_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "jwt_shared_secret_ref_api"
+security: {
+    auth: {
+        jwt: {
+            algorithm: EdDSA
+            active_kid: "current"
+            signing_key: { systemd_credential: "jwt_keypair" }
+            verification_keys: [
+                {
+                    kid: "current"
+                    key: { systemd_credential: "jwt_keypair" }
+                }
+                {
+                    kid: "previous"
+                    key: { systemd_credential: "jwt_previous_public" }
+                }
+            ]
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"security.auth.jwt_verification_key_matches_signing_key"));
+    }
+
+    #[test]
+    fn check_report_warns_for_auth_ui_path_collisions() {
+        let root = temp_dir("auth-ui-path-collisions");
+        fs::create_dir_all(root.join("public")).expect("static dir should exist");
+        fs::write(root.join("public/index.html"), "<html></html>").expect("index should exist");
+        let config = root.join("auth_ui_path_collision_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "auth_ui_path_collision_api"
+authorization: {
+    management_api: {
+        mount: "/ops/authz"
+    }
+}
+static: {
+    mounts: [
+        {
+            mount: "/api/auth/portal"
+            dir: "public"
+            mode: Spa
+            cache: NoStore
+        }
+    ]
+}
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: Local
+            dir: "var/uploads"
+        }
+    ]
+    uploads: [
+        {
+            name: "asset_upload"
+            path: "dashboard"
+            backend: "uploads"
+        }
+    ]
+}
+security: {
+    auth: {
+        portal: {
+            path: "/note"
+            title: "Portal"
+        }
+        admin_dashboard: {
+            path: "/ops/authz"
+            title: "Admin Dashboard"
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"security.auth.ui_path_overlaps_resource_namespace"));
+        assert!(codes.contains(&"security.auth.ui_path_overlaps_authorization_management"));
+
+        let rendered =
+            render_service_check_report(&report, OutputFormat::Text).expect("text should render");
+        assert!(rendered.contains("security.auth.ui_path_overlaps_resource_namespace"));
+        assert!(rendered.contains("security.auth.ui_path_overlaps_authorization_management"));
+    }
+
+    #[test]
+    fn check_report_auth_ui_path_collisions_match_text_snapshot() {
+        let root = temp_dir("auth-ui-path-collision-snapshot");
+        fs::create_dir_all(root.join("public")).expect("static dir should exist");
+        fs::write(root.join("public/index.html"), "<html></html>").expect("index should exist");
+        let config = root.join("auth_ui_path_collision_api.eon");
+        fs::write(
+            &config,
+            r#"
+module: "auth_ui_path_collision_api"
+authorization: {
+    management_api: {
+        mount: "/ops/authz"
+    }
+}
+static: {
+    mounts: [
+        {
+            mount: "/api/auth/portal"
+            dir: "public"
+            mode: Spa
+            cache: NoStore
+        }
+    ]
+}
+storage: {
+    backends: [
+        {
+            name: "uploads"
+            kind: Local
+            dir: "var/uploads"
+        }
+    ]
+    uploads: [
+        {
+            name: "dashboard_upload"
+            path: "dashboard/files"
+            backend: "uploads"
+        }
+    ]
+}
+security: {
+    auth: {
+        portal: {
+            path: "/auth/portal"
+            title: "Portal"
+        }
+        admin_dashboard: {
+            path: "/dashboard"
+            title: "Admin Dashboard"
+        }
+    }
+}
+resources: [
+    {
+        name: "Note"
+        fields: [
+            { name: "id", type: I64, id: true }
+        ]
+    }
+]
+"#,
+        )
+        .expect("fixture should write");
+
+        let report = build_service_check_report(&config, &[], true).expect("fixture should load");
+        let normalized =
+            normalize_report_source(&report, "tests/fixtures/auth_ui_path_collision_api.eon");
+        let rendered = render_service_check_report(&normalized, OutputFormat::Text)
+            .expect("text should render");
+        assert_text_snapshot(&snapshot_path("auth_ui_path_collision_api.txt"), &rendered);
     }
 
     #[test]
