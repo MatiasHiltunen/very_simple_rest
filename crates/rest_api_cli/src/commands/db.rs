@@ -115,7 +115,7 @@ mod tests {
     use super::{check_connection, connect_database, database_url_from_service_config};
     use rest_macro_core::db::query;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -125,8 +125,7 @@ mod tests {
     }
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_support::env_lock()
     }
 
     #[test]

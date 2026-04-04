@@ -4275,7 +4275,7 @@ mod tests {
     };
     use serde::Serialize;
     use serde_json::{Value, json};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{fs, path::PathBuf};
 
@@ -4313,8 +4313,7 @@ mod tests {
     }
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_support::env_lock()
     }
 
     fn issue_token(user_id: i64, roles: &[&str]) -> String {

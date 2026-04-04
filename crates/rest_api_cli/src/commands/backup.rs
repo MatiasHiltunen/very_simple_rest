@@ -2431,7 +2431,7 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
-        sync::{Mutex, OnceLock},
+        sync::Mutex,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -2452,8 +2452,7 @@ mod tests {
     }
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_support::env_lock()
     }
 
     fn load_service(name: &str) -> compiler::ServiceSpec {

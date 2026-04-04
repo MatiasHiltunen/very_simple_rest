@@ -1,0 +1,15 @@
+module: "null_policy_api"
+resources: [
+    {
+        name: "Note"
+        policies: {
+            read: { field: "archived_at", is_null: true }
+            delete: { field: "archived_at", is_not_null: true }
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "title", type: String }
+            { name: "archived_at", type: String, nullable: true }
+        ]
+    }
+]

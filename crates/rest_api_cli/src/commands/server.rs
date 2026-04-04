@@ -26,8 +26,8 @@ use rest_macro_core::tls::{
 use syn::{parse_str, parse2};
 use uuid::Uuid;
 
-use crate::error::{Error, Result};
 use crate::commands::client;
+use crate::error::{Error, Result};
 
 const LOCAL_DEP_PATH_ENV: &str = "VSR_LOCAL_DEP_PATH";
 const REPO_GIT_URL: &str = "https://github.com/MatiasHiltunen/very_simple_rest.git";
@@ -1403,17 +1403,17 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
 
 fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth: bool) -> String {
     let auth_config = if include_builtin_auth {
-        "                    .configure(|cfg| auth::auth_api_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
+        "                    .configure(|cfg| very_simple_rest::core::auth::auth_api_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
     } else {
         ""
     };
     let public_auth_config = if include_builtin_auth {
-        "            .configure(|cfg| auth::public_auth_discovery_routes_with_settings(cfg, api_security.auth.clone()))\n"
+        "            .configure(|cfg| very_simple_rest::core::auth::public_auth_discovery_routes_with_settings(cfg, api_security.auth.clone()))\n"
     } else {
         ""
     };
     let auth_startup_check = if include_builtin_auth {
-        "    very_simple_rest::auth::ensure_jwt_secret_configured_with_settings(&api_security.auth)\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
+        "    very_simple_rest::core::auth::ensure_jwt_secret_configured_with_settings(&api_security.auth)\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
     } else {
         ""
     };
@@ -1488,6 +1488,8 @@ async fn main() -> std::io::Result<()> {{
     let logging = generated::{module_name}::logging();
     logging.init_env_logger();
 
+    let api_runtime = generated::{module_name}::runtime();
+    let api_security = generated::{module_name}::security();
 {auth_startup_check}    let current_exe = env::current_exe().ok();
     let bundle_dir = current_exe
         .as_ref()
@@ -1521,8 +1523,8 @@ async fn main() -> std::io::Result<()> {{
         .await
         .map_err(|error| std::io::Error::other(format!("database connection failed: {{error}}")))?;
 
-{tls_setup}    let api_runtime = generated::{module_name}::runtime();
-    let api_security = generated::{module_name}::security();
+{tls_setup}    let api_runtime = api_runtime.clone();
+    let api_security = api_security.clone();
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {{
         let api_runtime = api_runtime.clone();
@@ -2083,7 +2085,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use uuid::Uuid;
 
@@ -2357,8 +2359,7 @@ mod tests {
     }
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_support::env_lock()
     }
 
     fn capture_files(dir: &Path) -> Vec<PathBuf> {
@@ -2971,9 +2972,17 @@ resources: [
         assert!(root.join("migrations/0001_auth_management.sql").exists());
         assert!(root.join("migrations/0002_service.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("auth::auth_api_routes_with_settings"));
-        assert!(main_rs.contains("auth::public_auth_discovery_routes_with_settings"));
-        assert!(main_rs.contains("ensure_jwt_secret_configured"));
+        assert!(main_rs.contains("very_simple_rest::core::auth::auth_api_routes_with_settings"));
+        assert!(
+            main_rs.contains(
+                "very_simple_rest::core::auth::public_auth_discovery_routes_with_settings"
+            )
+        );
+        assert!(
+            main_rs.contains(
+                "very_simple_rest::core::auth::ensure_jwt_secret_configured_with_settings"
+            )
+        );
         let openapi = read_to_string(&root.join("openapi.json"));
         assert!(openapi.contains("\"/auth/login\""));
         assert!(openapi.contains("\"Account\""));
@@ -3411,7 +3420,7 @@ resources: [
         );
 
         let bind_addr = free_bind_addr();
-        let base_url = format!("http://{bind_addr}");
+        let base_url = format!("https://{bind_addr}");
         let stdout_log = root.join("bridgeboard.stdout.log");
         let stderr_log = root.join("bridgeboard.stderr.log");
         let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
@@ -3429,6 +3438,7 @@ resources: [
         let server = SpawnedBinary::new(child, stdout_log, stderr_log);
 
         let client = Client::builder()
+            .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(10))
             .build()
             .expect("http client should build");

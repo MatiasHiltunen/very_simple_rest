@@ -2766,6 +2766,9 @@ fn resource_impl_tokens(
         .map(Literal::string)
         .map(|context| quote!(Some(#context)))
         .unwrap_or_else(|| quote!(None));
+    let supports_direct_json_responses = resource.computed_fields.is_empty()
+        && resource.response_contexts.is_empty()
+        && resource.default_response_context.is_none();
     let response_context_match_arms = resource.response_contexts.iter().map(|context| {
         let name = Literal::string(&context.name);
         let fields = context.fields.iter().map(|field| Literal::string(field));
@@ -2835,6 +2838,60 @@ fn resource_impl_tokens(
             }
         }
     });
+    let item_ok_response_body = if supports_direct_json_responses {
+        quote! {
+            match Self::response_context_fields(requested) {
+                Ok(_) => HttpResponse::Ok().json(item),
+                Err(response) => response,
+            }
+        }
+    } else {
+        quote! {
+            match Self::serialize_item_response(item, requested) {
+                Ok(value) => HttpResponse::Ok().json(value),
+                Err(response) => response,
+            }
+        }
+    };
+    let item_created_response_body = if supports_direct_json_responses {
+        quote! {
+            match Self::response_context_fields(requested) {
+                Ok(_) => HttpResponse::Created()
+                    .append_header(("Location", Self::created_location(req, id)))
+                    .json(item),
+                Err(response) => response,
+            }
+        }
+    } else {
+        quote! {
+            match Self::serialize_item_response(item, requested) {
+                Ok(value) => HttpResponse::Created()
+                    .append_header(("Location", Self::created_location(req, id)))
+                    .json(value),
+                Err(response) => response,
+            }
+        }
+    };
+    let list_ok_response_body = if supports_direct_json_responses {
+        quote! {
+            match Self::response_context_fields(requested) {
+                Ok(_) => HttpResponse::Ok().json(response),
+                Err(response) => response,
+            }
+        }
+    } else {
+        quote! {
+            match Self::serialize_list_response(response, requested) {
+                Ok(value) => HttpResponse::Ok().json(value),
+                Err(response) => response,
+            }
+        }
+    };
+    let allow_dead_serialize_helpers = if supports_direct_json_responses {
+        quote!(#[allow(dead_code)])
+    } else {
+        quote!()
+    };
     let create_check = role_guard(runtime_crate, resource.roles.create.as_deref());
     let read_check = role_guard(runtime_crate, resource.roles.read.as_deref());
     let update_check = role_guard(runtime_crate, resource.roles.update.as_deref());
@@ -3774,10 +3831,7 @@ fn resource_impl_tokens(
             Err(response) => return response,
         };
         match Self::fetch_readable_by_id(path.into_inner(), &user, db.get_ref()).await {
-            Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
-                Ok(value) => HttpResponse::Ok().json(value),
-                Err(response) => response,
-            },
+            Ok(Some(item)) => Self::item_ok_response(&item, response_context.as_deref()),
             Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
         }
@@ -3794,12 +3848,9 @@ fn resource_impl_tokens(
                 )
                 .await
                 {
-                    Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
-                        Ok(value) => HttpResponse::Created()
-                            .append_header(("Location", Self::created_location(req, id)))
-                            .json(value),
-                        Err(response) => response,
-                    },
+                    Ok(Some(item)) => {
+                        Self::item_created_response(&item, req, id, response_context.as_deref())
+                    }
                     Ok(None) => HttpResponse::Created().finish(),
                     Err(response) => response,
                 }
@@ -4253,10 +4304,7 @@ fn resource_impl_tokens(
                         }
                         match q.fetch_all(db.get_ref()).await {
                             Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                    Ok(value) => HttpResponse::Ok().json(value),
-                                    Err(response) => response,
-                                },
+                                Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                 Err(response) => response,
                             },
                             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4302,10 +4350,7 @@ fn resource_impl_tokens(
                         }
                         match q.fetch_all(db.get_ref()).await {
                             Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                    Ok(value) => HttpResponse::Ok().json(value),
-                                    Err(response) => response,
-                                },
+                                Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                 Err(response) => response,
                             },
                             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4350,10 +4395,7 @@ fn resource_impl_tokens(
                     }
                     match q.fetch_all(db.get_ref()).await {
                         Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                Ok(value) => HttpResponse::Ok().json(value),
-                                Err(response) => response,
-                            },
+                            Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                             Err(response) => response,
                         },
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4414,10 +4456,7 @@ fn resource_impl_tokens(
                             }
                             match q.fetch_all(db.get_ref()).await {
                                 Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                    Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                        Ok(value) => HttpResponse::Ok().json(value),
-                                        Err(response) => response,
-                                    },
+                                    Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                     Err(response) => response,
                                 },
                                 Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4466,10 +4505,7 @@ fn resource_impl_tokens(
                             }
                             match q.fetch_all(db.get_ref()).await {
                                 Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                    Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                        Ok(value) => HttpResponse::Ok().json(value),
-                                        Err(response) => response,
-                                    },
+                                    Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                     Err(response) => response,
                                 },
                                 Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4517,10 +4553,7 @@ fn resource_impl_tokens(
                         }
                         match q.fetch_all(db.get_ref()).await {
                             Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                                Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                    Ok(value) => HttpResponse::Ok().json(value),
-                                    Err(response) => response,
-                                },
+                                Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                 Err(response) => response,
                             },
                             Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4574,10 +4607,7 @@ fn resource_impl_tokens(
                     }
                     match q.fetch_all(db.get_ref()).await {
                         Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                Ok(value) => HttpResponse::Ok().json(value),
-                                Err(response) => response,
-                            },
+                            Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                             Err(response) => response,
                         },
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4616,10 +4646,7 @@ fn resource_impl_tokens(
                     }
                     match q.fetch_all(db.get_ref()).await {
                         Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                            Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                                Ok(value) => HttpResponse::Ok().json(value),
-                                Err(response) => response,
-                            },
+                            Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                             Err(response) => response,
                         },
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4658,10 +4685,7 @@ fn resource_impl_tokens(
                 }
                 match q.fetch_all(db.get_ref()).await {
                     Ok(items) => match Self::finalize_list_response(plan, total, items) {
-                        Ok(response) => match Self::serialize_list_response(response, query.context.as_deref()) {
-                            Ok(value) => HttpResponse::Ok().json(value),
-                            Err(response) => response,
-                        },
+                        Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                         Err(response) => response,
                     },
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
@@ -4686,10 +4710,7 @@ fn resource_impl_tokens(
                     };
                     let id = path.into_inner();
                     match Self::fetch_readable_by_id(id, &user, db.get_ref()).await {
-                        Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
-                            Ok(value) => HttpResponse::Ok().json(value),
-                            Err(response) => response,
-                        },
+                        Ok(Some(item)) => Self::item_ok_response(&item, response_context.as_deref()),
                         Ok(None) => match Self::fetch_runtime_authorized_by_id(
                             id,
                             &user,
@@ -4699,10 +4720,7 @@ fn resource_impl_tokens(
                         )
                         .await
                         {
-                            Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
-                                Ok(value) => HttpResponse::Ok().json(value),
-                                Err(response) => response,
-                            },
+                            Ok(Some(item)) => Self::item_ok_response(&item, response_context.as_deref()),
                             Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
                             Err(response) => response,
                         },
@@ -4834,6 +4852,7 @@ fn resource_impl_tokens(
                 }
             }
 
+            #allow_dead_serialize_helpers
             fn serialize_item_value(
                 item: &Self,
                 context_fields: Option<&'static [&'static str]>,
@@ -4853,6 +4872,7 @@ fn resource_impl_tokens(
                 Ok(value)
             }
 
+            #allow_dead_serialize_helpers
             fn serialize_item_response(
                 item: &Self,
                 requested: Option<&str>,
@@ -4861,6 +4881,7 @@ fn resource_impl_tokens(
                 Self::serialize_item_value(item, context_fields)
             }
 
+            #allow_dead_serialize_helpers
             fn serialize_list_response(
                 response: #list_response_ty,
                 requested: Option<&str>,
@@ -4890,6 +4911,26 @@ fn resource_impl_tokens(
                 }))
             }
 
+            fn item_ok_response(item: &Self, requested: Option<&str>) -> HttpResponse {
+                #item_ok_response_body
+            }
+
+            fn item_created_response(
+                item: &Self,
+                req: &HttpRequest,
+                id: i64,
+                requested: Option<&str>,
+            ) -> HttpResponse {
+                #item_created_response_body
+            }
+
+            fn list_ok_response(
+                response: #list_response_ty,
+                requested: Option<&str>,
+            ) -> HttpResponse {
+                #list_ok_response_body
+            }
+
             fn created_location(req: &HttpRequest, id: i64) -> String {
                 format!("{}/{}", req.uri().path().trim_end_matches('/'), id)
             }
@@ -4907,12 +4948,9 @@ fn resource_impl_tokens(
                     Err(response) => return response,
                 };
                 match Self::fetch_readable_by_id(id, user, db).await {
-                    Ok(Some(item)) => match Self::serialize_item_response(&item, response_context.as_deref()) {
-                        Ok(value) => HttpResponse::Created()
-                            .append_header(("Location", Self::created_location(req, id)))
-                            .json(value),
-                        Err(response) => response,
-                    },
+                    Ok(Some(item)) => {
+                        Self::item_created_response(&item, req, id, response_context.as_deref())
+                    }
                     Ok(None) => #created_response_fallback,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
@@ -8158,5 +8196,61 @@ fn build_update_plan(resource: &ResourceSpec) -> UpdatePlan {
         clauses,
         bind_fields,
         where_index: bind_index,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use syn::parse_str;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn compact_tokens(tokens: &proc_macro2::TokenStream) -> String {
+        tokens
+            .to_string()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect()
+    }
+
+    #[test]
+    fn simple_resources_use_direct_json_response_helpers() {
+        let tokens = crate::compiler::expand_service_from_path(
+            &fixture_path("build_config_api.eon"),
+            parse_str("very_simple_rest").expect("runtime crate path should parse"),
+        )
+        .expect("fixture should expand");
+        let compact = compact_tokens(&tokens);
+
+        assert!(compact.contains("HttpResponse::Ok().json(item)"));
+        assert!(compact.contains("HttpResponse::Ok().json(response)"));
+        assert!(
+            compact.contains(
+                "HttpResponse::Created().append_header((\"Location\",Self::created_location(req,id))).json(item)"
+            )
+        );
+    }
+
+    #[test]
+    fn computed_or_contextual_resources_keep_value_serialization_helpers() {
+        let tokens = crate::compiler::expand_service_from_path(
+            &fixture_path("api_computed_fields_api.eon"),
+            parse_str("very_simple_rest").expect("runtime crate path should parse"),
+        )
+        .expect("fixture should expand");
+        let compact = compact_tokens(&tokens);
+
+        assert!(compact.contains(
+            "fnitem_ok_response(item:&Self,requested:Option<&str>)->HttpResponse{matchSelf::serialize_item_response(item,requested){Ok(value)=>HttpResponse::Ok().json(value),Err(response)=>response,}}"
+        ));
+        assert!(compact.contains(
+            "matchSelf::serialize_list_response(response,requested){Ok(value)=>HttpResponse::Ok().json(value),Err(response)=>response,}"
+        ));
     }
 }

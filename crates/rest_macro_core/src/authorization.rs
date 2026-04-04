@@ -3128,6 +3128,48 @@ fn collapse_conditions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "turso-local")]
+    use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
+    #[cfg(feature = "turso-local")]
+    use crate::db::connect_with_config;
+
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    async fn runtime_test_pool(prefix: &str) -> DbPool {
+        #[cfg(feature = "turso-local")]
+        {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos();
+            let database_path =
+                std::env::temp_dir().join(format!("vsr_authz_runtime_{prefix}_{stamp}.db"));
+            let config = DatabaseConfig {
+                engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                    path: database_path.to_string_lossy().into_owned(),
+                    encryption_key: None,
+                }),
+                resilience: None,
+            };
+            return connect_with_config("sqlite:ignored.db?mode=rwc", &config)
+                .await
+                .expect("database should connect");
+        }
+        #[cfg(all(not(feature = "turso-local"), feature = "sqlite"))]
+        {
+            sqlx::any::install_default_drivers();
+
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos();
+            let database_path =
+                std::env::temp_dir().join(format!("vsr_authz_runtime_{prefix}_{stamp}.db"));
+            let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
+            return DbPool::connect(&database_url)
+                .await
+                .expect("database should connect");
+        }
+    }
 
     fn eq(field: &str) -> AuthorizationCondition {
         AuthorizationCondition::Match(AuthorizationMatch {
@@ -3858,6 +3900,7 @@ mod tests {
         )));
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     fn scoped_doc_runtime_model() -> AuthorizationModel {
         AuthorizationModel {
             contract: AuthorizationContract {
@@ -4114,19 +4157,10 @@ mod tests {
         assert!(hybrid.fallback_applied);
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn authorization_runtime_persists_and_loads_scoped_assignments() {
-        sqlx::any::install_default_drivers();
-
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time should be valid")
-            .as_nanos();
-        let database_path = std::env::temp_dir().join(format!("vsr_authz_runtime_{stamp}.db"));
-        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
-        let pool = DbPool::connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = runtime_test_pool("persist").await;
         pool.execute_batch(&authorization_runtime_migration_sql(AuthDbBackend::Sqlite))
             .await
             .expect("runtime migration should apply");
@@ -4316,20 +4350,10 @@ mod tests {
         assert_eq!(events[3].reason.as_deref(), Some("cleanup"));
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn authorization_runtime_rejects_expired_assignment_creation_and_ignores_expired_rows() {
-        sqlx::any::install_default_drivers();
-
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time should be valid")
-            .as_nanos();
-        let database_path =
-            std::env::temp_dir().join(format!("vsr_authz_runtime_expired_{stamp}.db"));
-        let database_url = format!("sqlite:{}?mode=rwc", database_path.display());
-        let pool = DbPool::connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = runtime_test_pool("expired").await;
         pool.execute_batch(&authorization_runtime_migration_sql(AuthDbBackend::Sqlite))
             .await
             .expect("runtime migration should apply");

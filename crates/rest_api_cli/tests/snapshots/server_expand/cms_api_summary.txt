@@ -41,6 +41,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -92,6 +95,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -146,6 +152,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -201,6 +210,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -261,6 +273,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -314,6 +329,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -367,6 +385,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder
@@ -420,6 +441,9 @@ pub mod modern_cms_api
       fn serialize_item_value
       fn serialize_item_response
       fn serialize_list_response
+      fn item_ok_response
+      fn item_created_response
+      fn list_ok_response
       fn created_location
       fn created_response
       fn list_placeholder

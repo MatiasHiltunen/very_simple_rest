@@ -2117,11 +2117,18 @@ fn field_schema_with_optional(field: &FieldSpec, force_optional: bool) -> Value 
         schema_for_type(&field.ty)
     };
 
+    let inferred_datetime_suffix = field.name().ends_with("_at")
+        && !matches!(
+            structured_scalar_kind(&field.ty),
+            Some(super::model::StructuredScalarKind::Date)
+                | Some(super::model::StructuredScalarKind::Time)
+        );
+
     if !is_list_field(field)
         && (matches!(
             field.generated,
             GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
-        ) || field.name().ends_with("_at"))
+        ) || inferred_datetime_suffix)
     {
         schema["format"] = json!("date-time");
     }
@@ -3401,10 +3408,13 @@ mod tests {
             document["components"]["schemas"]["PostListResponse"]["properties"]["next_cursor"]["nullable"],
             json!(true)
         );
-        assert_eq!(
-            document["paths"]["/post"]["get"]["parameters"][7]["schema"]["minimum"],
-            json!(1)
-        );
+        let score_filter = document["paths"]["/post"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array")
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_score")
+            .expect("score filter should exist");
+        assert_eq!(score_filter["schema"]["minimum"], json!(1));
         assert_eq!(
             document["paths"]["/post"]["post"]["responses"]["400"]["content"]["application/json"]["schema"]
                 ["$ref"],

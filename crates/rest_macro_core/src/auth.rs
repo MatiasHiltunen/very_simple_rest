@@ -4659,27 +4659,37 @@ impl AuthRateLimiter {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     use super::{
-        AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
-        AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings, Claims,
-        LoginInput, auth_claim_migration_sql, auth_management_migration_sql, auth_migration_sql,
-        build_public_auth_url, configured_public_jwks,
-        ensure_admin_exists_with_settings_and_claim_prompt_mode, load_jwt_secret,
-        login_with_settings, validate_auth_claim_mappings,
+        AuthClaimMapping, AuthClaimType, AuthDbBackend, LoginInput, auth_claim_migration_sql,
+        auth_management_migration_sql, auth_migration_sql,
+        ensure_admin_exists_with_settings_and_claim_prompt_mode, login_with_settings,
+        validate_auth_claim_mappings,
+    };
+    use super::{
+        AuthEmailProvider, AuthEmailSettings, AuthJwtAlgorithm, AuthJwtSettings,
+        AuthJwtVerificationKey, AuthSettings, Claims, build_public_auth_url,
+        configured_public_jwks, load_jwt_secret,
     };
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
+    #[cfg(all(not(feature = "turso-local"), feature = "sqlite"))]
+    use crate::db::connect;
     #[cfg(feature = "turso-local")]
     use crate::db::connect_with_config;
-    use crate::db::{connect, query, query_scalar};
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    use crate::db::{DbPool, query, query_scalar};
     use crate::secret::SecretRef;
+    use actix_web::App;
     use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
-    use actix_web::{App, body::to_bytes, http::StatusCode, web};
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    use actix_web::{body::to_bytes, http::StatusCode, web};
     use chrono::{Duration, Utc};
     use jsonwebtoken::{
         DecodingKey, encode,
         jwk::{AlgorithmParameters, EllipticCurve, KeyAlgorithm},
     };
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     use sqlx::Row;
     use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
@@ -4690,6 +4700,7 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[cfg(all(not(feature = "turso-local"), feature = "sqlite"))]
     fn unique_sqlite_url(prefix: &str) -> String {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4697,6 +4708,35 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("vsr_auth_{prefix}_{nanos}.db"));
         format!("sqlite:{}?mode=rwc", path.display())
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    async fn connect_test_pool(prefix: &str) -> DbPool {
+        #[cfg(feature = "turso-local")]
+        {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic enough")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("vsr_auth_{prefix}_{nanos}.db"));
+            let config = DatabaseConfig {
+                engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                    path: path.to_string_lossy().into_owned(),
+                    encryption_key: None,
+                }),
+                resilience: None,
+            };
+            return connect_with_config("sqlite:ignored.db?mode=rwc", &config)
+                .await
+                .expect("database should connect");
+        }
+        #[cfg(all(not(feature = "turso-local"), feature = "sqlite"))]
+        {
+            let database_url = unique_sqlite_url(prefix);
+            return connect(&database_url)
+                .await
+                .expect("database should connect");
+        }
     }
 
     fn write_temp_secret_file(prefix: &str, contents: &str) -> std::path::PathBuf {
@@ -5127,6 +5167,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn ensure_admin_exists_inserts_detected_claim_columns_from_environment() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -5138,10 +5179,7 @@ mod tests {
             std::env::set_var("ADMIN_CLAIM_WORKSPACE_ID", "42");
         }
 
-        let database_url = unique_sqlite_url("ensure_admin_claims");
-        let pool = connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = connect_test_pool("ensure_admin_claims").await;
 
         query(
             "CREATE TABLE user (
@@ -5185,6 +5223,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn ensure_admin_exists_returns_false_when_required_claim_is_missing() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -5195,10 +5234,7 @@ mod tests {
             std::env::remove_var("ADMIN_TENANT_ID");
         }
 
-        let database_url = unique_sqlite_url("ensure_admin_required_claim");
-        let pool = connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = connect_test_pool("ensure_admin_required_claim").await;
 
         query(
             "CREATE TABLE user (
@@ -5234,6 +5270,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn login_treats_null_management_fields_as_unverified_when_schema_exists() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -5241,10 +5278,7 @@ mod tests {
             std::env::set_var("JWT_SECRET", "auth-management-test-secret");
         }
 
-        let database_url = unique_sqlite_url("management_nulls");
-        let pool = connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = connect_test_pool("management_nulls").await;
 
         for statement in auth_migration_sql(AuthDbBackend::Sqlite)
             .split(';')
@@ -5365,6 +5399,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn ensure_admin_exists_uses_explicit_auth_claim_mappings() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -5378,10 +5413,7 @@ mod tests {
             std::env::set_var("ADMIN_PLAN", "pro");
         }
 
-        let database_url = unique_sqlite_url("ensure_admin_explicit_claims");
-        let pool = connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = connect_test_pool("ensure_admin_explicit_claims").await;
 
         query(
             "CREATE TABLE user (
@@ -5471,12 +5503,10 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     #[actix_web::test]
     async fn validate_auth_claim_mappings_rejects_mismatched_column_types() {
-        let database_url = unique_sqlite_url("validate_auth_claims");
-        let pool = connect(&database_url)
-            .await
-            .expect("database should connect");
+        let pool = connect_test_pool("validate_auth_claims").await;
 
         query(
             "CREATE TABLE user (

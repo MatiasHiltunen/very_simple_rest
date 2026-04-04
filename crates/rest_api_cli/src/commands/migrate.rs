@@ -1304,10 +1304,7 @@ mod tests {
     use rest_macro_core::compiler;
     use rest_macro_core::db::query_scalar;
     use sqlx::Row;
-    use std::{
-        path::PathBuf,
-        sync::{Mutex, OnceLock},
-    };
+    use std::{path::PathBuf, sync::Mutex};
 
     use super::{
         BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, BUILTIN_AUTHZ_RUNTIME_MIGRATION,
@@ -1317,8 +1314,7 @@ mod tests {
     };
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_support::env_lock()
     }
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -1612,10 +1608,8 @@ resources: [
             &schema,
         )
         .expect("fixture should copy");
-        let database_url = format!(
-            "sqlite:{}?mode=rwc",
-            root.join("authz_runtime.db").display()
-        );
+        let database_url =
+            database_url_from_service_config(&schema).expect("database url should resolve");
 
         apply_setup_migrations(&database_url, Some(&schema))
             .await

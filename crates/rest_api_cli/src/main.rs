@@ -2520,16 +2520,11 @@ mod tests {
         include_builtin_auth, should_offer_serve_setup,
     };
     use clap::Parser;
-    use std::{
-        fs,
-        path::PathBuf,
-        sync::{Mutex, OnceLock},
-    };
+    use std::{fs, path::PathBuf, sync::Mutex};
     use uuid::Uuid;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        vsra::test_support::env_lock()
     }
 
     fn fixture_path(name: &str) -> PathBuf {
