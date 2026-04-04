@@ -4,7 +4,6 @@ use proc_macro2::Span;
 
 use super::model::{
     DbBackend, GeneratedValue, ResourceSpec, RowPolicies, ServiceSpec, is_optional_type,
-    temporal_scalar_kind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -296,9 +295,9 @@ fn render_field_definition(resource: &ResourceSpec, field: &super::model::FieldS
                 "{} {} NOT NULL DEFAULT {}",
                 field_name,
                 field.sql_type,
-                resource
-                    .db
-                    .generated_temporal_expression(temporal_scalar_kind(&field.ty))
+                resource.db.generated_temporal_expression(
+                    super::model::generated_temporal_kind_for_field(&field.ty, field.generated),
+                )
             )
         }
         GeneratedValue::None | GeneratedValue::AutoIncrement => {
@@ -730,7 +729,7 @@ resources: [
     }
 
     #[test]
-    fn mysql_migration_sql_uses_bigint_foreign_keys_and_varchar_strings() {
+    fn mysql_migration_sql_uses_bigint_foreign_keys_varchar_strings_and_datetime_defaults() {
         let schema_path = temp_schema_path("mysql_family_migration");
         fs::write(
             &schema_path,
@@ -742,6 +741,8 @@ resources: [
         fields: [
             { name: "id", type: I64, id: true }
             { name: "slug", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
         ]
     }
     {
@@ -754,6 +755,8 @@ resources: [
                 relation: { references: "family.id" }
             }
             { name: "display_name", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
         ]
     }
 ]
@@ -767,6 +770,12 @@ resources: [
 
         assert!(sql.contains("slug VARCHAR(255) NOT NULL"));
         assert!(sql.contains("family_id BIGINT NOT NULL"));
+        assert!(sql.contains(
+            "created_at VARCHAR(255) NOT NULL DEFAULT (DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%f+00:00'))"
+        ));
+        assert!(sql.contains(
+            "updated_at VARCHAR(255) NOT NULL DEFAULT (DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%f+00:00'))"
+        ));
 
         let _ = fs::remove_file(schema_path);
     }

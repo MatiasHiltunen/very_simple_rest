@@ -1156,6 +1156,23 @@ pub fn temporal_scalar_kind(ty: &Type) -> Option<GeneratedTemporalKind> {
     structured_scalar_kind(ty).and_then(|kind| kind.generated_temporal_kind())
 }
 
+pub fn generated_temporal_kind_for_field(
+    ty: &Type,
+    generated: GeneratedValue,
+) -> Option<GeneratedTemporalKind> {
+    temporal_scalar_kind(ty).or_else(|| {
+        if matches!(
+            generated,
+            GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
+        ) && matches!(type_leaf_name(ty).as_deref(), Some("String"))
+        {
+            Some(GeneratedTemporalKind::DateTime)
+        } else {
+            None
+        }
+    })
+}
+
 pub fn supports_range_filters(ty: &Type) -> bool {
     structured_scalar_kind(ty)
         .map(|kind| kind.supports_range_filters())
@@ -3310,11 +3327,15 @@ fn validate_policy_field<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_security_config;
+    use super::{
+        GeneratedTemporalKind, GeneratedValue, generated_temporal_kind_for_field,
+        validate_security_config,
+    };
     use crate::auth::{AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings};
     use crate::secret::SecretRef;
     use crate::security::SecurityConfig;
     use proc_macro2::Span;
+    use syn::parse_str;
 
     #[test]
     fn rejects_combined_structured_and_legacy_jwt_config() {
@@ -3386,5 +3407,33 @@ mod tests {
         assert!(message.contains("security.auth.jwt.active_kid"));
         assert!(message.contains("unknown verification key"));
         assert!(message.contains("current"));
+    }
+
+    #[test]
+    fn generated_string_timestamps_default_to_datetime_expressions() {
+        let ty = parse_str("String").expect("type should parse");
+
+        assert_eq!(
+            generated_temporal_kind_for_field(&ty, GeneratedValue::CreatedAt),
+            Some(GeneratedTemporalKind::DateTime)
+        );
+        assert_eq!(
+            generated_temporal_kind_for_field(&ty, GeneratedValue::UpdatedAt),
+            Some(GeneratedTemporalKind::DateTime)
+        );
+        assert_eq!(
+            generated_temporal_kind_for_field(&ty, GeneratedValue::None),
+            None
+        );
+    }
+
+    #[test]
+    fn generated_temporal_kind_preserves_explicit_temporal_types() {
+        let ty = parse_str("Date").expect("type should parse");
+
+        assert_eq!(
+            generated_temporal_kind_for_field(&ty, GeneratedValue::CreatedAt),
+            Some(GeneratedTemporalKind::Date)
+        );
     }
 }

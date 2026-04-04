@@ -5666,7 +5666,10 @@ fn resource_action_handler_tokens(
                             "{} = {}",
                             field.name(),
                             resource.db.generated_temporal_expression(
-                                super::model::temporal_scalar_kind(&field.ty)
+                                super::model::generated_temporal_kind_for_field(
+                                    &field.ty,
+                                    field.generated,
+                                )
                             )
                         )
                     }),
@@ -8175,9 +8178,12 @@ fn build_update_plan(resource: &ResourceSpec) -> UpdatePlan {
                     "{field_name} = {}",
                     resource
                         .db
-                        .generated_temporal_expression(super::model::temporal_scalar_kind(
-                            &field.ty
-                        ))
+                        .generated_temporal_expression(
+                            super::model::generated_temporal_kind_for_field(
+                                &field.ty,
+                                field.generated,
+                            ),
+                        )
                 ));
             }
             GeneratedValue::AutoIncrement | GeneratedValue::CreatedAt => {}

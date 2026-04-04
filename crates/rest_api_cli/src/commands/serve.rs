@@ -1377,6 +1377,14 @@ fn generated_temporal_expression(db: DbBackend, field: &DynamicField) -> &'stati
         FieldKind::DateTime => Some(compiler::GeneratedTemporalKind::DateTime),
         FieldKind::Date => Some(compiler::GeneratedTemporalKind::Date),
         FieldKind::Time => Some(compiler::GeneratedTemporalKind::Time),
+        FieldKind::Text
+            if matches!(
+                field.generated,
+                GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
+            ) =>
+        {
+            Some(compiler::GeneratedTemporalKind::DateTime)
+        }
         _ => None,
     };
     db.generated_temporal_expression(kind)
