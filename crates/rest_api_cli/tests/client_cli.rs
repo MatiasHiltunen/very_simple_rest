@@ -12,8 +12,7 @@ use uuid::Uuid;
 use vsra::commands::db::{connect_database, database_url_from_service_config};
 use vsra::commands::setup::run_setup;
 
-const TEST_TURSO_KEY: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const TEST_TURSO_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -56,7 +55,9 @@ fn wait_for_http_ready(client: &Client, url: &str, timeout: Duration) -> Result<
     while Instant::now() < deadline {
         match client.get(url).send() {
             Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(response) => last_error = Some(format!("server responded with {}", response.status())),
+            Ok(response) => {
+                last_error = Some(format!("server responded with {}", response.status()))
+            }
             Err(error) => last_error = Some(error.to_string()),
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -99,7 +100,8 @@ fn assert_text_snapshot(snapshot: &Path, actual: &str) {
         )
     });
     assert_eq!(
-        expected, actual,
+        expected,
+        actual,
         "snapshot mismatch at {}",
         snapshot.display()
     );
@@ -132,8 +134,9 @@ fn compile_generated_client(output_dir: &Path) {
 }
 
 fn assert_dependency_free_client(output_dir: &Path) {
-    let package_json: Value = serde_json::from_str(&read_to_string(&output_dir.join("package.json")))
-        .expect("generated package.json should be valid JSON");
+    let package_json: Value =
+        serde_json::from_str(&read_to_string(&output_dir.join("package.json")))
+            .expect("generated package.json should be valid JSON");
     assert!(
         package_json.get("dependencies").is_none(),
         "generated client must not declare runtime dependencies"
@@ -229,6 +232,7 @@ fn generate_client(input: &Path, output_dir: &Path) {
         .arg(input)
         .arg("--output")
         .arg(output_dir)
+        .arg("--emit-js")
         .arg("--force")
         .status()
         .expect("vsr client ts should execute");
@@ -333,10 +337,13 @@ fn generated_typescript_client_supports_auth_and_crud_against_live_server() {
         &format!("{base_url}/openapi.json"),
         Duration::from_secs(30),
     ) {
-        panic!("generated client server never became ready: {error}\n{}", server.logs());
+        panic!(
+            "generated client server never became ready: {error}\n{}",
+            server.logs()
+        );
     }
 
-    let script_path = client_dir.join("smoke.ts");
+    let script_path = client_dir.join("smoke.mjs");
     fs::write(
         &script_path,
         r#"import {
@@ -347,7 +354,7 @@ fn generated_typescript_client_supports_auth_and_crud_against_live_server() {
   listPost,
   getPost,
   updatePost,
-} from "./index.ts";
+} from "./index.js";
 
 const baseUrl = process.env.BASE_URL;
 const email = process.env.EMAIL;
@@ -480,10 +487,13 @@ fn generated_typescript_client_supports_uploads_against_live_server() {
         &format!("{base_url}/openapi.json"),
         Duration::from_secs(30),
     ) {
-        panic!("generated upload client server never became ready: {error}\n{}", server.logs());
+        panic!(
+            "generated upload client server never became ready: {error}\n{}",
+            server.logs()
+        );
     }
 
-    let script_path = client_dir.join("upload-smoke.ts");
+    let script_path = client_dir.join("upload-smoke.mjs");
     fs::write(
         &script_path,
         r#"import {
@@ -492,7 +502,7 @@ fn generated_typescript_client_supports_uploads_against_live_server() {
   loginUser,
   registerUser,
   uploadAssetUpload,
-} from "./index.ts";
+} from "./index.js";
 
 const baseUrl = process.env.BASE_URL;
 const email = process.env.EMAIL;
@@ -667,14 +677,14 @@ fn generated_typescript_client_supports_public_query_and_nested_routes_against_l
         );
     }
 
-    let script_path = client_dir.join("public-smoke.ts");
+    let script_path = client_dir.join("public-smoke.mjs");
     fs::write(
         &script_path,
         r#"import {
   createClient,
   listInterestByOrganization,
   listOrganization,
-} from "./index.ts";
+} from "./index.js";
 
 const baseUrl = process.env.BASE_URL;
 if (!baseUrl) {
@@ -825,6 +835,7 @@ fn client_ts_self_test_produces_passing_report_against_live_server() {
         .arg(&config)
         .arg("--output")
         .arg(&client_dir)
+        .arg("--emit-js")
         .arg("--force")
         .arg("--without-auth")
         .arg("--self-test")
@@ -835,7 +846,9 @@ fn client_ts_self_test_produces_passing_report_against_live_server() {
     if let Some(tsc_binary) = find_tsc_binary() {
         command.arg("--self-test-tsc").arg(tsc_binary);
     }
-    let output = command.output().expect("vsr client ts self-test should execute");
+    let output = command
+        .output()
+        .expect("vsr client ts self-test should execute");
     assert!(
         output.status.success(),
         "generated client self-test command failed\nstdout:\n{}\nstderr:\n{}",
@@ -850,12 +863,16 @@ fn client_ts_self_test_produces_passing_report_against_live_server() {
     let checks = report["checks"]
         .as_array()
         .expect("report checks should be an array");
-    assert!(checks.iter().any(|check| {
-        check["name"] == "manifest.dependencies" && check["status"] == "passed"
-    }));
-    assert!(checks.iter().any(|check| {
-        check["name"] == "module.imports" && check["status"] == "passed"
-    }));
+    assert!(
+        checks.iter().any(|check| {
+            check["name"] == "manifest.dependencies" && check["status"] == "passed"
+        })
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| { check["name"] == "module.imports" && check["status"] == "passed" })
+    );
     assert!(checks.iter().any(|check| {
         check["name"] == "runtime.node_import_smoke" && check["status"] == "passed"
     }));
@@ -905,9 +922,9 @@ fn client_ts_self_test_static_report_matches_snapshot() {
     let report: Value =
         serde_json::from_str(&read_to_string(&report_path)).expect("report should parse");
     let normalized = normalize_self_test_report(report);
-    let rendered =
-        serde_json::to_string_pretty(&normalized).expect("normalized report should serialize")
-            + "\n";
+    let rendered = serde_json::to_string_pretty(&normalized)
+        .expect("normalized report should serialize")
+        + "\n";
     assert_text_snapshot(
         &snapshot_path("public_catalog_static_report.json"),
         &rendered,
@@ -982,25 +999,43 @@ fn family_app_example_generates_browser_ready_client_modules() {
     fs::create_dir_all(&service_dir).expect("service dir should exist");
 
     let source_dir = example_path("family_app");
-    fs::copy(source_dir.join("family_app.eon"), service_dir.join("family_app.eon"))
-        .expect("family app config should copy");
+    fs::copy(
+        source_dir.join("family_app.eon"),
+        service_dir.join("family_app.eon"),
+    )
+    .expect("family app config should copy");
 
     let public_dir = service_dir.join("public");
     fs::create_dir_all(&public_dir).expect("public dir should exist");
-    fs::copy(source_dir.join("public/index.html"), public_dir.join("index.html"))
-        .expect("index.html should copy");
-    fs::copy(source_dir.join("public/styles.css"), public_dir.join("styles.css"))
-        .expect("styles.css should copy");
+    fs::copy(
+        source_dir.join("public/index.html"),
+        public_dir.join("index.html"),
+    )
+    .expect("index.html should copy");
+    fs::copy(
+        source_dir.join("public/styles.css"),
+        public_dir.join("styles.css"),
+    )
+    .expect("styles.css should copy");
     fs::copy(source_dir.join("public/app.js"), public_dir.join("app.js"))
         .expect("app.js should copy");
 
-    generate_client(&service_dir.join("family_app.eon"), &service_dir.join("public/gen/client"));
+    generate_client(
+        &service_dir.join("family_app.eon"),
+        &service_dir.join("public/gen/client"),
+    );
 
     let output_dir = service_dir.join("public/gen/client");
     assert_dependency_free_client(&output_dir);
     compile_generated_client(&output_dir);
-    assert!(output_dir.join("index.js").exists(), "browser JS entry should exist");
-    assert!(output_dir.join("client.js").exists(), "browser JS runtime should exist");
+    assert!(
+        output_dir.join("index.js").exists(),
+        "browser JS entry should exist"
+    );
+    assert!(
+        output_dir.join("client.js").exists(),
+        "browser JS runtime should exist"
+    );
     assert!(
         output_dir.join("operations.js").exists(),
         "browser JS operations should exist"

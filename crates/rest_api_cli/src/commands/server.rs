@@ -1518,6 +1518,30 @@ async fn main() -> std::io::Result<()> {{
         }}
     }};
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "{bind_addr_default}".to_owned());
+    let server_workers = match env::var("VSR_HTTP_WORKERS") {{
+        Ok(raw) => {{
+            let workers = raw.parse::<usize>().map_err(|error| {{
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("VSR_HTTP_WORKERS must be a positive integer, got `{{raw}}`: {{error}}"),
+                )
+            }})?;
+            if workers == 0 {{
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "VSR_HTTP_WORKERS must be greater than 0",
+                ));
+            }}
+            Some(workers)
+        }}
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {{
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "VSR_HTTP_WORKERS must contain valid UTF-8",
+            ));
+        }}
+    }};
 
     let pool = very_simple_rest::db::connect_with_config(&database_url, &database_config)
         .await
@@ -1542,6 +1566,11 @@ async fn main() -> std::io::Result<()> {{
             )
             .configure(generated::{module_name}::configure_static)
     }});
+    let server = if let Some(workers) = server_workers {{
+        server.workers(workers)
+    }} else {{
+        server
+    }};
 {server_bind}    server.run().await
 }}
 "##
