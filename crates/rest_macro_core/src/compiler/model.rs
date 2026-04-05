@@ -1141,8 +1141,8 @@ pub fn policy_field_claim_type(ty: &Type) -> Option<AuthClaimType> {
 pub fn structured_scalar_kind(ty: &Type) -> Option<StructuredScalarKind> {
     match type_leaf_name(ty).as_deref() {
         Some("DateTime" | GENERATED_DATETIME_ALIAS) => Some(StructuredScalarKind::DateTime),
-        Some("NaiveDate" | GENERATED_DATE_ALIAS) => Some(StructuredScalarKind::Date),
-        Some("NaiveTime" | GENERATED_TIME_ALIAS) => Some(StructuredScalarKind::Time),
+        Some("Date" | "NaiveDate" | GENERATED_DATE_ALIAS) => Some(StructuredScalarKind::Date),
+        Some("Time" | "NaiveTime" | GENERATED_TIME_ALIAS) => Some(StructuredScalarKind::Time),
         Some("Uuid" | GENERATED_UUID_ALIAS) => Some(StructuredScalarKind::Uuid),
         Some("Decimal" | GENERATED_DECIMAL_ALIAS) => Some(StructuredScalarKind::Decimal),
         Some(GENERATED_JSON_ALIAS) => Some(StructuredScalarKind::Json),
@@ -3429,11 +3429,16 @@ mod tests {
 
     #[test]
     fn generated_temporal_kind_preserves_explicit_temporal_types() {
-        let ty = parse_str("Date").expect("type should parse");
+        let date_ty = parse_str("Date").expect("type should parse");
+        let time_ty = parse_str("Time").expect("type should parse");
 
         assert_eq!(
-            generated_temporal_kind_for_field(&ty, GeneratedValue::CreatedAt),
+            generated_temporal_kind_for_field(&date_ty, GeneratedValue::CreatedAt),
             Some(GeneratedTemporalKind::Date)
+        );
+        assert_eq!(
+            generated_temporal_kind_for_field(&time_ty, GeneratedValue::UpdatedAt),
+            Some(GeneratedTemporalKind::Time)
         );
     }
 }
