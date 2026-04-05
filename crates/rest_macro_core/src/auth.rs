@@ -4659,17 +4659,17 @@ impl AuthRateLimiter {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
+        AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings, Claims,
+        auth_claim_migration_sql, auth_migration_sql, build_public_auth_url,
+        configured_public_jwks, load_jwt_secret,
+    };
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     use super::{
-        AuthClaimMapping, AuthClaimType, AuthDbBackend, LoginInput, auth_claim_migration_sql,
-        auth_management_migration_sql, auth_migration_sql,
+        LoginInput, auth_management_migration_sql,
         ensure_admin_exists_with_settings_and_claim_prompt_mode, login_with_settings,
         validate_auth_claim_mappings,
-    };
-    use super::{
-        AuthEmailProvider, AuthEmailSettings, AuthJwtAlgorithm, AuthJwtSettings,
-        AuthJwtVerificationKey, AuthSettings, Claims, build_public_auth_url,
-        configured_public_jwks, load_jwt_secret,
     };
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
@@ -4683,7 +4683,8 @@ mod tests {
     use actix_web::App;
     use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]
-    use actix_web::{body::to_bytes, http::StatusCode, web};
+    use actix_web::body::to_bytes;
+    use actix_web::{http::StatusCode, web};
     use chrono::{Duration, Utc};
     use jsonwebtoken::{
         DecodingKey, encode,

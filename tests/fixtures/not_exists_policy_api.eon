@@ -1,0 +1,40 @@
+resources: [
+    {
+        name: "ForumThreadRemoval"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "thread_id", type: I64 }
+        ]
+    }
+    {
+        name: "ForumThread"
+        policies: {
+            read: {
+                any_of: [
+                    {
+                        all_of: [
+                            { field: "removed_state", is_null: true }
+                            {
+                                not: {
+                                    exists: {
+                                        resource: "ForumThreadRemoval"
+                                        where: [
+                                            { field: "thread_id", equals_field: "id" }
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                    "author_user_id=user.id"
+                ]
+            }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "author_user_id", type: I64 }
+            { name: "removed_state", type: String, nullable: true }
+            { name: "title", type: String }
+        ]
+    }
+]

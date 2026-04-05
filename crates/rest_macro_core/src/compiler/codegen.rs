@@ -7999,7 +7999,7 @@ fn policy_expression_plan_tokens(
             );
             quote! {
                 {
-                    match #exists_condition {
+                    match (#exists_condition) {
                         #plan_ident::Resolved { condition, binds } => #plan_ident::Resolved {
                             condition: format!(
                                 "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",

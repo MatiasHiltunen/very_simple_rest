@@ -107,6 +107,15 @@ free_port() {
   node -e 'const net=require("node:net");const s=net.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});'
 }
 
+file_has_tls_block() {
+  local path="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q '^tls:' "$path"
+  else
+    grep -Eq '^tls:' "$path"
+  fi
+}
+
 run_static_example() {
   local name="$1"
   local source_dir="$REPO_ROOT/$(example_dir "$name")"
@@ -155,7 +164,7 @@ run_live_example() {
   local scheme="http"
   local curl_args=(-fsS)
   local extra_args=()
-  if rg -q '^tls:' "$input"; then
+  if file_has_tls_block "$input"; then
     scheme="https"
     curl_args=(-k -fsS)
     extra_args+=(--self-test-insecure-tls)
