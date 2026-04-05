@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use colored::Colorize;
 use rest_macro_core::compiler::{
@@ -96,7 +96,10 @@ pub fn generate_automated_typescript_client_for_build(input: &Path) -> Result<Op
         return Ok(None);
     }
 
-    println!("{}", "Generating automated TypeScript client...".cyan().bold());
+    println!(
+        "{}",
+        "Generating automated TypeScript client...".cyan().bold()
+    );
 
     let self_test = if service.clients.ts.automation.self_test {
         Some(TypescriptClientSelfTestOptions {
@@ -1804,7 +1807,10 @@ fn run_typescript_client_self_test(
     checks.push(check_generated_client_manifest(&generated.output_dir)?);
     checks.push(check_generated_client_import_graph(&generated.output_dir)?);
     checks.push(run_node_import_smoke_check(&generated.output_dir, options)?);
-    checks.push(run_typescript_compile_check(&generated.output_dir, options)?);
+    checks.push(run_typescript_compile_check(
+        &generated.output_dir,
+        options,
+    )?);
 
     if let Some(base_url) = options.runtime_base_url.as_deref() {
         checks.extend(run_runtime_probe_checks(generated, base_url, options)?);
@@ -1831,7 +1837,12 @@ fn check_generated_client_manifest(output_dir: &Path) -> Result<ClientSelfTestCh
     .context("generated package.json was invalid JSON")?;
 
     let mut forbidden = Vec::new();
-    for field in ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] {
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
         if package_json.get(field).is_some() {
             forbidden.push(field);
         }
@@ -1880,8 +1891,7 @@ fn check_generated_client_import_graph(output_dir: &Path) -> Result<ClientSelfTe
             name: "module.imports".to_owned(),
             kind: ClientSelfTestKind::Static,
             status: ClientSelfTestStatus::Passed,
-            details: "Generated client source files import only relative local modules."
-                .to_owned(),
+            details: "Generated client source files import only relative local modules.".to_owned(),
             metadata: Some(serde_json::json!({
                 "files_checked": source_files.len(),
             })),
@@ -1925,8 +1935,43 @@ fn run_node_import_smoke_check(
         });
     };
 
-    let module_url = file_url_string(&preferred_runtime_module_path(output_dir))?;
-    let script_path = temp_self_test_script_path("import-smoke")?;
+    let runtime_module_path = preferred_runtime_module_path(output_dir);
+    let requires_typescript_runtime = runtime_module_path
+        .extension()
+        .and_then(|value| value.to_str())
+        == Some("ts");
+    if requires_typescript_runtime && !node_supports_typescript_scripts(&node_binary)? {
+        return Ok(ClientSelfTestCheck {
+            name: "runtime.node_import_smoke".to_owned(),
+            kind: ClientSelfTestKind::Runtime,
+            status: if options.runtime_base_url.is_some() {
+                ClientSelfTestStatus::Failed
+            } else {
+                ClientSelfTestStatus::Skipped
+            },
+            details: if options.runtime_base_url.is_some() {
+                "Node.js was available, but it could not execute the generated TypeScript client runtime directly."
+                    .to_owned()
+            } else {
+                "Node.js was available, but it could not execute TypeScript modules directly, so the generated client runtime import smoke test was skipped."
+                    .to_owned()
+            },
+            metadata: Some(serde_json::json!({
+                "node_binary": node_binary.display().to_string(),
+                "module_path": runtime_module_path.display().to_string(),
+            })),
+        });
+    }
+
+    let module_url = file_url_string(&runtime_module_path)?;
+    let script_path = temp_self_test_script_path(
+        "import-smoke",
+        if requires_typescript_runtime {
+            "ts"
+        } else {
+            "mjs"
+        },
+    )?;
     fs::write(
         &script_path,
         format!(
@@ -1983,8 +2028,7 @@ fn run_typescript_compile_check(
             name: "typescript.compile".to_owned(),
             kind: ClientSelfTestKind::Static,
             status: ClientSelfTestStatus::Skipped,
-            details: "TypeScript compiler was not available, so `tsc -p` was skipped."
-                .to_owned(),
+            details: "TypeScript compiler was not available, so `tsc -p` was skipped.".to_owned(),
             metadata: None,
         });
     };
@@ -2039,6 +2083,26 @@ fn run_runtime_probe_checks(
         }]);
     };
 
+    let runtime_module_path = preferred_runtime_module_path(&generated.output_dir);
+    let requires_typescript_runtime = runtime_module_path
+        .extension()
+        .and_then(|value| value.to_str())
+        == Some("ts");
+    if requires_typescript_runtime && !node_supports_typescript_scripts(&node_binary)? {
+        return Ok(vec![ClientSelfTestCheck {
+            name: "runtime.public_get_probes".to_owned(),
+            kind: ClientSelfTestKind::Runtime,
+            status: ClientSelfTestStatus::Failed,
+            details:
+                "Runtime probe execution requires a Node.js runtime that can execute TypeScript modules directly, but the available `node` executable could not do so."
+                    .to_owned(),
+            metadata: Some(serde_json::json!({
+                "node_binary": node_binary.display().to_string(),
+                "module_path": runtime_module_path.display().to_string(),
+            })),
+        }]);
+    }
+
     let probes = generated
         .document
         .operations
@@ -2055,10 +2119,17 @@ fn run_runtime_probe_checks(
         .cloned()
         .collect::<Vec<_>>();
 
-    let script_path = temp_self_test_script_path("runtime-probes")?;
+    let script_path = temp_self_test_script_path(
+        "runtime-probes",
+        if requires_typescript_runtime {
+            "ts"
+        } else {
+            "mjs"
+        },
+    )?;
     fs::write(
         &script_path,
-        render_runtime_probe_script(&generated.output_dir, &probes)?,
+        render_runtime_probe_script(&runtime_module_path, &probes)?,
     )
     .with_context(|| format!("failed to write {}", script_path.display()))?;
 
@@ -2100,7 +2171,11 @@ fn run_runtime_probe_checks(
 
     let mut rendered = Vec::new();
     for check in checks {
-        let status = match check.get("status").and_then(Value::as_str).unwrap_or("failed") {
+        let status = match check
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed")
+        {
             "passed" => ClientSelfTestStatus::Passed,
             "skipped" => ClientSelfTestStatus::Skipped,
             _ => ClientSelfTestStatus::Failed,
@@ -2153,11 +2228,7 @@ fn resolve_self_test_report_path(
     }
 }
 
-fn write_self_test_report(
-    report: &ClientSelfTestReport,
-    path: &Path,
-    force: bool,
-) -> Result<()> {
+fn write_self_test_report(report: &ClientSelfTestReport, path: &Path, force: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -2181,7 +2252,11 @@ fn print_self_test_summary(report: &ClientSelfTestReport, report_path: &Path) {
         report.summary.failed,
         report.summary.skipped
     );
-    println!("{} {}", "Self-test report:".green().bold(), report_path.display());
+    println!(
+        "{} {}",
+        "Self-test report:".green().bold(),
+        report_path.display()
+    );
 }
 
 fn collect_generated_client_source_files(output_dir: &Path) -> Result<Vec<PathBuf>> {
@@ -2253,10 +2328,27 @@ fn resolve_executable(explicit: Option<&Path>, default_name: &str) -> Option<Pat
         .map(|_| PathBuf::from(default_name))
 }
 
-fn temp_self_test_script_path(kind: &str) -> Result<PathBuf> {
+fn node_supports_typescript_scripts(node_binary: &Path) -> Result<bool> {
+    let script_path = temp_self_test_script_path("typescript-probe", "ts")?;
+    fs::write(
+        &script_path,
+        "type ProbeValue = { value: number };\nconst probe: ProbeValue = { value: 1 };\nconsole.log(probe.value);\n",
+    )
+    .with_context(|| format!("failed to write {}", script_path.display()))?;
+
+    let output = Command::new(node_binary)
+        .arg(&script_path)
+        .output()
+        .with_context(|| format!("failed to execute {}", node_binary.display()))?;
+    let _ = fs::remove_file(&script_path);
+    Ok(output.status.success())
+}
+
+fn temp_self_test_script_path(kind: &str, extension: &str) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!(
-        "vsr-client-self-test-{kind}-{}.ts",
-        Uuid::new_v4()
+        "vsr-client-self-test-{kind}-{}.{}",
+        Uuid::new_v4(),
+        extension
     ));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -2271,8 +2363,8 @@ fn file_url_string(path: &Path) -> Result<String> {
         .map_err(|_| anyhow!("failed to convert {} to a file URL", path.display()))
 }
 
-fn render_runtime_probe_script(output_dir: &Path, probes: &[ClientOperation]) -> Result<String> {
-    let module_url = file_url_string(&preferred_runtime_module_path(output_dir))?;
+fn render_runtime_probe_script(module_path: &Path, probes: &[ClientOperation]) -> Result<String> {
+    let module_url = file_url_string(module_path)?;
     let mut import_names = vec!["createClient".to_owned()];
     import_names.extend(
         probes
@@ -2397,7 +2489,13 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
 
-    use super::{generate_automated_typescript_client_for_build, generate_typescript_client};
+    use super::{
+        generate_automated_typescript_client_for_build, generate_typescript_client,
+        run_node_import_smoke_check, ClientSelfTestStatus, TypescriptClientSelfTestOptions,
+    };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2424,6 +2522,45 @@ mod tests {
                 .expect("time should move forward")
                 .as_nanos()
         )
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, contents: &str) {
+        fs::write(path, contents).expect("script should write");
+        let mut permissions = fs::metadata(path)
+            .expect("script metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("script permissions should apply");
+    }
+
+    #[cfg(unix)]
+    fn fake_node_binary(root: &Path) -> PathBuf {
+        let node_path = root.join("fake-node");
+        write_executable_script(
+            &node_path,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "v20.0.0"
+  exit 0
+fi
+
+case "$1" in
+  *.ts)
+    echo 'TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".ts"' >&2
+    exit 1
+    ;;
+  *.mjs)
+    echo '{"ok":true}'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+        );
+        node_path
     }
 
     #[test]
@@ -2612,10 +2749,8 @@ mod tests {
         assert!(
             read_to_string(&output.join("package.json")).contains("\"name\": \"@demo/client-api\"")
         );
-        assert!(
-            read_to_string(&output.join("client.ts"))
-                .contains("const DEFAULT_SERVER_URL = \"/edge-api\";")
-        );
+        assert!(read_to_string(&output.join("client.ts"))
+            .contains("const DEFAULT_SERVER_URL = \"/edge-api\";"));
         assert!(output.join("index.js").exists());
     }
 
@@ -2703,16 +2838,71 @@ mod tests {
             .expect("automation should be enabled");
 
         assert_eq!(output, service_dir.join("web/src/gen/client"));
-        assert!(
-            service_dir
-                .join("reports/client-self-test.json")
-                .exists()
-        );
+        assert!(service_dir.join("reports/client-self-test.json").exists());
 
         let operations = read_to_string(&output.join("operations.ts"));
         assert!(!operations.contains("loginUser("));
         assert!(!operations.contains("listAuditLog("));
         assert!(operations.contains("listPost("));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_import_smoke_skips_for_ts_only_clients_when_node_lacks_ts_support() {
+        let root = test_root();
+        let output = root.join("ts-client");
+        fs::create_dir_all(&output).expect("output dir should exist");
+        fs::write(
+            output.join("index.ts"),
+            "export function createClient() { return { request() {} }; }\n",
+        )
+        .expect("ts client should write");
+
+        let check = run_node_import_smoke_check(
+            &output,
+            &TypescriptClientSelfTestOptions {
+                report_path: None,
+                runtime_base_url: None,
+                node_binary: Some(fake_node_binary(&root)),
+                tsc_binary: None,
+                insecure_tls: false,
+                force: false,
+            },
+        )
+        .expect("self-test check should run");
+
+        assert_eq!(check.status, ClientSelfTestStatus::Skipped);
+        assert!(check
+            .details
+            .contains("could not execute TypeScript modules directly"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_import_smoke_uses_mjs_wrapper_for_js_clients() {
+        let root = test_root();
+        let output = root.join("js-client");
+        fs::create_dir_all(&output).expect("output dir should exist");
+        fs::write(
+            output.join("index.js"),
+            "export function createClient() { return { request() {} }; }\n",
+        )
+        .expect("js client should write");
+
+        let check = run_node_import_smoke_check(
+            &output,
+            &TypescriptClientSelfTestOptions {
+                report_path: None,
+                runtime_base_url: None,
+                node_binary: Some(fake_node_binary(&root)),
+                tsc_binary: None,
+                insecure_tls: false,
+                force: false,
+            },
+        )
+        .expect("self-test check should run");
+
+        assert_eq!(check.status, ClientSelfTestStatus::Passed);
     }
 
     #[test]
