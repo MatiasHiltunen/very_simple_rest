@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::env::VarError;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -41,6 +42,7 @@ use uuid::Uuid;
 
 const BIND_MARKER: &str = "__vsr_bind__";
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
+const HTTP_WORKERS_ENV: &str = "VSR_HTTP_WORKERS";
 
 pub async fn serve_service(
     input: &Path,
@@ -114,6 +116,7 @@ pub async fn serve_service(
     } else {
         None
     };
+    let server_workers = http_workers_from_env()?;
 
     let server = HttpServer::new({
         let dynamic_service = dynamic_service.clone();
@@ -192,6 +195,11 @@ pub async fn serve_service(
                 })
         }
     });
+    let server = if let Some(workers) = server_workers {
+        server.workers(workers)
+    } else {
+        server
+    };
 
     if let Some(rustls_config) = rustls_config {
         log::info!("Server listening on https://{}", bind_addr);
@@ -205,6 +213,24 @@ pub async fn serve_service(
     }
 
     Ok(())
+}
+
+fn http_workers_from_env() -> anyhow::Result<Option<usize>> {
+    match std::env::var(HTTP_WORKERS_ENV) {
+        Ok(raw) => {
+            let workers = raw.parse::<usize>().map_err(|error| {
+                anyhow!("{HTTP_WORKERS_ENV} must be a positive integer, got `{raw}`: {error}")
+            })?;
+            if workers == 0 {
+                bail!("{HTTP_WORKERS_ENV} must be greater than 0");
+            }
+            Ok(Some(workers))
+        }
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => {
+            bail!("{HTTP_WORKERS_ENV} must contain valid UTF-8")
+        }
+    }
 }
 
 #[derive(Clone)]
