@@ -247,6 +247,29 @@ impl PolicyValueSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PolicyLiteralValue {
+    String(String),
+    I64(i64),
+    Bool(bool),
+}
+
+impl PolicyLiteralValue {
+    pub fn claim_type(&self) -> AuthClaimType {
+        match self {
+            Self::String(_) => AuthClaimType::String,
+            Self::I64(_) => AuthClaimType::I64,
+            Self::Bool(_) => AuthClaimType::Bool,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PolicyComparisonValue {
+    Source(PolicyValueSource),
+    Literal(PolicyLiteralValue),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyFilter {
     pub field: String,
     pub operator: PolicyFilterOperator,
@@ -254,7 +277,7 @@ pub struct PolicyFilter {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PolicyFilterOperator {
-    Equals(PolicyValueSource),
+    Equals(PolicyComparisonValue),
     IsNull,
     IsNotNull,
 }
@@ -2780,12 +2803,13 @@ fn validate_policy_filter_claim_source(
     span: Span,
 ) -> syn::Result<()> {
     match &filter.operator {
-        PolicyFilterOperator::Equals(source) => match source {
+        PolicyFilterOperator::Equals(PolicyComparisonValue::Source(source)) => match source {
             PolicyValueSource::InputField(_) => Ok(()),
             _ => {
                 validate_policy_claim_source(resource, scope, &filter.field, source, security, span)
             }
         },
+        PolicyFilterOperator::Equals(PolicyComparisonValue::Literal(_)) => Ok(()),
         PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => Ok(()),
     }
 }
@@ -3217,7 +3241,7 @@ fn validate_policy_filter_operator(
     span: Span,
 ) -> syn::Result<()> {
     match operator {
-        PolicyFilterOperator::Equals(source) => {
+        PolicyFilterOperator::Equals(PolicyComparisonValue::Source(source)) => {
             if let PolicyValueSource::InputField(input_field_name) = source {
                 if !allow_input_fields {
                     return Err(syn::Error::new(
@@ -3257,6 +3281,43 @@ fn validate_policy_filter_operator(
                     ));
                 }
             }
+            Ok(())
+        }
+        PolicyFilterOperator::Equals(PolicyComparisonValue::Literal(literal)) => {
+            let expected_ty = policy_field_claim_type(&field.ty).ok_or_else(|| {
+                syn::Error::new(
+                    span,
+                    format!(
+                        "row policy field `{field_name}` must use type `i64`, `String`, `bool`, or an `Option<...>` of one of those types"
+                    ),
+                )
+            })?;
+            let literal_ty = literal.claim_type();
+            if expected_ty != literal_ty {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "{scope} row policy field `{field_name}` compares incompatible field types `{}` and `{}`",
+                        auth_claim_type_label(expected_ty),
+                        auth_claim_type_label(literal_ty),
+                    ),
+                ));
+            }
+
+            if let (Some(enum_values), PolicyLiteralValue::String(value)) =
+                (field.enum_values(), literal)
+            {
+                if !enum_values.iter().any(|candidate| candidate == value) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "{scope} row policy field `{field_name}` must use one of declared enum values [{}]",
+                            enum_values.join(", ")
+                        ),
+                    ));
+                }
+            }
+
             Ok(())
         }
         PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => {

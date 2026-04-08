@@ -15,10 +15,10 @@ use rest_macro_core::authorization::{
 };
 use rest_macro_core::compiler::{
     self, DbBackend, FieldSpec, GeneratedValue, NumericBound, OpenApiSpecOptions,
-    PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression, PolicyFilterOperator,
-    PolicyValueSource, ResourceSpec, RoleRequirements, RowPolicies, ServiceSpec,
-    StructuredScalarKind, default_service_database_url, supports_exact_filters,
-    supports_field_sort, supports_range_filters,
+    PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression,
+    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource, ResourceSpec, RoleRequirements,
+    RowPolicies, ServiceSpec, StructuredScalarKind, default_service_database_url,
+    supports_exact_filters, supports_field_sort, supports_range_filters,
 };
 use rest_macro_core::database::{
     prepare_database_engine, resolve_database_config, resolve_database_url,
@@ -2509,6 +2509,27 @@ fn resolve_policy_source_value(
     }
 }
 
+fn bound_value_from_policy_literal(value: &PolicyLiteralValue) -> BoundValue {
+    match value {
+        PolicyLiteralValue::String(value) => BoundValue::Text(value.clone()),
+        PolicyLiteralValue::I64(value) => BoundValue::Integer(*value),
+        PolicyLiteralValue::Bool(value) => BoundValue::Bool(*value),
+    }
+}
+
+fn resolve_policy_comparison_value(
+    source: &PolicyComparisonValue,
+    target_field: &DynamicField,
+    user: &UserContext,
+) -> anyhow::Result<Option<BoundValue>> {
+    match source {
+        PolicyComparisonValue::Source(source) => {
+            resolve_policy_source_value(source, target_field, user)
+        }
+        PolicyComparisonValue::Literal(value) => Ok(Some(bound_value_from_policy_literal(value))),
+    }
+}
+
 fn resolve_create_source_value(
     resource: &DynamicResource,
     source: &PolicyValueSource,
@@ -2726,7 +2747,7 @@ fn build_row_policy_plan(
             let field = current.field(filter.field.as_str())?;
             match &filter.operator {
                 PolicyFilterOperator::Equals(source) => {
-                    let Some(value) = resolve_policy_source_value(source, field, user)? else {
+                    let Some(value) = resolve_policy_comparison_value(source, field, user)? else {
                         return Ok(PlanOutcome::Indeterminate);
                     };
                     Ok(PlanOutcome::Resolved(SqlPlan {
@@ -2807,7 +2828,7 @@ fn build_row_exists_condition_plan(
             let field = target.field(filter.field.as_str())?;
             match &filter.operator {
                 PolicyFilterOperator::Equals(source) => {
-                    let Some(value) = resolve_policy_source_value(source, field, user)? else {
+                    let Some(value) = resolve_policy_comparison_value(source, field, user)? else {
                         return Ok(PlanOutcome::Indeterminate);
                     };
                     Ok(PlanOutcome::Resolved(SqlPlan {
@@ -2911,7 +2932,7 @@ fn build_create_requirement_plan(
                         .get(filter.field.as_str())
                         .cloned()
                         .unwrap_or(BoundValue::Null);
-                    let right = resolve_create_requirement_source_value(
+                    let right = resolve_create_requirement_comparison_value(
                         resource, source, field, payload, effective, user,
                     )?;
                     Ok(PlanOutcome::Resolved(SqlPlan {
@@ -3025,7 +3046,7 @@ fn build_create_requirement_exists_condition_plan(
                 .map_err(|error| errors::internal_error(error.to_string()))?;
             match &filter.operator {
                 PolicyFilterOperator::Equals(source) => {
-                    let value = resolve_create_requirement_source_value(
+                    let value = resolve_create_requirement_comparison_value(
                         current, source, field, payload, effective, user,
                     )?;
                     Ok(PlanOutcome::Resolved(SqlPlan {
@@ -3109,6 +3130,27 @@ fn resolve_create_requirement_source_value(
             .get(name.as_str())
             .cloned()
             .unwrap_or(BoundValue::Null)),
+    }
+}
+
+fn resolve_create_requirement_comparison_value(
+    resource: &DynamicResource,
+    source: &PolicyComparisonValue,
+    target_field: &DynamicField,
+    payload: &Map<String, Value>,
+    effective: &HashMap<String, BoundValue>,
+    user: &UserContext,
+) -> Result<BoundValue, HttpResponse> {
+    match source {
+        PolicyComparisonValue::Source(source) => resolve_create_requirement_source_value(
+            resource,
+            source,
+            target_field,
+            payload,
+            effective,
+            user,
+        ),
+        PolicyComparisonValue::Literal(value) => Ok(bound_value_from_policy_literal(value)),
     }
 }
 

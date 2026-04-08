@@ -22,6 +22,7 @@ resources: [
             { name: "id", type: I64 }
             { name: "title_text", type: String, validate: { min_length: 3 } }
             { name: "author_id", type: I64 }
+            { name: "team_id", type: I64 }
             { name: "draft_body", type: String, nullable: true }
             { name: "internal_note", type: String, nullable: true }
         ]

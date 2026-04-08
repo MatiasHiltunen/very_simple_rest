@@ -1,4 +1,4 @@
-error: row_policy values must use `field=source`
+error: row_policy values must use `field=value`
  --> tests/ui/row_policy_unknown_kind.rs:6:21
   |
 6 | #[row_policy(read = "tenant:user_id")]

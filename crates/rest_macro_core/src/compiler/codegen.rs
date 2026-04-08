@@ -6,14 +6,16 @@ use quote::{format_ident, quote};
 use syn::{Path, Type};
 
 use super::model::{
-    GeneratedValue, PolicyFilterExpression, PolicyValueSource, ResourceSpec, ServiceSpec,
-    StaticCacheProfile, StaticMode, WriteModelStyle, default_service_database_url,
+    GeneratedValue, PolicyComparisonValue, PolicyFilterExpression, PolicyLiteralValue,
+    PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode,
+    WriteModelStyle, default_service_database_url,
 };
 use crate::{
     authorization::{
         ActionAuthorization, AuthorizationAssignment, AuthorizationCondition,
-        AuthorizationContract, AuthorizationExistsCondition, AuthorizationMatch,
-        AuthorizationModel, AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
+        AuthorizationContract, AuthorizationExistsCondition, AuthorizationLiteralValue,
+        AuthorizationMatch, AuthorizationModel, AuthorizationOperator, AuthorizationValueSource,
+        ResourceAuthorization,
     },
     database::{
         DatabaseBackupMode, DatabaseBackupTarget, DatabaseEngine, DatabaseReadRoutingMode,
@@ -816,6 +818,33 @@ fn value_source_tokens(source: &AuthorizationValueSource, runtime_crate: &Path) 
                 name: #name.to_owned(),
             })
         }
+        AuthorizationValueSource::Literal { value } => {
+            let value = authorization_literal_value_tokens(value, runtime_crate);
+            quote!(#runtime_crate::core::authorization::AuthorizationValueSource::Literal {
+                value: #value,
+            })
+        }
+    }
+}
+
+fn authorization_literal_value_tokens(
+    value: &AuthorizationLiteralValue,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match value {
+        AuthorizationLiteralValue::String(value) => {
+            let value = Literal::string(value);
+            quote!(#runtime_crate::core::authorization::AuthorizationLiteralValue::String(
+                #value.to_owned(),
+            ))
+        }
+        AuthorizationLiteralValue::I64(value) => {
+            let value = Literal::i64_unsuffixed(*value);
+            quote!(#runtime_crate::core::authorization::AuthorizationLiteralValue::I64(#value))
+        }
+        AuthorizationLiteralValue::Bool(value) => quote!(
+            #runtime_crate::core::authorization::AuthorizationLiteralValue::Bool(#value)
+        ),
     }
 }
 
@@ -5440,9 +5469,6 @@ fn create_payload_fields<'a>(
         .fields
         .iter()
         .filter_map(|field| {
-            if !field.expose_in_api() {
-                return None;
-            }
             if field.generated.skip_insert() {
                 return None;
             }
@@ -5543,8 +5569,7 @@ fn update_payload_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpe
         .fields
         .iter()
         .filter(|field| {
-            field.expose_in_api()
-                && !field.is_id
+            !field.is_id
                 && !field.generated.skip_update_bind()
                 && !controlled_fields.contains(&field.name())
         })
@@ -6773,15 +6798,7 @@ fn insert_fields(resource: &ResourceSpec) -> Vec<&super::model::FieldSpec> {
     resource
         .fields
         .iter()
-        .filter(|field| {
-            if field.generated.skip_insert() {
-                return false;
-            }
-            if field.expose_in_api() {
-                return true;
-            }
-            create_assignment_source(resource, &field.name()).is_some()
-        })
+        .filter(|field| !field.generated.skip_insert())
         .collect()
 }
 
@@ -6875,6 +6892,20 @@ fn optional_policy_source_value(
     }
 }
 
+fn policy_literal_value_tokens(value: &PolicyLiteralValue) -> TokenStream {
+    match value {
+        PolicyLiteralValue::String(value) => {
+            let value = Literal::string(value);
+            quote!(#value.to_owned())
+        }
+        PolicyLiteralValue::I64(value) => {
+            let value = Literal::i64_unsuffixed(*value);
+            quote!(#value)
+        }
+        PolicyLiteralValue::Bool(value) => quote!(#value),
+    }
+}
+
 fn list_bind_value_tokens(
     bind_ident: &syn::Ident,
     field: &super::model::FieldSpec,
@@ -6893,18 +6924,24 @@ fn policy_plan_ident(resource: &ResourceSpec) -> syn::Ident {
     format_ident!("{}PolicyFilterPlan", resource.struct_ident)
 }
 
-fn maybe_policy_source_value(
-    source: &PolicyValueSource,
+fn maybe_policy_comparison_value(
+    source: &PolicyComparisonValue,
     field: &super::model::FieldSpec,
 ) -> TokenStream {
     match source {
-        PolicyValueSource::UserId => quote!(Some(user.id)),
-        PolicyValueSource::Claim(name) => {
-            let claim_name = Literal::string(name);
-            claim_access_value_tokens(&claim_name, field)
-        }
-        PolicyValueSource::InputField(_) => {
-            panic!("read/update/delete row policies cannot use input sources")
+        PolicyComparisonValue::Source(source) => match source {
+            PolicyValueSource::UserId => quote!(Some(user.id)),
+            PolicyValueSource::Claim(name) => {
+                let claim_name = Literal::string(name);
+                claim_access_value_tokens(&claim_name, field)
+            }
+            PolicyValueSource::InputField(_) => {
+                panic!("read/update/delete row policies cannot use input sources")
+            }
+        },
+        PolicyComparisonValue::Literal(value) => {
+            let value = policy_literal_value_tokens(value);
+            quote!(Some(#value))
         }
     }
 }
@@ -7230,7 +7267,7 @@ fn create_requirement_expression_plan_tokens(
             );
             match &filter.operator {
                 super::model::PolicyFilterOperator::Equals(source) => {
-                    let source_value = create_source_value_tokens(
+                    let source_value = create_comparison_value_tokens(
                         resource,
                         authorization,
                         field,
@@ -7412,7 +7449,7 @@ fn create_requirement_exists_condition_tokens(
             let field_name = Literal::string(&filter.field);
             match &filter.operator {
                 super::model::PolicyFilterOperator::Equals(source) => {
-                    let source_value = create_source_value_tokens(
+                    let source_value = create_comparison_value_tokens(
                         resource,
                         authorization,
                         field,
@@ -7551,6 +7588,34 @@ fn create_source_value_tokens(
                 required,
                 runtime_crate,
             )
+        }
+    }
+}
+
+fn create_comparison_value_tokens(
+    resource: &ResourceSpec,
+    authorization: Option<&AuthorizationContract>,
+    target_field: &super::model::FieldSpec,
+    source: &PolicyComparisonValue,
+    required: bool,
+    runtime_crate: &Path,
+) -> TokenStream {
+    match source {
+        PolicyComparisonValue::Source(source) => create_source_value_tokens(
+            resource,
+            authorization,
+            target_field,
+            source,
+            required,
+            runtime_crate,
+        ),
+        PolicyComparisonValue::Literal(value) => {
+            let value = policy_literal_value_tokens(value);
+            if required {
+                value
+            } else {
+                quote!(Some(#value))
+            }
         }
     }
 }
@@ -7890,7 +7955,7 @@ fn policy_expression_plan_tokens(
             let field_name = Literal::string(&filter.field);
             match &filter.operator {
                 super::model::PolicyFilterOperator::Equals(source) => {
-                    let value = maybe_policy_source_value(source, field);
+                    let value = maybe_policy_comparison_value(source, field);
                     let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
                     quote! {
                         {
@@ -8033,7 +8098,7 @@ fn exists_condition_plan_tokens(
             let field_name = Literal::string(&filter.field);
             match &filter.operator {
                 super::model::PolicyFilterOperator::Equals(source) => {
-                    let value = maybe_policy_source_value(source, field);
+                    let value = maybe_policy_comparison_value(source, field);
                     let bind_value = list_bind_value_tokens(bind_ident, field, quote!(value));
                     quote! {
                         match #value {
@@ -8167,7 +8232,7 @@ fn build_update_plan(resource: &ResourceSpec) -> UpdatePlan {
     let controlled_fields = policy_controlled_fields(resource);
 
     for field in &resource.fields {
-        if !field.expose_in_api() || field.is_id || controlled_fields.contains(&field.name()) {
+        if field.is_id || controlled_fields.contains(&field.name()) {
             continue;
         }
 

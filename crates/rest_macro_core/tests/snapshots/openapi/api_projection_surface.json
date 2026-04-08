@@ -523,6 +523,10 @@
           "nullable": true,
           "type": "string"
         },
+        "team_id": {
+          "format": "int64",
+          "type": "integer"
+        },
         "title": {
           "minLength": 3,
           "type": "string"
@@ -530,7 +534,8 @@
       },
       "required": [
         "title",
-        "author"
+        "author",
+        "team_id"
       ],
       "type": "object"
     },

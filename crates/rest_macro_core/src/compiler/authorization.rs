@@ -4,15 +4,16 @@ use crate::{
     auth::AuthClaimType,
     authorization::{
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment, AuthorizationCondition,
-        AuthorizationExistsCondition, AuthorizationMatch, AuthorizationModel,
-        AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
+        AuthorizationExistsCondition, AuthorizationLiteralValue, AuthorizationMatch,
+        AuthorizationModel, AuthorizationOperator, AuthorizationValueSource, ResourceAuthorization,
     },
     security::SecurityConfig,
 };
 
 use super::model::{
-    PolicyAssignment, PolicyExistsCondition, PolicyFilter, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyValueSource, ResourceSpec, ServiceSpec,
+    PolicyAssignment, PolicyComparisonValue, PolicyExistsCondition, PolicyFilter,
+    PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
+    ResourceSpec, ServiceSpec,
 };
 
 pub fn compile_service_authorization(service: &ServiceSpec) -> AuthorizationModel {
@@ -211,7 +212,7 @@ fn compile_filter(
             PolicyFilterOperator::IsNotNull => AuthorizationOperator::IsNotNull,
         },
         source: match &filter.operator {
-            PolicyFilterOperator::Equals(source) => Some(compile_source(source, security)),
+            PolicyFilterOperator::Equals(source) => Some(compile_comparison_value(source, security)),
             PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => None,
         },
     })
@@ -288,10 +289,19 @@ fn compile_assignment(
     }
 }
 
-fn compile_source(
-    source: &PolicyValueSource,
+fn compile_comparison_value(
+    source: &PolicyComparisonValue,
     security: &SecurityConfig,
 ) -> AuthorizationValueSource {
+    match source {
+        PolicyComparisonValue::Source(source) => compile_source(source, security),
+        PolicyComparisonValue::Literal(literal) => AuthorizationValueSource::Literal {
+            value: compile_literal_value(literal),
+        },
+    }
+}
+
+fn compile_source(source: &PolicyValueSource, security: &SecurityConfig) -> AuthorizationValueSource {
     match source {
         PolicyValueSource::UserId => AuthorizationValueSource::UserId,
         PolicyValueSource::Claim(name) => AuthorizationValueSource::Claim {
@@ -301,6 +311,14 @@ fn compile_source(
         PolicyValueSource::InputField(name) => {
             AuthorizationValueSource::InputField { name: name.clone() }
         }
+    }
+}
+
+fn compile_literal_value(value: &PolicyLiteralValue) -> AuthorizationLiteralValue {
+    match value {
+        PolicyLiteralValue::String(value) => AuthorizationLiteralValue::String(value.clone()),
+        PolicyLiteralValue::I64(value) => AuthorizationLiteralValue::I64(*value),
+        PolicyLiteralValue::Bool(value) => AuthorizationLiteralValue::Bool(*value),
     }
 }
 

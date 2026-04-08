@@ -7,9 +7,9 @@ use rest_macro_core::{
         ActionAuthorization, AuthorizationAction, AuthorizationAssignment,
         AuthorizationAssignmentTrace, AuthorizationCondition, AuthorizationConditionTrace,
         AuthorizationContract, AuthorizationExistsCondition, AuthorizationExistsConditionTrace,
-        AuthorizationHybridSource, AuthorizationMatch, AuthorizationModel, AuthorizationOperator,
-        AuthorizationOutcome, AuthorizationRuntime, AuthorizationRuntimeAccessResult,
-        AuthorizationScopeBinding, AuthorizationScopedAssignment,
+        AuthorizationHybridSource, AuthorizationLiteralValue, AuthorizationMatch,
+        AuthorizationModel, AuthorizationOperator, AuthorizationOutcome, AuthorizationRuntime,
+        AuthorizationRuntimeAccessResult, AuthorizationScopeBinding, AuthorizationScopedAssignment,
         AuthorizationScopedAssignmentCreateInput, AuthorizationScopedAssignmentEventKind,
         AuthorizationScopedAssignmentEventRecord, AuthorizationScopedAssignmentRecord,
         AuthorizationScopedAssignmentTarget, AuthorizationScopedAssignmentTrace,
@@ -1397,6 +1397,11 @@ fn render_source(source: &AuthorizationValueSource) -> String {
         AuthorizationValueSource::UserId => "user.id".to_owned(),
         AuthorizationValueSource::Claim { name, ty } => format!("claim.{name}:{ty:?}"),
         AuthorizationValueSource::InputField { name } => format!("input.{name}"),
+        AuthorizationValueSource::Literal { value } => match value {
+            AuthorizationLiteralValue::String(value) => format!("{value:?}"),
+            AuthorizationLiteralValue::I64(value) => value.to_string(),
+            AuthorizationLiteralValue::Bool(value) => value.to_string(),
+        },
     }
 }
 

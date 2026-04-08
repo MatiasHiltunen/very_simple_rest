@@ -4,9 +4,10 @@ use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
     DbBackend, FieldSpec, FieldValidation, ListConfig, NumericBound, PolicyAssignment,
-    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyValueSource,
-    ReferentialAction, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle,
-    default_resource_module_ident, infer_generated_value, infer_sql_type,
+    PolicyComparisonValue, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
+    PolicyLiteralValue, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
+    RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
+    infer_generated_value, infer_sql_type,
     validate_field_validations, validate_list_config, validate_relations, validate_row_policies,
     validate_sql_identifier,
 };
@@ -530,7 +531,9 @@ fn parse_filter_policy(value: &str, span: proc_macro2::Span) -> syn::Result<Poli
     if let Some(field) = parse_legacy_policy_field(value, RowPolicyKind::Owner) {
         return Ok(PolicyFilter {
             field,
-            operator: PolicyFilterOperator::Equals(PolicyValueSource::UserId),
+            operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                PolicyValueSource::UserId,
+            )),
         });
     }
 
@@ -541,7 +544,7 @@ fn parse_filter_policy(value: &str, span: proc_macro2::Span) -> syn::Result<Poli
         ));
     }
 
-    let (field, source) = parse_policy_expression(value, span)?;
+    let (field, source) = parse_filter_expression(value, span)?;
     Ok(PolicyFilter {
         field,
         operator: PolicyFilterOperator::Equals(source),
@@ -563,7 +566,7 @@ fn parse_assignment_policy(value: &str, span: proc_macro2::Span) -> syn::Result<
         ));
     }
 
-    let (field, source) = parse_policy_expression(value, span)?;
+    let (field, source) = parse_assignment_expression(value, span)?;
     Ok(PolicyAssignment { field, source })
 }
 
@@ -582,7 +585,26 @@ fn parse_legacy_policy_field(value: &str, kind: RowPolicyKind) -> Option<String>
     }
 }
 
-fn parse_policy_expression(
+fn parse_filter_expression(
+    value: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<(String, PolicyComparisonValue)> {
+    let (field, source) = value
+        .split_once('=')
+        .ok_or_else(|| syn::Error::new(span, "row_policy values must use `field=value`"))?;
+    let field = field.trim();
+    if field.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "row_policy field name cannot be empty",
+        ));
+    }
+
+    let source = parse_policy_filter_value(source);
+    Ok((field.to_owned(), source))
+}
+
+fn parse_assignment_expression(
     value: &str,
     span: proc_macro2::Span,
 ) -> syn::Result<(String, PolicyValueSource)> {
@@ -608,6 +630,25 @@ fn parse_policy_source(value: &str, span: proc_macro2::Span) -> syn::Result<Poli
             "row_policy source must be `user.id` or `claim.<name>`",
         )
     })
+}
+
+fn parse_policy_filter_value(value: &str) -> PolicyComparisonValue {
+    if let Some(source) = PolicyValueSource::parse(value) {
+        return PolicyComparisonValue::Source(source);
+    }
+
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        return PolicyComparisonValue::Literal(PolicyLiteralValue::Bool(true));
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return PolicyComparisonValue::Literal(PolicyLiteralValue::Bool(false));
+    }
+    if let Ok(value) = trimmed.parse::<i64>() {
+        return PolicyComparisonValue::Literal(PolicyLiteralValue::I64(value));
+    }
+
+    PolicyComparisonValue::Literal(PolicyLiteralValue::String(trimmed.to_owned()))
 }
 
 #[cfg(test)]
@@ -691,10 +732,59 @@ mod tests {
         assert_eq!(
             read_filters[1].operator,
             super::super::model::PolicyFilterOperator::Equals(
-                super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+                super::super::model::PolicyComparisonValue::Source(
+                    super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+                )
             )
         );
         assert_eq!(resource.policies.create.len(), 2);
+    }
+
+    #[test]
+    fn parses_literal_row_policies_from_derive_input() {
+        let input: DeriveInput = syn::parse_quote! {
+            #[derive(RestApi)]
+            #[row_policy(read = "visibility=public; priority=10; featured=true")]
+            struct Post {
+                id: Option<i64>,
+                visibility: String,
+                priority: i64,
+                featured: bool,
+            }
+        };
+
+        let resource = parse_derive_input(input).expect("literal row policies should parse");
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            read_filters[0].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::String("public".to_owned())
+                )
+            )
+        );
+        assert_eq!(
+            read_filters[1].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::I64(10)
+                )
+            )
+        );
+        assert_eq!(
+            read_filters[2].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::Bool(true)
+                )
+            )
+        );
     }
 
     #[test]

@@ -951,6 +951,11 @@ export interface VsrClient {{
 
 const DEFAULT_SERVER_URL = {server_url:?};
 
+function requestNeedsCsrf(method: string): boolean {{
+  const normalized = method.toUpperCase();
+  return normalized === "POST" || normalized === "PUT" || normalized === "PATCH" || normalized === "DELETE";
+}}
+
 export function createClient(config: ClientConfig = {{}}): VsrClient {{
   const resolvedConfig: ResolvedClientConfig = {{
     baseUrl: config.baseUrl ?? "",
@@ -996,7 +1001,7 @@ export function createClient(config: ClientConfig = {{}}): VsrClient {{
         }}
       }}
 
-      if (body !== undefined && resolvedConfig.getCsrfToken) {{
+      if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken) {{
         const csrfToken = await resolvedConfig.getCsrfToken();
         if (csrfToken) {{
           headers.set(resolvedConfig.csrfHeaderName, csrfToken);
@@ -1170,6 +1175,11 @@ fn render_client_js(server_url: &str) -> String {
 
 const DEFAULT_SERVER_URL = {server_url:?};
 
+function requestNeedsCsrf(method) {{
+  const normalized = method.toUpperCase();
+  return normalized === "POST" || normalized === "PUT" || normalized === "PATCH" || normalized === "DELETE";
+}}
+
 export function createClient(config = {{}}) {{
   const resolvedConfig = {{
     baseUrl: config.baseUrl ?? "",
@@ -1215,7 +1225,7 @@ export function createClient(config = {{}}) {{
         }}
       }}
 
-      if (body !== undefined && resolvedConfig.getCsrfToken) {{
+      if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken) {{
         const csrfToken = await resolvedConfig.getCsrfToken();
         if (csrfToken) {{
           headers.set(resolvedConfig.csrfHeaderName, csrfToken);
@@ -2591,6 +2601,9 @@ esac
         assert!(types.contains("export type Post ="));
         assert!(types.contains("export type AuthTokenResponse ="));
         assert!(client.contains("export function createClient"));
+        assert!(client.contains("function requestNeedsCsrf(method: string): boolean"));
+        assert!(client.contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)"));
+        assert!(!client.contains("if (body !== undefined && resolvedConfig.getCsrfToken)"));
         assert!(package_json.contains("\"name\": \"@demo/blog-client\""));
         assert!(tsconfig.contains("\"allowImportingTsExtensions\": true"));
     }
@@ -2645,6 +2658,9 @@ esac
         assert!(package_json.contains("\"types\": \"./index.ts\""));
         assert!(index_js.contains("export * from \"./client.js\";"));
         assert!(client_js.contains("export function createClient"));
+        assert!(client_js.contains("function requestNeedsCsrf(method)"));
+        assert!(client_js.contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)"));
+        assert!(!client_js.contains("if (body !== undefined && resolvedConfig.getCsrfToken)"));
         assert!(client_js.contains("bind(globalThis)"));
         assert!(operations_js.contains("export async function listPost"));
         assert!(!operations_js.contains("import type"));

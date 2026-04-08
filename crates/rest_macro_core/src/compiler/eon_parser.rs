@@ -21,8 +21,9 @@ use super::model::{
     GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
     GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
     GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
-    PolicyExistsCondition, PolicyExistsFilter, PolicyFilter, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyValueSource, ReferentialAction, ReleaseBuildConfig,
+    PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
+    PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
+    ReferentialAction, ReleaseBuildConfig,
     ResourceActionAssignmentSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
     ResourceActionMethod, ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec,
     ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
@@ -932,12 +933,20 @@ struct LegacyRowPolicyDocument {
     field: String,
 }
 
+#[derive(Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum PolicyComparisonValueDocument {
+    String(String),
+    Integer(i64),
+    Bool(bool),
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyRuleDocument {
     field: String,
     #[serde(default)]
-    equals: Option<String>,
+    equals: Option<PolicyComparisonValueDocument>,
     #[serde(default)]
     is_null: bool,
     #[serde(default)]
@@ -951,7 +960,7 @@ struct PolicyRuleDocument {
 struct ExistsPolicyRuleDocument {
     field: String,
     #[serde(default)]
-    equals: Option<String>,
+    equals: Option<PolicyComparisonValueDocument>,
     #[serde(default)]
     is_null: bool,
     #[serde(default)]
@@ -2248,7 +2257,6 @@ fn build_resources_with_enums(
                 format!("failed to parse row policies for `{struct_name}`: {error}"),
             )
         })?;
-        validate_hidden_projection_fields(fields.as_slice(), &policies, struct_name.as_str())?;
         let (default_response_context, response_contexts) = build_response_contexts(
             fields.as_slice(),
             computed_fields.as_slice(),
@@ -3173,34 +3181,6 @@ fn apply_resource_api_projections(
     }
 
     Ok(computed_fields)
-}
-
-fn validate_hidden_projection_fields(
-    fields: &[FieldSpec],
-    policies: &RowPolicies,
-    resource_name: &str,
-) -> syn::Result<()> {
-    for field in fields {
-        if field.expose_in_api() || field.is_id || field.generated.skip_insert() {
-            continue;
-        }
-        let assigned_on_create = policies
-            .create
-            .iter()
-            .any(|policy| policy.field == field.name());
-        if assigned_on_create || is_optional_type(&field.ty) {
-            continue;
-        }
-        return Err(syn::Error::new(
-            Span::call_site(),
-            format!(
-                "resource `{resource_name}` hides required storage field `{}` from `api.fields`, but it is not nullable, generated, or assigned by create policy",
-                field.name()
-            ),
-        ));
-    }
-
-    Ok(())
 }
 
 fn build_response_contexts(
@@ -5903,7 +5883,7 @@ fn parse_exists_policy_entry(
             if let Some(source) = policy.equals {
                 return Ok(PolicyExistsCondition::Match(PolicyFilter {
                     field: policy.field,
-                    operator: PolicyFilterOperator::Equals(parse_policy_source(&source)?),
+                    operator: PolicyFilterOperator::Equals(parse_policy_comparison_value(source)?),
                 }));
             }
             if policy.is_null {
@@ -5944,7 +5924,9 @@ fn parse_filter_policy(
             match kind {
                 RowPolicyKind::Owner => Ok(PolicyFilter {
                     field: policy.field,
-                    operator: PolicyFilterOperator::Equals(PolicyValueSource::UserId),
+                    operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                        PolicyValueSource::UserId,
+                    )),
                 }),
                 RowPolicyKind::SetOwner => Err(syn::Error::new(
                     Span::call_site(),
@@ -5967,7 +5949,7 @@ fn parse_filter_policy(
             if let Some(source) = policy.equals {
                 return Ok(PolicyFilter {
                     field: policy.field,
-                    operator: PolicyFilterOperator::Equals(parse_policy_source(&source)?),
+                    operator: PolicyFilterOperator::Equals(parse_policy_comparison_value(source)?),
                 });
             }
             if policy.is_null {
@@ -6039,7 +6021,9 @@ fn parse_filter_shorthand(scope: &'static str, value: &str) -> syn::Result<Polic
     if let Some(field) = parse_legacy_policy_field(value, RowPolicyKind::Owner) {
         return Ok(PolicyFilter {
             field,
-            operator: PolicyFilterOperator::Equals(PolicyValueSource::UserId),
+            operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                PolicyValueSource::UserId,
+            )),
         });
     }
 
@@ -6050,7 +6034,7 @@ fn parse_filter_shorthand(scope: &'static str, value: &str) -> syn::Result<Polic
         ));
     }
 
-    let (field, source) = parse_policy_expression(value)?;
+    let (field, source) = parse_filter_expression(value)?;
     Ok(PolicyFilter {
         field,
         operator: PolicyFilterOperator::Equals(source),
@@ -6072,7 +6056,7 @@ fn parse_assignment_shorthand(value: &str) -> syn::Result<PolicyAssignment> {
         ));
     }
 
-    let (field, source) = parse_policy_expression(value)?;
+    let (field, source) = parse_assignment_expression(value)?;
     Ok(PolicyAssignment { field, source })
 }
 
@@ -6091,7 +6075,25 @@ fn parse_legacy_policy_field(value: &str, kind: RowPolicyKind) -> Option<String>
     }
 }
 
-fn parse_policy_expression(value: &str) -> syn::Result<(String, PolicyValueSource)> {
+fn parse_filter_expression(value: &str) -> syn::Result<(String, PolicyComparisonValue)> {
+    let (field, source) = value.split_once('=').ok_or_else(|| {
+        syn::Error::new(
+            Span::call_site(),
+            "row policy values must use `field=value`",
+        )
+    })?;
+    let field = field.trim();
+    if field.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "row policy field name cannot be empty",
+        ));
+    }
+
+    Ok((field.to_owned(), parse_policy_string_comparison_value(source)))
+}
+
+fn parse_assignment_expression(value: &str) -> syn::Result<(String, PolicyValueSource)> {
     let (field, source) = value.split_once('=').ok_or_else(|| {
         syn::Error::new(
             Span::call_site(),
@@ -6115,6 +6117,26 @@ fn parse_policy_source(value: &str) -> syn::Result<PolicyValueSource> {
             Span::call_site(),
             "row policy source must be `user.id`, `claim.<name>`, or `input.<field>`",
         )
+    })
+}
+
+fn parse_policy_string_comparison_value(value: &str) -> PolicyComparisonValue {
+    PolicyValueSource::parse(value)
+        .map(PolicyComparisonValue::Source)
+        .unwrap_or_else(|| PolicyComparisonValue::Literal(PolicyLiteralValue::String(value.to_owned())))
+}
+
+fn parse_policy_comparison_value(
+    value: PolicyComparisonValueDocument,
+) -> syn::Result<PolicyComparisonValue> {
+    Ok(match value {
+        PolicyComparisonValueDocument::String(value) => parse_policy_string_comparison_value(&value),
+        PolicyComparisonValueDocument::Integer(value) => {
+            PolicyComparisonValue::Literal(PolicyLiteralValue::I64(value))
+        }
+        PolicyComparisonValueDocument::Bool(value) => {
+            PolicyComparisonValue::Literal(PolicyLiteralValue::Bool(value))
+        }
     })
 }
 
@@ -7859,7 +7881,7 @@ resources: [
     }
 
     #[test]
-    fn rejects_hiding_required_storage_fields_in_api_projection() {
+    fn allows_hiding_required_storage_fields_in_api_projection() {
         let document = parse_document(
             r#"
 resources: [
@@ -7880,13 +7902,13 @@ resources: [
 ]
 "#,
         );
-        let error = build_resources(DbBackend::Sqlite, document.resources)
-            .expect_err("hiding a required storage field should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("hides required storage field `body_text`")
-        );
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
+        let resource = &resources[0];
+        let hidden = resource
+            .find_field("body_text")
+            .expect("hidden storage field should remain present");
+        assert!(!hidden.expose_in_api());
     }
 
     #[test]
@@ -8140,10 +8162,120 @@ resources: [
         assert_eq!(
             read_filters[1].operator,
             super::super::model::PolicyFilterOperator::Equals(
-                super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+                super::super::model::PolicyComparisonValue::Source(
+                    super::super::model::PolicyValueSource::Claim("tenant_id".to_owned())
+                )
             )
         );
         assert_eq!(resource.policies.create.len(), 2);
+    }
+
+    #[test]
+    fn parses_literal_row_policies_from_eon() {
+        let document = parse_document(
+            r#"
+            enums: [
+                { name: "CommentStatus", values: ["Approved", "Rejected"] }
+            ]
+            resources: [
+                {
+                    name: "Comment"
+                    policies: {
+                        read: [
+                            { field: "visibility", equals: "public" }
+                            { field: "status", equals: "Approved" }
+                            { field: "priority", equals: 10 }
+                            { field: "featured", equals: true }
+                        ]
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "visibility", type: String }
+                        { name: "status", type: CommentStatus }
+                        { name: "priority", type: I64 }
+                        { name: "featured", type: Bool }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let enums = build_enums(document.enums).expect("enums should build");
+        let resources = build_resources_with_enums(document.db, document.resources, &enums)
+            .expect("resources should build");
+        let resource = &resources[0];
+        let read_filters = resource
+            .policies
+            .iter_filters()
+            .into_iter()
+            .filter(|(scope, _)| *scope == "read")
+            .map(|(_, filter)| filter)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            read_filters[0].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::String("public".to_owned())
+                )
+            )
+        );
+        assert_eq!(
+            read_filters[1].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::String("Approved".to_owned())
+                )
+            )
+        );
+        assert_eq!(
+            read_filters[2].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::I64(10)
+                )
+            )
+        );
+        assert_eq!(
+            read_filters[3].operator,
+            super::super::model::PolicyFilterOperator::Equals(
+                super::super::model::PolicyComparisonValue::Literal(
+                    super::super::model::PolicyLiteralValue::Bool(true)
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_enum_literal_in_row_policy_from_eon() {
+        let document = parse_document(
+            r#"
+            enums: [
+                { name: "CommentStatus", values: ["Approved", "Rejected"] }
+            ]
+            resources: [
+                {
+                    name: "Comment"
+                    policies: {
+                        read: { field: "status", equals: "Pending" }
+                    }
+                    fields: [
+                        { name: "id", type: I64 }
+                        { name: "status", type: CommentStatus }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let enums = build_enums(document.enums).expect("enums should build");
+        let error = build_resources_with_enums(document.db, document.resources, &enums)
+            .expect_err("unknown enum literal should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("must use one of declared enum values [Approved, Rejected]")
+        );
     }
 
     #[test]
@@ -8410,7 +8542,9 @@ resources: [
                             assert_eq!(
                                 filter.operator,
                                 super::super::model::PolicyFilterOperator::Equals(
-                                    PolicyValueSource::InputField("family_id".to_owned())
+                                    super::super::model::PolicyComparisonValue::Source(
+                                        PolicyValueSource::InputField("family_id".to_owned())
+                                    )
                                 )
                             );
                         }
@@ -10132,8 +10266,11 @@ resources: [
             Ok(_) => panic!("invalid row policy source should fail"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("user.id"));
-        assert!(error.to_string().contains("claim.<name>"));
+        assert!(
+            error
+                .to_string()
+                .contains("read row policy field `tenant_id` compares incompatible field types `I64` and `String`")
+        );
     }
 
     #[test]

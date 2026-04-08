@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::Serialize;
 use serde_json::{Value, json};
+use sqlx::Row as _;
 use very_simple_rest::actix_web::{App, http::StatusCode, test};
 use very_simple_rest::db::{connect, query};
 use very_simple_rest::prelude::*;
@@ -35,6 +36,7 @@ async fn generated_handlers_apply_resource_api_field_projections() {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title_text TEXT NOT NULL,
             author_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
             draft_body TEXT,
             internal_note TEXT
         )",
@@ -44,11 +46,12 @@ async fn generated_handlers_apply_resource_api_field_projections() {
     .expect("schema should apply");
 
     query(
-        "INSERT INTO blog_post (id, title_text, author_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO blog_post (id, title_text, author_id, team_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(1_i64)
     .bind("Alpha")
     .bind(7_i64)
+    .bind(3_i64)
     .bind("secret draft")
     .bind("internal only")
     .execute(&pool)
@@ -68,7 +71,8 @@ async fn generated_handlers_apply_resource_api_field_projections() {
         .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
         .set_json(json!({
             "title": "Gamma",
-            "author": 7
+            "author": 7,
+            "team_id": 3
         }))
         .to_request();
     let create_response = test::call_service(&app, create_request).await;
@@ -76,9 +80,18 @@ async fn generated_handlers_apply_resource_api_field_projections() {
     let created: Value = test::read_body_json(create_response).await;
     assert_eq!(created["title"], "Gamma");
     assert_eq!(created["author"], 7);
+    assert!(created.get("team_id").is_none());
     assert!(created.get("title_text").is_none());
     assert!(created.get("draft_body").is_none());
     assert!(created.get("internal_note").is_none());
+
+    let stored_team_id = query("SELECT team_id FROM blog_post WHERE title_text = ?")
+        .bind("Gamma")
+        .fetch_one(&pool)
+        .await
+        .expect("created row should persist")
+        .get::<i64, _>(0);
+    assert_eq!(stored_team_id, 3);
 
     let list_request = test::TestRequest::get()
         .uri("/api/posts?filter_author=7&sort=title")

@@ -1,5 +1,5 @@
-error: row_policy source must be `user.id` or `claim.<name>`
- --> tests/ui/row_policy_invalid_source.rs:6:21
+error: read row policy field `tenant_id` compares incompatible field types `I64` and `String`
+ --> tests/ui/row_policy_invalid_source.rs:7:8
   |
-6 | #[row_policy(read = "tenant_id=session.tenant_id")]
-  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+7 | struct InvalidPolicySource {
+  |        ^^^^^^^^^^^^^^^^^^^

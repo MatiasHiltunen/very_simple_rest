@@ -434,6 +434,15 @@ pub enum AuthorizationValueSource {
     UserId,
     Claim { name: String, ty: AuthClaimType },
     InputField { name: String },
+    Literal { value: AuthorizationLiteralValue },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AuthorizationLiteralValue {
+    String(String),
+    I64(i64),
+    Bool(bool),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2709,6 +2718,11 @@ fn resolve_source_value(
         AuthorizationValueSource::UserId => input.user_id.map(Value::from),
         AuthorizationValueSource::Claim { name, .. } => input.claims.get(name).cloned(),
         AuthorizationValueSource::InputField { name } => input.proposed.get(name).cloned(),
+        AuthorizationValueSource::Literal { value } => Some(match value {
+            AuthorizationLiteralValue::String(value) => Value::String(value.clone()),
+            AuthorizationLiteralValue::I64(value) => Value::from(*value),
+            AuthorizationLiteralValue::Bool(value) => Value::from(*value),
+        }),
     }
 }
 
