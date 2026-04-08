@@ -2726,6 +2726,7 @@ fn vsr_serve_applies_api_projections_in_spawned_process() {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title_text TEXT NOT NULL,
                     author_id INTEGER NOT NULL,
+                    team_id INTEGER NOT NULL,
                     draft_body TEXT,
                     internal_note TEXT
                 )",
@@ -2734,11 +2735,12 @@ fn vsr_serve_applies_api_projections_in_spawned_process() {
             .await
             .expect("schema should apply");
             query(
-                "INSERT INTO blog_post (id, title_text, author_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO blog_post (id, title_text, author_id, team_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(1_i64)
             .bind("Alpha")
             .bind(7_i64)
+            .bind(3_i64)
             .bind("secret draft")
             .bind("internal only")
             .execute(&pool)
@@ -2800,19 +2802,64 @@ fn vsr_serve_applies_api_projections_in_spawned_process() {
         .bearer_auth(&token)
         .json(&json!({
             "title": "Gamma",
-            "author": 7
+            "author": 7,
+            "team_id": 3
         }))
         .send()
         .expect("projection create should succeed");
-    assert_eq!(create_response.status(), reqwest::StatusCode::CREATED);
-    let created: Value = create_response
-        .json()
-        .expect("projection create should decode");
+    let create_status = create_response.status();
+    let create_body = create_response
+        .text()
+        .expect("projection create response should read");
+    assert_eq!(
+        create_status,
+        reqwest::StatusCode::CREATED,
+        "projection create failed: {create_body}"
+    );
+    let created: Value =
+        serde_json::from_str(&create_body).expect("projection create should decode");
     assert_eq!(created["title"], "Gamma");
     assert_eq!(created["author"], 7);
+    assert!(created.get("team_id").is_none());
     assert!(created.get("title_text").is_none());
     assert!(created.get("draft_body").is_none());
     assert!(created.get("internal_note").is_none());
+    let created_id = created["id"]
+        .as_i64()
+        .expect("projection create should return an integer id");
+
+    let update_response = client
+        .put(format!("{base_url}/api/posts/{created_id}"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "title": "Gamma Revised",
+            "author": 7,
+            "team_id": 9
+        }))
+        .send()
+        .expect("projection update should succeed");
+    let update_status = update_response.status();
+    let update_body = update_response
+        .text()
+        .expect("projection update response should read");
+    assert_eq!(
+        update_status,
+        reqwest::StatusCode::OK,
+        "projection update failed: {update_body}"
+    );
+
+    let item_response = client
+        .get(format!("{base_url}/api/posts/{created_id}"))
+        .send()
+        .expect("projection item should load");
+    assert_eq!(item_response.status(), reqwest::StatusCode::OK);
+    let item_body: Value = item_response.json().expect("projection item should decode");
+    assert_eq!(item_body["title"], "Gamma Revised");
+    assert_eq!(item_body["author"], 7);
+    assert!(item_body.get("team_id").is_none());
+    assert!(item_body.get("title_text").is_none());
+    assert!(item_body.get("draft_body").is_none());
+    assert!(item_body.get("internal_note").is_none());
 
     let list_response = client
         .get(format!("{base_url}/api/posts?filter_author=7&sort=title"))
@@ -2822,7 +2869,7 @@ fn vsr_serve_applies_api_projections_in_spawned_process() {
     let list_body: Value = list_response.json().expect("projection list should decode");
     assert_eq!(list_body["total"], 2);
     assert_eq!(list_body["items"][0]["title"], "Alpha");
-    assert_eq!(list_body["items"][1]["title"], "Gamma");
+    assert_eq!(list_body["items"][1]["title"], "Gamma Revised");
     assert!(list_body["items"][0].get("draft_body").is_none());
     assert!(list_body["items"][0].get("internal_note").is_none());
 }

@@ -371,8 +371,7 @@ impl DynamicResource {
             .fields
             .iter()
             .filter(|field| {
-                field.expose_in_api()
-                    && !field.is_id
+                !field.is_id
                     && !field.generated.skip_update_bind()
                     && !controlled_fields.contains(&field.name())
             })
@@ -1246,9 +1245,6 @@ fn build_create_field_rules(
     let mut fields = Vec::new();
 
     for field in &resource.fields {
-        if !field.expose_in_api() {
-            continue;
-        }
         if field.generated.skip_insert() {
             continue;
         }
@@ -1327,7 +1323,11 @@ fn should_insert_field(resource: &DynamicResource, field: &DynamicField) -> bool
     if field.generated.skip_insert() {
         return false;
     }
-    if field.expose_in_api {
+    if resource
+        .create_fields
+        .iter()
+        .any(|rule| rule.name == field.name)
+    {
         return true;
     }
     resource
@@ -4351,6 +4351,7 @@ mod tests {
     };
     use serde::Serialize;
     use serde_json::{Value, json};
+    use sqlx::Row;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{fs, path::PathBuf};
@@ -4952,11 +4953,12 @@ mod tests {
         }
         let (dynamic_service, state) = build_test_state("api_projection_api.eon", false).await;
         query(
-            "INSERT INTO blog_post (id, title_text, author_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO blog_post (id, title_text, author_id, team_id, draft_body, internal_note) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(1_i64)
         .bind("Alpha")
         .bind(7_i64)
+        .bind(3_i64)
         .bind("secret draft")
         .bind("internal only")
         .execute(&state.pool)
@@ -4974,17 +4976,68 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
             .set_json(json!({
                 "title": "Gamma",
-                "author": 7
+                "author": 7,
+                "team_id": 3
             }))
             .to_request();
         let create_response = test::call_service(&app, create_request).await;
-        assert_eq!(create_response.status(), StatusCode::CREATED);
-        let create_body: Value = test::read_body_json(create_response).await;
+        let create_status = create_response.status();
+        let create_body = test::read_body(create_response).await;
+        assert_eq!(
+            create_status,
+            StatusCode::CREATED,
+            "create failed: {}",
+            String::from_utf8_lossy(&create_body)
+        );
+        let create_body: Value =
+            serde_json::from_slice(&create_body).expect("create response should be valid json");
         assert_eq!(create_body["title"], "Gamma");
         assert_eq!(create_body["author"], 7);
+        assert!(create_body.get("team_id").is_none());
         assert!(create_body.get("title_text").is_none());
         assert!(create_body.get("draft_body").is_none());
         assert!(create_body.get("internal_note").is_none());
+        let created_id = create_body["id"].as_i64().expect("created id should be an integer");
+
+        let update_request = test::TestRequest::put()
+            .uri(format!("/api/posts/{created_id}").as_str())
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Gamma Revised",
+                "author": 7,
+                "team_id": 9
+            }))
+            .to_request();
+        let update_response = test::call_service(&app, update_request).await;
+        let update_status = update_response.status();
+        let update_body = test::read_body(update_response).await;
+        assert_eq!(
+            update_status,
+            StatusCode::OK,
+            "update failed: {}",
+            String::from_utf8_lossy(&update_body)
+        );
+
+        let stored_row = query("SELECT title_text, team_id FROM blog_post WHERE id = ?")
+            .bind(created_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("created row should persist");
+        assert_eq!(stored_row.get::<String, _>(0), "Gamma Revised");
+        assert_eq!(stored_row.get::<i64, _>(1), 9);
+
+        let item_request = test::TestRequest::get()
+            .uri(format!("/api/posts/{created_id}").as_str())
+            .to_request();
+        let item_response = test::call_service(&app, item_request).await;
+        assert_eq!(item_response.status(), StatusCode::OK);
+        let item_body: Value = test::read_body_json(item_response).await;
+        assert_eq!(item_body["title"], "Gamma Revised");
+        assert_eq!(item_body["author"], 7);
+        assert!(item_body.get("team_id").is_none());
+        assert!(item_body.get("title_text").is_none());
+        assert!(item_body.get("draft_body").is_none());
+        assert!(item_body.get("internal_note").is_none());
 
         let list_request = test::TestRequest::get()
             .uri("/api/posts?filter_author=7&sort=title")
@@ -4994,7 +5047,7 @@ mod tests {
         let list_body: Value = test::read_body_json(list_response).await;
         assert_eq!(list_body["total"], 2);
         assert_eq!(list_body["items"][0]["title"], "Alpha");
-        assert_eq!(list_body["items"][1]["title"], "Gamma");
+        assert_eq!(list_body["items"][1]["title"], "Gamma Revised");
         assert!(list_body["items"][0].get("draft_body").is_none());
         assert!(list_body["items"][0].get("internal_note").is_none());
     }
