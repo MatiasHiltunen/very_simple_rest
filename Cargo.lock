@@ -1808,7 +1808,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "demo"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -4332,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "rest_macro"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -4343,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "rest_macro_core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -6166,7 +6166,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "very_simple_rest"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -6195,7 +6195,7 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vsra"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "actix-cors",
  "actix-files",
