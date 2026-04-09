@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use colored::Colorize;
 use rest_macro_core::compiler::{
@@ -415,6 +415,8 @@ fn write_generated_client(
     document: &ClientDocument,
     emit_js: bool,
 ) -> Result<()> {
+    let input_schema_aliases = compute_input_schema_aliases(&document.schemas);
+
     write_file(
         &output_dir.join("package.json"),
         &render_package_json(package_name, emit_js),
@@ -427,11 +429,11 @@ fn write_generated_client(
     )?;
     write_file(
         &output_dir.join("types.ts"),
-        &render_types_ts(&document.schemas),
+        &render_types_ts(&document.schemas, &input_schema_aliases),
     )?;
     write_file(
         &output_dir.join("operations.ts"),
-        &render_operations_ts(document),
+        &render_operations_ts(document, &input_schema_aliases),
     )?;
     if emit_js {
         write_file(&output_dir.join("index.js"), &render_index_js())?;
@@ -564,7 +566,6 @@ struct ClientOperation {
     operation_id: String,
     method: String,
     path: String,
-    summary: Option<String>,
     path_params: Vec<ClientParameter>,
     query_params: Vec<ClientParameter>,
     header_params: Vec<ClientParameter>,
@@ -620,10 +621,6 @@ impl ClientOperation {
             operation_id,
             method: method.to_ascii_uppercase(),
             path: path.to_owned(),
-            summary: operation
-                .get("summary")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
             path_params,
             query_params,
             header_params,
@@ -886,14 +883,19 @@ fn render_index_js() -> String {
 
 fn render_client_ts(server_url: &str) -> String {
     format!(
-        r#"export type QueryValue =
-  | string
-  | number
-  | boolean
+        r#"export type DateTimeInput = string | Date;
+export type DateInput = string | VsrDate;
+export type TimeInput = string | VsrTime;
+
+type TemporalValue = Date | VsrDate | VsrTime;
+type ScalarValue = string | number | boolean | TemporalValue;
+
+export type QueryValue =
+  | ScalarValue
   | null
   | undefined
   | Blob
-  | Array<string | number | boolean | null | undefined>;
+  | Array<ScalarValue | null | undefined>;
 
 export type QueryParams = Record<string, QueryValue>;
 
@@ -929,6 +931,79 @@ export type ResolvedClientConfig = {{
   getCsrfToken?: () => string | null | undefined | Promise<string | null | undefined>;
   csrfHeaderName: string;
 }};
+
+export class VsrDate {{
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+
+  constructor(year: number, month: number, day: number) {{
+    if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {{
+      throw new Error("VsrDate values must be integers.");
+    }}
+    const normalized = new Date(Date.UTC(year, month - 1, day));
+    if (
+      normalized.getUTCFullYear() !== year ||
+      normalized.getUTCMonth() !== month - 1 ||
+      normalized.getUTCDate() !== day
+    ) {{
+      throw new Error("Invalid VsrDate value.");
+    }}
+    this.year = year;
+    this.month = month;
+    this.day = day;
+  }}
+
+  toString(): string {{
+    return `${{padNumber(this.year, 4)}}-${{padNumber(this.month, 2)}}-${{padNumber(this.day, 2)}}`;
+  }}
+
+  toJSON(): string {{
+    return this.toString();
+  }}
+}}
+
+export class VsrTime {{
+  readonly hour: number;
+  readonly minute: number;
+  readonly second: number;
+  readonly microsecond: number;
+
+  constructor(hour: number, minute: number, second: number = 0, microsecond: number = 0) {{
+    if (
+      !Number.isInteger(hour) ||
+      !Number.isInteger(minute) ||
+      !Number.isInteger(second) ||
+      !Number.isInteger(microsecond)
+    ) {{
+      throw new Error("VsrTime values must be integers.");
+    }}
+    if (hour < 0 || hour > 23) {{
+      throw new Error("VsrTime hour must be between 0 and 23.");
+    }}
+    if (minute < 0 || minute > 59) {{
+      throw new Error("VsrTime minute must be between 0 and 59.");
+    }}
+    if (second < 0 || second > 59) {{
+      throw new Error("VsrTime second must be between 0 and 59.");
+    }}
+    if (microsecond < 0 || microsecond > 999999) {{
+      throw new Error("VsrTime microsecond must be between 0 and 999999.");
+    }}
+    this.hour = hour;
+    this.minute = minute;
+    this.second = second;
+    this.microsecond = microsecond;
+  }}
+
+  toString(): string {{
+    return `${{padNumber(this.hour, 2)}}:${{padNumber(this.minute, 2)}}:${{padNumber(this.second, 2)}}.${{padNumber(this.microsecond, 6)}}`;
+  }}
+
+  toJSON(): string {{
+    return this.toString();
+  }}
+}}
 
 export class ApiError extends Error {{
   readonly status: number;
@@ -989,10 +1064,10 @@ export function createClient(config: ClientConfig = {{}}): VsrClient {{
           body = request.body instanceof FormData ? request.body : objectToFormData(request.body);
         }} else if (request.contentType === "application/json") {{
           headers.set("content-type", "application/json");
-          body = JSON.stringify(request.body);
+          body = JSON.stringify(normalizeJsonValue(request.body));
         }} else if (request.contentType === "text/plain") {{
           headers.set("content-type", "text/plain");
-          body = typeof request.body === "string" ? request.body : String(request.body);
+          body = stringifyScalarLikeValue(request.body);
         }} else {{
           if (request.contentType) {{
             headers.set("content-type", request.contentType);
@@ -1067,14 +1142,14 @@ function ensureLeadingSlash(value: string): string {{
 
 export function interpolatePath(
   template: string,
-  params?: Record<string, string | number | boolean | null | undefined>,
+  params?: Record<string, ScalarValue | null | undefined>,
 ): string {{
   return template.replace(/\{{([^}}]+)\}}/g, (_, key: string) => {{
     const value = params?.[key];
     if (value === undefined || value === null) {{
       throw new Error(`Missing required path parameter: ${{key}}`);
     }}
-    return encodeURIComponent(String(value));
+    return encodeURIComponent(stringifyScalarValue(value));
   }});
 }}
 
@@ -1086,7 +1161,7 @@ function appendQuery(searchParams: URLSearchParams, query: QueryParams): void {{
     if (Array.isArray(value)) {{
       for (const item of value) {{
         if (item !== undefined && item !== null) {{
-          searchParams.append(key, stringifyQueryValue(item));
+          searchParams.append(key, stringifyScalarValue(item));
         }}
       }}
       continue;
@@ -1094,12 +1169,31 @@ function appendQuery(searchParams: URLSearchParams, query: QueryParams): void {{
     if (value instanceof Blob) {{
       continue;
     }}
-    searchParams.append(key, stringifyQueryValue(value));
+    searchParams.append(key, stringifyScalarValue(value));
   }}
 }}
 
-function stringifyQueryValue(value: string | number | boolean): string {{
-  return typeof value === "string" ? value : String(value);
+function stringifyScalarValue(value: ScalarValue): string {{
+  if (typeof value === "string") {{
+    return value;
+  }}
+  if (typeof value === "number" || typeof value === "boolean") {{
+    return String(value);
+  }}
+  return stringifyTemporalValue(value);
+}}
+
+function stringifyScalarLikeValue(value: unknown): string {{
+  if (typeof value === "string") {{
+    return value;
+  }}
+  if (typeof value === "number" || typeof value === "boolean") {{
+    return String(value);
+  }}
+  if (isTemporalValue(value)) {{
+    return stringifyTemporalValue(value);
+  }}
+  return String(value);
 }}
 
 function objectToFormData(value: unknown): FormData {{
@@ -1130,6 +1224,10 @@ function appendFormDataValue(formData: FormData, key: string, value: unknown): v
     formData.append(key, value);
     return;
   }}
+  if (isTemporalValue(value)) {{
+    formData.append(key, stringifyTemporalValue(value));
+    return;
+  }}
   if (typeof value === "string") {{
     formData.append(key, value);
     return;
@@ -1157,13 +1255,118 @@ async function parseResponseBody(response: Response): Promise<unknown> {{
   const text = await response.text();
   return text ? text : undefined;
 }}
+
+function normalizeJsonValue(value: unknown): unknown {{
+  if (value === undefined || value === null) {{
+    return value;
+  }}
+  if (isTemporalValue(value)) {{
+    return stringifyTemporalValue(value);
+  }}
+  if (Array.isArray(value)) {{
+    return value.map((entry) => normalizeJsonValue(entry));
+  }}
+  if (value instanceof Blob || value instanceof FormData || value instanceof URLSearchParams) {{
+    return value;
+  }}
+  if (typeof value === "object") {{
+    const normalized: Record<string, unknown> = {{}};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {{
+      normalized[key] = normalizeJsonValue(entry);
+    }}
+    return normalized;
+  }}
+  return value;
+}}
+
+function isTemporalValue(value: unknown): value is TemporalValue {{
+  return value instanceof Date || value instanceof VsrDate || value instanceof VsrTime;
+}}
+
+function stringifyTemporalValue(value: TemporalValue): string {{
+  if (value instanceof Date) {{
+    if (Number.isNaN(value.getTime())) {{
+      throw new Error("Invalid DateTimeInput value.");
+    }}
+    return `${{padNumber(value.getUTCFullYear(), 4)}}-${{padNumber(value.getUTCMonth() + 1, 2)}}-${{padNumber(value.getUTCDate(), 2)}}T${{padNumber(value.getUTCHours(), 2)}}:${{padNumber(value.getUTCMinutes(), 2)}}:${{padNumber(value.getUTCSeconds(), 2)}}.${{padNumber(value.getUTCMilliseconds() * 1000, 6)}}+00:00`;
+  }}
+  return value.toString();
+}}
+
+function padNumber(value: number, width: number): string {{
+  return String(value).padStart(width, "0");
+}}
 "#
     )
 }
 
 fn render_client_js(server_url: &str) -> String {
     format!(
-        r#"export class ApiError extends Error {{
+        r#"export class VsrDate {{
+  constructor(year, month, day) {{
+    if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {{
+      throw new Error("VsrDate values must be integers.");
+    }}
+    const normalized = new Date(Date.UTC(year, month - 1, day));
+    if (
+      normalized.getUTCFullYear() !== year ||
+      normalized.getUTCMonth() !== month - 1 ||
+      normalized.getUTCDate() !== day
+    ) {{
+      throw new Error("Invalid VsrDate value.");
+    }}
+    this.year = year;
+    this.month = month;
+    this.day = day;
+  }}
+
+  toString() {{
+    return `${{padNumber(this.year, 4)}}-${{padNumber(this.month, 2)}}-${{padNumber(this.day, 2)}}`;
+  }}
+
+  toJSON() {{
+    return this.toString();
+  }}
+}}
+
+export class VsrTime {{
+  constructor(hour, minute, second = 0, microsecond = 0) {{
+    if (
+      !Number.isInteger(hour) ||
+      !Number.isInteger(minute) ||
+      !Number.isInteger(second) ||
+      !Number.isInteger(microsecond)
+    ) {{
+      throw new Error("VsrTime values must be integers.");
+    }}
+    if (hour < 0 || hour > 23) {{
+      throw new Error("VsrTime hour must be between 0 and 23.");
+    }}
+    if (minute < 0 || minute > 59) {{
+      throw new Error("VsrTime minute must be between 0 and 59.");
+    }}
+    if (second < 0 || second > 59) {{
+      throw new Error("VsrTime second must be between 0 and 59.");
+    }}
+    if (microsecond < 0 || microsecond > 999999) {{
+      throw new Error("VsrTime microsecond must be between 0 and 999999.");
+    }}
+    this.hour = hour;
+    this.minute = minute;
+    this.second = second;
+    this.microsecond = microsecond;
+  }}
+
+  toString() {{
+    return `${{padNumber(this.hour, 2)}}:${{padNumber(this.minute, 2)}}:${{padNumber(this.second, 2)}}.${{padNumber(this.microsecond, 6)}}`;
+  }}
+
+  toJSON() {{
+    return this.toString();
+  }}
+}}
+
+export class ApiError extends Error {{
   constructor(message, status, body, headers) {{
     super(message);
     this.name = "ApiError";
@@ -1213,10 +1416,10 @@ export function createClient(config = {{}}) {{
           body = request.body instanceof FormData ? request.body : objectToFormData(request.body);
         }} else if (request.contentType === "application/json") {{
           headers.set("content-type", "application/json");
-          body = JSON.stringify(request.body);
+          body = JSON.stringify(normalizeJsonValue(request.body));
         }} else if (request.contentType === "text/plain") {{
           headers.set("content-type", "text/plain");
-          body = typeof request.body === "string" ? request.body : String(request.body);
+          body = stringifyScalarLikeValue(request.body);
         }} else {{
           if (request.contentType) {{
             headers.set("content-type", request.contentType);
@@ -1295,7 +1498,7 @@ export function interpolatePath(template, params) {{
     if (value === undefined || value === null) {{
       throw new Error(`Missing required path parameter: ${{key}}`);
     }}
-    return encodeURIComponent(String(value));
+    return encodeURIComponent(stringifyScalarValue(value));
   }});
 }}
 
@@ -1307,7 +1510,7 @@ function appendQuery(searchParams, query) {{
     if (Array.isArray(value)) {{
       for (const item of value) {{
         if (item !== undefined && item !== null) {{
-          searchParams.append(key, stringifyQueryValue(item));
+          searchParams.append(key, stringifyScalarValue(item));
         }}
       }}
       continue;
@@ -1315,12 +1518,31 @@ function appendQuery(searchParams, query) {{
     if (value instanceof Blob) {{
       continue;
     }}
-    searchParams.append(key, stringifyQueryValue(value));
+    searchParams.append(key, stringifyScalarValue(value));
   }}
 }}
 
-function stringifyQueryValue(value) {{
-  return typeof value === "string" ? value : String(value);
+function stringifyScalarValue(value) {{
+  if (typeof value === "string") {{
+    return value;
+  }}
+  if (typeof value === "number" || typeof value === "boolean") {{
+    return String(value);
+  }}
+  return stringifyTemporalValue(value);
+}}
+
+function stringifyScalarLikeValue(value) {{
+  if (typeof value === "string") {{
+    return value;
+  }}
+  if (typeof value === "number" || typeof value === "boolean") {{
+    return String(value);
+  }}
+  if (isTemporalValue(value)) {{
+    return stringifyTemporalValue(value);
+  }}
+  return String(value);
 }}
 
 function objectToFormData(value) {{
@@ -1351,6 +1573,10 @@ function appendFormDataValue(formData, key, value) {{
     formData.append(key, value);
     return;
   }}
+  if (isTemporalValue(value)) {{
+    formData.append(key, stringifyTemporalValue(value));
+    return;
+  }}
   if (typeof value === "string") {{
     formData.append(key, value);
     return;
@@ -1378,18 +1604,87 @@ async function parseResponseBody(response) {{
   const text = await response.text();
   return text ? text : undefined;
 }}
+
+function normalizeJsonValue(value) {{
+  if (value === undefined || value === null) {{
+    return value;
+  }}
+  if (isTemporalValue(value)) {{
+    return stringifyTemporalValue(value);
+  }}
+  if (Array.isArray(value)) {{
+    return value.map((entry) => normalizeJsonValue(entry));
+  }}
+  if (value instanceof Blob || value instanceof FormData || value instanceof URLSearchParams) {{
+    return value;
+  }}
+  if (typeof value === "object") {{
+    const normalized = {{}};
+    for (const [key, entry] of Object.entries(value)) {{
+      normalized[key] = normalizeJsonValue(entry);
+    }}
+    return normalized;
+  }}
+  return value;
+}}
+
+function isTemporalValue(value) {{
+  return value instanceof Date || value instanceof VsrDate || value instanceof VsrTime;
+}}
+
+function stringifyTemporalValue(value) {{
+  if (value instanceof Date) {{
+    if (Number.isNaN(value.getTime())) {{
+      throw new Error("Invalid DateTimeInput value.");
+    }}
+    return `${{padNumber(value.getUTCFullYear(), 4)}}-${{padNumber(value.getUTCMonth() + 1, 2)}}-${{padNumber(value.getUTCDate(), 2)}}T${{padNumber(value.getUTCHours(), 2)}}:${{padNumber(value.getUTCMinutes(), 2)}}:${{padNumber(value.getUTCSeconds(), 2)}}.${{padNumber(value.getUTCMilliseconds() * 1000, 6)}}+00:00`;
+  }}
+  return value.toString();
+}}
+
+function padNumber(value, width) {{
+  return String(value).padStart(width, "0");
+}}
 "#
     )
 }
 
-fn render_types_ts(schemas: &BTreeMap<String, Value>) -> String {
+fn render_types_ts(
+    schemas: &BTreeMap<String, Value>,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
     let mut output = String::from("// Generated by `vsr client ts`\n\n");
+    if !input_schema_aliases.is_empty() {
+        output.push_str(
+            "import type { DateInput, DateTimeInput, TimeInput } from \"./client.ts\";\n\n",
+        );
+    }
     for (name, schema) in schemas {
+        let type_name = sanitize_type_name(name);
         output.push_str(&format!(
             "export type {} = {};\n\n",
-            sanitize_type_name(name),
-            render_schema_type(schema, 0)
+            type_name,
+            render_schema_type_with_refs(
+                schema,
+                0,
+                RefMode::Bare,
+                TypeUsage::Output,
+                input_schema_aliases
+            )
         ));
+        if input_schema_aliases.contains(&type_name) {
+            output.push_str(&format!(
+                "export type {}Input = {};\n\n",
+                type_name,
+                render_schema_type_with_refs(
+                    schema,
+                    0,
+                    RefMode::Bare,
+                    TypeUsage::Input,
+                    input_schema_aliases
+                )
+            ));
+        }
     }
     if schemas.is_empty() {
         output.push_str("export {};\n");
@@ -1397,41 +1692,59 @@ fn render_types_ts(schemas: &BTreeMap<String, Value>) -> String {
     output
 }
 
-fn render_operations_ts(document: &ClientDocument) -> String {
+fn render_operations_ts(
+    document: &ClientDocument,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
     let mut output = String::from(
-        "// Generated by `vsr client ts`\n\nimport type * as Schemas from \"./types.ts\";\nimport { interpolatePath, type QueryParams, type VsrClient } from \"./client.ts\";\n\n",
+        "// Generated by `vsr client ts`\n\nimport type * as Schemas from \"./types.ts\";\nimport { interpolatePath, type DateInput, type DateTimeInput, type QueryParams, type TimeInput, type VsrClient } from \"./client.ts\";\n\ntype Req = { headers?: HeadersInit; signal?: AbortSignal };\ntype Page<S extends string> = { limit?: number; offset?: number; cursor?: string; sort?: S; order?: \"asc\" | \"desc\" };\ntype Range<K extends string, V> = { [P in K]?: V } & { [P in K as `${P}_gt` | `${P}_gte` | `${P}_lt` | `${P}_lte`]?: V };\ntype DR<K extends string, V = DateTimeInput> = Range<K, V>;\nconst r = (p: Req) => ({ headers: p.headers, signal: p.signal });\n\n",
     );
 
     for operation in &document.operations {
         let request_type_name = format!("{}Request", sanitize_type_name(&operation.operation_id));
-        let response_type_name = format!("{}Response", sanitize_type_name(&operation.operation_id));
-        output.push_str(&format!(
-            "export type {response_type_name} = {};\n",
-            render_operation_response_type(&operation.response)
-        ));
-        output.push_str(&format!(
-            "export type {request_type_name} = {};\n\n",
-            render_operation_request_type(operation)
-        ));
-
-        if let Some(summary) = operation.summary.as_deref() {
-            output.push_str(&format!("/** {} */\n", escape_js_doc(summary)));
+        let query_type_name = (!operation.query_params.is_empty())
+            .then(|| format!("{}Query", sanitize_type_name(&operation.operation_id)));
+        let response_type =
+            render_operation_response_type(&operation.response, input_schema_aliases);
+        if let Some(query_type_name) = query_type_name.as_deref() {
+            output.push_str(&format!(
+                "export type {query_type_name} = {};\n",
+                render_operation_query_type(&operation.query_params, input_schema_aliases)
+            ));
+        }
+        if !operation_uses_inline_req(operation) {
+            output.push_str(&format!(
+                "export type {request_type_name} = {};\n",
+                render_operation_request_type(
+                    operation,
+                    query_type_name.as_deref(),
+                    input_schema_aliases
+                )
+            ));
+        }
+        if query_type_name.is_some() || !operation_uses_inline_req(operation) {
+            output.push('\n');
         }
         let params_default = if operation_has_required_inputs(operation) {
             ""
         } else {
             " = {}"
         };
+        let params_type = if operation_uses_inline_req(operation) {
+            "Req"
+        } else {
+            request_type_name.as_str()
+        };
         output.push_str(&format!(
             "export async function {}(client: VsrClient, params: {}{}): Promise<{}> {{\n",
             sanitize_identifier(&operation.operation_id),
-            request_type_name,
+            params_type,
             params_default,
-            response_type_name
+            response_type
         ));
         output.push_str(&format!(
             "  return client.request<{}>({});\n",
-            response_type_name,
+            response_type,
             render_request_config_literal(operation, false)
         ));
         output.push_str("}\n\n");
@@ -1446,13 +1759,10 @@ fn render_operations_ts(document: &ClientDocument) -> String {
 
 fn render_operations_js(document: &ClientDocument) -> String {
     let mut output = String::from(
-        "// Generated by `vsr client ts`\n\nimport { interpolatePath } from \"./client.js\";\n\n",
+        "// Generated by `vsr client ts`\n\nimport { interpolatePath } from \"./client.js\";\n\nconst r = (p) => ({ headers: p.headers, signal: p.signal });\n\n",
     );
 
     for operation in &document.operations {
-        if let Some(summary) = operation.summary.as_deref() {
-            output.push_str(&format!("/** {} */\n", escape_js_doc(summary)));
-        }
         let params_default = if operation_has_required_inputs(operation) {
             ""
         } else {
@@ -1477,52 +1787,150 @@ fn render_operations_js(document: &ClientDocument) -> String {
     output
 }
 
-fn render_operation_response_type(response: &ClientResponse) -> String {
+fn render_operation_response_type(
+    response: &ClientResponse,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
     match &response.kind {
-        ResponseKind::Json(schema) => render_schema_type_with_refs(schema, 0, RefMode::Schemas),
+        ResponseKind::Json(schema) => render_schema_type_with_refs(
+            schema,
+            0,
+            RefMode::Schemas,
+            TypeUsage::Output,
+            input_schema_aliases,
+        ),
         ResponseKind::Text => "string".to_owned(),
         ResponseKind::Binary => "Blob".to_owned(),
         ResponseKind::Void => "void".to_owned(),
     }
 }
 
-fn render_operation_request_type(operation: &ClientOperation) -> String {
-    let mut fields = Vec::new();
+fn render_operation_request_type(
+    operation: &ClientOperation,
+    query_type_name: Option<&str>,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
+    let mut parts = Vec::new();
     if !operation.path_params.is_empty() {
-        fields.push(format!(
-            "\"path\": {};",
-            render_parameter_object_type(&operation.path_params)
+        parts.push(render_type_literal(
+            &[format!(
+                "\"path\": {};",
+                render_parameter_object_type(
+                    &operation.path_params,
+                    TypeUsage::Input,
+                    input_schema_aliases
+                )
+            )],
+            0,
         ));
     }
-    if !operation.query_params.is_empty() {
+    if let Some(query_type_name) = query_type_name {
         let optional = operation.query_params.iter().all(|param| !param.required);
-        fields.push(format!(
-            "\"query\"{}: {};",
-            if optional { "?" } else { "" },
-            render_parameter_object_type(&operation.query_params)
+        parts.push(render_type_literal(
+            &[format!(
+                "\"query\"{}: {query_type_name};",
+                if optional { "?" } else { "" }
+            )],
+            0,
+        ));
+    }
+    if let Some(body) = &operation.request_body {
+        parts.push(render_type_literal(
+            &[format!(
+                "\"body\": {};",
+                render_schema_type_with_refs(
+                    &body.schema,
+                    1,
+                    RefMode::Schemas,
+                    TypeUsage::Input,
+                    input_schema_aliases
+                )
+            )],
+            0,
         ));
     }
     if !operation.header_params.is_empty() {
         let optional = operation.header_params.iter().all(|param| !param.required);
-        fields.push(format!(
-            "\"headers\"{}: {};",
-            if optional { "?" } else { "" },
-            render_parameter_object_type(&operation.header_params)
+        parts.push(render_type_literal(
+            &[
+                format!(
+                    "\"headers\"{}: {};",
+                    if optional { "?" } else { "" },
+                    render_parameter_object_type(
+                        &operation.header_params,
+                        TypeUsage::Input,
+                        input_schema_aliases
+                    )
+                ),
+                "\"signal\"?: AbortSignal;".to_owned(),
+            ],
+            0,
         ));
     } else {
-        fields.push("\"headers\"?: HeadersInit;".to_owned());
+        parts.push("Req".to_owned());
     }
-    if let Some(body) = &operation.request_body {
-        fields.push(format!(
-            "\"body\": {};",
-            render_schema_type_with_refs(&body.schema, 1, RefMode::Schemas)
-        ));
-    }
-    fields.push("\"signal\"?: AbortSignal;".to_owned());
-    render_type_literal(&fields, 0)
+    render_intersection_type(&parts)
 }
 
-fn render_parameter_object_type(parameters: &[ClientParameter]) -> String {
+fn render_operation_query_type(
+    parameters: &[ClientParameter],
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
+    let page_sort_union = render_page_sort_union(parameters, input_schema_aliases);
+    let range_groups = collect_range_groups(parameters, input_schema_aliases);
+    let mut consumed = BTreeSet::new();
+    if page_sort_union.is_some() {
+        consumed.extend(["limit", "offset", "cursor", "sort", "order"]);
+    }
+    for group in &range_groups {
+        for name in &group.covered_names {
+            consumed.insert(name.as_str());
+        }
+    }
+
+    let remaining = parameters
+        .iter()
+        .filter(|parameter| !consumed.contains(parameter.name.as_str()))
+        .collect::<Vec<_>>();
+
+    let mut parts = Vec::new();
+    if let Some(sort_union) = page_sort_union {
+        parts.push(format!("Page<{sort_union}>"));
+    }
+    for group in range_groups {
+        parts.push(group.rendered);
+    }
+    if !remaining.is_empty() {
+        parts.push(render_parameter_object_type_refs(
+            &remaining,
+            TypeUsage::Input,
+            input_schema_aliases,
+        ));
+    }
+
+    if parts.is_empty() {
+        "{}".to_owned()
+    } else if parts.len() == 1 {
+        parts.remove(0)
+    } else {
+        parts.join("\n  & ")
+    }
+}
+
+fn render_parameter_object_type(
+    parameters: &[ClientParameter],
+    type_usage: TypeUsage,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
+    let parameters = parameters.iter().collect::<Vec<_>>();
+    render_parameter_object_type_refs(&parameters, type_usage, input_schema_aliases)
+}
+
+fn render_parameter_object_type_refs(
+    parameters: &[&ClientParameter],
+    type_usage: TypeUsage,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
     let fields = parameters
         .iter()
         .map(|parameter| {
@@ -1530,7 +1938,13 @@ fn render_parameter_object_type(parameters: &[ClientParameter]) -> String {
                 "{}{}: {};",
                 quoted_property_name(&parameter.name),
                 if parameter.required { "" } else { "?" },
-                render_schema_type_with_refs(&parameter.schema, 1, RefMode::Schemas)
+                render_schema_type_with_refs(
+                    &parameter.schema,
+                    1,
+                    RefMode::Schemas,
+                    type_usage,
+                    input_schema_aliases
+                )
             )
         })
         .collect::<Vec<_>>();
@@ -1554,11 +1968,6 @@ fn render_request_config_literal(operation: &ClientOperation, javascript: bool) 
             "query: params.query as QueryParams | undefined".to_owned()
         });
     }
-    if !operation.header_params.is_empty() {
-        fields.push("headers: params.headers".to_owned());
-    } else {
-        fields.push("headers: params.headers".to_owned());
-    }
     if let Some(body) = &operation.request_body {
         fields.push("body: params.body".to_owned());
         if let Some(content_type) = body.content_type.as_http_header() {
@@ -1567,7 +1976,7 @@ fn render_request_config_literal(operation: &ClientOperation, javascript: bool) 
             fields.push("contentType: \"multipart/form-data\"".to_owned());
         }
     }
-    fields.push("signal: params.signal".to_owned());
+    fields.push("...r(params)".to_owned());
     if operation.requires_bearer_auth {
         fields.push("requiresBearerAuth: true".to_owned());
     }
@@ -1588,6 +1997,190 @@ fn operation_has_required_inputs(operation: &ClientOperation) -> bool {
         || operation.request_body.is_some()
 }
 
+fn operation_uses_inline_req(operation: &ClientOperation) -> bool {
+    operation.path_params.is_empty()
+        && operation.query_params.is_empty()
+        && operation.header_params.is_empty()
+        && operation.request_body.is_none()
+}
+
+fn render_page_sort_union(
+    parameters: &[ClientParameter],
+    input_schema_aliases: &BTreeSet<String>,
+) -> Option<String> {
+    let mut limit = false;
+    let mut offset = false;
+    let mut cursor = false;
+    let mut order = false;
+    let mut sort_union = None;
+
+    for parameter in parameters {
+        match parameter.name.as_str() {
+            "limit" => limit = true,
+            "offset" => offset = true,
+            "cursor" => cursor = true,
+            "order" => order = true,
+            "sort" => {
+                sort_union = Some(render_schema_type_with_refs(
+                    &parameter.schema,
+                    0,
+                    RefMode::Schemas,
+                    TypeUsage::Input,
+                    input_schema_aliases,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    (limit && offset && cursor && order)
+        .then(|| sort_union)
+        .flatten()
+}
+
+fn collect_range_groups(
+    parameters: &[ClientParameter],
+    input_schema_aliases: &BTreeSet<String>,
+) -> Vec<RenderedRangeGroup> {
+    let mut base_groups = Vec::<RangeGroupSpec>::new();
+    let mut base_index = BTreeMap::<String, usize>::new();
+
+    for parameter in parameters {
+        let Some(base_name) = range_parameter_base_name(&parameter.name) else {
+            continue;
+        };
+        let value_type = render_schema_type_with_refs(
+            &parameter.schema,
+            0,
+            RefMode::Schemas,
+            TypeUsage::Input,
+            input_schema_aliases,
+        );
+        let uses_dr = matches!(
+            value_type.as_str(),
+            "DateTimeInput" | "DateInput" | "TimeInput"
+        );
+        let index = match base_index.get(base_name).copied() {
+            Some(index) => index,
+            None => {
+                let index = base_groups.len();
+                base_groups.push(RangeGroupSpec {
+                    base_name: base_name.to_owned(),
+                    covered_names: BTreeSet::new(),
+                    value_type,
+                    uses_dr,
+                });
+                base_index.insert(base_name.to_owned(), index);
+                index
+            }
+        };
+        let group = &mut base_groups[index];
+        group.covered_names.insert(parameter.name.clone());
+        group.uses_dr &= uses_dr;
+    }
+
+    for parameter in parameters {
+        if let Some(index) = base_index.get(&parameter.name).copied() {
+            let group = &mut base_groups[index];
+            group.covered_names.insert(parameter.name.clone());
+            if group.value_type.is_empty() {
+                group.value_type = render_schema_type_with_refs(
+                    &parameter.schema,
+                    0,
+                    RefMode::Schemas,
+                    TypeUsage::Input,
+                    input_schema_aliases,
+                );
+            }
+            group.uses_dr &= matches!(
+                group.value_type.as_str(),
+                "DateTimeInput" | "DateInput" | "TimeInput"
+            );
+        }
+    }
+
+    let mut rendered_groups = Vec::<RenderedRangeGroup>::new();
+    for group in base_groups {
+        let key = if group.uses_dr {
+            ("dr".to_owned(), group.value_type.clone())
+        } else {
+            ("range".to_owned(), group.value_type.clone())
+        };
+        if let Some(existing) = rendered_groups
+            .iter_mut()
+            .find(|candidate| candidate.key == key)
+        {
+            existing.base_names.push(group.base_name);
+            existing.covered_names.extend(group.covered_names);
+        } else {
+            rendered_groups.push(RenderedRangeGroup {
+                key,
+                base_names: vec![group.base_name],
+                covered_names: group.covered_names,
+                rendered: String::new(),
+            });
+        }
+    }
+
+    for group in &mut rendered_groups {
+        let union = render_string_literal_union(&group.base_names);
+        group.rendered = if group.key.0 == "dr" {
+            if group.key.1 == "DateTimeInput" {
+                format!("DR<{union}>")
+            } else {
+                format!("DR<{union}, {}>", group.key.1)
+            }
+        } else {
+            format!("Range<{union}, {}>", group.key.1)
+        };
+    }
+
+    rendered_groups
+}
+
+fn range_parameter_base_name(value: &str) -> Option<&str> {
+    for suffix in ["_gt", "_gte", "_lt", "_lte"] {
+        if let Some(base) = value.strip_suffix(suffix) {
+            return Some(base);
+        }
+    }
+    None
+}
+
+fn render_string_literal_union(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{value:?}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn render_intersection_type(parts: &[String]) -> String {
+    if parts.is_empty() {
+        "{}".to_owned()
+    } else if parts.len() == 1 {
+        parts[0].clone()
+    } else {
+        parts.join(" &\n  ")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RangeGroupSpec {
+    base_name: String,
+    covered_names: BTreeSet<String>,
+    value_type: String,
+    uses_dr: bool,
+}
+
+#[derive(Clone, Debug)]
+struct RenderedRangeGroup {
+    key: (String, String),
+    base_names: Vec<String>,
+    covered_names: BTreeSet<String>,
+    rendered: String,
+}
+
 fn render_type_literal(fields: &[String], indent_level: usize) -> String {
     if fields.is_empty() {
         return "{}".to_owned();
@@ -1605,17 +2198,45 @@ fn render_type_literal(fields: &[String], indent_level: usize) -> String {
     rendered
 }
 
-fn render_schema_type(schema: &Value, indent_level: usize) -> String {
-    render_schema_type_with_refs(schema, indent_level, RefMode::Bare)
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RefMode {
     Bare,
     Schemas,
 }
 
-fn render_schema_type_with_refs(schema: &Value, indent_level: usize, ref_mode: RefMode) -> String {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeUsage {
+    Output,
+    Input,
+}
+
+fn compute_input_schema_aliases(schemas: &BTreeMap<String, Value>) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    loop {
+        let mut next_aliases = BTreeSet::new();
+        for (name, schema) in schemas {
+            let output =
+                render_schema_type_with_refs(schema, 0, RefMode::Bare, TypeUsage::Output, &aliases);
+            let input =
+                render_schema_type_with_refs(schema, 0, RefMode::Bare, TypeUsage::Input, &aliases);
+            if output != input {
+                next_aliases.insert(sanitize_type_name(name));
+            }
+        }
+        if next_aliases == aliases {
+            return aliases;
+        }
+        aliases = next_aliases;
+    }
+}
+
+fn render_schema_type_with_refs(
+    schema: &Value,
+    indent_level: usize,
+    ref_mode: RefMode,
+    type_usage: TypeUsage,
+    input_schema_aliases: &BTreeSet<String>,
+) -> String {
     let Some(schema) = schema.as_object() else {
         return "unknown".to_owned();
     };
@@ -1626,36 +2247,79 @@ fn render_schema_type_with_refs(schema: &Value, indent_level: usize, ref_mode: R
             .next()
             .map(sanitize_type_name)
             .unwrap_or_else(|| "unknown".to_owned());
+        let reference_type_name =
+            if type_usage == TypeUsage::Input && input_schema_aliases.contains(&type_name) {
+                format!("{type_name}Input")
+            } else {
+                type_name
+            };
         match ref_mode {
-            RefMode::Bare => type_name,
-            RefMode::Schemas => format!("Schemas.{type_name}"),
+            RefMode::Bare => reference_type_name,
+            RefMode::Schemas => format!("Schemas.{reference_type_name}"),
         }
     } else if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         render_enum_union(values)
     } else if let Some(value) = schema.get("const") {
         render_literal_type(value)
     } else if let Some(values) = schema.get("oneOf").and_then(Value::as_array) {
-        render_union(values, indent_level, "|", ref_mode)
+        render_union(
+            values,
+            indent_level,
+            "|",
+            ref_mode,
+            type_usage,
+            input_schema_aliases,
+        )
     } else if let Some(values) = schema.get("anyOf").and_then(Value::as_array) {
-        render_union(values, indent_level, "|", ref_mode)
+        render_union(
+            values,
+            indent_level,
+            "|",
+            ref_mode,
+            type_usage,
+            input_schema_aliases,
+        )
     } else if let Some(values) = schema.get("allOf").and_then(Value::as_array) {
-        render_union(values, indent_level, "&", ref_mode)
+        render_union(
+            values,
+            indent_level,
+            "&",
+            ref_mode,
+            type_usage,
+            input_schema_aliases,
+        )
     } else if schema_type(schema) == Some("array") {
         let item_type = schema
             .get("items")
-            .map(|items| render_schema_type_with_refs(items, indent_level, ref_mode))
+            .map(|items| {
+                render_schema_type_with_refs(
+                    items,
+                    indent_level,
+                    ref_mode,
+                    type_usage,
+                    input_schema_aliases,
+                )
+            })
             .unwrap_or_else(|| "unknown".to_owned());
         format!("Array<{item_type}>")
     } else if schema_type(schema) == Some("object")
         || schema.contains_key("properties")
         || schema.contains_key("additionalProperties")
     {
-        render_object_schema(schema, indent_level, ref_mode)
+        render_object_schema(
+            schema,
+            indent_level,
+            ref_mode,
+            type_usage,
+            input_schema_aliases,
+        )
     } else {
         match schema_type(schema) {
             Some("string") => {
                 if schema.get("format").and_then(Value::as_str) == Some("binary") {
                     "Blob".to_owned()
+                } else if type_usage == TypeUsage::Input {
+                    render_temporal_input_type(schema).unwrap_or_else(|| "string".to_owned())
                 } else {
                     "string".to_owned()
                 }
@@ -1701,6 +2365,8 @@ fn render_union(
     indent_level: usize,
     separator: &str,
     ref_mode: RefMode,
+    type_usage: TypeUsage,
+    input_schema_aliases: &BTreeSet<String>,
 ) -> String {
     values
         .iter()
@@ -1709,6 +2375,8 @@ fn render_union(
                 value,
                 indent_level + 1,
                 ref_mode,
+                type_usage,
+                input_schema_aliases,
             ))
         })
         .collect::<Vec<_>>()
@@ -1719,6 +2387,8 @@ fn render_object_schema(
     schema: &Map<String, Value>,
     indent_level: usize,
     ref_mode: RefMode,
+    type_usage: TypeUsage,
+    input_schema_aliases: &BTreeSet<String>,
 ) -> String {
     let required = schema
         .get("required")
@@ -1739,7 +2409,13 @@ fn render_object_schema(
                 "{}{}: {};",
                 quoted_property_name(name),
                 if required.contains(name) { "" } else { "?" },
-                render_schema_type_with_refs(property_schema, indent_level + 1, ref_mode)
+                render_schema_type_with_refs(
+                    property_schema,
+                    indent_level + 1,
+                    ref_mode,
+                    type_usage,
+                    input_schema_aliases,
+                )
             ));
         }
     }
@@ -1751,7 +2427,9 @@ fn render_object_schema(
             render_schema_type_with_refs(
                 &schema["additionalProperties"],
                 indent_level + 1,
-                ref_mode
+                ref_mode,
+                type_usage,
+                input_schema_aliases,
             )
         )),
         _ => {}
@@ -1762,6 +2440,15 @@ fn render_object_schema(
 
 fn schema_type(schema: &Map<String, Value>) -> Option<&str> {
     schema.get("type").and_then(Value::as_str)
+}
+
+fn render_temporal_input_type(schema: &Map<String, Value>) -> Option<String> {
+    match schema.get("format").and_then(Value::as_str) {
+        Some("date-time") => Some("DateTimeInput".to_owned()),
+        Some("date") => Some("DateInput".to_owned()),
+        Some("time") => Some("TimeInput".to_owned()),
+        _ => None,
+    }
 }
 
 fn parenthesize_complex_type(value: &str) -> String {
@@ -1801,10 +2488,6 @@ fn sanitize_type_name(value: &str) -> String {
 
 fn quoted_property_name(value: &str) -> String {
     format!("{value:?}")
-}
-
-fn escape_js_doc(value: &str) -> String {
-    value.replace("*/", "* /")
 }
 
 fn run_typescript_client_self_test(
@@ -2492,6 +3175,7 @@ console.log(JSON.stringify({{ checks }}, null, 2));
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2500,8 +3184,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        generate_automated_typescript_client_for_build, generate_typescript_client,
-        run_node_import_smoke_check, ClientSelfTestStatus, TypescriptClientSelfTestOptions,
+        ClientParameter, ClientSelfTestStatus, ParameterLocation, TypescriptClientSelfTestOptions,
+        compute_input_schema_aliases, generate_automated_typescript_client_for_build,
+        generate_typescript_client, render_operation_query_type, render_types_ts,
+        run_node_import_smoke_check,
     };
 
     #[cfg(unix)]
@@ -2598,14 +3284,228 @@ esac
         assert!(operations.contains("export async function listPost"));
         assert!(operations.contains("export async function loginUser"));
         assert!(operations.contains("createPost(client: VsrClient"));
+        assert!(operations.contains("type DR<K extends string, V = DateTimeInput> = Range<K, V>;"));
+        assert!(operations.contains("type Req = { headers?: HeadersInit; signal?: AbortSignal };"));
+        assert!(operations.contains("type Page<S extends string> = { limit?: number; offset?: number; cursor?: string; sort?: S; order?: \"asc\" | \"desc\" };"));
+        assert!(operations.contains("type Range<K extends string, V> = { [P in K]?: V } & { [P in K as `${P}_gt` | `${P}_gte` | `${P}_lt` | `${P}_lte`]?: V };"));
+        assert!(
+            operations
+                .contains("const r = (p: Req) => ({ headers: p.headers, signal: p.signal });")
+        );
+        assert!(operations.contains("export type ListPostQuery = Page<"));
+        assert!(
+            operations.contains("getAuthenticatedAccount(client: VsrClient, params: Req = {})")
+        );
+        assert!(operations.contains("...r(params)"));
+        assert!(operations.contains("requiresBearerAuth: true"));
+        assert!(!operations.contains("requiresBearerAuth: false"));
+        assert!(!operations.contains("export type ListPostResponse ="));
+        assert!(!operations.contains("/**"));
         assert!(types.contains("export type Post ="));
+        assert!(types.contains("export type PostInput ="));
+        assert!(types.contains("\"created_at\"?: (string) | null;"));
+        assert!(types.contains("\"created_at\"?: (DateTimeInput) | null;"));
         assert!(types.contains("export type AuthTokenResponse ="));
         assert!(client.contains("export function createClient"));
+        assert!(client.contains("export type DateTimeInput = string | Date;"));
+        assert!(client.contains("export class VsrDate"));
+        assert!(client.contains("export class VsrTime"));
         assert!(client.contains("function requestNeedsCsrf(method: string): boolean"));
-        assert!(client.contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)"));
+        assert!(
+            client.contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)")
+        );
         assert!(!client.contains("if (body !== undefined && resolvedConfig.getCsrfToken)"));
+        assert!(
+            client.contains("if (request.requiresBearerAuth && resolvedConfig.getAccessToken)")
+        );
+        assert!(!client.contains("const requiresBearerAuth = request.requiresBearerAuth ?? true;"));
+        assert!(client.contains("body = JSON.stringify(normalizeJsonValue(request.body));"));
         assert!(package_json.contains("\"name\": \"@demo/blog-client\""));
         assert!(tsconfig.contains("\"allowImportingTsExtensions\": true"));
+    }
+
+    #[test]
+    fn generate_typescript_client_composes_datetime_and_numeric_range_query_helpers() {
+        let root = test_root();
+
+        let mixin_output = root.join("mixin-client");
+        generate_typescript_client(
+            &fixture_path("mixin_fields_api.eon"),
+            Some(&mixin_output),
+            false,
+            &[],
+            None,
+            Some("/api"),
+            None,
+            Some(true),
+        )
+        .expect("mixin client should generate");
+        let mixin_operations = read_to_string(&mixin_output.join("operations.ts"));
+        assert!(mixin_operations.contains("export type ListPostQuery = Page<"));
+        assert!(mixin_operations.contains("DR<\"filter_created_at\" | \"filter_updated_at\">"));
+
+        let numeric_query = render_operation_query_type(
+            &[
+                ClientParameter {
+                    name: "limit".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "offset".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "cursor".to_owned(),
+                    schema: serde_json::json!({ "type": "string" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "sort".to_owned(),
+                    schema: serde_json::json!({
+                        "type": "string",
+                        "enum": ["id", "publication_year"]
+                    }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "order".to_owned(),
+                    schema: serde_json::json!({
+                        "type": "string",
+                        "enum": ["asc", "desc"]
+                    }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_publication_year".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_publication_year_gt".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_publication_year_gte".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_publication_year_lt".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_publication_year_lte".to_owned(),
+                    schema: serde_json::json!({ "type": "integer", "format": "int64" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+            ],
+            &BTreeSet::new(),
+        );
+        assert!(numeric_query.contains("Page<\"id\" | \"publication_year\">"));
+        assert!(numeric_query.contains("Range<\"filter_publication_year\", number>"));
+
+        let temporal_query = render_operation_query_type(
+            &[
+                ClientParameter {
+                    name: "filter_run_on".to_owned(),
+                    schema: serde_json::json!({ "type": "string", "format": "date" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_run_on_gte".to_owned(),
+                    schema: serde_json::json!({ "type": "string", "format": "date" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_run_on_lt".to_owned(),
+                    schema: serde_json::json!({ "type": "string", "format": "date" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_run_at".to_owned(),
+                    schema: serde_json::json!({ "type": "string", "format": "time" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_run_at_gt".to_owned(),
+                    schema: serde_json::json!({ "type": "string", "format": "time" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+                ClientParameter {
+                    name: "filter_run_at_lte".to_owned(),
+                    schema: serde_json::json!({ "type": "string", "format": "time" }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
+            ],
+            &BTreeSet::new(),
+        );
+        assert!(temporal_query.contains("DR<\"filter_run_on\", DateInput>"));
+        assert!(temporal_query.contains("DR<\"filter_run_at\", TimeInput>"));
+    }
+
+    #[test]
+    fn generate_typescript_client_emits_temporal_input_aliases_without_widening_outputs() {
+        let schemas = BTreeMap::from([
+            (
+                "Event".to_owned(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "starts_at": { "type": "string", "format": "date-time" }
+                    },
+                    "required": ["starts_at"]
+                }),
+            ),
+            (
+                "Envelope".to_owned(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "event": { "$ref": "#/components/schemas/Event" }
+                    },
+                    "required": ["event"]
+                }),
+            ),
+        ]);
+
+        let input_schema_aliases = compute_input_schema_aliases(&schemas);
+        assert_eq!(
+            input_schema_aliases,
+            BTreeSet::from(["Envelope".to_owned(), "Event".to_owned()])
+        );
+
+        let types = render_types_ts(&schemas, &input_schema_aliases);
+        assert!(
+            types.contains(
+                "import type { DateInput, DateTimeInput, TimeInput } from \"./client.ts\";"
+            )
+        );
+        assert!(types.contains("export type Event = {"));
+        assert!(types.contains("\"starts_at\": string;"));
+        assert!(types.contains("export type EventInput = {"));
+        assert!(types.contains("\"starts_at\": DateTimeInput;"));
+        assert!(types.contains("export type EnvelopeInput = {"));
+        assert!(types.contains("\"event\": EventInput;"));
     }
 
     #[test]
@@ -2658,11 +3558,30 @@ esac
         assert!(package_json.contains("\"types\": \"./index.ts\""));
         assert!(index_js.contains("export * from \"./client.js\";"));
         assert!(client_js.contains("export function createClient"));
+        assert!(client_js.contains("export class VsrDate"));
+        assert!(client_js.contains("export class VsrTime"));
         assert!(client_js.contains("function requestNeedsCsrf(method)"));
-        assert!(client_js.contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)"));
+        assert!(
+            client_js
+                .contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)")
+        );
         assert!(!client_js.contains("if (body !== undefined && resolvedConfig.getCsrfToken)"));
+        assert!(
+            client_js.contains("if (request.requiresBearerAuth && resolvedConfig.getAccessToken)")
+        );
+        assert!(
+            !client_js.contains("const requiresBearerAuth = request.requiresBearerAuth ?? true;")
+        );
+        assert!(client_js.contains("body = JSON.stringify(normalizeJsonValue(request.body));"));
         assert!(client_js.contains("bind(globalThis)"));
         assert!(operations_js.contains("export async function listPost"));
+        assert!(
+            operations_js.contains("const r = (p) => ({ headers: p.headers, signal: p.signal });")
+        );
+        assert!(operations_js.contains("...r(params)"));
+        assert!(operations_js.contains("requiresBearerAuth: true"));
+        assert!(!operations_js.contains("requiresBearerAuth: false"));
+        assert!(!operations_js.contains("/**"));
         assert!(!operations_js.contains("import type"));
     }
 
@@ -2765,8 +3684,10 @@ esac
         assert!(
             read_to_string(&output.join("package.json")).contains("\"name\": \"@demo/client-api\"")
         );
-        assert!(read_to_string(&output.join("client.ts"))
-            .contains("const DEFAULT_SERVER_URL = \"/edge-api\";"));
+        assert!(
+            read_to_string(&output.join("client.ts"))
+                .contains("const DEFAULT_SERVER_URL = \"/edge-api\";")
+        );
         assert!(output.join("index.js").exists());
     }
 
@@ -2888,9 +3809,11 @@ esac
         .expect("self-test check should run");
 
         assert_eq!(check.status, ClientSelfTestStatus::Skipped);
-        assert!(check
-            .details
-            .contains("could not execute TypeScript modules directly"));
+        assert!(
+            check
+                .details
+                .contains("could not execute TypeScript modules directly")
+        );
     }
 
     #[cfg(unix)]

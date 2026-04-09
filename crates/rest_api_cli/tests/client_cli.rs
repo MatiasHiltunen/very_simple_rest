@@ -731,6 +731,296 @@ if (interests.items[0]?.title !== "AI Thesis Co-Creation") {
 }
 
 #[test]
+fn generated_typescript_client_serializes_datetime_objects_against_live_server() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "generated-client-datetime-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("datetime_api.eon");
+    fs::copy(fixture_path("datetime_api.eon"), &config).expect("fixture should copy");
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize datetime service");
+        });
+
+    let client_dir = root.join("generated-client");
+    generate_client(&config, &client_dir);
+    assert_dependency_free_client(&client_dir);
+    compile_generated_client(&client_dir);
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve.stdout.log");
+    let stderr_log = root.join("serve.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "generated-client-datetime-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "generated datetime client server never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let script_path = client_dir.join("datetime-smoke.mjs");
+    fs::write(
+        &script_path,
+        r#"import {
+  createClient,
+  createEvent,
+  loginUser,
+  listEvent,
+} from "./index.js";
+
+const baseUrl = process.env.BASE_URL;
+const email = process.env.EMAIL;
+const password = process.env.PASSWORD;
+if (!baseUrl || !email || !password) {
+  throw new Error("missing smoke-test env");
+}
+
+const anonClient = createClient({ baseUrl });
+const login = await loginUser(anonClient, {
+  body: { email, password },
+});
+if (!login.token) {
+  throw new Error("login did not return a token");
+}
+
+const authClient = createClient({
+  baseUrl,
+  getAccessToken: () => login.token,
+});
+
+await createEvent(authClient, {
+  body: {
+    title: "Temporal Alpha",
+    starts_at: new Date("2026-03-17T10:00:00Z"),
+    ends_at: new Date("2026-03-17T11:00:00Z"),
+  },
+});
+
+const exact = await listEvent(authClient, {
+  query: {
+    filter_starts_at: new Date("2026-03-17T10:00:00Z"),
+    sort: "starts_at",
+    order: "asc",
+  },
+});
+if (exact.total !== 1 || exact.items[0]?.title !== "Temporal Alpha") {
+  throw new Error(`unexpected exact datetime result: ${JSON.stringify(exact)}`);
+}
+
+const ranged = await listEvent(authClient, {
+  query: {
+    filter_starts_at_gte: new Date("2026-03-17T09:59:59Z"),
+    filter_starts_at_lt: new Date("2026-03-17T10:00:01Z"),
+    sort: "starts_at",
+    order: "asc",
+  },
+});
+if (ranged.total !== 1 || ranged.items[0]?.title !== "Temporal Alpha") {
+  throw new Error(`unexpected ranged datetime result: ${JSON.stringify(ranged)}`);
+}
+"#,
+    )
+    .expect("datetime smoke script should write");
+
+    let output = run_node_script(
+        &script_path,
+        &[
+            ("BASE_URL", &base_url),
+            ("EMAIL", "admin@example.com"),
+            ("PASSWORD", "password123"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "generated datetime client smoke script failed\nstdout:\n{}\nstderr:\n{}\nserver:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        server.logs()
+    );
+}
+
+#[test]
+fn generated_typescript_client_serializes_date_and_time_objects_against_live_server() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "generated-client-scalar-types-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("scalar_types_api.eon");
+    fs::copy(fixture_path("scalar_types_api.eon"), &config).expect("fixture should copy");
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize scalar types service");
+        });
+
+    let client_dir = root.join("generated-client");
+    generate_client(&config, &client_dir);
+    assert_dependency_free_client(&client_dir);
+    compile_generated_client(&client_dir);
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("serve.stdout.log");
+    let stderr_log = root.join("serve.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "generated-client-scalar-types-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "generated scalar-types client server never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let script_path = client_dir.join("scalar-types-smoke.mjs");
+    fs::write(
+        &script_path,
+        r#"import {
+  VsrDate,
+  VsrTime,
+  createClient,
+  createSchedule,
+  loginUser,
+  listSchedule,
+} from "./index.js";
+
+const baseUrl = process.env.BASE_URL;
+const email = process.env.EMAIL;
+const password = process.env.PASSWORD;
+if (!baseUrl || !email || !password) {
+  throw new Error("missing smoke-test env");
+}
+
+const anonClient = createClient({ baseUrl });
+const login = await loginUser(anonClient, {
+  body: { email, password },
+});
+if (!login.token) {
+  throw new Error("login did not return a token");
+}
+
+const authClient = createClient({
+  baseUrl,
+  getAccessToken: () => login.token,
+});
+
+await createSchedule(authClient, {
+  body: {
+    run_on: new VsrDate(2026, 3, 17),
+    run_at: new VsrTime(8, 0, 0),
+    external_id: "33333333-3333-4333-8333-333333333333",
+    amount: "1.5000",
+  },
+});
+
+const exact = await listSchedule(authClient, {
+  query: {
+    filter_run_on: new VsrDate(2026, 3, 17),
+    filter_run_at: new VsrTime(8, 0, 0),
+    sort: "run_on",
+    order: "asc",
+  },
+});
+if (exact.total !== 1 || exact.items[0]?.external_id !== "33333333-3333-4333-8333-333333333333") {
+  throw new Error(`unexpected exact date/time result: ${JSON.stringify(exact)}`);
+}
+
+const ranged = await listSchedule(authClient, {
+  query: {
+    filter_run_on_gte: new VsrDate(2026, 3, 17),
+    filter_run_on_lt: new VsrDate(2026, 3, 18),
+    filter_run_at_gt: new VsrTime(7, 59, 59),
+    filter_run_at_lte: new VsrTime(8, 0, 0),
+    sort: "run_at",
+    order: "asc",
+  },
+});
+if (ranged.total !== 1 || ranged.items[0]?.external_id !== "33333333-3333-4333-8333-333333333333") {
+  throw new Error(`unexpected ranged date/time result: ${JSON.stringify(ranged)}`);
+}
+"#,
+    )
+    .expect("scalar types smoke script should write");
+
+    let output = run_node_script(
+        &script_path,
+        &[
+            ("BASE_URL", &base_url),
+            ("EMAIL", "admin@example.com"),
+            ("PASSWORD", "password123"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "generated scalar types client smoke script failed\nstdout:\n{}\nstderr:\n{}\nserver:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        server.logs()
+    );
+}
+
+#[test]
 fn client_ts_self_test_produces_passing_report_against_live_server() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
     unsafe {
