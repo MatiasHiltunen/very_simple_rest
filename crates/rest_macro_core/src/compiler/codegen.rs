@@ -22,7 +22,7 @@ use crate::{
         DatabaseReplicationMode, DatabaseResilienceProfile,
     },
     logging::LogTimestampPrecision,
-    security::{FrameOptions, ReferrerPolicy},
+    security::{DefaultReadAccess, FrameOptions, ReferrerPolicy},
 };
 
 pub fn expand_resource_impl(
@@ -1321,6 +1321,14 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
     let admin_dashboard =
         option_auth_ui_page_tokens(security.auth.admin_dashboard.as_ref(), runtime_crate);
     let content_type_options = security.headers.content_type_options;
+    let access_default_read = match security.access.default_read {
+        DefaultReadAccess::Inferred => {
+            quote!(#runtime_crate::core::security::DefaultReadAccess::Inferred)
+        }
+        DefaultReadAccess::Authenticated => {
+            quote!(#runtime_crate::core::security::DefaultReadAccess::Authenticated)
+        }
+    };
 
     quote! {
         #runtime_crate::core::security::SecurityConfig {
@@ -1343,6 +1351,9 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
             rate_limits: #runtime_crate::core::security::RateLimitSecurity {
                 login: #login_rate_limit,
                 register: #register_rate_limit,
+            },
+            access: #runtime_crate::core::security::AccessSecurity {
+                default_read: #access_default_read,
             },
             headers: #runtime_crate::core::security::HeaderSecurity {
                 frame_options: #frame_options,

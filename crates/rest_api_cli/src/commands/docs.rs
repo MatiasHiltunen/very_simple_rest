@@ -749,6 +749,20 @@ object or just a type such as `title: String`.",
 
     push_section(
         &mut markdown,
+        "Resource Access",
+        "Resource access controls whether reads stay legacy/inferred, become explicitly public, or require any authenticated user even without a role.",
+        &[row(
+            "resources[].access.read",
+            "String",
+            "`inferred`",
+            "No",
+            "`inferred`, `public`, or `authenticated`",
+            "Use `public` for anonymous reads and `authenticated` to require a valid user token/session without a specific role. `public` cannot be combined with `roles.read` or `user.*` / `claim.*` read row policies.",
+        )],
+    );
+
+    push_section(
+        &mut markdown,
         "Resource Roles",
         "Role checks are string comparisons against the authenticated user's role list.",
         &[
@@ -2136,6 +2150,14 @@ database: {
                 "Currently applies to built-in auth login and register flows.",
             ),
             row(
+                "security.access",
+                "Map",
+                "Legacy inferred read access",
+                "No",
+                "See Access Defaults",
+                "Controls the service-wide default for resource read access when `resources[].access.read` is omitted.",
+            ),
+            row(
                 "security.headers",
                 "Map",
                 "No additional security headers",
@@ -2152,6 +2174,20 @@ database: {
                 "Controls JWT claims, TTLs, email flows, session cookies, and custom UI pages.",
             ),
         ],
+    );
+
+    push_section(
+        &mut markdown,
+        "Access Defaults",
+        "Use this when you want authenticated reads by default and explicit opt-in for public resources.",
+        &[row(
+            "security.access.default_read",
+            "String",
+            "`inferred`",
+            "No",
+            "`inferred` or `authenticated`",
+            "When set to `authenticated`, resources must explicitly opt into anonymous reads with `resources[].access.read = public`.",
+        )],
     );
 
     push_section(

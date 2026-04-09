@@ -17,7 +17,7 @@ use crate::database::{DatabaseConfig, DatabaseEngine, sqlite_url_for_path};
 use crate::logging::LoggingConfig;
 use crate::runtime::RuntimeConfig;
 use crate::secret::SecretRef;
-use crate::security::SecurityConfig;
+use crate::security::{DefaultReadAccess, SecurityConfig};
 use crate::storage::StorageConfig;
 use crate::tls::TlsConfig;
 use url::Url;
@@ -192,6 +192,19 @@ impl RoleRequirements {
         }
         self
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResourceReadAccess {
+    #[default]
+    Inferred,
+    Public,
+    Authenticated,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ResourceAccess {
+    pub read: ResourceReadAccess,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
@@ -509,6 +522,23 @@ impl RowPolicies {
         collect_scope_exists_index_targets(self.delete.as_ref(), &mut targets);
         targets
     }
+}
+
+fn read_filter_uses_principal_values(filter: Option<&PolicyFilterExpression>) -> bool {
+    let Some(filter) = filter else {
+        return false;
+    };
+
+    let mut filters = Vec::new();
+    filter.collect_filters(&mut filters);
+    filters.iter().any(|filter| {
+        matches!(
+            &filter.operator,
+            PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                PolicyValueSource::UserId | PolicyValueSource::Claim(_)
+            ))
+        )
+    })
 }
 
 fn collect_scope_filters<'a>(
@@ -878,6 +908,7 @@ pub struct ResourceSpec {
     pub response_contexts: Vec<ResponseContextSpec>,
     pub id_field: String,
     pub db: DbBackend,
+    pub access: ResourceAccess,
     pub roles: RoleRequirements,
     pub policies: RowPolicies,
     pub list: ListConfig,
@@ -1016,6 +1047,7 @@ impl std::fmt::Debug for ResourceSpec {
             .field("response_contexts", &self.response_contexts)
             .field("id_field", &self.id_field)
             .field("db", &self.db)
+            .field("access", &self.access)
             .field("roles", &self.roles)
             .field("policies", &self.policies)
             .field("list", &self.list)
@@ -1225,7 +1257,56 @@ pub fn supports_contains_filters(field: &FieldSpec) -> bool {
 }
 
 pub fn read_requires_auth(resource: &ResourceSpec) -> bool {
-    resource.roles.read.is_some() || resource.policies.has_read_filters()
+    match resource.access.read {
+        ResourceReadAccess::Public => false,
+        ResourceReadAccess::Authenticated => true,
+        ResourceReadAccess::Inferred => {
+            resource.roles.read.is_some() || resource.policies.has_read_filters()
+        }
+    }
+}
+
+pub fn apply_service_read_access_defaults(
+    resources: &mut [ResourceSpec],
+    security: &SecurityConfig,
+) {
+    if security.access.default_read != DefaultReadAccess::Authenticated {
+        return;
+    }
+
+    for resource in resources {
+        if resource.access.read == ResourceReadAccess::Inferred {
+            resource.access.read = ResourceReadAccess::Authenticated;
+        }
+    }
+}
+
+pub fn validate_resource_access(resource: &ResourceSpec, span: Span) -> syn::Result<()> {
+    if resource.access.read != ResourceReadAccess::Public {
+        return Ok(());
+    }
+
+    if resource.roles.read.is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "resource `{}` cannot combine `access.read = public` with `roles.read`",
+                resource.struct_ident,
+            ),
+        ));
+    }
+
+    if read_filter_uses_principal_values(resource.policies.read.as_ref()) {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "resource `{}` cannot use `access.read = public` with read row policies that depend on `user.*` or `claim.*` values",
+                resource.struct_ident,
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn supports_sort(ty: &Type) -> bool {

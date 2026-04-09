@@ -44,6 +44,18 @@ pub struct RateLimitSecurity {
     pub register: Option<RateLimitRule>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DefaultReadAccess {
+    #[default]
+    Inferred,
+    Authenticated,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccessSecurity {
+    pub default_read: DefaultReadAccess,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameOptions {
     Deny,
@@ -104,6 +116,7 @@ pub struct SecurityConfig {
     pub cors: CorsSecurity,
     pub trusted_proxies: TrustedProxySecurity,
     pub rate_limits: RateLimitSecurity,
+    pub access: AccessSecurity,
     pub headers: HeaderSecurity,
     pub auth: AuthSettings,
 }

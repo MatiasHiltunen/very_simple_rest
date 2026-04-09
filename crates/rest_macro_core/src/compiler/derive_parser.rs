@@ -5,10 +5,10 @@ use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 use super::model::{
     DbBackend, FieldSpec, FieldValidation, ListConfig, NumericBound, PolicyAssignment,
     PolicyComparisonValue, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
-    PolicyLiteralValue, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
-    RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
+    PolicyLiteralValue, PolicyValueSource, ReferentialAction, ResourceAccess, ResourceSpec,
+    RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
     infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
-    validate_relations, validate_row_policies, validate_sql_identifier,
+    validate_relations, validate_resource_access, validate_row_policies, validate_sql_identifier,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -199,6 +199,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         response_contexts: Vec::new(),
         id_field,
         db,
+        access: ResourceAccess::default(),
         roles: roles.with_legacy_defaults(),
         policies,
         list,
@@ -209,6 +210,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         fields: parsed_fields,
         write_style: WriteModelStyle::ExistingStructWithDtos,
     };
+    validate_resource_access(&parsed, struct_ident.span())?;
     validate_row_policies(
         &parsed,
         std::slice::from_ref(&parsed),

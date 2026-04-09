@@ -1,7 +1,15 @@
 module: "public_catalog_api"
+security: {
+    access: {
+        default_read: "authenticated"
+    }
+}
 resources: [
     {
         name: "Organization"
+        access: {
+            read: "public"
+        }
         roles: {
             create: "admin"
             update: "admin"
@@ -17,6 +25,9 @@ resources: [
     }
     {
         name: "Interest"
+        access: {
+            read: "public"
+        }
         roles: {
             create: "admin"
             update: "admin"

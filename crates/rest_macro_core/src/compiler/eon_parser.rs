@@ -23,19 +23,20 @@ use super::model::{
     GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
     PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
     PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
-    ReferentialAction, ReleaseBuildConfig, ResourceActionAssignmentSpec,
+    ReferentialAction, ReleaseBuildConfig, ResourceAccess, ResourceActionAssignmentSpec,
     ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
-    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceSpec,
-    ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceReadAccess,
+    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
     StaticCacheProfile, StaticMode, StaticMountSpec, TsClientAutomationConfig, TsClientConfig,
-    WriteModelStyle, default_resource_module_ident, infer_generated_value, infer_sql_type,
-    is_json_array_type, is_json_object_type, is_json_type, is_list_field, is_optional_type,
-    is_typed_object_field, sanitize_module_ident, sanitize_struct_ident, structured_scalar_kind,
-    supports_declared_index, validate_authorization_contract, validate_build_config,
-    validate_clients_config, validate_field_transforms, validate_field_validations,
-    validate_list_config, validate_logging_config, validate_policy_claim_sources,
-    validate_relations, validate_row_policies, validate_runtime_config, validate_security_config,
-    validate_sql_identifier, validate_tls_config,
+    WriteModelStyle, apply_service_read_access_defaults, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, is_json_array_type, is_json_object_type, is_json_type,
+    is_list_field, is_optional_type, is_typed_object_field, sanitize_module_ident,
+    sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
+    validate_authorization_contract, validate_build_config, validate_clients_config,
+    validate_field_transforms, validate_field_validations, validate_list_config,
+    validate_logging_config, validate_policy_claim_sources, validate_relations,
+    validate_resource_access, validate_row_policies, validate_runtime_config,
+    validate_security_config, validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
@@ -59,8 +60,9 @@ use crate::{
     runtime::{CompressionConfig, RuntimeConfig},
     secret::SecretRef,
     security::{
-        CorsSecurity, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
-        ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
+        AccessSecurity, CorsSecurity, DefaultReadAccess, FrameOptions, HeaderSecurity, Hsts,
+        RateLimitRule, RateLimitSecurity, ReferrerPolicy, RequestSecurity, SecurityConfig,
+        TrustedProxySecurity,
     },
     storage::{
         StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
@@ -197,9 +199,17 @@ struct SecurityDocument {
     #[serde(default)]
     rate_limits: Option<RateLimitsDocument>,
     #[serde(default)]
+    access: Option<SecurityAccessDocument>,
+    #[serde(default)]
     headers: Option<HeaderSecurityDocument>,
     #[serde(default)]
     auth: Option<AuthSecurityDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct SecurityAccessDocument {
+    #[serde(default)]
+    default_read: Option<String>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -732,6 +742,8 @@ struct ResourceDocument {
     #[serde(default)]
     id_field: Option<String>,
     #[serde(default)]
+    access: ResourceAccessDocument,
+    #[serde(default)]
     roles: RoleRequirements,
     #[serde(default)]
     policies: RowPoliciesDocument,
@@ -749,6 +761,12 @@ struct ResourceDocument {
     actions: Vec<ResourceActionDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ResourceAccessDocument {
+    #[serde(default)]
+    read: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1076,6 +1094,8 @@ struct ResourceMapValueDocument {
     #[serde(default)]
     id_field: Option<String>,
     #[serde(default)]
+    access: ResourceAccessDocument,
+    #[serde(default)]
     roles: RoleRequirements,
     #[serde(default)]
     policies: RowPoliciesDocument,
@@ -1278,6 +1298,7 @@ impl ResourceMapValueDocument {
             table: self.table,
             api_name: self.api_name,
             id_field: self.id_field,
+            access: self.access,
             roles: self.roles,
             policies: self.policies,
             list: self.list,
@@ -1790,13 +1811,14 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
     let enums = build_enums(document.enums)?;
     let mixins = build_mixins(document.mixins)?;
     let resources = expand_resource_mixins(document.resources, &mixins)?;
-    let resources = build_resources_with_enums(document.db, resources, enums.as_slice())?;
+    let mut resources = build_resources_with_enums(document.db, resources, enums.as_slice())?;
     if resources.is_empty() {
         return Err(syn::Error::new(
             span,
             "service config must contain at least one resource",
         ));
     }
+    apply_service_read_access_defaults(&mut resources, &security);
     validate_storage_upload_routes(&storage, &resources)?;
     validate_policy_claim_sources(&resources, &security, span)?;
     validate_authorization_contract(&authorization, &resources, span)?;
@@ -2257,6 +2279,7 @@ fn build_resources_with_enums(
                 format!("failed to parse row policies for `{struct_name}`: {error}"),
             )
         })?;
+        let access = parse_resource_access_document(resource.access)?;
         let (default_response_context, response_contexts) = build_response_contexts(
             fields.as_slice(),
             computed_fields.as_slice(),
@@ -2282,6 +2305,7 @@ fn build_resources_with_enums(
             response_contexts,
             id_field: configured_id,
             db,
+            access,
             roles: resource.roles.with_legacy_defaults(),
             policies,
             list: parse_list_config(resource.list),
@@ -2307,6 +2331,7 @@ fn build_resources_with_enums(
     }
 
     for resource in &result {
+        validate_resource_access(resource, Span::call_site())?;
         validate_row_policies(resource, &result, &resource.policies, Span::call_site())?;
         validate_relations(&resource.fields, Span::call_site())?;
         validate_field_validations(&resource.fields, Span::call_site())?;
@@ -3526,6 +3551,48 @@ fn parse_list_config(document: ListConfigDocument) -> ListConfig {
     }
 }
 
+fn parse_resource_access_document(document: ResourceAccessDocument) -> syn::Result<ResourceAccess> {
+    let read = match document.read.as_deref() {
+        None => ResourceReadAccess::Inferred,
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "public" => ResourceReadAccess::Public,
+            "authenticated" => ResourceReadAccess::Authenticated,
+            _ => {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("unsupported `resources[].access.read` value `{value}`"),
+                ));
+            }
+        },
+    };
+
+    Ok(ResourceAccess { read })
+}
+
+fn parse_security_access_document(
+    document: Option<SecurityAccessDocument>,
+) -> syn::Result<AccessSecurity> {
+    let Some(document) = document else {
+        return Ok(AccessSecurity::default());
+    };
+
+    let default_read = match document.default_read.as_deref() {
+        None => DefaultReadAccess::Inferred,
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "inferred" => DefaultReadAccess::Inferred,
+            "authenticated" => DefaultReadAccess::Authenticated,
+            _ => {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("unsupported `security.access.default_read` value `{value}`"),
+                ));
+            }
+        },
+    };
+
+    Ok(AccessSecurity { default_read })
+}
+
 fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Result<SecurityConfig> {
     let requests = document
         .requests
@@ -3533,6 +3600,7 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
             json_max_bytes: requests.json_max_bytes,
         })
         .unwrap_or_default();
+    let access = parse_security_access_document(document.access)?;
 
     let headers = if let Some(headers) = document.headers {
         HeaderSecurity {
@@ -3653,6 +3721,7 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         cors,
         trusted_proxies,
         rate_limits,
+        access,
         headers,
         auth,
     })
@@ -6439,6 +6508,7 @@ mod tests {
                 api_name: None,
                 table: None,
                 id_field: None,
+                access: ResourceAccessDocument::default(),
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
@@ -6497,6 +6567,7 @@ mod tests {
                 api_name: None,
                 table: None,
                 id_field: None,
+                access: ResourceAccessDocument::default(),
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
@@ -6613,6 +6684,7 @@ mod tests {
                 api_name: None,
                 table: None,
                 id_field: None,
+                access: ResourceAccessDocument::default(),
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
@@ -6710,6 +6782,7 @@ mod tests {
                 api_name: None,
                 table: None,
                 id_field: None,
+                access: ResourceAccessDocument::default(),
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
@@ -6802,6 +6875,7 @@ mod tests {
                 api_name: None,
                 table: None,
                 id_field: None,
+                access: ResourceAccessDocument::default(),
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),
@@ -7967,6 +8041,79 @@ resources: [
     }
 
     #[test]
+    fn applies_authenticated_read_default_and_preserves_explicit_public_access() {
+        let document = parse_document(
+            r#"
+security: {
+    access: {
+        default_read: "authenticated"
+    }
+}
+resources: [
+    {
+        name: "Post"
+        access: {
+            read: "public"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "Draft"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let security = parse_security_document(document.security, Span::call_site())
+            .expect("security should parse");
+        let mut resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
+        apply_service_read_access_defaults(&mut resources, &security);
+
+        assert_eq!(resources[0].access.read, ResourceReadAccess::Public);
+        assert!(!super::super::model::read_requires_auth(&resources[0]));
+        assert_eq!(resources[1].access.read, ResourceReadAccess::Authenticated);
+        assert!(super::super::model::read_requires_auth(&resources[1]));
+    }
+
+    #[test]
+    fn rejects_public_read_access_with_principal_dependent_policy() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Comment"
+        access: {
+            read: "public"
+        }
+        policies: {
+            read: { field: "author_user_id", equals: "user.id" }
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "author_user_id", type: I64 }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("public access with user policy should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot use `access.read = public` with read row policies"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_api_field_in_response_context() {
         let document = parse_document(
             r#"
@@ -8004,6 +8151,7 @@ resources: [
                 api_name: None,
                 table: Some("post; DROP TABLE user;".to_owned()),
                 id_field: None,
+                access: ResourceAccessDocument::default(),
                 roles: RoleRequirements::default(),
                 policies: RowPoliciesDocument::default(),
                 list: ListConfigDocument::default(),

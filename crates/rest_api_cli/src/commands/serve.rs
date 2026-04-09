@@ -425,7 +425,7 @@ impl DynamicResource {
             .collect();
 
         Ok(Self {
-            read_requires_auth: spec.roles.read.is_some() || spec.policies.has_read_filters(),
+            read_requires_auth: compiler::read_requires_auth(&spec),
             resource_name: spec.struct_ident.to_string(),
             table_name: spec.table_name.clone(),
             api_name: spec.api_name().to_owned(),
