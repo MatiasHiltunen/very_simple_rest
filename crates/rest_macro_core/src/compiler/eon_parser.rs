@@ -23,10 +23,10 @@ use super::model::{
     GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
     PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
     PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
-    ReferentialAction, ReleaseBuildConfig,
-    ResourceActionAssignmentSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
-    ResourceActionMethod, ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec,
-    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    ReferentialAction, ReleaseBuildConfig, ResourceActionAssignmentSpec,
+    ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
+    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceSpec,
+    ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
     StaticCacheProfile, StaticMode, StaticMountSpec, TsClientAutomationConfig, TsClientConfig,
     WriteModelStyle, default_resource_module_ident, infer_generated_value, infer_sql_type,
     is_json_array_type, is_json_object_type, is_json_type, is_list_field, is_optional_type,
@@ -6090,7 +6090,10 @@ fn parse_filter_expression(value: &str) -> syn::Result<(String, PolicyComparison
         ));
     }
 
-    Ok((field.to_owned(), parse_policy_string_comparison_value(source)))
+    Ok((
+        field.to_owned(),
+        parse_policy_string_comparison_value(source),
+    ))
 }
 
 fn parse_assignment_expression(value: &str) -> syn::Result<(String, PolicyValueSource)> {
@@ -6123,14 +6126,18 @@ fn parse_policy_source(value: &str) -> syn::Result<PolicyValueSource> {
 fn parse_policy_string_comparison_value(value: &str) -> PolicyComparisonValue {
     PolicyValueSource::parse(value)
         .map(PolicyComparisonValue::Source)
-        .unwrap_or_else(|| PolicyComparisonValue::Literal(PolicyLiteralValue::String(value.to_owned())))
+        .unwrap_or_else(|| {
+            PolicyComparisonValue::Literal(PolicyLiteralValue::String(value.to_owned()))
+        })
 }
 
 fn parse_policy_comparison_value(
     value: PolicyComparisonValueDocument,
 ) -> syn::Result<PolicyComparisonValue> {
     Ok(match value {
-        PolicyComparisonValueDocument::String(value) => parse_policy_string_comparison_value(&value),
+        PolicyComparisonValueDocument::String(value) => {
+            parse_policy_string_comparison_value(&value)
+        }
         PolicyComparisonValueDocument::Integer(value) => {
             PolicyComparisonValue::Literal(PolicyLiteralValue::I64(value))
         }
@@ -10266,11 +10273,9 @@ resources: [
             Ok(_) => panic!("invalid row policy source should fail"),
             Err(error) => error,
         };
-        assert!(
-            error
-                .to_string()
-                .contains("read row policy field `tenant_id` compares incompatible field types `I64` and `String`")
-        );
+        assert!(error.to_string().contains(
+            "read row policy field `tenant_id` compares incompatible field types `I64` and `String`"
+        ));
     }
 
     #[test]

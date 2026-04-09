@@ -7,9 +7,8 @@ use super::model::{
     PolicyComparisonValue, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
     PolicyLiteralValue, PolicyValueSource, ReferentialAction, ResourceSpec, RoleRequirements,
     RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
-    infer_generated_value, infer_sql_type,
-    validate_field_validations, validate_list_config, validate_relations, validate_row_policies,
-    validate_sql_identifier,
+    infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
+    validate_relations, validate_row_policies, validate_sql_identifier,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {

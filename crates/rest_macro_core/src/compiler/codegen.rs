@@ -7,8 +7,8 @@ use syn::{Path, Type};
 
 use super::model::{
     GeneratedValue, PolicyComparisonValue, PolicyFilterExpression, PolicyLiteralValue,
-    PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode,
-    WriteModelStyle, default_service_database_url,
+    PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode, WriteModelStyle,
+    default_service_database_url,
 };
 use crate::{
     authorization::{

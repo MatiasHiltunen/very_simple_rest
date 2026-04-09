@@ -4681,9 +4681,9 @@ mod tests {
     use crate::db::{DbPool, query, query_scalar};
     use crate::secret::SecretRef;
     use actix_web::App;
-    use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     use actix_web::body::to_bytes;
+    use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
     use actix_web::{http::StatusCode, web};
     use chrono::{Duration, Utc};
     use jsonwebtoken::{

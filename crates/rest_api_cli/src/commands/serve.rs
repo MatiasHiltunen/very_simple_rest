@@ -4997,7 +4997,9 @@ mod tests {
         assert!(create_body.get("title_text").is_none());
         assert!(create_body.get("draft_body").is_none());
         assert!(create_body.get("internal_note").is_none());
-        let created_id = create_body["id"].as_i64().expect("created id should be an integer");
+        let created_id = create_body["id"]
+            .as_i64()
+            .expect("created id should be an integer");
 
         let update_request = test::TestRequest::put()
             .uri(format!("/api/posts/{created_id}").as_str())

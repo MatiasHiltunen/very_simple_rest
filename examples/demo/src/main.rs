@@ -43,8 +43,9 @@ fn database_config() -> database::DatabaseConfig {
     database::DatabaseConfig {
         engine: database::DatabaseEngine::TursoLocal(database::TursoLocalConfig {
             path: DEFAULT_DB_PATH.to_owned(),
-            encryption_key: env::var_os("TURSO_ENCRYPTION_KEY")
-                .map(|_| very_simple_rest::core::secret::SecretRef::env_or_file("TURSO_ENCRYPTION_KEY")),
+            encryption_key: env::var_os("TURSO_ENCRYPTION_KEY").map(|_| {
+                very_simple_rest::core::secret::SecretRef::env_or_file("TURSO_ENCRYPTION_KEY")
+            }),
         }),
         resilience: None,
     }

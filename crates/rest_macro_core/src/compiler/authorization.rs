@@ -212,7 +212,9 @@ fn compile_filter(
             PolicyFilterOperator::IsNotNull => AuthorizationOperator::IsNotNull,
         },
         source: match &filter.operator {
-            PolicyFilterOperator::Equals(source) => Some(compile_comparison_value(source, security)),
+            PolicyFilterOperator::Equals(source) => {
+                Some(compile_comparison_value(source, security))
+            }
             PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => None,
         },
     })
@@ -301,7 +303,10 @@ fn compile_comparison_value(
     }
 }
 
-fn compile_source(source: &PolicyValueSource, security: &SecurityConfig) -> AuthorizationValueSource {
+fn compile_source(
+    source: &PolicyValueSource,
+    security: &SecurityConfig,
+) -> AuthorizationValueSource {
     match source {
         PolicyValueSource::UserId => AuthorizationValueSource::UserId,
         PolicyValueSource::Claim(name) => AuthorizationValueSource::Claim {
