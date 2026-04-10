@@ -3007,10 +3007,7 @@ fn extract_module_specifier(line: &str) -> Option<&str> {
 
 fn resolve_executable(explicit: Option<&Path>, default_name: &str) -> Option<PathBuf> {
     if let Some(path) = explicit {
-        return path
-            .is_file()
-            .then(|| path.to_path_buf())
-            .or_else(|| Some(path.to_path_buf()));
+        return Some(normalize_windows_command_shim(path));
     }
 
     Command::new(default_name)
@@ -3019,6 +3016,29 @@ fn resolve_executable(explicit: Option<&Path>, default_name: &str) -> Option<Pat
         .ok()
         .filter(|output| output.status.success())
         .map(|_| PathBuf::from(default_name))
+}
+
+fn normalize_windows_command_shim(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        match path.extension().and_then(|value| value.to_str()) {
+            Some("cmd" | "exe" | "bat") => return path.to_path_buf(),
+            Some("ps1") => {
+                let cmd_path = path.with_extension("cmd");
+                if cmd_path.is_file() {
+                    return cmd_path;
+                }
+            }
+            _ => {
+                let cmd_path = path.with_extension("cmd");
+                if cmd_path.is_file() {
+                    return cmd_path;
+                }
+            }
+        }
+    }
+
+    path.to_path_buf()
 }
 
 fn node_supports_typescript_scripts(node_binary: &Path) -> Result<bool> {

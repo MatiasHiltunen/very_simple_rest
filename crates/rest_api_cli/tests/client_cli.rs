@@ -100,16 +100,29 @@ fn assert_text_snapshot(snapshot: &Path, actual: &str) {
         )
     });
     assert_eq!(
-        expected,
-        actual,
+        normalize_snapshot_text(&expected),
+        normalize_snapshot_text(actual),
         "snapshot mismatch at {}",
         snapshot.display()
     );
 }
 
+fn normalize_snapshot_text(value: &str) -> String {
+    value.replace("\r\n", "\n")
+}
+
 fn find_tsc_binary() -> Option<PathBuf> {
-    let candidate = repo_root().join("examples/cms/web/node_modules/.bin/tsc");
-    candidate.is_file().then_some(candidate)
+    let bin_dir = repo_root().join("examples/cms/web/node_modules/.bin");
+    let candidates: &[&str] = if cfg!(windows) {
+        &["tsc.cmd", "tsc"]
+    } else {
+        &["tsc", "tsc.cmd"]
+    };
+
+    candidates
+        .iter()
+        .map(|name| bin_dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn compile_generated_client(output_dir: &Path) {
