@@ -97,6 +97,7 @@ fn security_config() -> core::security::SecurityConfig {
                 window_seconds: 300,
             }),
         },
+        access: core::security::AccessSecurity::default(),
         headers: core::security::HeaderSecurity {
             frame_options: Some(core::security::FrameOptions::Deny),
             content_type_options: true,
@@ -149,7 +150,7 @@ fn log_available_endpoints(bind_addr: &str) {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .format_timestamp_secs()
         .init();

@@ -8,7 +8,7 @@ use actix_web::{HttpResponse, Responder, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bcrypt::{hash, verify};
 use chrono::{Duration, SecondsFormat, Utc};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, OctetKeyPairParameters, OctetKeyPairType,

@@ -12,6 +12,13 @@ readme = "README.md"
 default-run = "vsr"
 build = "build.rs"
 
+[features]
+default = ["sqlite", "turso-local", "postgres"]
+sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
+postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
+mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
+turso-local = ["sqlite", "rest_macro_core/turso-local"]
+
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 dialoguer = "0.12"
@@ -21,12 +28,12 @@ actix-web = { workspace = true, features = ["rustls-0_23"] }
 actix-cors.workspace = true
 actix-files.workspace = true
 base64.workspace = true
-sqlx = { workspace = true, features = ["sqlite", "postgres", "mysql"] }
+sqlx.workspace = true
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "2.0"
-dotenv.workspace = true
-rest_macro_core = { workspace = true, features = ["codegen", "sqlite", "turso-local", "postgres", "mysql"] }
+dotenvy.workspace = true
+rest_macro_core = { workspace = true, features = ["codegen"] }
 bcrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true

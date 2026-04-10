@@ -1214,7 +1214,7 @@ async fn run_cli() -> Result<()> {
             }
     );
     if !skip_cwd_dotenv {
-        let _ = dotenv::dotenv();
+        let _ = dotenvy::dotenv();
     }
     let cli_database_url = cli.database_url.clone();
     let env_database_url = load_database_url_from_env()?;

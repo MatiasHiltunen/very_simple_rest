@@ -10,10 +10,10 @@ resolver = "2"
 [workspace.dependencies]
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "any", "macros", "chrono"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-native-tls", "any", "derive", "chrono", "json", "uuid", "rust_decimal"] }
 serde_json = "1.0"
 base64 = "0.22"
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 bcrypt = "0.19"
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = "1.40"
@@ -23,7 +23,7 @@ proc-macro2 = "1.0"
 proc-macro-crate = "3"
 eon = "0.2.0"
 heck = "0.5"
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 rand = "0.10.0"
 uuid = { version = "1.22", features = ["v4", "serde"] }
 rest_macro = { path = "crates/rest_macro", version = "0.1.10" }
@@ -33,7 +33,6 @@ env_logger = "0.11"
 actix-cors = "0.7"
 actix-files = "0.6"
 rustls = "0.23"
-rustls-pemfile = "2.2"
 turso = "0.6.0-pre.2"
 reqwest = { version = "0.13", features = ["json"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
@@ -81,7 +80,7 @@ actix-files.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 uuid.workspace = true
-dotenv.workspace = true
+dotenvy.workspace = true
 
 # Feature configuration for the top-level crate
 [features]
@@ -102,3 +101,6 @@ trybuild = "1"
 name = "demo"
 path = "examples/demo/src/main.rs"
 required-features = ["sqlite", "macros"]
+
+[patch.crates-io]
+sqlx-mysql = { path = "vendor/sqlx-mysql" }

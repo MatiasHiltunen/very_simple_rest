@@ -1330,7 +1330,7 @@ edition = "2024"
 
 [dependencies]
 {actix_web_dependency}
-dotenv = "0.15"
+dotenvy = "0.15.7"
 serde = {{ version = "1", features = ["derive"] }}
 {dependency}
 {release_profile}
@@ -1484,7 +1484,7 @@ async fn swagger_ui() -> impl Responder {{
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {{
-    let _ = dotenv::dotenv();
+    let _ = dotenvy::dotenv();
     let logging = generated::{module_name}::logging();
     logging.init_env_logger();
 
@@ -2296,7 +2296,10 @@ mod tests {
     }
 
     fn normalize_snapshot_text(value: &str) -> String {
-        value.replace("\r\n", "\n").trim_end_matches('\n').to_owned()
+        value
+            .replace("\r\n", "\n")
+            .trim_end_matches('\n')
+            .to_owned()
     }
 
     fn assert_expanded_output_matches_snapshot(input: &Path, snapshot_name: &str, root: &Path) {

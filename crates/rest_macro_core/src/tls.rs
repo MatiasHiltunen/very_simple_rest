@@ -1,8 +1,8 @@
 use std::env;
-use std::fs::File;
-use std::io::{BufReader, Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 
+use rustls::pki_types::pem::{Error as PemError, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 
@@ -153,27 +153,10 @@ fn resolve_relative_path(base_dir: &Path, path: &str) -> String {
 }
 
 fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path).map_err(|error| {
-        Error::new(
-            error.kind(),
-            format!(
-                "failed to open TLS certificate `{}`: {error}",
-                path.display()
-            ),
-        )
-    })?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|error| tls_pem_error(path, "certificate", error))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "failed to parse TLS certificate PEM `{}`: {error}",
-                    path.display()
-                ),
-            )
-        })?;
+        .map_err(|error| tls_pem_error(path, "certificate", error))?;
 
     if certs.is_empty() {
         return Err(Error::new(
@@ -189,33 +172,29 @@ fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path).map_err(|error| {
-        Error::new(
+    PrivateKeyDer::from_pem_file(path).map_err(|error| tls_pem_error(path, "private key", error))
+}
+
+fn tls_pem_error(path: &Path, label: &str, error: PemError) -> Error {
+    match error {
+        PemError::Io(error) => Error::new(
             error.kind(),
-            format!(
-                "failed to open TLS private key `{}`: {error}",
-                path.display()
-            ),
-        )
-    })?;
-    let mut reader = BufReader::new(file);
-    match rustls_pemfile::private_key(&mut reader).map_err(|error| {
-        Error::new(
+            format!("failed to open TLS {label} `{}`: {error}", path.display()),
+        ),
+        PemError::NoItemsFound => Error::new(
             ErrorKind::InvalidData,
             format!(
-                "failed to parse TLS private key PEM `{}`: {error}",
+                "TLS {label} PEM `{}` did not contain any supported PEM sections",
                 path.display()
             ),
-        )
-    })? {
-        Some(key) => Ok(key),
-        None => Err(Error::new(
+        ),
+        other => Error::new(
             ErrorKind::InvalidData,
             format!(
-                "TLS private key PEM `{}` did not contain a PKCS#8, PKCS#1, or SEC1 private key",
+                "failed to parse TLS {label} PEM `{}`: {other}",
                 path.display()
             ),
-        )),
+        ),
     }
 }
 
