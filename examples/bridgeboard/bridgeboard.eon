@@ -43,7 +43,7 @@ security: {
 		email: {
 			from_email: "noreply@example.com"
 			from_name: "Bridgeboard"
-			public_base_url: "http://127.0.0.1:8082"
+			public_base_url: "https://127.0.0.1:8443"
 			provider: {
 				kind: Resend
 				api_key_env: "RESEND_API_KEY"
@@ -70,6 +70,23 @@ static: {
 			cache: NoStore
 		}
 	]
+}
+clients: {
+    ts: {
+        output_dir: {
+            path: "public/gen/client"
+        }
+        package_name: "@examples/bridgeboard-client"
+        server_url: "/api"
+        emit_js: true
+        automation: {
+            on_build: true
+            self_test: true
+            self_test_report: {
+                path: "reports/client-self-test.json"
+            }
+        }
+    }
 }
 resources: {
 	Organization: {

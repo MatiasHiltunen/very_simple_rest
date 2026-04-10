@@ -6,7 +6,7 @@ This example shows the `.eon`-only workflow end to end:
 - browser-friendly auth through same-origin session cookies plus CSRF protection
 - owner-scoped todo data for normal users
 - admin access to all todos through `admin_bypass: true`
-- a small static client app served by the generated server itself
+- a small static client app served directly by `vsr serve`
 - local Turso storage through `database.engine = TursoLocal`
 
 The API resource is intentionally small: one `Todo` table with `title`, `completed`, and
@@ -18,9 +18,6 @@ everything.
 ```bash
 cd examples/todo_app
 
-vsr build todo_app.eon --force
-cp todo-app.bundle/.env.example .env
-
 # Set these in `.env` or export them before the next steps.
 export JWT_SECRET=replace-me
 export TURSO_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -28,19 +25,27 @@ export TURSO_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123
 export ADMIN_EMAIL=admin@example.com
 export ADMIN_PASSWORD=change-me
 vsr setup --non-interactive
-
-./todo-app
+vsr serve todo_app.eon
 ```
 
 Then open `http://127.0.0.1:8080`.
 
 `vsr setup` auto-discovers `todo_app.eon` in the current directory, applies the built-in auth
-schema, and initializes `var/data/todo_app.db`. `vsr build todo_app.eon` writes the binary to
-`./todo-app` and exports the runtime assets to `./todo-app.bundle/`.
+schema, and initializes `var/data/todo_app.db`. The checked-in SPA imports the generated client
+from `public/gen/client`, so the example works immediately with `vsr serve`.
 
 The browser client uses cookie-based auth for the session. It no longer stores bearer tokens in
 `localStorage`; instead the server issues an `HttpOnly` session cookie and a CSRF cookie for
 unsafe requests.
+
+If you change the schema and want to refresh the checked-in browser client manually, run:
+
+```bash
+vsr client ts --input todo_app.eon --force
+```
+
+The example also enables `clients.ts.automation.on_build`, so `vsr build todo_app.eon` refreshes
+the client automatically and writes a self-test report to `reports/client-self-test.json`.
 
 ## How To Test The Access Rules
 
@@ -61,4 +66,4 @@ unsafe requests.
 
 - `todo_app.eon` defines the API, security defaults, database engine, row policies, and static SPA mount
 - `public/index.html` is the browser client
-- `public/app.js` contains the minimal client logic for auth and todo CRUD
+- `public/app.js` wires the UI through the generated browser client in `public/gen/client`

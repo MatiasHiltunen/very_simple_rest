@@ -1267,14 +1267,18 @@ mod tests {
                 snapshot.display()
             )
         });
-        let expected = expected.trim_end_matches('\n');
-        let actual = actual.trim_end_matches('\n');
+        let expected = normalize_snapshot_text(&expected);
+        let actual = normalize_snapshot_text(actual);
         assert_eq!(
             expected,
             actual,
             "snapshot mismatch at {}",
             snapshot.display()
         );
+    }
+
+    fn normalize_snapshot_text(value: &str) -> String {
+        value.replace("\r\n", "\n").trim_end_matches('\n').to_owned()
     }
 
     fn normalize_report_source(report: &ServiceCheckReport, source: &str) -> ServiceCheckReport {
@@ -1693,14 +1697,17 @@ resources: [
     fn check_report_warns_for_client_automation_output_overlapping_bundle() {
         let root = temp_dir("client-automation-bundle-overlap");
         let config = root.join("client_bundle_overlap_api.eon");
-        fs::write(
-            &config,
-            r#"
+        let bundle_dir = if cfg!(windows) {
+            "client-bundle-overlap-api.exe.bundle/generated-client"
+        } else {
+            "client-bundle-overlap-api.bundle/generated-client"
+        };
+        let config_body = r#"
 module: "client_bundle_overlap_api"
 clients: {
     ts: {
         output_dir: {
-            path: "client-bundle-overlap-api.bundle/generated-client"
+            path: "__BUNDLE_DIR__"
         }
         automation: {
             on_build: true
@@ -1716,7 +1723,11 @@ resources: [
         ]
     }
 ]
-"#,
+"#
+        .replace("__BUNDLE_DIR__", bundle_dir);
+        fs::write(
+            &config,
+            config_body,
         )
         .expect("fixture should write");
 

@@ -2273,11 +2273,11 @@ fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Va
             }
             FieldKind::Boolean => {
                 if field.optional {
-                    row.try_get::<Option<bool>, _>(field.name.as_str())?
+                    read_optional_bool_column(row, field.name.as_str())?
                         .map(Value::Bool)
                         .unwrap_or(Value::Null)
                 } else {
-                    Value::Bool(row.try_get::<bool, _>(field.name.as_str())?)
+                    Value::Bool(read_bool_column(row, field.name.as_str())?)
                 }
             }
             FieldKind::Text
@@ -2309,6 +2309,29 @@ fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Va
     }
     apply_computed_fields_to_map(resource.computed_fields.as_slice(), &mut map);
     Ok(Value::Object(map))
+}
+
+fn read_bool_column(row: &sqlx::any::AnyRow, field_name: &str) -> Result<bool, sqlx::Error> {
+    match row.try_get::<bool, _>(field_name) {
+        Ok(value) => Ok(value),
+        Err(bool_error) => match row.try_get::<i64, _>(field_name) {
+            Ok(value) => Ok(value != 0),
+            Err(_) => Err(bool_error),
+        },
+    }
+}
+
+fn read_optional_bool_column(
+    row: &sqlx::any::AnyRow,
+    field_name: &str,
+) -> Result<Option<bool>, sqlx::Error> {
+    match row.try_get::<Option<bool>, _>(field_name) {
+        Ok(value) => Ok(value),
+        Err(bool_error) => match row.try_get::<Option<i64>, _>(field_name) {
+            Ok(value) => Ok(value.map(|value| value != 0)),
+            Err(_) => Err(bool_error),
+        },
+    }
 }
 
 fn apply_computed_fields_to_map(

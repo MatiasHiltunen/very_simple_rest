@@ -1323,6 +1323,10 @@ mod tests {
             .join(name)
     }
 
+    fn eon_path(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
     #[test]
     fn migration_files_only_returns_sorted_sql_files() {
         let root = std::env::temp_dir().join("migration_files_only_sql");
@@ -1503,7 +1507,7 @@ resources: [
     }}
 ]
 "#,
-                database_path.display(),
+                eon_path(&database_path),
             ),
         )
         .expect("schema should be written");
@@ -1683,7 +1687,7 @@ resources: [
     }}
 ]
 "#,
-                database_path.display(),
+                eon_path(&database_path),
             ),
         )
         .expect("schema should be written");
@@ -1777,7 +1781,7 @@ resources: [
     }}
 ]
 "#,
-                database_path.display(),
+                eon_path(&database_path),
             ),
         )
         .expect("schema should be written");
@@ -2115,7 +2119,7 @@ resources: [
     }}
 ]
 "#,
-                database_path.display(),
+                eon_path(&database_path),
                 env_var,
             ),
         )

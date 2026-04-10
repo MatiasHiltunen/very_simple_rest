@@ -217,6 +217,14 @@ Response contexts are named subsets of already-exposed API fields. They currentl
 | resources[].api.contexts[].name | String | Required in list form; implied by the key in map form | Yes in list form | Valid API identifier | Context names must be unique per resource and are exposed through OpenAPI as the `context` query parameter enum. |
 | resources[].api.contexts[].fields | List<String> | [] | No | Exposed API field names | Every listed field must already be exposed on the resource API surface, either directly or through `api.fields` projection. |
 
+## Resource Access
+
+Resource access controls whether reads stay legacy/inferred, become explicitly public, or require any authenticated user even without a role.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| resources[].access.read | String | `inferred` | No | `inferred`, `public`, or `authenticated` | Use `public` for anonymous reads and `authenticated` to require a valid user token/session without a specific role. `public` cannot be combined with `roles.read` or `user.*` / `claim.*` read row policies. |
+
 ## Resource Roles
 
 Role checks are string comparisons against the authenticated user's role list.
@@ -604,8 +612,17 @@ Every key inside `security` is optional. Unset blocks keep the default open beha
 | security.cors | Map | No custom CORS policy | No | See CORS | Empty methods/headers lists fall back to runtime defaults. |
 | security.trusted_proxies | Map | No trusted proxies | No | See Trusted Proxies | Used when extracting the client IP from forwarded headers. |
 | security.rate_limits | Map | No auth rate limits | No | See Rate Limits | Currently applies to built-in auth login and register flows. |
+| security.access | Map | Legacy inferred read access | No | See Access Defaults | Controls the service-wide default for resource read access when `resources[].access.read` is omitted. |
 | security.headers | Map | No additional security headers | No | See Security Headers | Controls X-Frame-Options, nosniff, Referrer-Policy, and HSTS. |
 | security.auth | Map | Built-in auth defaults | No | See Auth Settings | Controls JWT claims, TTLs, email flows, session cookies, and custom UI pages. |
+
+## Access Defaults
+
+Use this when you want authenticated reads by default and explicit opt-in for public resources.
+
+| Path | Type / Shape | Default | Required | Accepted Values | Notes |
+| --- | --- | --- | --- | --- | --- |
+| security.access.default_read | String | `inferred` | No | `inferred` or `authenticated` | When set to `authenticated`, resources must explicitly opt into anonymous reads with `resources[].access.read = public`. |
 
 ## Request Security
 

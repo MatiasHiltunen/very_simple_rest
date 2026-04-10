@@ -239,6 +239,24 @@ fn generate_client(input: &Path, output_dir: &Path) {
     assert!(status.success(), "vsr client ts should succeed");
 }
 
+#[test]
+fn cli_binary_help_renders() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .arg("--help")
+        .output()
+        .expect("vsr --help should execute");
+    assert!(
+        output.status.success(),
+        "vsr --help should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Usage: vsr"),
+        "help output should include usage text"
+    );
+}
+
 fn run_node_script(script_path: &Path, envs: &[(&str, &str)]) -> Output {
     let mut command = Command::new("node");
     command.arg(script_path);
@@ -1335,5 +1353,112 @@ fn family_app_example_generates_browser_ready_client_modules() {
     assert!(
         app_js.contains("from \"./gen/client/index.js\""),
         "family app should import the generated browser client"
+    );
+}
+
+#[test]
+fn todo_app_example_generates_browser_ready_client_modules() {
+    let root = test_root();
+    let service_dir = root.join("todo_app");
+    fs::create_dir_all(&service_dir).expect("service dir should exist");
+
+    let source_dir = example_path("todo_app");
+    fs::copy(
+        source_dir.join("todo_app.eon"),
+        service_dir.join("todo_app.eon"),
+    )
+    .expect("todo app config should copy");
+
+    let public_dir = service_dir.join("public");
+    fs::create_dir_all(&public_dir).expect("public dir should exist");
+    fs::copy(
+        source_dir.join("public/index.html"),
+        public_dir.join("index.html"),
+    )
+    .expect("index.html should copy");
+    fs::copy(source_dir.join("public/app.js"), public_dir.join("app.js"))
+        .expect("app.js should copy");
+
+    generate_client(
+        &service_dir.join("todo_app.eon"),
+        &service_dir.join("public/gen/client"),
+    );
+
+    let output_dir = service_dir.join("public/gen/client");
+    assert_dependency_free_client(&output_dir);
+    compile_generated_client(&output_dir);
+    assert!(
+        output_dir.join("index.js").exists(),
+        "browser JS entry should exist"
+    );
+    assert!(
+        output_dir.join("client.js").exists(),
+        "browser JS runtime should exist"
+    );
+    assert!(
+        output_dir.join("operations.js").exists(),
+        "browser JS operations should exist"
+    );
+
+    let app_js = read_to_string(&service_dir.join("public/app.js"));
+    assert!(
+        app_js.contains("from \"./gen/client/index.js\""),
+        "todo app should import the generated browser client"
+    );
+}
+
+#[test]
+fn bridgeboard_example_generates_browser_ready_client_modules() {
+    let root = test_root();
+    let service_dir = root.join("bridgeboard");
+    fs::create_dir_all(&service_dir).expect("service dir should exist");
+
+    let source_dir = example_path("bridgeboard");
+    fs::copy(
+        source_dir.join("bridgeboard.eon"),
+        service_dir.join("bridgeboard.eon"),
+    )
+    .expect("bridgeboard config should copy");
+
+    let public_dir = service_dir.join("public");
+    fs::create_dir_all(&public_dir).expect("public dir should exist");
+    fs::copy(
+        source_dir.join("public/index.html"),
+        public_dir.join("index.html"),
+    )
+    .expect("index.html should copy");
+    fs::copy(
+        source_dir.join("public/styles.css"),
+        public_dir.join("styles.css"),
+    )
+    .expect("styles.css should copy");
+    fs::copy(source_dir.join("public/app.js"), public_dir.join("app.js"))
+        .expect("app.js should copy");
+
+    generate_client(
+        &service_dir.join("bridgeboard.eon"),
+        &service_dir.join("public/gen/client"),
+    );
+
+    let output_dir = service_dir.join("public/gen/client");
+    assert_dependency_free_client(&output_dir);
+    compile_generated_client(&output_dir);
+    assert!(
+        output_dir.join("index.js").exists(),
+        "browser JS entry should exist"
+    );
+    assert!(
+        output_dir.join("client.js").exists(),
+        "browser JS runtime should exist"
+    );
+    assert!(
+        output_dir.join("operations.js").exists(),
+        "browser JS operations should exist"
+    );
+
+    let app_js = read_to_string(&service_dir.join("public/app.js"));
+    assert!(
+        app_js.contains("from \"./gen/client/index.js\""),
+        "bridgeboard should import the generated browser client"
     );
 }

@@ -615,24 +615,24 @@ impl LocalStorageBackend {
     }
 
     fn metadata_path(&self, object_path: &ObjectPath) -> Result<PathBuf, StorageError> {
-        let filesystem_path = self
-            .store
-            .path_to_filesystem(object_path)
-            .map_err(|error| {
-                StorageError::new(format!("failed to resolve local object path: {error}"))
-            })?;
-        let relative = filesystem_path
-            .strip_prefix(&self.root_dir)
-            .map_err(|error| {
+        let object_key = object_path.to_string();
+        let mut metadata_path = self.root_dir.join(".vsr-meta");
+        for segment in object_key.split('/') {
+            if !segment.is_empty() {
+                metadata_path.push(segment);
+            }
+        }
+
+        let file_name = metadata_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
                 StorageError::new(format!(
-                    "failed to resolve local metadata path for `{}`: {error}",
-                    filesystem_path.display()
+                    "failed to resolve local metadata path for object `{object_key}`"
                 ))
             })?;
-        Ok(self
-            .root_dir
-            .join(".vsr-meta")
-            .join(format!("{}.json", relative.display())))
+        metadata_path.set_file_name(format!("{file_name}.json"));
+        Ok(metadata_path)
     }
 }
 

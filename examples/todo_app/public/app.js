@@ -1,9 +1,25 @@
-const API_URL = "/api";
+import {
+  createClient,
+  createTodo,
+  deleteTodo,
+  getAuthenticatedAccount,
+  listTodo,
+  loginUser,
+  logoutUser,
+  registerUser,
+  updateTodo,
+} from "./gen/client/index.js";
+
 const csrfCookieName = "vsr_csrf";
 
 let csrfToken = "";
 let currentUser = null;
 let todos = [];
+
+const apiClient = createClient({
+  credentials: "same-origin",
+  getCsrfToken: () => csrfToken || readCookie(csrfCookieName) || undefined,
+});
 
 const sessionSummary = document.getElementById("sessionSummary");
 const sessionClaims = document.getElementById("sessionClaims");
@@ -15,11 +31,11 @@ const passwordInput = document.getElementById("passwordInput");
 const todoTitleInput = document.getElementById("todoTitleInput");
 const todoCompletedInput = document.getElementById("todoCompletedInput");
 
-document.getElementById("registerBtn").addEventListener("click", registerUser);
-document.getElementById("loginBtn").addEventListener("click", loginUser);
-document.getElementById("logoutBtn").addEventListener("click", logoutUser);
+document.getElementById("registerBtn").addEventListener("click", registerTodoUser);
+document.getElementById("loginBtn").addEventListener("click", loginTodoUser);
+document.getElementById("logoutBtn").addEventListener("click", logoutTodoUser);
 document.getElementById("refreshProfileBtn").addEventListener("click", refreshSession);
-document.getElementById("createTodoBtn").addEventListener("click", createTodo);
+document.getElementById("createTodoBtn").addEventListener("click", createTodoItem);
 document.getElementById("reloadTodosBtn").addEventListener("click", loadTodos);
 
 refreshSession();
@@ -32,19 +48,25 @@ function setStatus(message, kind = "") {
 function renderSession() {
   if (!currentUser) {
     sessionSummary.textContent = "Not logged in.";
-    sessionClaims.textContent = "Register a new user here, or log in as the admin created through the CLI.";
+    sessionClaims.textContent =
+      "Register a new user here, or log in as the admin created through the CLI.";
     return;
   }
 
   const roleList = (currentUser.roles || []).join(", ") || "none";
-  sessionSummary.textContent = `Logged in as user #${currentUser.id} (${roleList})`;
+  const email =
+    typeof currentUser.email === "string" && currentUser.email
+      ? currentUser.email
+      : `user #${currentUser.id}`;
+  sessionSummary.textContent = `Logged in as ${email} (${roleList})`;
 
   const extraClaims = Object.fromEntries(
     Object.entries(currentUser).filter(([key]) => key !== "id" && key !== "roles"),
   );
-  const claims = Object.keys(extraClaims).length > 0
-    ? JSON.stringify(extraClaims)
-    : "No extra numeric claims on this account.";
+  const claims =
+    Object.keys(extraClaims).length > 0
+      ? JSON.stringify(extraClaims)
+      : "No extra numeric claims on this account.";
   sessionClaims.textContent = claims;
 }
 
@@ -64,7 +86,8 @@ function renderTodos() {
     const card = document.createElement("article");
     card.className = `todo${todo.completed ? " done" : ""}`;
 
-    const isOwner = currentUser.roles.includes("admin") || Number(todo.user_id) === Number(currentUser.id);
+    const isOwner =
+      currentUser.roles.includes("admin") || Number(todo.user_id) === Number(currentUser.id);
     const stateLabel = todo.completed ? "Completed" : "Open";
 
     card.innerHTML = `
@@ -86,44 +109,14 @@ function renderTodos() {
     `;
 
     const [toggleButton, deleteButton] = card.querySelectorAll("button");
-    toggleButton.addEventListener("click", () => toggleTodo(todo));
-    deleteButton.addEventListener("click", () => deleteTodo(todo));
+    toggleButton.addEventListener("click", () => toggleTodoItem(todo));
+    deleteButton.addEventListener("click", () => deleteTodoItem(todo));
 
     todoList.appendChild(card);
   }
 }
 
-async function apiFetch(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (!headers.has("Content-Type") && options.body) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (requestNeedsCsrf(options.method) && csrfToken && !headers.has("x-csrf-token")) {
-    headers.set("x-csrf-token", csrfToken);
-  }
-
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    credentials: "same-origin",
-    headers,
-  });
-
-  const contentType = response.headers.get("content-type") || "";
-  const data = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
-
-  if (!response.ok) {
-    const message = typeof data === "string"
-      ? data
-      : data.message || data.code || `HTTP ${response.status}`;
-    throw new Error(message);
-  }
-
-  return data;
-}
-
-async function registerUser() {
+async function registerTodoUser() {
   const email = emailInput.value.trim();
   const password = passwordInput.value;
   if (!email || !password) {
@@ -132,17 +125,16 @@ async function registerUser() {
   }
 
   try {
-    await apiFetch("/auth/register", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
+    await registerUser(apiClient, {
+      body: { email, password },
     });
     setStatus("Registration succeeded. Log in with the same credentials.", "success");
   } catch (error) {
-    setStatus(error.message, "error");
+    setStatus(getErrorMessage(error), "error");
   }
 }
 
-async function loginUser() {
+async function loginTodoUser() {
   const email = emailInput.value.trim();
   const password = passwordInput.value;
   if (!email || !password) {
@@ -151,15 +143,14 @@ async function loginUser() {
   }
 
   try {
-    const data = await apiFetch("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
+    const data = await loginUser(apiClient, {
+      body: { email, password },
     });
     csrfToken = data.csrf_token || readCookie(csrfCookieName) || "";
     setStatus("Login succeeded. Loading your current API view...", "success");
     await refreshSession();
   } catch (error) {
-    setStatus(error.message, "error");
+    setStatus(getErrorMessage(error), "error");
   }
 }
 
@@ -174,7 +165,8 @@ async function refreshSession() {
   }
 
   try {
-    currentUser = await apiFetch("/auth/me");
+    currentUser = await getAuthenticatedAccount(apiClient);
+    syncCsrfToken();
     renderSession();
     await loadTodos();
   } catch (error) {
@@ -183,19 +175,17 @@ async function refreshSession() {
     todos = [];
     renderSession();
     renderTodos();
-    if (!String(error.message || "").includes("Missing token")) {
-      setStatus(`Session refresh failed: ${error.message}`, "error");
+    if (!isMissingTokenError(error)) {
+      setStatus(`Session refresh failed: ${getErrorMessage(error)}`, "error");
     }
   }
 }
 
-async function logoutUser() {
+async function logoutTodoUser() {
   try {
-    await apiFetch("/auth/logout", {
-      method: "POST",
-    });
+    await logoutUser(apiClient);
   } catch (error) {
-    setStatus(`Logout failed: ${error.message}`, "error");
+    setStatus(`Logout failed: ${getErrorMessage(error)}`, "error");
     return;
   }
 
@@ -214,15 +204,15 @@ async function loadTodos() {
   }
 
   try {
-    const response = await apiFetch("/todo");
+    const response = await listTodo(apiClient);
     todos = response.items || [];
     renderTodos();
   } catch (error) {
-    setStatus(`Failed to load todos: ${error.message}`, "error");
+    setStatus(`Failed to load todos: ${getErrorMessage(error)}`, "error");
   }
 }
 
-async function createTodo() {
+async function createTodoItem() {
   if (!currentUser) {
     setStatus("Log in before creating todos.", "error");
     return;
@@ -235,48 +225,88 @@ async function createTodo() {
   }
 
   try {
-    await apiFetch("/todo", {
-      method: "POST",
-      body: JSON.stringify({
+    await createTodo(apiClient, {
+      body: {
         title,
         completed: todoCompletedInput.value === "true",
-      }),
+      },
     });
     todoTitleInput.value = "";
     todoCompletedInput.value = "false";
     setStatus("Todo created.", "success");
     await loadTodos();
   } catch (error) {
-    setStatus(`Create failed: ${error.message}`, "error");
+    setStatus(`Create failed: ${getErrorMessage(error)}`, "error");
   }
 }
 
-async function toggleTodo(todo) {
+async function toggleTodoItem(todo) {
   try {
-    await apiFetch(`/todo/${todo.id}`, {
-      method: "PUT",
-      body: JSON.stringify({
+    await updateTodo(apiClient, {
+      path: { id: Number(todo.id) },
+      body: {
         title: todo.title,
         completed: !todo.completed,
-      }),
+      },
     });
     setStatus("Todo updated.", "success");
     await loadTodos();
   } catch (error) {
-    setStatus(`Update failed: ${error.message}`, "error");
+    setStatus(`Update failed: ${getErrorMessage(error)}`, "error");
   }
 }
 
-async function deleteTodo(todo) {
+async function deleteTodoItem(todo) {
   try {
-    await apiFetch(`/todo/${todo.id}`, {
-      method: "DELETE",
+    await deleteTodo(apiClient, {
+      path: { id: Number(todo.id) },
     });
     setStatus("Todo deleted.", "success");
     await loadTodos();
   } catch (error) {
-    setStatus(`Delete failed: ${error.message}`, "error");
+    setStatus(`Delete failed: ${getErrorMessage(error)}`, "error");
   }
+}
+
+function getErrorMessage(error) {
+  if (error && typeof error.message === "string" && error.message) {
+    return error.message;
+  }
+  if (
+    error &&
+    typeof error === "object" &&
+    error.body &&
+    typeof error.body === "object" &&
+    typeof error.body.message === "string"
+  ) {
+    return error.body.message;
+  }
+  if (
+    error &&
+    typeof error === "object" &&
+    error.body &&
+    typeof error.body === "object" &&
+    typeof error.body.code === "string"
+  ) {
+    return error.body.code;
+  }
+  return "Request failed.";
+}
+
+function isMissingTokenError(error) {
+  const code =
+    error &&
+    typeof error === "object" &&
+    error.body &&
+    typeof error.body === "object" &&
+    typeof error.body.code === "string"
+      ? error.body.code
+      : "";
+  return (
+    code === "missing_token" ||
+    code === "invalid_token" ||
+    getErrorMessage(error).toLowerCase().includes("missing token")
+  );
 }
 
 function escapeHtml(value) {
@@ -289,7 +319,7 @@ function escapeHtml(value) {
 }
 
 function syncCsrfToken() {
-  csrfToken = readCookie(csrfCookieName) || "";
+  csrfToken = readCookie(csrfCookieName) || csrfToken;
 }
 
 function readCookie(name) {
@@ -303,9 +333,4 @@ function readCookie(name) {
     }
   }
   return "";
-}
-
-function requestNeedsCsrf(method) {
-  const normalized = String(method || "GET").toUpperCase();
-  return !["GET", "HEAD", "OPTIONS", "TRACE"].includes(normalized);
 }

@@ -1420,7 +1420,7 @@ fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth
     let bind_addr_default = default_bind_addr(service);
     let tls_setup = if service.tls.is_enabled() {
         format!(
-            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = generated::{module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
+            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| current_exe.as_ref().and_then(|path| path.parent().map(|dir| dir.to_path_buf())))\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = generated::{module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
         )
     } else {
         String::new()
@@ -1493,11 +1493,16 @@ async fn main() -> std::io::Result<()> {{
 {auth_startup_check}    let current_exe = env::current_exe().ok();
     let bundle_dir = current_exe
         .as_ref()
-        .map(|path| path.with_extension("bundle"))
+        .and_then(|path| {{
+            let parent = path.parent()?;
+            let mut bundle_name = path.file_name()?.to_os_string();
+            bundle_name.push(".bundle");
+            Some(parent.join(bundle_name))
+        }})
         .filter(|dir| dir.is_dir());
-    let database_base_dir = bundle_dir
+    let database_base_dir = current_exe
         .as_ref()
-        .and_then(|_| current_exe.as_ref().and_then(|path| path.parent().map(|dir| dir.to_path_buf())))
+        .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let database_config = very_simple_rest::core::database::resolve_database_config(
@@ -2280,12 +2285,18 @@ mod tests {
                 snapshot.display()
             )
         });
+        let expected = normalize_snapshot_text(&expected);
+        let actual = normalize_snapshot_text(actual);
         assert_eq!(
             expected,
             actual,
             "snapshot mismatch at {}",
             snapshot.display()
         );
+    }
+
+    fn normalize_snapshot_text(value: &str) -> String {
+        value.replace("\r\n", "\n").trim_end_matches('\n').to_owned()
     }
 
     fn assert_expanded_output_matches_snapshot(input: &Path, snapshot_name: &str, root: &Path) {

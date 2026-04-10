@@ -41,6 +41,7 @@ export ADMIN_EMAIL=admin@example.com
 export ADMIN_PASSWORD=change-me
 
 vsr setup --non-interactive
+vsr serve family_app.eon
 ```
 
 The `migrations/` directory intentionally does not bundle `0000_auth.sql` or
@@ -50,10 +51,9 @@ first, then applies the example-specific runtime-authz and family-schema migrati
 ## Browser Workspace
 
 This example now ships a same-origin plain HTML, CSS, and JavaScript SPA in
-[public/](/Users/mh/Projects/very_simple_rest/examples/family_app/public). The `.eon` config
+[public/](./public). The `.eon` config
 mounts it at `/`, and the SPA now imports the VSR-generated client from
-[public/gen/client/](/Users/mh/Projects/very_simple_rest/examples/family_app/public/gen/client).
-Once the generated family-app server is running you can open:
+[public/gen/client/](./public/gen/client). Once `vsr serve family_app.eon` is running you can open:
 
 ```text
 http://127.0.0.1:8080/

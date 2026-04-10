@@ -3358,6 +3358,125 @@ fn vsr_server_serve_subcommand_starts_native_runtime() {
 }
 
 #[test]
+fn vsr_serve_todo_app_example_supports_clean_room_e2e() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+    let root = test_root();
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        std::env::set_var("JWT_SECRET", "todo-app-serve-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
+    }
+
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("todo_app.eon");
+    fs::copy(example_path("todo_app/todo_app.eon"), &config).expect("example should copy");
+    copy_dir_all(&example_path("todo_app/public"), &root.join("public"));
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            run_setup(&database_url, Some(&config), true, false, false)
+                .await
+                .expect("setup should initialize the todo app database");
+        });
+
+    assert!(
+        root.join("var/data/todo_app.db").exists(),
+        "setup should create the config-relative todo app database"
+    );
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let stdout_log = root.join("todo-app-serve.stdout.log");
+    let stderr_log = root.join("todo-app-serve.stderr.log");
+    let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
+    let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
+    let child = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .env("BIND_ADDR", &bind_addr)
+        .env("JWT_SECRET", "todo-app-serve-secret")
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("vsr serve should start");
+    let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+
+    let client = http_client();
+    if let Err(error) =
+        wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+    {
+        panic!(
+            "todo app native serve never became ready: {error}\n{}",
+            server.logs()
+        );
+    }
+
+    let root_response = client
+        .get(format!("{base_url}/"))
+        .send()
+        .expect("root page should load");
+    assert!(root_response.status().is_success());
+    let root_body = root_response.text().expect("root page body should read");
+    assert!(root_body.contains("Todo App"));
+
+    let admin_login_response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "password123",
+        }))
+        .send()
+        .expect("admin login should succeed");
+    assert_eq!(admin_login_response.status(), reqwest::StatusCode::OK);
+    let admin_login: Value = admin_login_response
+        .json()
+        .expect("admin login response should decode");
+    let admin_token = admin_login
+        .get("token")
+        .and_then(Value::as_str)
+        .expect("admin login should return a token")
+        .to_owned();
+
+    let create_todo_response = client
+        .post(format!("{base_url}/api/todo"))
+        .bearer_auth(&admin_token)
+        .json(&json!({
+            "title": "Verify todo example",
+            "completed": false,
+        }))
+        .send()
+        .expect("todo create should succeed");
+    let create_todo_status = create_todo_response.status();
+    let create_todo_body = create_todo_response
+        .text()
+        .expect("todo create response body should read");
+    assert_eq!(
+        create_todo_status,
+        reqwest::StatusCode::CREATED,
+        "todo create should succeed\nbody:\n{create_todo_body}\n{}",
+        server.logs()
+    );
+
+    let todo_list_response = client
+        .get(format!("{base_url}/api/todo"))
+        .bearer_auth(&admin_token)
+        .send()
+        .expect("todo list should load");
+    assert!(todo_list_response.status().is_success());
+    let todo_list: Value = todo_list_response.json().expect("todo list should decode");
+    assert_eq!(todo_list.get("total").and_then(Value::as_i64), Some(1));
+    assert_eq!(todo_list["items"][0]["title"], "Verify todo example");
+}
+
+#[test]
 fn vsr_serve_bridgeboard_example_supports_clean_room_e2e() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
 

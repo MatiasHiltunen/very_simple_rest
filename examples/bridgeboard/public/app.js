@@ -1,4 +1,33 @@
-const API_BASE = "/api";
+import {
+  createBuiltinAuthUser,
+  createClient,
+  createCollaborationRequest as createCollaborationRequestOperation,
+  createInterest as createInterestOperation,
+  createOrganization as createOrganizationOperation,
+  createThesisTopic as createThesisTopicOperation,
+  deleteBuiltinAuthUser as deleteBuiltinAuthUserOperation,
+  deleteCollaborationRequest as deleteCollaborationRequestOperation,
+  getAccountRecord,
+  getAuthenticatedAccount,
+  getOrganization,
+  getThesisTopic,
+  listBuiltinAuthUsers,
+  listCollaborationRequest,
+  listInterest,
+  listInterestByOrganization,
+  listOrganization,
+  listThesisTopic,
+  loginUser as loginUserOperation,
+  logoutUser as logoutUserOperation,
+  registerUser as registerUserOperation,
+  requestPasswordReset as requestPasswordResetOperation,
+  resendAccountVerificationEmail as resendAccountVerificationEmailOperation,
+  resendBuiltinAuthUserVerification as resendBuiltinAuthUserVerificationOperation,
+  resendVerificationEmail as resendVerificationEmailOperation,
+  updateBuiltinAuthUser as updateBuiltinAuthUserOperation,
+  updateCollaborationRequest as updateCollaborationRequestOperation,
+} from "./gen/client/index.js";
+
 const AUTH_PORTAL_URL = "/api/auth/portal";
 const AUTH_ADMIN_URL = "/api/auth/admin";
 const CSRF_COOKIE_NAME = "vsr_csrf";
@@ -120,6 +149,11 @@ const state = {
   route: null,
   view: null,
 };
+
+const apiClient = createClient({
+  credentials: "same-origin",
+  getCsrfToken: () => state.csrfToken || readCookie(CSRF_COOKIE_NAME) || undefined,
+});
 
 const elements = {
   siteHeader: document.getElementById("siteHeader"),
@@ -513,13 +547,14 @@ async function loadOrganizationDetailView(slug) {
   }
 
   const [interests, topics] = await Promise.all([
-    apiFetch(
-      buildListPath(`/organization/${organization.id}/interest`, {
+    listInterestByOrganization(apiClient, {
+      path: { id: Number(organization.id) },
+      query: {
         limit: 24,
         sort: "desired_start_on",
         order: "asc",
-      }),
-    ),
+      },
+    }),
     fetchTopics(
       { organizationId: organization.id },
       { limit: 24, sort: "application_deadline", order: "asc" },
@@ -559,10 +594,12 @@ async function loadTopicsView(searchParams) {
 
 async function loadTopicDetailView(id) {
   await ensureOrganizationOptions();
-  const topic = await apiFetch(`/thesis_topic/${encodeURIComponent(id)}`);
-  const organization = await apiFetch(
-    `/organization/${encodeURIComponent(String(topic.organization_id))}`,
-  );
+  const topic = await getThesisTopic(apiClient, {
+    path: { id: Number(id) },
+  });
+  const organization = await getOrganization(apiClient, {
+    path: { id: Number(topic.organization_id) },
+  });
   const relatedTopics = await fetchTopics(
     { organizationId: topic.organization_id },
     { limit: 6, sort: "application_deadline", order: "asc" },
@@ -2006,9 +2043,8 @@ async function submitAccountAuth(form, submitter) {
   }
 
   if (intent === "register") {
-    await apiFetch("/auth/register", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
+    await registerUserOperation(apiClient, {
+      body: { email, password },
     });
     setNotice(
       "Registration created. Verify the email before signing in. In local capture mode, open the newest email capture file.",
@@ -2017,9 +2053,8 @@ async function submitAccountAuth(form, submitter) {
     return;
   }
 
-  const payload = await apiFetch("/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ email, password }),
+  const payload = await loginUserOperation(apiClient, {
+    body: { email, password },
   });
   state.csrfToken = payload?.csrf_token || readCookie(CSRF_COOKIE_NAME) || "";
   await refreshSession({ silent: true });
@@ -2045,9 +2080,8 @@ async function submitCollaborationRequest(form) {
     throw new Error("Organization, title, and message are required.");
   }
 
-  await apiFetch("/collaboration_request", {
-    method: "POST",
-    body: JSON.stringify(payload),
+  await createCollaborationRequestOperation(apiClient, {
+    body: payload,
   });
   setNotice("Collaboration request submitted.", "success");
   await reloadCurrentRoute();
@@ -2070,9 +2104,8 @@ async function createOrganization(form) {
     throw new Error("All organization fields are required.");
   }
 
-  await apiFetch("/organization", {
-    method: "POST",
-    body: JSON.stringify(payload),
+  await createOrganizationOperation(apiClient, {
+    body: payload,
   });
   invalidateOrganizationOptions();
   setNotice("Organization created.", "success");
@@ -2093,9 +2126,8 @@ async function createInterest(form) {
     throw new Error("All interest fields except the start date are required.");
   }
 
-  await apiFetch("/interest", {
-    method: "POST",
-    body: JSON.stringify(payload),
+  await createInterestOperation(apiClient, {
+    body: payload,
   });
   setNotice("Interest signal created.", "success");
   await reloadCurrentRoute();
@@ -2124,9 +2156,8 @@ async function createThesisTopic(form) {
     throw new Error("All thesis topic fields except the deadline are required.");
   }
 
-  await apiFetch("/thesis_topic", {
-    method: "POST",
-    body: JSON.stringify(payload),
+  await createThesisTopicOperation(apiClient, {
+    body: payload,
   });
   setNotice("Thesis topic created.", "success");
   await reloadCurrentRoute();
@@ -2159,9 +2190,8 @@ async function createManagedUser(form) {
     throw new Error("Email, password, and role are required.");
   }
 
-  await apiFetch("/auth/admin/users", {
-    method: "POST",
-    body: JSON.stringify(payload),
+  await createBuiltinAuthUser(apiClient, {
+    body: payload,
   });
   setNotice(`Created ${payload.email}.`, "success");
   await reloadCurrentRoute();
@@ -2175,9 +2205,9 @@ async function saveManagedUser(userId) {
     throw new Error("Role cannot be empty.");
   }
 
-  await apiFetch(`/auth/admin/users/${encodeURIComponent(userId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({ role, email_verified: emailVerified }),
+  await updateBuiltinAuthUserOperation(apiClient, {
+    path: { id: Number(userId) },
+    body: { role, email_verified: emailVerified },
   });
   setNotice("User updated.", "success");
   await reloadCurrentRoute();
@@ -2188,24 +2218,23 @@ async function deleteManagedUser(userId) {
     return;
   }
 
-  await apiFetch(`/auth/admin/users/${encodeURIComponent(userId)}`, {
-    method: "DELETE",
+  await deleteBuiltinAuthUserOperation(apiClient, {
+    path: { id: Number(userId) },
   });
   setNotice("User deleted.", "success");
   await reloadCurrentRoute();
 }
 
 async function resendManagedUserVerification(userId) {
-  await apiFetch(`/auth/admin/users/${encodeURIComponent(userId)}/verification`, {
-    method: "POST",
+  await resendBuiltinAuthUserVerificationOperation(apiClient, {
+    path: { id: Number(userId) },
   });
   setNotice("Verification email queued.", "success");
 }
 
 async function sendManagedUserReset(email) {
-  await apiFetch("/auth/password-reset/request", {
-    method: "POST",
-    body: JSON.stringify({ email }),
+  await requestPasswordResetOperation(apiClient, {
+    body: { email },
   });
   setNotice("Password reset email queued.", "success");
 }
@@ -2217,9 +2246,8 @@ async function requestPasswordReset() {
     throw new Error("Enter an email address first.");
   }
 
-  await apiFetch("/auth/password-reset/request", {
-    method: "POST",
-    body: JSON.stringify({ email }),
+  await requestPasswordResetOperation(apiClient, {
+    body: { email },
   });
   setNotice(
     "If that account exists, a password reset link has been sent.",
@@ -2229,16 +2257,15 @@ async function requestPasswordReset() {
 
 async function resendVerificationEmail() {
   if (state.currentUser) {
-    await apiFetch("/auth/account/verification", { method: "POST" });
+    await resendAccountVerificationEmailOperation(apiClient);
   } else {
     const emailField = document.getElementById("accountEmail");
     const email = emailField?.value.trim() || "";
     if (!email) {
       throw new Error("Enter an email address first.");
     }
-    await apiFetch("/auth/verification/resend", {
-      method: "POST",
-      body: JSON.stringify({ email }),
+    await resendVerificationEmailOperation(apiClient, {
+      body: { email },
     });
   }
   setNotice(
@@ -2248,7 +2275,7 @@ async function resendVerificationEmail() {
 }
 
 async function logoutUser() {
-  await apiFetch("/auth/logout", { method: "POST" });
+  await logoutUserOperation(apiClient);
   clearSession();
   setNotice("Logged out.", "success");
   navigate("/account");
@@ -2258,8 +2285,8 @@ async function deleteRequest(requestId) {
   if (!window.confirm("Delete this collaboration request?")) {
     return;
   }
-  await apiFetch(`/collaboration_request/${encodeURIComponent(requestId)}`, {
-    method: "DELETE",
+  await deleteCollaborationRequestOperation(apiClient, {
+    path: { id: Number(requestId) },
   });
   setNotice("Request deleted.", "success");
   await reloadCurrentRoute();
@@ -2271,15 +2298,15 @@ async function updateRequestStatus(requestId, status) {
     throw new Error("Request record could not be found.");
   }
 
-  await apiFetch(`/collaboration_request/${encodeURIComponent(requestId)}`, {
-    method: "PUT",
-    body: JSON.stringify({
+  await updateCollaborationRequestOperation(apiClient, {
+    path: { id: Number(requestId) },
+    body: {
       organization_id: request.organization_id,
       title: request.title,
       message: request.message,
       status,
       preferred_start_on: request.preferred_start_on || null,
-    }),
+    },
   });
   setNotice(`Request moved to ${status}.`, "success");
   await reloadCurrentRoute();
@@ -2294,12 +2321,11 @@ async function loadDemoDataset() {
 
   for (const organization of DEMO_DATA.organizations) {
     try {
-      await apiFetch("/organization", {
-        method: "POST",
-        body: JSON.stringify(organization),
+      await createOrganizationOperation(apiClient, {
+        body: organization,
       });
     } catch (error) {
-      if (!String(error.message).includes("duplicate")) {
+      if (!getErrorMessage(error).includes("duplicate")) {
         throw error;
       }
     }
@@ -2316,18 +2342,17 @@ async function loadDemoDataset() {
       continue;
     }
     try {
-      await apiFetch("/interest", {
-        method: "POST",
-        body: JSON.stringify({
+      await createInterestOperation(apiClient, {
+        body: {
           organization_id: organization.id,
           title: interest.title,
           work_mode: interest.work_mode,
           desired_start_on: interest.desired_start_on,
           summary: interest.summary,
-        }),
+        },
       });
     } catch (error) {
-      if (!String(error.message).includes("duplicate")) {
+      if (!getErrorMessage(error).includes("duplicate")) {
         throw error;
       }
     }
@@ -2341,9 +2366,8 @@ async function loadDemoDataset() {
       continue;
     }
     try {
-      await apiFetch("/thesis_topic", {
-        method: "POST",
-        body: JSON.stringify({
+      await createThesisTopicOperation(apiClient, {
+        body: {
           organization_id: organization.id,
           title: topic.title,
           discipline: topic.discipline,
@@ -2351,10 +2375,10 @@ async function loadDemoDataset() {
           contact_email: topic.contact_email,
           application_deadline: topic.application_deadline,
           summary: topic.summary,
-        }),
+        },
       });
     } catch (error) {
-      if (!String(error.message).includes("duplicate")) {
+      if (!getErrorMessage(error).includes("duplicate")) {
         throw error;
       }
     }
@@ -2373,17 +2397,18 @@ async function refreshSession({ silent = false } = {}) {
 
   try {
     const [currentUser, account] = await Promise.all([
-      apiFetch("/auth/me"),
-      apiFetch("/auth/account"),
+      getAuthenticatedAccount(apiClient),
+      getAccountRecord(apiClient),
     ]);
     state.currentUser = currentUser;
     state.account = account;
+    syncCsrfToken();
     syncHeader();
     return true;
   } catch (error) {
     clearSession();
     if (!silent && !isMissingTokenError(error)) {
-      setNotice(error.message || "Could not refresh the session.", "error");
+      setNotice(getErrorMessage(error), "error");
     }
     return false;
   }
@@ -2568,127 +2593,61 @@ function syncCsrfToken() {
   state.csrfToken = readCookie(CSRF_COOKIE_NAME) || state.csrfToken;
 }
 
-function requestNeedsCsrf(method) {
-  return !["GET", "HEAD", "OPTIONS", "TRACE"].includes(
-    (method || "GET").toUpperCase(),
-  );
-}
-
-async function apiFetch(path, options = {}) {
-  const method = (options.method || "GET").toUpperCase();
-  const headers = new Headers(options.headers || {});
-  if (options.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (requestNeedsCsrf(method) && state.csrfToken && !headers.has("x-csrf-token")) {
-    headers.set("x-csrf-token", state.csrfToken);
-  }
-
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    method,
-    credentials: "same-origin",
-    headers,
-  });
-
-  syncCsrfToken();
-
-  const contentType = response.headers.get("content-type") || "";
-  let payload = null;
-  if (response.status !== 204 && response.status !== 205) {
-    const text = await response.text();
-    if (text) {
-      payload = contentType.includes("application/json")
-        ? JSON.parse(text)
-        : text;
-    }
-  }
-
-  if (!response.ok) {
-    const message =
-      typeof payload === "string"
-        ? payload || `HTTP ${response.status}`
-        : payload?.message || payload?.code || `HTTP ${response.status}`;
-    const error = new Error(message);
-    error.status = response.status;
-    error.code = payload?.code || null;
-    error.payload = payload;
-    throw error;
-  }
-
-  return payload;
-}
-
 async function fetchOrganizations(filters = {}, options = {}) {
-  const params = new URLSearchParams();
-  params.set("limit", String(options.limit || 24));
-  params.set("sort", options.sort || "name");
-  params.set("order", options.order || "asc");
-  if (filters.name) {
-    params.set("filter_name_contains", filters.name);
-  }
-  if (filters.country) {
-    params.set("filter_country_contains", filters.country);
-  }
-  if (filters.slug) {
-    params.set("filter_slug", filters.slug);
-  }
-  return apiFetch(buildListPath("/organization", params));
+  return listOrganization(apiClient, {
+    query: {
+      limit: options.limit || 24,
+      sort: options.sort || "name",
+      order: options.order || "asc",
+      filter_name_contains: filters.name || undefined,
+      filter_country_contains: filters.country || undefined,
+      filter_slug: filters.slug || undefined,
+    },
+  });
 }
 
 async function fetchInterests(filters = {}, options = {}) {
-  const params = new URLSearchParams();
-  params.set("limit", String(options.limit || 24));
-  params.set("sort", options.sort || "title");
-  params.set("order", options.order || "asc");
-  if (filters.title) {
-    params.set("filter_title_contains", filters.title);
-  }
-  if (filters.organizationId) {
-    params.set("filter_organization_id", String(filters.organizationId));
-  }
-  return apiFetch(buildListPath("/interest", params));
+  return listInterest(apiClient, {
+    query: {
+      limit: options.limit || 24,
+      sort: options.sort || "title",
+      order: options.order || "asc",
+      filter_title_contains: filters.title || undefined,
+      filter_organization_id: filters.organizationId || undefined,
+    },
+  });
 }
 
 async function fetchTopics(filters = {}, options = {}) {
-  const params = new URLSearchParams();
-  params.set("limit", String(options.limit || 24));
-  params.set("sort", options.sort || "title");
-  params.set("order", options.order || "asc");
-  if (filters.title) {
-    params.set("filter_title_contains", filters.title);
-  }
-  if (filters.discipline) {
-    params.set("filter_discipline_contains", filters.discipline);
-  }
-  if (filters.location) {
-    params.set("filter_location_contains", filters.location);
-  }
-  if (filters.organizationId) {
-    params.set("filter_organization_id", String(filters.organizationId));
-  }
-  return apiFetch(buildListPath("/thesis_topic", params));
+  return listThesisTopic(apiClient, {
+    query: {
+      limit: options.limit || 24,
+      sort: options.sort || "title",
+      order: options.order || "asc",
+      filter_title_contains: filters.title || undefined,
+      filter_discipline_contains: filters.discipline || undefined,
+      filter_location_contains: filters.location || undefined,
+      filter_organization_id: filters.organizationId || undefined,
+    },
+  });
 }
 
 async function fetchRequests(options = {}) {
-  const params = new URLSearchParams();
-  params.set("limit", String(options.limit || 50));
-  params.set("sort", options.sort || "created_at");
-  params.set("order", options.order || "desc");
-  return apiFetch(buildListPath("/collaboration_request", params));
+  return listCollaborationRequest(apiClient, {
+    query: {
+      limit: options.limit || 50,
+      sort: options.sort || "created_at",
+      order: options.order || "desc",
+    },
+  });
 }
 
 async function fetchManagedUsers(email = "") {
-  const params = new URLSearchParams();
-  if (email) {
-    params.set("email", email);
-  }
-  return apiFetch(buildListPath("/auth/admin/users", params));
-}
-
-function buildListPath(basePath, params) {
-  const search = params instanceof URLSearchParams ? params.toString() : new URLSearchParams(params).toString();
-  return search ? `${basePath}?${search}` : basePath;
+  return listBuiltinAuthUsers(apiClient, {
+    query: {
+      email: email || undefined,
+    },
+  });
 }
 
 async function ensureOrganizationOptions() {
@@ -2742,11 +2701,49 @@ function isAdmin() {
   return Boolean(state.account?.roles?.includes("admin"));
 }
 
+function getErrorCode(error) {
+  if (
+    error &&
+    typeof error === "object" &&
+    error.body &&
+    typeof error.body === "object" &&
+    typeof error.body.code === "string"
+  ) {
+    return error.body.code;
+  }
+  return error?.code || null;
+}
+
+function getErrorMessage(error) {
+  if (
+    error &&
+    typeof error === "object" &&
+    error.body &&
+    typeof error.body === "object" &&
+    typeof error.body.message === "string"
+  ) {
+    return error.body.message;
+  }
+  if (
+    error &&
+    typeof error === "object" &&
+    error.body &&
+    typeof error.body === "object" &&
+    typeof error.body.code === "string"
+  ) {
+    return error.body.code;
+  }
+  if (error?.message) {
+    return error.message;
+  }
+  return "Request failed.";
+}
+
 function isMissingTokenError(error) {
   return (
-    error?.code === "missing_token" ||
-    error?.code === "invalid_token" ||
-    String(error?.message || "").toLowerCase().includes("missing token")
+    getErrorCode(error) === "missing_token" ||
+    getErrorCode(error) === "invalid_token" ||
+    getErrorMessage(error).toLowerCase().includes("missing token")
   );
 }
 

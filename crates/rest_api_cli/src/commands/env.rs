@@ -471,12 +471,88 @@ pub fn default_env_path(config_path: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn load_env_file(path: &Path) -> Result<()> {
-    dotenv::from_path(path).map_err(|error| {
+    let content = std::fs::read_to_string(path).map_err(|error| {
         Error::Config(format!(
             "failed to load environment file `{}`: {error}",
             path.display()
         ))
-    })
+    })?;
+
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let assignment = trimmed
+            .strip_prefix("export ")
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+        let Some((key, value)) = assignment.split_once('=') else {
+            return Err(Error::Config(format!(
+                "failed to load environment file `{}`: Error parsing line {}: `{}`",
+                path.display(),
+                index + 1,
+                line
+            )));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(Error::Config(format!(
+                "failed to load environment file `{}`: Error parsing line {}: `{}`",
+                path.display(),
+                index + 1,
+                line
+            )));
+        }
+        let value = decode_env_value(value).map_err(|error| {
+            Error::Config(format!(
+                "failed to load environment file `{}`: Error parsing line {}: `{}` ({error})",
+                path.display(),
+                index + 1,
+                line
+            ))
+        })?;
+        if std::env::var_os(key).is_none() {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn decode_env_value(raw: &str) -> std::result::Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        let mut decoded = String::with_capacity(trimmed.len().saturating_sub(2));
+        let mut chars = trimmed[1..trimmed.len() - 1].chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                decoded.push(ch);
+                continue;
+            }
+
+            let escaped = chars.next().ok_or("unterminated escape sequence")?;
+            match escaped {
+                '\\' => decoded.push('\\'),
+                '"' => decoded.push('"'),
+                'n' => decoded.push('\n'),
+                'r' => decoded.push('\r'),
+                't' => decoded.push('\t'),
+                '0' => decoded.push('\0'),
+                _ => return Err("unsupported escape sequence"),
+            }
+        }
+        return Ok(decoded);
+    }
+
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return Ok(trimmed[1..trimmed.len() - 1].to_owned());
+    }
+
+    Ok(trimmed.to_owned())
 }
 
 pub fn write_env_file(
@@ -771,10 +847,16 @@ mod tests {
 
     #[test]
     fn default_env_path_uses_service_directory_when_config_is_present() {
-        let config = PathBuf::from("/tmp/example/service/api.eon");
+        let config = std::env::temp_dir()
+            .join("vsr_env_path")
+            .join("service")
+            .join("api.eon");
         assert_eq!(
             default_env_path(Some(&config)).expect("env path should resolve"),
-            PathBuf::from("/tmp/example/service/.env")
+            config
+                .parent()
+                .expect("config should have a parent")
+                .join(".env")
         );
     }
 

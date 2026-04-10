@@ -3233,8 +3233,12 @@ mod tests {
     #[test]
     fn checked_in_reference_matches_generator() {
         assert_eq!(
-            read_to_string(&repo_reference_path()),
-            render_eon_reference_markdown()
+            normalize_text(&read_to_string(&repo_reference_path())),
+            normalize_text(&render_eon_reference_markdown())
         );
+    }
+
+    fn normalize_text(value: &str) -> String {
+        value.replace("\r\n", "\n")
     }
 }
