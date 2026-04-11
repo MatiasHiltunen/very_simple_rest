@@ -106,58 +106,82 @@ resources: {
 			}
 			slug: {
 				type: String
-				validate: {
-					min_length: 3
-					max_length: 48
+				garde: {
+					length: {
+						min: 3
+						max: 48
+						mode: Chars
+					}
 				}
 			}
 			name: {
 				type: String
-				validate: {
-					min_length: 3
-					max_length: 120
+				garde: {
+					length: {
+						min: 3
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			country: {
 				type: String
-				validate: {
-					min_length: 2
-					max_length: 64
+				garde: {
+					length: {
+						min: 2
+						max: 64
+						mode: Chars
+					}
 				}
 			}
 			city: {
 				type: String
-				validate: {
-					min_length: 2
-					max_length: 64
+				garde: {
+					length: {
+						min: 2
+						max: 64
+						mode: Chars
+					}
 				}
 			}
 			website_url: {
 				type: String
-				validate: {
-					min_length: 8
-					max_length: 200
+				garde: {
+					length: {
+						min: 8
+						max: 200
+						mode: Chars
+					}
 				}
 			}
 			contact_email: {
 				type: String
-				validate: {
-					min_length: 5
-					max_length: 160
+				garde: {
+					length: {
+						min: 5
+						max: 160
+						mode: Chars
+					}
 				}
 			}
 			collaboration_stage: {
 				type: String
-				validate: {
-					min_length: 3
-					max_length: 64
+				garde: {
+					length: {
+						min: 3
+						max: 64
+						mode: Chars
+					}
 				}
 			}
 			summary: {
 				type: String
-				validate: {
-					min_length: 24
-					max_length: 800
+				garde: {
+					length: {
+						min: 24
+						max: 800
+						mode: Chars
+					}
 				}
 			}
 			created_at: DateTime
@@ -188,23 +212,32 @@ resources: {
 			}
 			title: {
 				type: String
-				validate: {
-					min_length: 4
-					max_length: 140
+				garde: {
+					length: {
+						min: 4
+						max: 140
+						mode: Chars
+					}
 				}
 			}
 			work_mode: {
 				type: String
-				validate: {
-					min_length: 4
-					max_length: 48
+				garde: {
+					length: {
+						min: 4
+						max: 48
+						mode: Chars
+					}
 				}
 			}
 			summary: {
 				type: String
-				validate: {
-					min_length: 24
-					max_length: 800
+				garde: {
+					length: {
+						min: 24
+						max: 800
+						mode: Chars
+					}
 				}
 			}
 			desired_start_on: {
@@ -239,37 +272,52 @@ resources: {
 			}
 			title: {
 				type: String
-				validate: {
-					min_length: 5
-					max_length: 160
+				garde: {
+					length: {
+						min: 5
+						max: 160
+						mode: Chars
+					}
 				}
 			}
 			discipline: {
 				type: String
-				validate: {
-					min_length: 3
-					max_length: 80
+				garde: {
+					length: {
+						min: 3
+						max: 80
+						mode: Chars
+					}
 				}
 			}
 			location: {
 				type: String
-				validate: {
-					min_length: 2
-					max_length: 80
+				garde: {
+					length: {
+						min: 2
+						max: 80
+						mode: Chars
+					}
 				}
 			}
 			contact_email: {
 				type: String
-				validate: {
-					min_length: 5
-					max_length: 160
+				garde: {
+					length: {
+						min: 5
+						max: 160
+						mode: Chars
+					}
 				}
 			}
 			summary: {
 				type: String
-				validate: {
-					min_length: 24
-					max_length: 900
+				garde: {
+					length: {
+						min: 24
+						max: 900
+						mode: Chars
+					}
 				}
 			}
 			application_deadline: {
@@ -325,23 +373,32 @@ resources: {
 			requester_user_id: I64
 			title: {
 				type: String
-				validate: {
-					min_length: 5
-					max_length: 160
+				garde: {
+					length: {
+						min: 5
+						max: 160
+						mode: Chars
+					}
 				}
 			}
 			message: {
 				type: String
-				validate: {
-					min_length: 32
-					max_length: 1600
+				garde: {
+					length: {
+						min: 32
+						max: 1600
+						mode: Chars
+					}
 				}
 			}
 			status: {
 				type: String
-				validate: {
-					min_length: 4
-					max_length: 32
+				garde: {
+					length: {
+						min: 4
+						max: 32
+						mode: Chars
+					}
 				}
 			}
 			preferred_start_on: {

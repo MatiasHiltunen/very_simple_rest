@@ -26,6 +26,7 @@ heck = "0.5"
 dotenvy = "0.15.7"
 rand = "0.10.0"
 uuid = { version = "1.22", features = ["v4", "serde"] }
+garde = { version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }
 rest_macro = { path = "crates/rest_macro", version = "0.1.10" }
 rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.10" }
 log = "0.4"
@@ -80,6 +81,7 @@ actix-files.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 uuid.workspace = true
+garde.workspace = true
 dotenvy.workspace = true
 
 # Feature configuration for the top-level crate

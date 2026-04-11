@@ -131,7 +131,7 @@ resources: [
 
         fields: [
             { name: "id", type: I64, id: true }
-            { name: "title", type: String, validate: { min_length: 3, max_length: 120 } }
+            { name: "title", type: String, garde: { length: { min: 3, max: 120, mode: Chars } } }
             { name: "slug", type: String, unique: true, transforms: [Slugify] }
             { name: "status", type: PostStatus }
             {

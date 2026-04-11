@@ -70,9 +70,10 @@ claims. Relations can also declare `on_delete` as `Cascade`, `Restrict`, `SetNul
 renames are not supported; relation fields map to columns with the same name.
 
 Field validations can be declared with `#[validate(...)]` on derive-based resources or
-`validate: { ... }` in `.eon` fields. The current supported keys are `min_length`,
-`max_length`, `minimum`, and `maximum`, and the generated OpenAPI schema mirrors them as
-`minLength`, `maxLength`, `minimum`, and `maximum`.
+`garde: { ... }` in `.eon` fields. `.eon` uses garde-style rules such as `length`,
+`range`, `pattern`, `email`, `url`, `required`, and `inner`. Generated OpenAPI schemas
+mirror the subset that maps cleanly to OpenAPI, including `minLength`, `maxLength`,
+`minItems`, `maxItems`, `minimum`, `maximum`, `pattern`, and standard string formats.
 
 Generated resource handlers also use a stable JSON error body with `code`, `message`, and an
 optional `field`. OpenAPI documents expose this schema as `ApiErrorResponse` for generated
@@ -267,6 +268,7 @@ pub use actix_web;
 pub use base64;
 pub use chrono;
 pub use env_logger;
+pub use garde;
 pub use log;
 pub use rust_decimal;
 pub use serde;

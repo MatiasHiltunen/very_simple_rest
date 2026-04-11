@@ -3,12 +3,13 @@ use std::collections::HashSet;
 use syn::{Data, DeriveInput, Fields, Lit, spanned::Spanned};
 
 use super::model::{
-    DbBackend, FieldSpec, FieldValidation, ListConfig, NumericBound, PolicyAssignment,
-    PolicyComparisonValue, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
-    PolicyLiteralValue, PolicyValueSource, ReferentialAction, ResourceAccess, ResourceSpec,
-    RoleRequirements, RowPolicies, RowPolicyKind, WriteModelStyle, default_resource_module_ident,
-    infer_generated_value, infer_sql_type, validate_field_validations, validate_list_config,
-    validate_relations, validate_resource_access, validate_row_policies, validate_sql_identifier,
+    DbBackend, FieldSpec, FieldValidation, LengthMode, LengthValidation, ListConfig, NumericBound,
+    PolicyAssignment, PolicyComparisonValue, PolicyFilter, PolicyFilterExpression,
+    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource, RangeValidation,
+    ReferentialAction, ResourceAccess, ResourceSpec, RoleRequirements, RowPolicies, RowPolicyKind,
+    WriteModelStyle, default_resource_module_ident, infer_generated_value, infer_sql_type,
+    validate_field_validations, validate_list_config, validate_relations, validate_resource_access,
+    validate_row_policies, validate_sql_identifier,
 };
 
 pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
@@ -314,32 +315,30 @@ fn parse_validation(attrs: &[syn::Attribute]) -> syn::Result<FieldValidation> {
 
             match key.as_str() {
                 "min_length" => {
-                    validation.min_length = Some(parse_length_value(
-                        validation.min_length,
-                        lit,
-                        "min_length",
-                    )?);
+                    let length = validation.length.get_or_insert_with(|| LengthValidation {
+                        mode: Some(LengthMode::Chars),
+                        ..LengthValidation::default()
+                    });
+                    length.min = Some(parse_length_value(length.min, lit, "min_length")?);
                 }
                 "max_length" => {
-                    validation.max_length = Some(parse_length_value(
-                        validation.max_length,
-                        lit,
-                        "max_length",
-                    )?);
+                    let length = validation.length.get_or_insert_with(|| LengthValidation {
+                        mode: Some(LengthMode::Chars),
+                        ..LengthValidation::default()
+                    });
+                    length.max = Some(parse_length_value(length.max, lit, "max_length")?);
                 }
                 "minimum" => {
-                    validation.minimum = Some(parse_numeric_value(
-                        validation.minimum.as_ref(),
-                        lit,
-                        "minimum",
-                    )?);
+                    let range = validation
+                        .range
+                        .get_or_insert_with(RangeValidation::default);
+                    range.min = Some(parse_numeric_value(range.min.as_ref(), lit, "minimum")?);
                 }
                 "maximum" => {
-                    validation.maximum = Some(parse_numeric_value(
-                        validation.maximum.as_ref(),
-                        lit,
-                        "maximum",
-                    )?);
+                    let range = validation
+                        .range
+                        .get_or_insert_with(RangeValidation::default);
+                    range.max = Some(parse_numeric_value(range.max.as_ref(), lit, "maximum")?);
                 }
                 _ => return Err(meta.error("unsupported validate key")),
             }
@@ -857,16 +856,46 @@ mod tests {
 
         let resource = parse_derive_input(input).expect("validation should parse");
         let title = resource.find_field("title").expect("title should exist");
-        assert_eq!(title.validation.min_length, Some(3));
-        assert_eq!(title.validation.max_length, Some(32));
+        assert_eq!(
+            title
+                .validation
+                .length
+                .as_ref()
+                .and_then(|length| length.min),
+            Some(3)
+        );
+        assert_eq!(
+            title
+                .validation
+                .length
+                .as_ref()
+                .and_then(|length| length.max),
+            Some(32)
+        );
+        assert_eq!(
+            title
+                .validation
+                .length
+                .as_ref()
+                .and_then(|length| length.mode),
+            Some(LengthMode::Chars)
+        );
 
         let score = resource.find_field("score").expect("score should exist");
         assert_eq!(
-            score.validation.minimum,
+            score
+                .validation
+                .range
+                .as_ref()
+                .and_then(|range| range.min.clone()),
             Some(super::super::model::NumericBound::Integer(1))
         );
         assert_eq!(
-            score.validation.maximum,
+            score
+                .validation
+                .range
+                .as_ref()
+                .and_then(|range| range.max.clone()),
             Some(super::super::model::NumericBound::Integer(10))
         );
     }
@@ -941,8 +970,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("title"));
-        assert!(error.to_string().contains("min_length"));
-        assert!(error.to_string().contains("max_length"));
+        assert!(error.to_string().contains("range"));
     }
 
     #[test]

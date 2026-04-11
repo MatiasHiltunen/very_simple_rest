@@ -1920,7 +1920,7 @@ fn object_schema(fields: &[&FieldSpec]) -> Value {
     for field in fields {
         let field_name = field.api_name().to_owned();
         properties.insert(field_name.clone(), field_schema(field));
-        if !is_optional_type(&field.ty) {
+        if !is_optional_type(&field.ty) || field.validation.required {
             required.push(field_name);
         }
     }
@@ -2038,7 +2038,9 @@ fn create_payload_schema(resource: &ResourceSpec) -> Value {
             field_name.clone(),
             field_schema_with_optional(field.field, field.allow_admin_override),
         );
-        if !field.allow_admin_override && !is_optional_type(&field.field.ty) {
+        if !field.allow_admin_override
+            && (!is_optional_type(&field.field.ty) || field.field.validation.required)
+        {
             required.push(field_name);
         }
     }
@@ -2076,7 +2078,7 @@ fn action_input_schema(
             .find_field(input.target_field.as_str())
             .expect("validated action input target field should exist");
         properties.insert(input.name.clone(), field_schema(field));
-        if !is_optional_type(&field.ty) {
+        if !is_optional_type(&field.ty) || field.validation.required {
             required.push(input.name.clone());
         }
     }
@@ -2190,17 +2192,60 @@ fn schema_for_type(ty: &syn::Type) -> Value {
 }
 
 fn apply_field_validation_schema(field: &FieldSpec, schema: &mut Value) {
-    if let Some(min_length) = field.validation.min_length {
-        schema["minLength"] = json!(min_length);
+    if let Some(length) = field.validation.length.as_ref() {
+        if is_list_field(field) {
+            if matches!(length.mode, None | Some(super::model::LengthMode::Simple)) {
+                if let Some(min) = length.min {
+                    schema["minItems"] = json!(min);
+                }
+                if let Some(max) = length.max {
+                    schema["maxItems"] = json!(max);
+                }
+                if let Some(equal) = length.equal {
+                    schema["minItems"] = json!(equal);
+                    schema["maxItems"] = json!(equal);
+                }
+            }
+        } else if matches!(length.mode, Some(super::model::LengthMode::Chars)) {
+            if let Some(min) = length.min {
+                schema["minLength"] = json!(min);
+            }
+            if let Some(max) = length.max {
+                schema["maxLength"] = json!(max);
+            }
+            if let Some(equal) = length.equal {
+                schema["minLength"] = json!(equal);
+                schema["maxLength"] = json!(equal);
+            }
+        }
     }
-    if let Some(max_length) = field.validation.max_length {
-        schema["maxLength"] = json!(max_length);
+
+    if let Some(range) = field.validation.range.as_ref() {
+        if let Some(minimum) = &range.min {
+            schema["minimum"] = numeric_bound_json(minimum);
+        }
+        if let Some(maximum) = &range.max {
+            schema["maximum"] = numeric_bound_json(maximum);
+        }
+        if let Some(equal) = &range.equal {
+            let equal = numeric_bound_json(equal);
+            schema["minimum"] = equal.clone();
+            schema["maximum"] = equal;
+        }
     }
-    if let Some(minimum) = &field.validation.minimum {
-        schema["minimum"] = numeric_bound_json(minimum);
+
+    if let Some(pattern) = field.validation.pattern.as_deref() {
+        schema["pattern"] = json!(pattern);
     }
-    if let Some(maximum) = &field.validation.maximum {
-        schema["maximum"] = numeric_bound_json(maximum);
+
+    if field.validation.email {
+        schema["format"] = json!("email");
+    } else if field.validation.url {
+        schema["format"] = json!("uri");
+    } else if field.validation.ipv4 {
+        schema["format"] = json!("ipv4");
+    } else if field.validation.ipv6 {
+        schema["format"] = json!("ipv6");
     }
 }
 

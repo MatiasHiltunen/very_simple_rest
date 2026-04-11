@@ -1390,20 +1390,7 @@ Custom relation column renames are not supported. The Rust field name is the dat
 
 Generated `Create` and `Update` handlers can enforce field-level validation before SQL execution.
 
-Derive example:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-pub struct Post {
-    pub id: Option<i64>,
-    #[validate(min_length = 3, max_length = 120)]
-    pub title: String,
-    #[validate(minimum = 1, maximum = 10)]
-    pub score: i64,
-}
-```
-
-`.eon` example:
+`.eon` garde example:
 
 ```eon
 {
@@ -1413,30 +1400,38 @@ pub struct Post {
         {
             name: "title"
             type: String
-            validate: {
-                min_length: 3
-                max_length: 120
+            garde: {
+                length: {
+                    min: 3
+                    max: 120
+                    mode: Chars
+                }
             }
         }
         {
             name: "score"
             type: I64
-            validate: {
-                minimum: 1
-                maximum: 10
+            garde: {
+                range: {
+                    min: 1
+                    max: 10
+                }
             }
         }
     ]
 }
 ```
 
-Supported constraints:
+Supported `.eon` garde rules include `length`, `range`, `pattern`, `contains`, `prefix`,
+`suffix`, `ascii`, `alphanumeric`, `email`, `url`, `ip`, `ipv4`, `ipv6`, `required`,
+and recursive `inner`.
 
-- `min_length` and `max_length` for string-like fields
-- `minimum` and `maximum` for integer and floating-point fields
+Derive-based resources still support `#[validate(...)]`, but `.eon` config uses
+`garde: { ... }`.
 
-These constraints are reflected in generated OpenAPI schemas as `minLength`, `maxLength`,
-`minimum`, and `maximum`.
+The generated OpenAPI schema reflects the subset with a clean standard mapping, including
+`minLength`, `maxLength`, `minItems`, `maxItems`, `minimum`, `maximum`, `pattern`,
+and standard string `format` values.
 
 ## Error Responses
 

@@ -13,7 +13,7 @@ resources: [
         }
         fields: [
             { name: "id", type: I64 }
-            { name: "title_text", api_name: "title", type: String, validate: { min_length: 3 } }
+            { name: "title_text", api_name: "title", type: String, garde: { length: { min: 3, mode: Chars } } }
             { name: "author_id", api_name: "author", type: I64 }
             { name: "created_at", api_name: "createdAt", type: DateTime, nullable: true }
         ]

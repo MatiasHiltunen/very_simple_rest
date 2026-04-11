@@ -89,9 +89,12 @@ resources: [
             {
                 name: "title"
                 type: String
-                validate: {
-                    min_length: 1
-                    max_length: 120
+                garde: {
+                    length: {
+                        min: 1
+                        max: 120
+                        mode: Chars
+                    }
                 }
             }
             { name: "completed", type: Bool }

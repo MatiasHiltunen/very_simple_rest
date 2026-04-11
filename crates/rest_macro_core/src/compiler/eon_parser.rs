@@ -20,23 +20,24 @@ use super::model::{
     DbBackend, EnumSpec, FieldSpec, FieldTransform, FieldValidation, GENERATED_DATE_ALIAS,
     GENERATED_DATETIME_ALIAS, GENERATED_DECIMAL_ALIAS, GENERATED_JSON_ALIAS,
     GENERATED_JSON_ARRAY_ALIAS, GENERATED_JSON_OBJECT_ALIAS, GENERATED_TIME_ALIAS,
-    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, ListConfig, NumericBound, PolicyAssignment,
-    PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilter,
-    PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
-    ReferentialAction, ReleaseBuildConfig, ResourceAccess, ResourceActionAssignmentSpec,
-    ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
-    ResourceActionSpec, ResourceActionTarget, ResourceActionValueSpec, ResourceReadAccess,
-    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
-    StaticCacheProfile, StaticMode, StaticMountSpec, TsClientAutomationConfig, TsClientConfig,
-    WriteModelStyle, apply_service_read_access_defaults, default_resource_module_ident,
-    infer_generated_value, infer_sql_type, is_json_array_type, is_json_object_type, is_json_type,
-    is_list_field, is_optional_type, is_typed_object_field, sanitize_module_ident,
-    sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
-    validate_authorization_contract, validate_build_config, validate_clients_config,
-    validate_field_transforms, validate_field_validations, validate_list_config,
-    validate_logging_config, validate_policy_claim_sources, validate_relations,
-    validate_resource_access, validate_row_policies, validate_runtime_config,
-    validate_security_config, validate_sql_identifier, validate_tls_config,
+    GENERATED_UUID_ALIAS, GeneratedValue, IndexSpec, LengthMode, LengthValidation, ListConfig,
+    NumericBound, PolicyAssignment, PolicyComparisonValue, PolicyExistsCondition,
+    PolicyExistsFilter, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
+    PolicyLiteralValue, PolicyValueSource, RangeValidation, ReferentialAction, ReleaseBuildConfig,
+    ResourceAccess, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
+    ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec, ResourceActionTarget,
+    ResourceActionValueSpec, ResourceReadAccess, ResourceSpec, ResponseContextSpec,
+    RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
+    StaticMountSpec, TsClientAutomationConfig, TsClientConfig, WriteModelStyle,
+    apply_service_read_access_defaults, default_resource_module_ident, infer_generated_value,
+    infer_sql_type, is_json_array_type, is_json_object_type, is_json_type, is_list_field,
+    is_optional_type, is_typed_object_field, sanitize_module_ident, sanitize_struct_ident,
+    structured_scalar_kind, supports_declared_index, validate_authorization_contract,
+    validate_build_config, validate_clients_config, validate_field_transforms,
+    validate_field_validations, validate_list_config, validate_logging_config,
+    validate_policy_claim_sources, validate_relations, validate_resource_access,
+    validate_row_policies, validate_runtime_config, validate_security_config,
+    validate_sql_identifier, validate_tls_config,
 };
 use crate::{
     auth::{
@@ -1010,8 +1011,10 @@ struct FieldDocument {
     transforms: Vec<String>,
     #[serde(default)]
     relation: Option<RelationDocument>,
-    #[serde(default)]
+    #[serde(default, rename = "garde")]
     validate: Option<FieldValidationDocument>,
+    #[serde(default, rename = "validate")]
+    legacy_validate: Option<JsonValue>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1038,15 +1041,68 @@ struct RelationDocument {
 }
 
 #[derive(Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FieldValidationDocument {
     #[serde(default)]
-    min_length: Option<usize>,
+    ascii: bool,
     #[serde(default)]
-    max_length: Option<usize>,
+    alphanumeric: bool,
     #[serde(default)]
-    minimum: Option<NumericBoundDocument>,
+    email: bool,
     #[serde(default)]
-    maximum: Option<NumericBoundDocument>,
+    url: bool,
+    #[serde(default)]
+    ip: bool,
+    #[serde(default)]
+    ipv4: bool,
+    #[serde(default)]
+    ipv6: bool,
+    #[serde(default)]
+    phone_number: bool,
+    #[serde(default)]
+    credit_card: bool,
+    #[serde(default)]
+    required: bool,
+    #[serde(default)]
+    dive: bool,
+    #[serde(default)]
+    contains: Option<String>,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    suffix: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    length: Option<LengthValidationDocument>,
+    #[serde(default)]
+    range: Option<RangeValidationDocument>,
+    #[serde(default)]
+    inner: Option<Box<FieldValidationDocument>>,
+}
+
+#[derive(Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LengthValidationDocument {
+    #[serde(default)]
+    min: Option<usize>,
+    #[serde(default)]
+    max: Option<usize>,
+    #[serde(default)]
+    equal: Option<usize>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RangeValidationDocument {
+    #[serde(default)]
+    min: Option<NumericBoundDocument>,
+    #[serde(default)]
+    max: Option<NumericBoundDocument>,
+    #[serde(default)]
+    equal: Option<NumericBoundDocument>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1153,8 +1209,10 @@ struct FieldMapConfigDocument {
     transforms: Vec<String>,
     #[serde(default)]
     relation: Option<RelationDocument>,
-    #[serde(default)]
+    #[serde(default, rename = "garde")]
     validate: Option<FieldValidationDocument>,
+    #[serde(default, rename = "validate")]
+    legacy_validate: Option<JsonValue>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1347,6 +1405,7 @@ impl FieldMapValueDocument {
                 transforms: Vec::new(),
                 relation: None,
                 validate: None,
+                legacy_validate: None,
             }),
             Self::Config(field) => field.into_document::<E>(key),
         }
@@ -1379,6 +1438,7 @@ impl FieldMapConfigDocument {
             transforms: self.transforms,
             relation: self.relation,
             validate: self.validate,
+            legacy_validate: self.legacy_validate,
         })
     }
 }
@@ -2121,6 +2181,10 @@ fn build_resources_with_enums(
                 }
                 (field_api_name, true)
             };
+            reject_legacy_field_validation(
+                field.legacy_validate.as_ref(),
+                format!("field `{}` on resource `{struct_name}`", field.name).as_str(),
+            )?;
 
             let is_id = field.id || field.name == configured_id;
             let generated = match field.generated {
@@ -2168,7 +2232,7 @@ fn build_resources_with_enums(
                         return Err(syn::Error::new(
                             Span::call_site(),
                             format!(
-                                "field `{}` on resource `{struct_name}` cannot combine `type = Object` with `validate` yet",
+                                "field `{}` on resource `{struct_name}` only supports nested garde validation through child fields and `dive`/`required`",
                                 field.name
                             ),
                         ));
@@ -2213,22 +2277,13 @@ fn build_resources_with_enums(
                         ),
                     ));
                 }
-                if field.validate.is_some() {
-                    return Err(syn::Error::new(
-                        Span::call_site(),
-                        format!(
-                            "field `{}` on resource `{struct_name}` cannot combine `type = List` with `validate` yet",
-                            field.name
-                        ),
-                    ));
-                }
             }
 
             let relation = match field.relation {
                 Some(relation) => Some(parse_relation_document(relation)?),
                 None => None,
             };
-            let validation = parse_field_validation_document(field.validate);
+            let validation = parse_field_validation_document(field.validate)?;
             let transforms = parse_field_transforms_document(field.transforms)?;
 
             fields.push(FieldSpec {
@@ -2917,71 +2972,102 @@ fn validate_resource_action_scalar_value(
         }
     }
 
-    if let Some(min_length) = field.validation.min_length {
+    if let Some(length) = field.validation.length.as_ref() {
         let text = value.as_str().ok_or_else(|| {
             syn::Error::new(Span::call_site(), format!("{label} must be a string"))
         })?;
-        if text.chars().count() < min_length {
+        let measured = match length.mode {
+            Some(LengthMode::Chars) => text.chars().count(),
+            _ => text.len(),
+        };
+        if let Some(min_length) = length.min
+            && measured < min_length
+        {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!("{label} must have at least {min_length} characters"),
             ));
         }
-    }
-    if let Some(max_length) = field.validation.max_length {
-        let text = value.as_str().ok_or_else(|| {
-            syn::Error::new(Span::call_site(), format!("{label} must be a string"))
-        })?;
-        if text.chars().count() > max_length {
+        if let Some(max_length) = length.max
+            && measured > max_length
+        {
             return Err(syn::Error::new(
                 Span::call_site(),
                 format!("{label} must have at most {max_length} characters"),
             ));
         }
+        if let Some(equal) = length.equal
+            && measured != equal
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("{label} must have exactly {equal} characters"),
+            ));
+        }
     }
 
-    match infer_sql_type(&field.ty, DbBackend::Sqlite).as_str() {
-        sql_type if super::model::is_integer_sql_type(sql_type) => {
-            if let Some(NumericBound::Integer(minimum)) = &field.validation.minimum
-                && value.as_i64().is_some_and(|actual| actual < *minimum)
-            {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    format!("{label} must be at least {minimum}"),
-                ));
+    if let Some(range) = field.validation.range.as_ref() {
+        match infer_sql_type(&field.ty, DbBackend::Sqlite).as_str() {
+            sql_type if super::model::is_integer_sql_type(sql_type) => {
+                if let Some(NumericBound::Integer(minimum)) = &range.min
+                    && value.as_i64().is_some_and(|actual| actual < *minimum)
+                {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("{label} must be at least {minimum}"),
+                    ));
+                }
+                if let Some(NumericBound::Integer(maximum)) = &range.max
+                    && value.as_i64().is_some_and(|actual| actual > *maximum)
+                {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("{label} must be at most {maximum}"),
+                    ));
+                }
+                if let Some(NumericBound::Integer(equal)) = &range.equal
+                    && value.as_i64().is_some_and(|actual| actual != *equal)
+                {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("{label} must equal {equal}"),
+                    ));
+                }
             }
-            if let Some(NumericBound::Integer(maximum)) = &field.validation.maximum
-                && value.as_i64().is_some_and(|actual| actual > *maximum)
-            {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    format!("{label} must be at most {maximum}"),
-                ));
+            "REAL" => {
+                if let Some(minimum) = &range.min
+                    && value
+                        .as_f64()
+                        .is_some_and(|actual| actual < minimum.as_f64())
+                {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("{label} must be at least {}", minimum.as_f64()),
+                    ));
+                }
+                if let Some(maximum) = &range.max
+                    && value
+                        .as_f64()
+                        .is_some_and(|actual| actual > maximum.as_f64())
+                {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("{label} must be at most {}", maximum.as_f64()),
+                    ));
+                }
+                if let Some(equal) = &range.equal
+                    && value
+                        .as_f64()
+                        .is_some_and(|actual| actual != equal.as_f64())
+                {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        format!("{label} must equal {}", equal.as_f64()),
+                    ));
+                }
             }
+            _ => {}
         }
-        "REAL" => {
-            if let Some(minimum) = &field.validation.minimum
-                && value
-                    .as_f64()
-                    .is_some_and(|actual| actual < minimum.as_f64())
-            {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    format!("{label} must be at least {}", minimum.as_f64()),
-                ));
-            }
-            if let Some(maximum) = &field.validation.maximum
-                && value
-                    .as_f64()
-                    .is_some_and(|actual| actual > maximum.as_f64())
-            {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    format!("{label} must be at most {}", maximum.as_f64()),
-                ));
-            }
-        }
-        _ => {}
     }
 
     Ok(())
@@ -3422,6 +3508,10 @@ fn build_object_fields(
                 ),
             ));
         }
+        reject_legacy_field_validation(
+            field.legacy_validate.as_ref(),
+            format!("nested field `{}` in {context}", field.name).as_str(),
+        )?;
 
         if field.id {
             return Err(syn::Error::new(
@@ -3478,7 +3568,7 @@ fn build_object_fields(
                     return Err(syn::Error::new(
                         Span::call_site(),
                         format!(
-                            "nested field `{}` in {context} cannot combine `type = Object` with `validate` yet",
+                            "nested field `{}` in {context} only supports nested garde validation through child fields and `dive`/`required`",
                             field.name
                         ),
                     ));
@@ -3504,16 +3594,6 @@ fn build_object_fields(
             }
         };
 
-        if parsed_ty.list_item_ty.is_some() && field.validate.is_some() {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                format!(
-                    "nested field `{}` in {context} cannot combine `type = List` with `validate` yet",
-                    field.name
-                ),
-            ));
-        }
-
         result.push(FieldSpec {
             ident: syn::parse_str(&field.name).map_err(|_| {
                 syn::Error::new(
@@ -3536,7 +3616,7 @@ fn build_object_fields(
             sql_type,
             is_id: false,
             generated: GeneratedValue::None,
-            validation: parse_field_validation_document(field.validate),
+            validation: parse_field_validation_document(field.validate)?,
             relation: None,
         });
     }
@@ -5550,16 +5630,93 @@ fn parse_referential_action(value: &str) -> syn::Result<ReferentialAction> {
     })
 }
 
-fn parse_field_validation_document(document: Option<FieldValidationDocument>) -> FieldValidation {
+fn reject_legacy_field_validation(document: Option<&JsonValue>, context: &str) -> syn::Result<()> {
+    if document.is_some() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!("{context} uses legacy `validate`; rename it to `garde`"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_field_validation_document(
+    document: Option<FieldValidationDocument>,
+) -> syn::Result<FieldValidation> {
     let Some(document) = document else {
-        return FieldValidation::default();
+        return Ok(FieldValidation::default());
     };
 
-    FieldValidation {
-        min_length: document.min_length,
-        max_length: document.max_length,
-        minimum: document.minimum.map(parse_numeric_bound_document),
-        maximum: document.maximum.map(parse_numeric_bound_document),
+    Ok(FieldValidation {
+        ascii: document.ascii,
+        alphanumeric: document.alphanumeric,
+        email: document.email,
+        url: document.url,
+        ip: document.ip,
+        ipv4: document.ipv4,
+        ipv6: document.ipv6,
+        phone_number: document.phone_number,
+        credit_card: document.credit_card,
+        required: document.required,
+        dive: document.dive,
+        contains: document.contains,
+        prefix: document.prefix,
+        suffix: document.suffix,
+        pattern: document.pattern,
+        length: document
+            .length
+            .map(parse_length_validation_document)
+            .transpose()?,
+        range: document
+            .range
+            .map(parse_range_validation_document)
+            .transpose()?,
+        inner: document
+            .inner
+            .map(|inner| parse_field_validation_document(Some(*inner)).map(Box::new))
+            .transpose()?,
+    })
+}
+
+fn parse_length_validation_document(
+    document: LengthValidationDocument,
+) -> syn::Result<LengthValidation> {
+    Ok(LengthValidation {
+        min: document.min,
+        max: document.max,
+        equal: document.equal,
+        mode: document
+            .mode
+            .as_deref()
+            .map(parse_length_mode_document)
+            .transpose()?,
+    })
+}
+
+fn parse_range_validation_document(
+    document: RangeValidationDocument,
+) -> syn::Result<RangeValidation> {
+    Ok(RangeValidation {
+        min: document.min.map(parse_numeric_bound_document),
+        max: document.max.map(parse_numeric_bound_document),
+        equal: document.equal.map(parse_numeric_bound_document),
+    })
+}
+
+fn parse_length_mode_document(value: &str) -> syn::Result<LengthMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "simple" => Ok(LengthMode::Simple),
+        "bytes" => Ok(LengthMode::Bytes),
+        "chars" | "characters" => Ok(LengthMode::Chars),
+        "graphemes" => Ok(LengthMode::Graphemes),
+        "utf16" | "utf-16" => Ok(LengthMode::Utf16),
+        _ => Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "unsupported `garde.length.mode` value `{value}`; expected Simple, Bytes, Chars, Graphemes, or Utf16"
+            ),
+        )),
     }
 }
 
@@ -6531,6 +6688,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "starts_at".to_owned(),
@@ -6545,6 +6703,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                 ],
             }],
@@ -6590,6 +6749,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "run_on".to_owned(),
@@ -6604,6 +6764,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "run_at".to_owned(),
@@ -6618,6 +6779,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "external_id".to_owned(),
@@ -6632,6 +6794,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "amount".to_owned(),
@@ -6646,6 +6809,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                 ],
             }],
@@ -6707,6 +6871,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "payload".to_owned(),
@@ -6721,6 +6886,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "attributes".to_owned(),
@@ -6735,6 +6901,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "blocks".to_owned(),
@@ -6749,6 +6916,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                 ],
             }],
@@ -6805,6 +6973,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "categories".to_owned(),
@@ -6819,6 +6988,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "blocks".to_owned(),
@@ -6833,6 +7003,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                 ],
             }],
@@ -6898,6 +7069,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "title".to_owned(),
@@ -6918,11 +7090,15 @@ mod tests {
                                 transforms: Vec::new(),
                                 relation: None,
                                 validate: Some(FieldValidationDocument {
-                                    min_length: Some(3),
-                                    max_length: None,
-                                    minimum: None,
-                                    maximum: None,
+                                    length: Some(LengthValidationDocument {
+                                        min: Some(3),
+                                        max: None,
+                                        equal: None,
+                                        mode: Some("Chars".to_owned()),
+                                    }),
+                                    ..FieldValidationDocument::default()
                                 }),
+                                legacy_validate: None,
                             },
                             FieldDocument {
                                 name: "rendered".to_owned(),
@@ -6937,6 +7113,7 @@ mod tests {
                                 transforms: Vec::new(),
                                 relation: None,
                                 validate: None,
+                                legacy_validate: None,
                             },
                         ],
                         nullable: false,
@@ -6946,6 +7123,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "settings".to_owned(),
@@ -6966,6 +7144,7 @@ mod tests {
                                 transforms: Vec::new(),
                                 relation: None,
                                 validate: None,
+                                legacy_validate: None,
                             },
                             FieldDocument {
                                 name: "categories".to_owned(),
@@ -6980,6 +7159,7 @@ mod tests {
                                 transforms: Vec::new(),
                                 relation: None,
                                 validate: None,
+                                legacy_validate: None,
                             },
                         ],
                         nullable: true,
@@ -6989,6 +7169,7 @@ mod tests {
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                 ],
             }],
@@ -7010,7 +7191,14 @@ mod tests {
         assert!(super::super::model::is_typed_object_field(title));
         assert_eq!(title_fields.len(), 2);
         assert_eq!(title_fields[0].name(), "raw");
-        assert_eq!(title_fields[0].validation.min_length, Some(3));
+        assert_eq!(
+            title_fields[0]
+                .validation
+                .length
+                .as_ref()
+                .and_then(|length| length.min),
+            Some(3)
+        );
         assert!(super::super::model::is_list_field(&settings_fields[1]));
         assert_eq!(
             super::super::model::list_item_type(&settings_fields[1])
@@ -7259,8 +7447,11 @@ resources: [
             {
                 name: "status"
                 type: PostStatus
-                validate: {
-                    min_length: 3
+                garde: {
+                    length: {
+                        min: 3
+                        mode: Chars
+                    }
                 }
             }
         ]
@@ -7504,7 +7695,7 @@ resources: [
         ]
         fields: [
             { name: "id", type: I64, id: true }
-            { name: "title", type: String, validate: { min_length: 5 } }
+            { name: "title", type: String, garde: { length: { min: 5, mode: Chars } } }
             { name: "slug", type: String, transforms: [Slugify] }
             { name: "status", type: String, transforms: [Trim, Lowercase] }
         ]
@@ -8174,6 +8365,7 @@ resources: [
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                     FieldDocument {
                         name: "title".to_owned(),
@@ -8188,6 +8380,7 @@ resources: [
                         transforms: Vec::new(),
                         relation: None,
                         validate: None,
+                        legacy_validate: None,
                     },
                 ],
             }],
@@ -10169,17 +10362,22 @@ resources: [
                         {
                             name: "title"
                             type: String
-                            validate: {
-                                min_length: 3
-                                max_length: 32
+                            garde: {
+                                length: {
+                                    min: 3
+                                    max: 32
+                                    mode: Chars
+                                }
                             }
                         }
                         {
                             name: "score"
                             type: I64
-                            validate: {
-                                minimum: 1
-                                maximum: 10
+                            garde: {
+                                range: {
+                                    min: 1
+                                    max: 10
+                                }
                             }
                         }
                     ]
@@ -10193,18 +10391,40 @@ resources: [
         let title = resources[0]
             .find_field("title")
             .expect("title should exist");
-        assert_eq!(title.validation.min_length, Some(3));
-        assert_eq!(title.validation.max_length, Some(32));
+        assert_eq!(
+            title
+                .validation
+                .length
+                .as_ref()
+                .and_then(|length| length.min),
+            Some(3)
+        );
+        assert_eq!(
+            title
+                .validation
+                .length
+                .as_ref()
+                .and_then(|length| length.max),
+            Some(32)
+        );
 
         let score = resources[0]
             .find_field("score")
             .expect("score should exist");
         assert_eq!(
-            score.validation.minimum,
+            score
+                .validation
+                .range
+                .as_ref()
+                .and_then(|range| range.min.clone()),
             Some(super::super::model::NumericBound::Integer(1))
         );
         assert_eq!(
-            score.validation.maximum,
+            score
+                .validation
+                .range
+                .as_ref()
+                .and_then(|range| range.max.clone()),
             Some(super::super::model::NumericBound::Integer(10))
         );
     }
@@ -10469,8 +10689,10 @@ resources: [
                         {
                             name: "published"
                             type: Bool
-                            validate: {
-                                minimum: 1
+                            garde: {
+                                range: {
+                                    min: 1
+                                }
                             }
                         }
                     ]
@@ -10484,7 +10706,37 @@ resources: [
             Err(error) => error,
         };
         assert!(error.to_string().contains("published"));
-        assert!(error.to_string().contains("does not support validation"));
+        assert!(error.to_string().contains("range"));
+    }
+
+    #[test]
+    fn rejects_legacy_validate_key_from_eon() {
+        let document = parse_document(
+            r#"
+            resources: [
+                {
+                    name: "Post"
+                    fields: [
+                        { name: "id", type: I64 }
+                        {
+                            name: "title"
+                            type: String
+                            validate: {
+                                min_length: 3
+                            }
+                        }
+                    ]
+                }
+            ]
+            "#,
+        );
+
+        let error = match build_resources(document.db, document.resources) {
+            Ok(_) => panic!("legacy validate should fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("legacy `validate`"));
+        assert!(error.to_string().contains("rename it to `garde`"));
     }
 
     #[test]
