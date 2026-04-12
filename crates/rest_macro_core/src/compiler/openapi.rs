@@ -1561,7 +1561,18 @@ fn nested_list_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Valu
 
 fn create_responses() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
-        ("201", plain_response("Created")),
+        (
+            "201",
+            plain_response_with_headers(
+                "Created",
+                json!({
+                    "Location": {
+                        "description": "Canonical URL of the created resource",
+                        "schema": { "type": "string" }
+                    }
+                }),
+            ),
+        ),
         (
             "400",
             api_error_response("Invalid request body or validation error"),
@@ -1633,6 +1644,12 @@ fn plain_response(description: &'static str) -> Value {
     json!({
         "description": description,
     })
+}
+
+fn plain_response_with_headers(description: &'static str, headers: Value) -> Value {
+    let mut response = plain_response(description);
+    response["headers"] = headers;
+    response
 }
 
 fn api_error_response(description: &'static str) -> Value {
@@ -3792,6 +3809,24 @@ mod tests {
             }
         });
         assert_json_snapshot(&snapshot_path("builtin_auth_admin_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_location_header_for_generic_create_responses() {
+        let service =
+            load_service_from_path(&fixture_path("mapped_api.eon")).expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Mapped API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["paths"]["/post"]["post"]["responses"]["201"]["headers"]["Location"]["schema"]
+                ["type"],
+            "string"
+        );
     }
 
     #[test]
