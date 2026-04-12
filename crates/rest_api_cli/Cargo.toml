@@ -55,6 +55,7 @@ log.workspace = true
 syn.workspace = true
 prettyplease = "0.2"
 url = "2"
+garde.workspace = true
 
 [dev-dependencies]
 jsonwebtoken.workspace = true

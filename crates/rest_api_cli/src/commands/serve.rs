@@ -1683,6 +1683,19 @@ fn invalid_json_field(path: &str, detail: impl Into<String>) -> JsonFieldError {
     )
 }
 
+fn measured_text_length(value: &str, mode: Option<compiler::LengthMode>) -> usize {
+    match mode {
+        Some(compiler::LengthMode::Chars) => value.chars().count(),
+        Some(compiler::LengthMode::Graphemes) => {
+            use garde::rules::length::HasGraphemes as _;
+
+            value.num_graphemes()
+        }
+        Some(compiler::LengthMode::Utf16) => value.encode_utf16().count(),
+        Some(compiler::LengthMode::Simple | compiler::LengthMode::Bytes) | None => value.len(),
+    }
+}
+
 fn normalize_json_item_value(kind: FieldKind, value: &Value) -> anyhow::Result<Value> {
     match kind {
         FieldKind::Integer => value
@@ -1814,26 +1827,34 @@ fn apply_nested_validation(
         return Ok(());
     }
 
-    if let Some(min_length) = field.validation.min_length {
+    if let Some(length) = field.validation.length.as_ref() {
         let text = value
             .as_str()
             .ok_or_else(|| expected_json_field(path, "a string"))?;
-        if text.chars().count() < min_length {
+        let measured = measured_text_length(text, length.mode);
+
+        if let Some(min_length) = length.min
+            && measured < min_length
+        {
             return Err(JsonFieldError::new(
                 path,
                 format!("Field `{path}` must have at least {min_length} characters"),
             ));
         }
-    }
-
-    if let Some(max_length) = field.validation.max_length {
-        let text = value
-            .as_str()
-            .ok_or_else(|| expected_json_field(path, "a string"))?;
-        if text.chars().count() > max_length {
+        if let Some(max_length) = length.max
+            && measured > max_length
+        {
             return Err(JsonFieldError::new(
                 path,
                 format!("Field `{path}` must have at most {max_length} characters"),
+            ));
+        }
+        if let Some(equal) = length.equal
+            && measured != equal
+        {
+            return Err(JsonFieldError::new(
+                path,
+                format!("Field `{path}` must have exactly {equal} characters"),
             ));
         }
     }
@@ -1843,19 +1864,29 @@ fn apply_nested_validation(
             let actual = value
                 .as_i64()
                 .ok_or_else(|| expected_json_field(path, "an integer"))?;
-            if let Some(NumericBound::Integer(minimum)) = &field.validation.minimum {
-                if actual < *minimum {
+            if let Some(range) = field.validation.range.as_ref() {
+                if let Some(NumericBound::Integer(minimum)) = &range.min
+                    && actual < *minimum
+                {
                     return Err(JsonFieldError::new(
                         path,
                         format!("Field `{path}` must be at least {minimum}"),
                     ));
                 }
-            }
-            if let Some(NumericBound::Integer(maximum)) = &field.validation.maximum {
-                if actual > *maximum {
+                if let Some(NumericBound::Integer(maximum)) = &range.max
+                    && actual > *maximum
+                {
                     return Err(JsonFieldError::new(
                         path,
                         format!("Field `{path}` must be at most {maximum}"),
+                    ));
+                }
+                if let Some(NumericBound::Integer(equal)) = &range.equal
+                    && actual != *equal
+                {
+                    return Err(JsonFieldError::new(
+                        path,
+                        format!("Field `{path}` must equal {equal}"),
                     ));
                 }
             }
@@ -1864,19 +1895,29 @@ fn apply_nested_validation(
             let actual = value
                 .as_f64()
                 .ok_or_else(|| expected_json_field(path, "a number"))?;
-            if let Some(minimum) = &field.validation.minimum {
-                if actual < minimum.as_f64() {
+            if let Some(range) = field.validation.range.as_ref() {
+                if let Some(minimum) = &range.min
+                    && actual < minimum.as_f64()
+                {
                     return Err(JsonFieldError::new(
                         path,
                         format!("Field `{path}` must be at least {}", minimum.as_f64()),
                     ));
                 }
-            }
-            if let Some(maximum) = &field.validation.maximum {
-                if actual > maximum.as_f64() {
+                if let Some(maximum) = &range.max
+                    && actual > maximum.as_f64()
+                {
                     return Err(JsonFieldError::new(
                         path,
                         format!("Field `{path}` must be at most {}", maximum.as_f64()),
+                    ));
+                }
+                if let Some(equal) = &range.equal
+                    && actual != equal.as_f64()
+                {
+                    return Err(JsonFieldError::new(
+                        path,
+                        format!("Field `{path}` must equal {}", equal.as_f64()),
                     ));
                 }
             }
@@ -2165,9 +2206,13 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
         return Ok(());
     }
 
-    if let Some(min_length) = field.validation.min_length {
+    if let Some(length) = field.validation.length.as_ref() {
         if let BoundValue::Text(text) = value {
-            if text.chars().count() < min_length {
+            let measured = measured_text_length(text, length.mode);
+
+            if let Some(min_length) = length.min
+                && measured < min_length
+            {
                 return Err(errors::validation_error(
                     field.api_name.clone(),
                     format!(
@@ -2176,12 +2221,9 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
                     ),
                 ));
             }
-        }
-    }
-
-    if let Some(max_length) = field.validation.max_length {
-        if let BoundValue::Text(text) = value {
-            if text.chars().count() > max_length {
+            if let Some(max_length) = length.max
+                && measured > max_length
+            {
                 return Err(errors::validation_error(
                     field.api_name.clone(),
                     format!(
@@ -2190,31 +2232,54 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
                     ),
                 ));
             }
+            if let Some(equal) = length.equal
+                && measured != equal
+            {
+                return Err(errors::validation_error(
+                    field.api_name.clone(),
+                    format!(
+                        "Field `{}` must have exactly {} characters",
+                        field.api_name, equal
+                    ),
+                ));
+            }
         }
     }
 
     match value {
         BoundValue::Integer(actual) => {
-            if let Some(NumericBound::Integer(minimum)) = field.validation.minimum {
-                if *actual < minimum {
+            if let Some(range) = field.validation.range.as_ref() {
+                if let Some(NumericBound::Integer(minimum)) = &range.min
+                    && *actual < *minimum
+                {
                     return Err(errors::validation_error(
                         field.api_name.clone(),
                         format!("Field `{}` must be at least {}", field.api_name, minimum),
                     ));
                 }
-            }
-            if let Some(NumericBound::Integer(maximum)) = field.validation.maximum {
-                if *actual > maximum {
+                if let Some(NumericBound::Integer(maximum)) = &range.max
+                    && *actual > *maximum
+                {
                     return Err(errors::validation_error(
                         field.api_name.clone(),
                         format!("Field `{}` must be at most {}", field.api_name, maximum),
                     ));
                 }
+                if let Some(NumericBound::Integer(equal)) = &range.equal
+                    && *actual != *equal
+                {
+                    return Err(errors::validation_error(
+                        field.api_name.clone(),
+                        format!("Field `{}` must equal {}", field.api_name, equal),
+                    ));
+                }
             }
         }
         BoundValue::Real(actual) => {
-            if let Some(minimum) = &field.validation.minimum {
-                if *actual < minimum.as_f64() {
+            if let Some(range) = field.validation.range.as_ref() {
+                if let Some(minimum) = &range.min
+                    && *actual < minimum.as_f64()
+                {
                     return Err(errors::validation_error(
                         field.api_name.clone(),
                         format!(
@@ -2224,9 +2289,9 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
                         ),
                     ));
                 }
-            }
-            if let Some(maximum) = &field.validation.maximum {
-                if *actual > maximum.as_f64() {
+                if let Some(maximum) = &range.max
+                    && *actual > maximum.as_f64()
+                {
                     return Err(errors::validation_error(
                         field.api_name.clone(),
                         format!(
@@ -2234,6 +2299,14 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
                             field.api_name,
                             maximum.as_f64()
                         ),
+                    ));
+                }
+                if let Some(equal) = &range.equal
+                    && *actual != equal.as_f64()
+                {
+                    return Err(errors::validation_error(
+                        field.api_name.clone(),
+                        format!("Field `{}` must equal {}", field.api_name, equal.as_f64()),
                     ));
                 }
             }
@@ -2314,10 +2387,14 @@ fn row_to_json(resource: &DynamicResource, row: &sqlx::any::AnyRow) -> Result<Va
 fn read_bool_column(row: &sqlx::any::AnyRow, field_name: &str) -> Result<bool, sqlx::Error> {
     match row.try_get::<bool, _>(field_name) {
         Ok(value) => Ok(value),
-        Err(bool_error) => match row.try_get::<i64, _>(field_name) {
+        Err(sqlx::Error::ColumnDecode { .. }) => match row.try_get::<i64, _>(field_name) {
             Ok(value) => Ok(value != 0),
-            Err(_) => Err(bool_error),
+            Err(sqlx::Error::ColumnDecode { .. }) => {
+                row.try_get::<i32, _>(field_name).map(|value| value != 0)
+            }
+            Err(error) => Err(error),
         },
+        Err(error) => Err(error),
     }
 }
 
@@ -2327,10 +2404,14 @@ fn read_optional_bool_column(
 ) -> Result<Option<bool>, sqlx::Error> {
     match row.try_get::<Option<bool>, _>(field_name) {
         Ok(value) => Ok(value),
-        Err(bool_error) => match row.try_get::<Option<i64>, _>(field_name) {
+        Err(sqlx::Error::ColumnDecode { .. }) => match row.try_get::<Option<i64>, _>(field_name) {
             Ok(value) => Ok(value.map(|value| value != 0)),
-            Err(_) => Err(bool_error),
+            Err(sqlx::Error::ColumnDecode { .. }) => row
+                .try_get::<Option<i32>, _>(field_name)
+                .map(|value| value.map(|value| value != 0)),
+            Err(error) => Err(error),
         },
+        Err(error) => Err(error),
     }
 }
 
@@ -4367,7 +4448,7 @@ mod tests {
     use rest_macro_core::database::{
         prepare_database_engine, resolve_database_config, service_base_dir_from_config_path,
     };
-    use rest_macro_core::db::{DbPool, query};
+    use rest_macro_core::db::{DbPool, query, query_scalar};
     use rest_macro_core::static_files::configure_static_mounts_with_runtime;
     use rest_macro_core::storage::{
         configure_public_mounts_with_runtime, configure_s3_compat_with_runtime,
@@ -4673,6 +4754,122 @@ mod tests {
             .to_request();
         let filter_response = test::call_service(&app, filter_request).await;
         assert_eq!(filter_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_roundtrips_boolean_fields_from_sqlite_integer_storage() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("mapped_api.eon", false).await;
+        query("INSERT INTO post (id, title, published) VALUES (?, ?, ?)")
+            .bind(1_i64)
+            .bind("Seeded integer boolean")
+            .bind(1_i64)
+            .execute(&state.pool)
+            .await
+            .expect("bool seed data should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let list_request = test::TestRequest::get().uri("/api/post").to_request();
+        let list_response = test::call_service(&app, list_request).await;
+        let list_status = list_response.status();
+        let list_body = test::read_body(list_response).await;
+        assert_eq!(
+            list_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&list_body)
+        );
+        let list_json: Value = serde_json::from_slice(&list_body).expect("list body should decode");
+        assert_eq!(list_json["items"][0]["published"], Value::Bool(true));
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/post")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Created boolean",
+                "published": false
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        let created_location = create_response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok())
+            .expect("create response should expose a location")
+            .to_owned();
+        let create_status = create_response.status();
+        let create_body = test::read_body(create_response).await;
+        assert_eq!(
+            create_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&create_body)
+        );
+        assert_eq!(created_location, "/api/post/2");
+        let created_json: Value =
+            serde_json::from_slice(&create_body).expect("create body should decode");
+        assert_eq!(created_json["published"], Value::Bool(false));
+    }
+
+    #[actix_web::test]
+    async fn native_serve_returns_location_without_body_when_create_succeeds_but_read_is_forbidden()
+    {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("create_visibility_api.eon", false).await;
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let token = issue_token(1, &["user"]);
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/lead")
+            .insert_header(("Authorization", format!("Bearer {}", token.as_str())))
+            .set_json(json!({
+                "title": "Restricted follow-up",
+                "message": "Visible only to admins"
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        let created_location = create_response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok())
+            .expect("create response should expose a location")
+            .to_owned();
+        let create_status = create_response.status();
+        let create_body = test::read_body(create_response).await;
+        assert_eq!(
+            create_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&create_body)
+        );
+        assert!(
+            create_body.is_empty(),
+            "restricted creates should omit the body"
+        );
+        assert_eq!(created_location, "/api/lead/1");
+
+        let stored_count = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM lead")
+            .fetch_one(&state.pool)
+            .await
+            .expect("lead count should query");
+        assert_eq!(stored_count, 1);
     }
 
     #[actix_web::test]
@@ -5432,10 +5629,11 @@ mod tests {
                     optional: false,
                     generated: GeneratedValue::None,
                     validation: compiler::FieldValidation {
-                        min_length: Some(3),
-                        max_length: None,
-                        minimum: None,
-                        maximum: None,
+                        length: Some(compiler::LengthValidation {
+                            min: Some(3),
+                            ..compiler::LengthValidation::default()
+                        }),
+                        ..compiler::FieldValidation::default()
                     },
                     supports_exact_filters: false,
                     supports_sort: false,

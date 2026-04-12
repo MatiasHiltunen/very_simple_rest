@@ -902,7 +902,7 @@ mod tests {
                 role TEXT NOT NULL,
                 tenant_scope INTEGER NOT NULL,
                 claim_workspace_id INTEGER,
-                is_staff BOOLEAN NOT NULL,
+                is_staff INTEGER NOT NULL,
                 plan TEXT NOT NULL
             )",
         )

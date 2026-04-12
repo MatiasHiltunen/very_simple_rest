@@ -788,7 +788,7 @@ where
     E: sqlx::Executor<'static, Database = Any>,
 {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    let result = apply_sqlx_binds(sqlx::query(&sql), query.binds)
+    let result = apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
         .execute(executor)
         .await?;
     Ok(DbQueryResult {
@@ -806,7 +806,7 @@ where
     E: sqlx::Executor<'static, Database = Any>,
 {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    apply_sqlx_binds(sqlx::query(&sql), query.binds)
+    apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
         .fetch_all(executor)
         .await
 }
@@ -817,7 +817,7 @@ async fn execute_sqlx_tx(
     query: BoundQuery<'_>,
 ) -> Result<DbQueryResult, sqlx::Error> {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    let result = apply_sqlx_binds(sqlx::query(&sql), query.binds)
+    let result = apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
         .execute(tx.as_mut())
         .await?;
     Ok(DbQueryResult {
@@ -832,7 +832,7 @@ async fn fetch_all_sqlx_tx(
     query: BoundQuery<'_>,
 ) -> Result<Vec<AnyRow>, sqlx::Error> {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    apply_sqlx_binds(sqlx::query(&sql), query.binds)
+    apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
         .fetch_all(tx.as_mut())
         .await
 }
@@ -894,10 +894,11 @@ fn rewrite_sql_placeholders(sql: &str, backend: SqlxBackend) -> String {
 
 fn apply_sqlx_binds<'q>(
     mut query: sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>>,
+    backend: SqlxBackend,
     binds: Vec<DbValue>,
 ) -> sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>> {
     for bind in binds {
-        query = match bind {
+        query = match normalize_sqlx_bind_value(bind, backend) {
             DbValue::Null => query.bind::<Option<String>>(None),
             DbValue::Bool(value) => query.bind(value),
             DbValue::Integer(value) => query.bind(value),
@@ -907,6 +908,15 @@ fn apply_sqlx_binds<'q>(
         };
     }
     query
+}
+
+fn normalize_sqlx_bind_value(value: DbValue, backend: SqlxBackend) -> DbValue {
+    match (backend, value) {
+        (SqlxBackend::Sqlite | SqlxBackend::Mysql, DbValue::Bool(value)) => {
+            DbValue::Integer(i64::from(value))
+        }
+        (_, value) => value,
+    }
 }
 
 #[cfg(feature = "turso-local")]
@@ -1416,9 +1426,13 @@ fn parse_turso_local_url(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "sqlite")]
+    use super::connect;
     #[cfg(feature = "turso-local")]
-    use super::{DbPool, connect_with_config, query, query_scalar};
-    use super::{SqlxBackend, rewrite_sql_placeholders};
+    use super::{DbPool, connect_with_config};
+    use super::{DbValue, SqlxBackend, normalize_sqlx_bind_value, rewrite_sql_placeholders};
+    #[cfg(any(feature = "turso-local", feature = "sqlite"))]
+    use super::{query, query_scalar};
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     #[cfg(feature = "turso-local")]
@@ -1441,6 +1455,98 @@ mod tests {
         );
         assert_eq!(rewrite_sql_placeholders(sql, SqlxBackend::Mysql), sql);
         assert_eq!(rewrite_sql_placeholders(sql, SqlxBackend::Sqlite), sql);
+    }
+
+    #[test]
+    fn normalize_sqlx_bind_value_converts_bool_for_integer_backends() {
+        assert_eq!(
+            normalize_sqlx_bind_value(DbValue::Bool(true), SqlxBackend::Sqlite),
+            DbValue::Integer(1)
+        );
+        assert_eq!(
+            normalize_sqlx_bind_value(DbValue::Bool(false), SqlxBackend::Mysql),
+            DbValue::Integer(0)
+        );
+        assert_eq!(
+            normalize_sqlx_bind_value(DbValue::Bool(true), SqlxBackend::Postgres),
+            DbValue::Bool(true)
+        );
+        assert_eq!(
+            normalize_sqlx_bind_value(DbValue::Bool(false), SqlxBackend::Unknown),
+            DbValue::Bool(false)
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[actix_web::test]
+    async fn sqlite_bool_binds_roundtrip_through_integer_storage() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vsr_sqlite_bool_binds_{stamp}.db"));
+        let database_url = format!("sqlite:{}?mode=rwc", path.display());
+
+        let pool = connect(&database_url)
+            .await
+            .expect("sqlite pool should connect");
+
+        query("CREATE TABLE flag (id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create table should succeed");
+        query("INSERT INTO flag (id, enabled) VALUES (?, ?)")
+            .bind(1_i64)
+            .bind(true)
+            .execute(&pool)
+            .await
+            .expect("true insert should succeed");
+        query("INSERT INTO flag (id, enabled) VALUES (?, ?)")
+            .bind(2_i64)
+            .bind(false)
+            .execute(&pool)
+            .await
+            .expect("false insert should succeed");
+
+        let first_type: String =
+            query_scalar::<sqlx::Any, String>("SELECT typeof(enabled) FROM flag WHERE id = ?")
+                .bind(1_i64)
+                .fetch_one(&pool)
+                .await
+                .expect("sqlite type query should succeed");
+        assert_eq!(first_type, "integer");
+
+        let first_value: i64 =
+            query_scalar::<sqlx::Any, i64>("SELECT enabled FROM flag WHERE id = ?")
+                .bind(1_i64)
+                .fetch_one(&pool)
+                .await
+                .expect("stored true value should decode");
+        let second_value: i64 =
+            query_scalar::<sqlx::Any, i64>("SELECT enabled FROM flag WHERE id = ?")
+                .bind(2_i64)
+                .fetch_one(&pool)
+                .await
+                .expect("stored false value should decode");
+        assert_eq!(first_value, 1);
+        assert_eq!(second_value, 0);
+
+        let true_count: i64 =
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM flag WHERE enabled = ?")
+                .bind(true)
+                .fetch_one(&pool)
+                .await
+                .expect("true filter should succeed");
+        let false_count: i64 =
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM flag WHERE enabled = ?")
+                .bind(false)
+                .fetch_one(&pool)
+                .await
+                .expect("false filter should succeed");
+        assert_eq!(true_count, 1);
+        assert_eq!(false_count, 1);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(feature = "turso-local")]
