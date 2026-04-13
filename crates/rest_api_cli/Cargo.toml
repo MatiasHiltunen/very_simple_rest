@@ -18,6 +18,8 @@ sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
 postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
 mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
 turso-local = ["sqlite", "rest_macro_core/turso-local"]
+aws-sdk-s3-backup = ["dep:aws-config", "dep:aws-sdk-s3"]
+s3-backup = ["aws-sdk-s3-backup"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -43,14 +45,15 @@ uuid.workspace = true
 colored = "3.1"
 rand.workspace = true
 regex = "1.12.3"
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+reqwest = { workspace = true, features = ["blocking"] }
 rcgen.workspace = true
 brotli = "7.0.0"
 flate2 = "1.1.0"
 sha2.workspace = true
-aws-config = "1.8"
-aws-sdk-s3 = "1.84"
-aws-credential-types = "1.2"
+futures-util = "0.3"
+object_store = { workspace = true, features = ["aws", "fs"] }
+aws-config = { version = "1.8", optional = true }
+aws-sdk-s3 = { version = "1.84", optional = true }
 log.workspace = true
 syn.workspace = true
 prettyplease = "0.2"

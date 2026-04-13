@@ -8,7 +8,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "aws-sdk-s3-backup")]
 use aws_config::{BehaviorVersion, meta::region::RegionProviderChain};
+#[cfg(feature = "aws-sdk-s3-backup")]
 use aws_sdk_s3::{
     Client as S3Client,
     config::{Builder as S3ConfigBuilder, Region},
@@ -16,6 +18,11 @@ use aws_sdk_s3::{
 };
 use chrono::Utc;
 use colored::Colorize;
+use futures_util::StreamExt as _;
+use object_store::{
+    ObjectStoreExt, ObjectStoreScheme, WriteMultipart, parse_url_opts,
+    path::Path as ObjectStorePath,
+};
 use reqwest::Url;
 use rest_macro_core::{
     compiler::{self, DbBackend},
@@ -29,6 +36,10 @@ use rest_macro_core::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row as _;
+use tokio::{
+    fs::File as TokioFile,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 use super::db::{connect_database, database_config_from_service_config};
 
@@ -140,14 +151,28 @@ struct RemoteArtifactTransferResult {
     files: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackupRemoteScheme {
+    File,
+    S3,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackupRemoteLocation {
+    url: Url,
+    scheme: BackupRemoteScheme,
+    prefix: ObjectStorePath,
+}
+
+#[cfg(feature = "aws-sdk-s3-backup")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct S3RemoteLocation {
     bucket: String,
     prefix: String,
 }
 
-#[derive(Clone, Debug, Default)]
-struct S3RemoteOptions<'a> {
+#[derive(Clone, Copy, Debug, Default)]
+struct RemoteTransferOptions<'a> {
     endpoint_url: Option<&'a str>,
     region: Option<&'a str>,
     path_style: bool,
@@ -273,7 +298,7 @@ pub async fn run_backup_push(
     let result = push_snapshot_artifact(
         artifact,
         remote,
-        S3RemoteOptions {
+        RemoteTransferOptions {
             endpoint_url,
             region,
             path_style,
@@ -297,7 +322,7 @@ pub async fn run_backup_pull(
         remote,
         output,
         force,
-        S3RemoteOptions {
+        RemoteTransferOptions {
             endpoint_url,
             region,
             path_style,
@@ -621,7 +646,337 @@ async fn verify_logical_dump_artifact_from_manifest(
 async fn push_snapshot_artifact(
     artifact: &Path,
     remote: &str,
-    options: S3RemoteOptions<'_>,
+    options: RemoteTransferOptions<'_>,
+) -> Result<RemoteArtifactTransferResult> {
+    let remote_location = parse_backup_remote_location(remote)?;
+    match remote_location.scheme {
+        BackupRemoteScheme::File => {
+            push_snapshot_artifact_with_object_store(artifact, remote, &remote_location, options)
+                .await
+        }
+        BackupRemoteScheme::S3 => {
+            #[cfg(feature = "aws-sdk-s3-backup")]
+            {
+                push_snapshot_artifact_with_aws_sdk(artifact, remote, options).await
+            }
+            #[cfg(not(feature = "aws-sdk-s3-backup"))]
+            {
+                push_snapshot_artifact_with_object_store(
+                    artifact,
+                    remote,
+                    &remote_location,
+                    options,
+                )
+                .await
+            }
+        }
+    }
+}
+
+async fn push_snapshot_artifact_with_object_store(
+    artifact: &Path,
+    remote: &str,
+    remote_location: &BackupRemoteLocation,
+    options: RemoteTransferOptions<'_>,
+) -> Result<RemoteArtifactTransferResult> {
+    let (artifact_dir, _, _) = load_snapshot_manifest(artifact)?;
+    let files = collect_artifact_files(&artifact_dir)?;
+    let (store, remote_prefix) = build_object_store_remote(remote_location, options)?;
+    let mut total_bytes = 0u64;
+    let mut uploaded_files = Vec::with_capacity(files.len());
+
+    for (absolute_path, relative_path) in files {
+        let object_path = join_remote_object_path(&remote_prefix, &relative_path);
+        let size = fs::metadata(&absolute_path)
+            .with_context(|| format!("failed to read metadata for {}", absolute_path.display()))?
+            .len();
+        upload_file_to_object_store(store.as_ref(), &object_path, &absolute_path, remote).await?;
+        total_bytes += size;
+        uploaded_files.push(relative_path);
+    }
+
+    Ok(RemoteArtifactTransferResult {
+        remote_uri: remote.to_owned(),
+        artifact_dir: artifact_dir.display().to_string(),
+        file_count: uploaded_files.len(),
+        total_bytes,
+        files: uploaded_files,
+    })
+}
+
+async fn pull_snapshot_artifact(
+    remote: &str,
+    output: &Path,
+    force: bool,
+    options: RemoteTransferOptions<'_>,
+) -> Result<RemoteArtifactTransferResult> {
+    let remote_location = parse_backup_remote_location(remote)?;
+    match remote_location.scheme {
+        BackupRemoteScheme::File => {
+            pull_snapshot_artifact_with_object_store(
+                remote,
+                output,
+                force,
+                &remote_location,
+                options,
+            )
+            .await
+        }
+        BackupRemoteScheme::S3 => {
+            #[cfg(feature = "aws-sdk-s3-backup")]
+            {
+                pull_snapshot_artifact_with_aws_sdk(remote, output, force, options).await
+            }
+            #[cfg(not(feature = "aws-sdk-s3-backup"))]
+            {
+                pull_snapshot_artifact_with_object_store(
+                    remote,
+                    output,
+                    force,
+                    &remote_location,
+                    options,
+                )
+                .await
+            }
+        }
+    }
+}
+
+async fn pull_snapshot_artifact_with_object_store(
+    remote: &str,
+    output: &Path,
+    force: bool,
+    remote_location: &BackupRemoteLocation,
+    options: RemoteTransferOptions<'_>,
+) -> Result<RemoteArtifactTransferResult> {
+    prepare_artifact_directory(output, force)?;
+    let (store, remote_prefix) = build_object_store_remote(remote_location, options)?;
+    let mut list_stream = store.list(Some(&remote_prefix));
+    let mut object_locations = Vec::new();
+
+    while let Some(meta) = list_stream
+        .next()
+        .await
+        .transpose()
+        .with_context(|| format!("failed to list objects under {remote}"))?
+    {
+        object_locations.push(meta.location);
+    }
+
+    if object_locations.is_empty() {
+        bail!("no backup artifact files found at {remote}");
+    }
+
+    object_locations.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+
+    let mut total_bytes = 0u64;
+    let mut downloaded_files = Vec::with_capacity(object_locations.len());
+
+    for object_location in object_locations {
+        let relative_path = relative_path_from_remote_path(&remote_prefix, &object_location)?;
+        let local_path = output.join(&relative_path);
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let size =
+            download_file_from_object_store(store.as_ref(), &object_location, &local_path, remote)
+                .await?;
+        total_bytes += size;
+        downloaded_files.push(relative_path);
+    }
+
+    let (artifact_dir, _, manifest) = load_snapshot_manifest(output)?;
+    let snapshot_path = artifact_dir.join(&manifest.artifact_file);
+    if !snapshot_path.is_file() {
+        bail!(
+            "pulled artifact is missing the manifest-declared snapshot file {}",
+            snapshot_path.display()
+        );
+    }
+
+    Ok(RemoteArtifactTransferResult {
+        remote_uri: remote.to_owned(),
+        artifact_dir: artifact_dir.display().to_string(),
+        file_count: downloaded_files.len(),
+        total_bytes,
+        files: downloaded_files,
+    })
+}
+
+fn parse_backup_remote_location(remote: &str) -> Result<BackupRemoteLocation> {
+    let trimmed = remote.trim();
+    let url = Url::parse(trimmed)
+        .with_context(|| format!("failed to parse remote `{trimmed}` as a URL"))?;
+    let (scheme, prefix) =
+        ObjectStoreScheme::parse(&url).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    let scheme = match scheme {
+        ObjectStoreScheme::Local => BackupRemoteScheme::File,
+        ObjectStoreScheme::AmazonS3 => BackupRemoteScheme::S3,
+        _ => bail!("remote must use `file:///path/to/artifact` or `s3://bucket/prefix`"),
+    };
+
+    if matches!(scheme, BackupRemoteScheme::S3)
+        && url.host_str().map(str::trim).unwrap_or_default().is_empty()
+    {
+        bail!("remote must include a bucket name");
+    }
+
+    Ok(BackupRemoteLocation {
+        url,
+        scheme,
+        prefix,
+    })
+}
+
+fn build_object_store_remote(
+    remote: &BackupRemoteLocation,
+    options: RemoteTransferOptions<'_>,
+) -> Result<(Box<dyn object_store::ObjectStore>, ObjectStorePath)> {
+    let option_pairs = build_object_store_option_pairs(remote, options);
+    parse_url_opts(&remote.url, option_pairs).map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+fn build_object_store_option_pairs(
+    remote: &BackupRemoteLocation,
+    options: RemoteTransferOptions<'_>,
+) -> Vec<(String, String)> {
+    let mut option_pairs: Vec<(String, String)> = env::vars().collect();
+
+    if matches!(remote.scheme, BackupRemoteScheme::S3) {
+        if let Some(region) = options.region {
+            option_pairs.push(("region".to_owned(), region.to_owned()));
+        }
+        if let Some(endpoint_url) = options.endpoint_url {
+            option_pairs.push(("endpoint_url".to_owned(), endpoint_url.to_owned()));
+            if endpoint_url.starts_with("http://") {
+                option_pairs.push(("aws_allow_http".to_owned(), "true".to_owned()));
+            }
+        }
+        if options.path_style {
+            option_pairs.push((
+                "virtual_hosted_style_request".to_owned(),
+                "false".to_owned(),
+            ));
+        } else if options.endpoint_url.is_none() {
+            option_pairs.push(("virtual_hosted_style_request".to_owned(), "true".to_owned()));
+        }
+    }
+
+    option_pairs
+}
+
+fn join_remote_object_path(base_path: &ObjectStorePath, relative_path: &str) -> ObjectStorePath {
+    let mut object_path = base_path.clone();
+    object_path.extend(relative_path.split('/'));
+    object_path
+}
+
+fn relative_path_from_remote_path(
+    prefix: &ObjectStorePath,
+    location: &ObjectStorePath,
+) -> Result<String> {
+    let relative_parts: Vec<String> = location
+        .prefix_match(prefix)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "encountered object `{}` outside requested remote prefix `{}`",
+                location,
+                prefix
+            )
+        })?
+        .map(|part| part.as_ref().to_owned())
+        .collect();
+
+    if relative_parts.is_empty() {
+        bail!("encountered an empty object key while pulling artifact");
+    }
+
+    Ok(relative_parts.join("/"))
+}
+
+async fn upload_file_to_object_store(
+    store: &dyn object_store::ObjectStore,
+    location: &ObjectStorePath,
+    local_path: &Path,
+    remote: &str,
+) -> Result<()> {
+    let mut file = TokioFile::open(local_path)
+        .await
+        .with_context(|| format!("failed to open {}", local_path.display()))?;
+    let upload = store
+        .put_multipart(location)
+        .await
+        .with_context(|| format!("failed to begin multipart upload for {remote}/{}", location))?;
+    let mut writer = WriteMultipart::new(upload);
+    let mut buffer = vec![0u8; 64 * 1024];
+
+    loop {
+        if let Err(error) = writer.wait_for_capacity(4).await {
+            writer
+                .abort()
+                .await
+                .context("failed to abort multipart upload after capacity error")?;
+            return Err(error).with_context(|| format!("failed to upload {remote}/{}", location));
+        }
+
+        match file.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(bytes_read) => writer.write(&buffer[..bytes_read]),
+            Err(error) => {
+                writer
+                    .abort()
+                    .await
+                    .context("failed to abort multipart upload after read error")?;
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", local_path.display()));
+            }
+        }
+    }
+
+    writer
+        .finish()
+        .await
+        .with_context(|| format!("failed to upload {remote}/{}", location))?;
+    Ok(())
+}
+
+async fn download_file_from_object_store(
+    store: &dyn object_store::ObjectStore,
+    location: &ObjectStorePath,
+    local_path: &Path,
+    remote: &str,
+) -> Result<u64> {
+    let get_result = store
+        .get(location)
+        .await
+        .with_context(|| format!("failed to download {remote}/{}", location))?;
+    let mut stream = get_result.into_stream();
+    let mut file = TokioFile::create(local_path)
+        .await
+        .with_context(|| format!("failed to create {}", local_path.display()))?;
+    let mut total_bytes = 0u64;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("failed to read {remote}/{}", location))?;
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("failed to write {}", local_path.display()))?;
+        total_bytes += chunk.len() as u64;
+    }
+
+    file.flush()
+        .await
+        .with_context(|| format!("failed to flush {}", local_path.display()))?;
+    Ok(total_bytes)
+}
+
+#[cfg(feature = "aws-sdk-s3-backup")]
+async fn push_snapshot_artifact_with_aws_sdk(
+    artifact: &Path,
+    remote: &str,
+    options: RemoteTransferOptions<'_>,
 ) -> Result<RemoteArtifactTransferResult> {
     let (artifact_dir, _, _) = load_snapshot_manifest(artifact)?;
     let location = parse_s3_remote_location(remote)?;
@@ -659,11 +1014,12 @@ async fn push_snapshot_artifact(
     })
 }
 
-async fn pull_snapshot_artifact(
+#[cfg(feature = "aws-sdk-s3-backup")]
+async fn pull_snapshot_artifact_with_aws_sdk(
     remote: &str,
     output: &Path,
     force: bool,
-    options: S3RemoteOptions<'_>,
+    options: RemoteTransferOptions<'_>,
 ) -> Result<RemoteArtifactTransferResult> {
     let location = parse_s3_remote_location(remote)?;
     prepare_artifact_directory(output, force)?;
@@ -720,7 +1076,8 @@ async fn pull_snapshot_artifact(
     })
 }
 
-async fn build_s3_client(options: S3RemoteOptions<'_>) -> Result<S3Client> {
+#[cfg(feature = "aws-sdk-s3-backup")]
+async fn build_s3_client(options: RemoteTransferOptions<'_>) -> Result<S3Client> {
     let region_provider = match options.region {
         Some(region) => RegionProviderChain::first_try(Some(Region::new(region.to_owned())))
             .or_default_provider()
@@ -741,6 +1098,7 @@ async fn build_s3_client(options: S3RemoteOptions<'_>) -> Result<S3Client> {
     Ok(S3Client::from_conf(builder.build()))
 }
 
+#[cfg(feature = "aws-sdk-s3-backup")]
 async fn list_s3_object_keys(
     client: &S3Client,
     location: &S3RemoteLocation,
@@ -784,6 +1142,7 @@ async fn list_s3_object_keys(
     Ok(keys)
 }
 
+#[cfg(feature = "aws-sdk-s3-backup")]
 fn parse_s3_remote_location(remote: &str) -> Result<S3RemoteLocation> {
     let trimmed = remote.trim();
     let without_scheme = trimmed
@@ -841,6 +1200,7 @@ fn collect_artifact_files_recursive(
     Ok(())
 }
 
+#[cfg(feature = "aws-sdk-s3-backup")]
 fn join_s3_key(prefix: &str, relative_path: &str) -> String {
     if prefix.is_empty() {
         relative_path.to_owned()
@@ -849,6 +1209,7 @@ fn join_s3_key(prefix: &str, relative_path: &str) -> String {
     }
 }
 
+#[cfg(feature = "aws-sdk-s3-backup")]
 fn relative_path_from_s3_key(prefix: &str, key: &str) -> Result<String> {
     if prefix.is_empty() {
         if key.is_empty() {
@@ -2436,11 +2797,13 @@ mod tests {
     };
 
     use super::{
-        OutputFormat, build_backup_doctor_report, build_replication_doctor_report,
-        collect_artifact_files, create_snapshot_artifact, parse_database_url,
-        parse_mysql_dump_database_name, parse_s3_remote_location, relative_path_from_s3_key,
+        BackupRemoteScheme, OutputFormat, RemoteTransferOptions, build_backup_doctor_report,
+        build_replication_doctor_report, collect_artifact_files, create_snapshot_artifact,
+        parse_backup_remote_location, parse_database_url, parse_mysql_dump_database_name,
+        pull_snapshot_artifact, push_snapshot_artifact, relative_path_from_remote_path,
         render_backup_plan, rewrite_database_url_for_docker, verify_backup_artifact,
     };
+    use object_store::path::Path as ObjectStorePath;
     use rest_macro_core::{compiler, db::query};
 
     use crate::commands::db::connect_database;
@@ -2490,25 +2853,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_s3_remote_location_supports_bucket_and_prefix() {
-        let location =
-            parse_s3_remote_location("s3://backup-bucket/path/to/run1").expect("s3 uri parses");
-        assert_eq!(location.bucket, "backup-bucket");
-        assert_eq!(location.prefix, "path/to/run1");
+    fn parse_backup_remote_location_supports_file_and_s3() {
+        let s3 =
+            parse_backup_remote_location("s3://backup-bucket/path/to/run1").expect("s3 uri parses");
+        assert_eq!(s3.scheme, BackupRemoteScheme::S3);
+        assert_eq!(s3.prefix.as_ref(), "path/to/run1");
 
-        let bucket_only = parse_s3_remote_location("s3://backup-bucket").expect("bucket parses");
-        assert_eq!(bucket_only.bucket, "backup-bucket");
-        assert!(bucket_only.prefix.is_empty());
+        let bucket_only =
+            parse_backup_remote_location("s3://backup-bucket").expect("bucket parses");
+        assert_eq!(bucket_only.scheme, BackupRemoteScheme::S3);
+        assert!(bucket_only.prefix.is_root());
+
+        let file =
+            parse_backup_remote_location("file:///var/backups/run1").expect("file uri parses");
+        assert_eq!(file.scheme, BackupRemoteScheme::File);
+        assert_eq!(file.prefix.as_ref(), "var/backups/run1");
     }
 
     #[test]
-    fn relative_path_from_s3_key_rejects_out_of_prefix_objects() {
+    fn relative_path_from_remote_path_rejects_out_of_prefix_objects() {
+        let prefix = ObjectStorePath::from("backups/run1");
         assert_eq!(
-            relative_path_from_s3_key("backups/run1", "backups/run1/manifest.json")
-                .expect("relative path should resolve"),
+            relative_path_from_remote_path(
+                &prefix,
+                &ObjectStorePath::from("backups/run1/manifest.json")
+            )
+            .expect("relative path should resolve"),
             "manifest.json"
         );
-        assert!(relative_path_from_s3_key("backups/run1", "backups/other/manifest.json").is_err());
+        assert!(
+            relative_path_from_remote_path(
+                &prefix,
+                &ObjectStorePath::from("backups/other/manifest.json")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2689,6 +3068,72 @@ mod tests {
             super::BackupArtifactKind::Snapshot
         ));
         assert!(PathBuf::from(&verify.artifact_path).is_file());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn backup_push_and_pull_support_file_remote() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic enough")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vsr_backup_file_remote_{stamp}"));
+        fs::create_dir_all(&root).expect("temp root should exist");
+        let config = root.join("backup_doctor_sqlite_api.eon");
+        fs::copy(fixture_path("backup_doctor_sqlite_api.eon"), &config)
+            .expect("fixture should copy");
+        let service = compiler::load_service_from_path(&config).expect("service should load");
+        let database_url = format!("sqlite:{}?mode=rwc", root.join("app.db").display());
+        let pool = connect_database(&database_url, Some(&config))
+            .await
+            .expect("database should connect");
+        let migration_sql =
+            compiler::render_service_migration_sql(&service).expect("migration should render");
+        pool.execute_batch(&migration_sql)
+            .await
+            .expect("migration should apply");
+        query("INSERT INTO note (title) VALUES (?)")
+            .bind("hello")
+            .execute(&pool)
+            .await
+            .expect("seed insert should work");
+
+        let artifact_dir = root.join("artifact");
+        create_snapshot_artifact(&config, &database_url, Some(&config), &artifact_dir, false)
+            .await
+            .expect("snapshot should succeed");
+
+        let remote_dir = root.join("remote-store").join("run1");
+        let remote_uri = reqwest::Url::from_directory_path(&remote_dir)
+            .expect("file url should build")
+            .to_string();
+
+        let push =
+            push_snapshot_artifact(&artifact_dir, &remote_uri, RemoteTransferOptions::default())
+                .await
+                .expect("push should succeed");
+        assert!(push.file_count >= 2);
+        assert!(remote_dir.join("manifest.json").is_file());
+
+        let restored_dir = root.join("restored");
+        let pull = pull_snapshot_artifact(
+            &remote_uri,
+            &restored_dir,
+            false,
+            RemoteTransferOptions::default(),
+        )
+        .await
+        .expect("pull should succeed");
+        assert_eq!(pull.file_count, push.file_count);
+        assert!(restored_dir.join("manifest.json").is_file());
+
+        let verify = verify_backup_artifact(&restored_dir)
+            .await
+            .expect("restored artifact should verify");
+        assert!(verify.healthy);
+        assert!(verify.checksum_verified);
 
         let _ = fs::remove_dir_all(root);
     }
