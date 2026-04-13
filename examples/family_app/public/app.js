@@ -1643,6 +1643,7 @@ async function toggleShoppingItem(itemId) {
     await updateShoppingItem(apiClient, {
       path: { id: itemId },
       body: {
+        family_id: item.family_id,
         household_id: item.household_id,
         title: item.title,
         completed: !item.completed,
