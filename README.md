@@ -27,7 +27,10 @@ cargo build --release
 
 ## Quickstart
 
-Use the generated starter instead of copying an old README snippet:
+
+Use the generated starter:
+
+- **Note that `vsr serve` creates .env and runs migrations by default if not present, so you would only need the .eon file and vsr to get defined REST API up and running.**
 
 ```bash
 vsr init my-api --starter minimal
@@ -48,14 +51,9 @@ For a fuller maintained example, see [examples/template](examples/template/READM
 
 ## Docs
 
-Human-oriented docs now live in the book source under [docs/src](docs/src/SUMMARY.md).
-Serve it locally with:
+Docs now live in the book source under [docs/src](docs/src/SUMMARY.md) until domain is set for the project.
 
-```bash
-mdbook serve docs
-```
-
-The AI-friendly single-file `.eon` reference is still generated with:
+The AI-friendly single-file `.eon` reference can be generated with:
 
 ```bash
 vsr docs --output docs/eon-reference.md
@@ -69,8 +67,7 @@ Start here:
 - [`.eon` reference](docs/eon-reference.md)
 - [CLI crate README](crates/rest_api_cli/README.md)
 
-## Examples
+## Couple Examples
 
-- [examples/template](examples/template/README.md): maintained starter-shaped `.eon` service
 - [examples/cms](examples/cms/README.md): fuller contract-first CMS example
 - [examples/family_app](examples/family_app/README.md): authorization-heavy example
