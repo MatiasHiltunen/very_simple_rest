@@ -1682,6 +1682,7 @@ fn resource_struct_tokens(
     let struct_ident = &resource.struct_ident;
     let create_ident = format_ident!("{struct_ident}Create");
     let update_ident = format_ident!("{struct_ident}Update");
+    let garde_helper_defs = garde_validation_helper_defs(resource, runtime_crate);
     let action_input_structs = resource
         .actions
         .iter()
@@ -1706,8 +1707,14 @@ fn resource_struct_tokens(
             let ident = &field.field.ident;
             let ty = create_payload_field_ty(&field);
             let rename_attr = serde_rename_attr(field.field.api_name(), &field.field.name());
+            let garde_attr = garde_field_attr_tokens(
+                field.field,
+                create_payload_field_is_optional(&field),
+                super::model::is_optional_type(&field.field.ty),
+            );
             quote! {
                 #rename_attr
+                #garde_attr
                 pub #ident: #ty,
             }
         });
@@ -1715,22 +1722,28 @@ fn resource_struct_tokens(
         let ident = &field.ident;
         let ty = &field.ty;
         let rename_attr = serde_rename_attr(field.api_name(), &field.name());
+        let garde_attr =
+            garde_field_attr_tokens(field, super::model::is_optional_type(&field.ty), true);
         quote! {
             #rename_attr
+            #garde_attr
             pub #ident: #ty,
         }
     });
 
     match resource.write_style {
         WriteModelStyle::ExistingStructWithDtos => quote! {
+            #(#garde_helper_defs)*
             #(#object_validator_defs)*
 
             #[derive(
                 Debug,
                 Clone,
                 #runtime_crate::serde::Serialize,
-                #runtime_crate::serde::Deserialize
+                #runtime_crate::serde::Deserialize,
+                #runtime_crate::garde::Validate
             )]
+            #[garde(allow_unvalidated)]
             pub struct #create_ident {
                 #(#create_fields)*
             }
@@ -1739,8 +1752,10 @@ fn resource_struct_tokens(
                 Debug,
                 Clone,
                 #runtime_crate::serde::Serialize,
-                #runtime_crate::serde::Deserialize
+                #runtime_crate::serde::Deserialize,
+                #runtime_crate::garde::Validate
             )]
+            #[garde(allow_unvalidated)]
             pub struct #update_ident {
                 #(#update_fields)*
             }
@@ -1750,6 +1765,7 @@ fn resource_struct_tokens(
             #list_query_tokens
         },
         WriteModelStyle::GeneratedStructWithDtos => quote! {
+            #(#garde_helper_defs)*
             #(#object_validator_defs)*
 
             #[derive(
@@ -1768,8 +1784,10 @@ fn resource_struct_tokens(
                 Debug,
                 Clone,
                 #runtime_crate::serde::Serialize,
-                #runtime_crate::serde::Deserialize
+                #runtime_crate::serde::Deserialize,
+                #runtime_crate::garde::Validate
             )]
+            #[garde(allow_unvalidated)]
             pub struct #create_ident {
                 #(#create_fields)*
             }
@@ -1778,8 +1796,10 @@ fn resource_struct_tokens(
                 Debug,
                 Clone,
                 #runtime_crate::serde::Serialize,
-                #runtime_crate::serde::Deserialize
+                #runtime_crate::serde::Deserialize,
+                #runtime_crate::garde::Validate
             )]
+            #[garde(allow_unvalidated)]
             pub struct #update_ident {
                 #(#update_fields)*
             }
@@ -1797,6 +1817,231 @@ fn serde_rename_attr(api_name: &str, storage_name: &str) -> TokenStream {
     } else {
         let api_name = Literal::string(api_name);
         quote!(#[serde(rename = #api_name)])
+    }
+}
+
+fn garde_validation_error_helper(resource: &ResourceSpec) -> syn::Ident {
+    format_ident!(
+        "garde_validation_error_{}",
+        resource.struct_ident.to_string().to_snake_case()
+    )
+}
+
+fn prefixed_garde_validation_error_helper(resource: &ResourceSpec) -> syn::Ident {
+    format_ident!(
+        "prefixed_garde_validation_error_{}",
+        resource.struct_ident.to_string().to_snake_case()
+    )
+}
+
+fn garde_validation_helper_defs(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
+    let error_helper = garde_validation_error_helper(resource);
+    let prefixed_error_helper = prefixed_garde_validation_error_helper(resource);
+
+    vec![
+        quote! {
+            #[allow(dead_code)]
+            fn #error_helper(
+                report: #runtime_crate::garde::Report,
+            ) -> (Option<String>, String) {
+                match report.iter().next() {
+                    Some((path, error)) => {
+                        let field = path.to_string();
+                        let message = error.to_string();
+                        if field.is_empty() {
+                            (None, message)
+                        } else {
+                            (
+                                Some(field.clone()),
+                                format!("Field `{}` {}", field, message),
+                            )
+                        }
+                    }
+                    None => (None, "Validation failed".to_owned()),
+                }
+            }
+        },
+        quote! {
+            #[allow(dead_code)]
+            fn #prefixed_error_helper(
+                base_path: &str,
+                report: #runtime_crate::garde::Report,
+            ) -> (String, String) {
+                match report.iter().next() {
+                    Some((path, error)) => {
+                        let suffix = path.to_string();
+                        let field_path = if suffix.is_empty() {
+                            base_path.to_owned()
+                        } else if base_path.is_empty() {
+                            suffix
+                        } else {
+                            format!("{}.{}", base_path, suffix)
+                        };
+                        (
+                            field_path.clone(),
+                            format!("Field `{}` {}", field_path, error),
+                        )
+                    }
+                    None => (
+                        base_path.to_owned(),
+                        format!("Field `{}` is invalid", base_path),
+                    ),
+                }
+            }
+        },
+    ]
+}
+
+fn garde_field_attr_tokens(
+    field: &super::model::FieldSpec,
+    actual_optional: bool,
+    emit_required: bool,
+) -> TokenStream {
+    let mut rules = Vec::new();
+    if emit_required && field.validation.required {
+        rules.push(quote!(required));
+    }
+
+    let nested_rules = garde_rule_tokens_from_validation(&field.validation, false);
+    if actual_optional {
+        if !nested_rules.is_empty() {
+            rules.push(quote!(inner(#(#nested_rules),*)));
+        }
+    } else {
+        rules.extend(nested_rules);
+    }
+
+    if rules.is_empty() {
+        quote! {}
+    } else {
+        quote!(#[garde(#(#rules),*)])
+    }
+}
+
+fn garde_rule_tokens_from_validation(
+    validation: &super::model::FieldValidation,
+    include_required: bool,
+) -> Vec<TokenStream> {
+    let mut rules = Vec::new();
+
+    if include_required && validation.required {
+        rules.push(quote!(required));
+    }
+    if validation.ascii {
+        rules.push(quote!(ascii));
+    }
+    if validation.alphanumeric {
+        rules.push(quote!(alphanumeric));
+    }
+    if validation.email {
+        rules.push(quote!(email));
+    }
+    if validation.url {
+        rules.push(quote!(url));
+    }
+    if validation.ip {
+        rules.push(quote!(ip));
+    }
+    if validation.ipv4 {
+        rules.push(quote!(ipv4));
+    }
+    if validation.ipv6 {
+        rules.push(quote!(ipv6));
+    }
+    if validation.phone_number {
+        rules.push(quote!(phone_number));
+    }
+    if validation.credit_card {
+        rules.push(quote!(credit_card));
+    }
+    if let Some(value) = validation.contains.as_deref() {
+        let value = Literal::string(value);
+        rules.push(quote!(contains(#value)));
+    }
+    if let Some(value) = validation.prefix.as_deref() {
+        let value = Literal::string(value);
+        rules.push(quote!(prefix(#value)));
+    }
+    if let Some(value) = validation.suffix.as_deref() {
+        let value = Literal::string(value);
+        rules.push(quote!(suffix(#value)));
+    }
+    if let Some(value) = validation.pattern.as_deref() {
+        let value = Literal::string(value);
+        rules.push(quote!(pattern(#value)));
+    }
+    if let Some(length) = validation.length.as_ref() {
+        rules.push(garde_length_rule_tokens(length));
+    }
+    if let Some(range) = validation.range.as_ref() {
+        rules.push(garde_range_rule_tokens(range));
+    }
+    if let Some(inner) = validation.inner.as_deref() {
+        let nested_rules = garde_rule_tokens_from_validation(inner, true);
+        if !nested_rules.is_empty() {
+            rules.push(quote!(inner(#(#nested_rules),*)));
+        }
+    }
+
+    rules
+}
+
+fn garde_length_rule_tokens(length: &super::model::LengthValidation) -> TokenStream {
+    let mode = length.mode.map(garde_length_mode_tokens);
+    let min = length.min.map(Literal::usize_unsuffixed);
+    let max = length.max.map(Literal::usize_unsuffixed);
+    let equal = length.equal.map(Literal::usize_unsuffixed);
+
+    let mut args = Vec::new();
+    if let Some(mode) = mode {
+        args.push(quote!(#mode));
+    }
+    if let Some(min) = min {
+        args.push(quote!(min = #min));
+    }
+    if let Some(max) = max {
+        args.push(quote!(max = #max));
+    }
+    if let Some(equal) = equal {
+        args.push(quote!(equal = #equal));
+    }
+
+    quote!(length(#(#args),*))
+}
+
+fn garde_range_rule_tokens(range: &super::model::RangeValidation) -> TokenStream {
+    let mut args = Vec::new();
+
+    if let Some(min) = range.min.as_ref() {
+        let min = numeric_bound_literal(min);
+        args.push(quote!(min = #min));
+    }
+    if let Some(max) = range.max.as_ref() {
+        let max = numeric_bound_literal(max);
+        args.push(quote!(max = #max));
+    }
+    if let Some(equal) = range.equal.as_ref() {
+        let equal = numeric_bound_literal(equal);
+        args.push(quote!(equal = #equal));
+    }
+
+    quote!(range(#(#args),*))
+}
+
+fn garde_length_mode_tokens(mode: super::model::LengthMode) -> syn::Ident {
+    match mode {
+        super::model::LengthMode::Simple => format_ident!("simple"),
+        super::model::LengthMode::Bytes => format_ident!("bytes"),
+        super::model::LengthMode::Chars => format_ident!("chars"),
+        super::model::LengthMode::Graphemes => format_ident!("graphemes"),
+        super::model::LengthMode::Utf16 => format_ident!("utf16"),
+    }
+}
+
+fn numeric_bound_literal(bound: &super::model::NumericBound) -> Literal {
+    match bound {
+        super::model::NumericBound::Integer(value) => Literal::i64_unsuffixed(*value),
+        super::model::NumericBound::Float(value) => Literal::f64_unsuffixed(*value),
     }
 }
 
@@ -1933,15 +2178,22 @@ fn collect_typed_object_validator_defs(
             runtime_crate,
         );
         let rename_attr = serde_rename_attr(nested_field.api_name(), &nested_field.name());
+        let garde_attr = garde_field_attr_tokens(
+            nested_field,
+            super::model::is_optional_type(&nested_field.ty),
+            true,
+        );
         if super::model::is_optional_type(&nested_field.ty) {
             quote! {
                 #rename_attr
+                #garde_attr
                 #[serde(default)]
                 pub #ident: #ty,
             }
         } else {
             quote! {
                 #rename_attr
+                #garde_attr
                 pub #ident: #ty,
             }
         }
@@ -1949,10 +2201,17 @@ fn collect_typed_object_validator_defs(
     let validations = nested_fields
         .iter()
         .map(typed_object_validator_field_check_tokens);
+    let prefixed_error_helper = prefixed_garde_validation_error_helper(resource);
 
     definitions.push(quote! {
         #[allow(dead_code)]
-        #[derive(Debug, Clone, #runtime_crate::serde::Deserialize)]
+        #[derive(
+            Debug,
+            Clone,
+            #runtime_crate::serde::Deserialize,
+            #runtime_crate::garde::Validate
+        )]
+        #[garde(allow_unvalidated)]
         #[serde(deny_unknown_fields)]
         struct #struct_ident {
             #(#field_defs)*
@@ -1960,7 +2219,9 @@ fn collect_typed_object_validator_defs(
 
         impl #struct_ident {
             fn validate(&self, base_path: &str) -> Result<(), (String, String)> {
-                let _ = base_path;
+                if let Err(report) = #runtime_crate::garde::Validate::validate(self) {
+                    return Err(#prefixed_error_helper(base_path, report));
+                }
                 #(#validations)*
                 Ok(())
             }
@@ -2118,7 +2379,7 @@ fn typed_object_validator_field_check_tokens(field: &super::model::FieldSpec) ->
         };
     }
 
-    if field.validation.is_empty() && field.enum_values().is_none() {
+    if field.enum_values().is_none() {
         return quote! {};
     }
 
@@ -2160,80 +2421,6 @@ fn typed_object_validator_scalar_checks(field: &super::model::FieldSpec) -> Vec<
                 ));
             }
         });
-    }
-
-    if let Some(min_length) = field.validation.min_length {
-        checks.push(quote! {
-            if value.chars().count() < #min_length {
-                return Err((
-                    field_path.clone(),
-                    format!("Field `{}` must have at least {} characters", field_path, #min_length),
-                ));
-            }
-        });
-    }
-
-    if let Some(max_length) = field.validation.max_length {
-        checks.push(quote! {
-            if value.chars().count() > #max_length {
-                return Err((
-                    field_path.clone(),
-                    format!("Field `{}` must have at most {} characters", field_path, #max_length),
-                ));
-            }
-        });
-    }
-
-    match field.sql_type.as_str() {
-        sql_type if super::model::is_integer_sql_type(sql_type) => {
-            if let Some(super::model::NumericBound::Integer(minimum)) = &field.validation.minimum {
-                let minimum = Literal::i64_unsuffixed(*minimum);
-                checks.push(quote! {
-                    if (*value as i64) < #minimum {
-                        return Err((
-                            field_path.clone(),
-                            format!("Field `{}` must be at least {}", field_path, #minimum),
-                        ));
-                    }
-                });
-            }
-            if let Some(super::model::NumericBound::Integer(maximum)) = &field.validation.maximum {
-                let maximum = Literal::i64_unsuffixed(*maximum);
-                checks.push(quote! {
-                    if (*value as i64) > #maximum {
-                        return Err((
-                            field_path.clone(),
-                            format!("Field `{}` must be at most {}", field_path, #maximum),
-                        ));
-                    }
-                });
-            }
-        }
-        "REAL" => {
-            if let Some(minimum) = &field.validation.minimum {
-                let minimum = Literal::f64_unsuffixed(minimum.as_f64());
-                checks.push(quote! {
-                    if (*value as f64) < #minimum {
-                        return Err((
-                            field_path.clone(),
-                            format!("Field `{}` must be at least {}", field_path, #minimum),
-                        ));
-                    }
-                });
-            }
-            if let Some(maximum) = &field.validation.maximum {
-                let maximum = Literal::f64_unsuffixed(maximum.as_f64());
-                checks.push(quote! {
-                    if (*value as f64) > #maximum {
-                        return Err((
-                            field_path.clone(),
-                            format!("Field `{}` must be at most {}", field_path, #maximum),
-                        ));
-                    }
-                });
-            }
-        }
-        _ => {}
     }
 
     checks
@@ -2938,6 +3125,17 @@ fn resource_impl_tokens(
     let delete_check = role_guard(runtime_crate, resource.roles.delete.as_deref());
     let create_normalization = create_normalization_tokens(resource, authorization);
     let update_normalization = update_normalization_tokens(resource);
+    let garde_error_helper = garde_validation_error_helper(resource);
+    let create_garde_validation = if create_payload_fields(resource, authorization).is_empty() {
+        quote! {}
+    } else {
+        garde_validate_item_tokens(&garde_error_helper, runtime_crate)
+    };
+    let update_garde_validation = if update_payload_fields(resource).is_empty() {
+        quote! {}
+    } else {
+        garde_validate_item_tokens(&garde_error_helper, runtime_crate)
+    };
     let create_validation = create_validation_tokens(resource, authorization, runtime_crate);
     let update_validation = update_validation_tokens(resource, runtime_crate);
     let create_payload_is_used = !create_payload_fields(resource, authorization).is_empty()
@@ -5352,6 +5550,7 @@ fn resource_impl_tokens(
                 #create_check
                 #create_payload_binding
                 #(#create_normalization)*
+                #create_garde_validation
                 #(#create_validation)*
                 #create_require_check
                 #create_body
@@ -5369,6 +5568,7 @@ fn resource_impl_tokens(
                 #update_check
                 #update_payload_binding
                 #(#update_normalization)*
+                #update_garde_validation
                 #(#update_validation)*
                 #update_body
             }
@@ -5443,8 +5643,14 @@ fn resource_action_input_struct_tokens(
             let field_ident = resource_action_input_field_ident(index);
             let ty = &target_field.ty;
             let rename = Literal::string(input.name.as_str());
+            let garde_attr = garde_field_attr_tokens(
+                target_field,
+                super::model::is_optional_type(&target_field.ty),
+                true,
+            );
             quote! {
                 #[serde(rename = #rename)]
+                #garde_attr
                 pub #field_ident: #ty,
             }
         })
@@ -5455,8 +5661,10 @@ fn resource_action_input_struct_tokens(
             Debug,
             Clone,
             #runtime_crate::serde::Serialize,
-            #runtime_crate::serde::Deserialize
+            #runtime_crate::serde::Deserialize,
+            #runtime_crate::garde::Validate
         )]
+        #[garde(allow_unvalidated)]
         pub struct #ident {
             #(#fields)*
         }
@@ -5646,6 +5854,12 @@ fn resource_action_handler_tokens(
                     )
                 })
                 .collect::<Vec<_>>();
+            let garde_error_helper = garde_validation_error_helper(resource);
+            let action_garde_validation = if action.input_fields.is_empty() {
+                quote! {}
+            } else {
+                garde_validate_item_tokens(&garde_error_helper, runtime_crate)
+            };
             let action_uses_input_assignments = match &action.behavior {
                 super::model::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
                     assignments.iter().any(|assignment| {
@@ -5658,6 +5872,7 @@ fn resource_action_handler_tokens(
                 super::model::ResourceActionBehaviorSpec::DeleteResource => false,
             };
             let action_payload_is_used = action_uses_input_assignments
+                || !action.input_fields.is_empty()
                 || !action_normalization.is_empty()
                 || !action_validation.is_empty();
             let action_payload_binding = if !action_payload_is_used {
@@ -5674,6 +5889,7 @@ fn resource_action_handler_tokens(
                     let _ = &item;
                     #action_payload_binding
                     #(#action_normalization)*
+                    #action_garde_validation
                     #(#action_validation)*
                 }
             };
@@ -6524,6 +6740,18 @@ fn list_bind_match_tokens(
         .collect()
 }
 
+fn garde_validate_item_tokens(error_helper: &syn::Ident, runtime_crate: &Path) -> TokenStream {
+    quote! {
+        if let Err(report) = #runtime_crate::garde::Validate::validate(&item) {
+            let (field, message) = super::#error_helper(report);
+            return match field {
+                Some(field) => #runtime_crate::core::errors::validation_error(field, message),
+                None => #runtime_crate::core::errors::bad_request("validation_error", message),
+            };
+        }
+    }
+}
+
 fn create_validation_tokens(
     resource: &ResourceSpec,
     authorization: Option<&AuthorizationContract>,
@@ -6641,8 +6869,7 @@ fn validation_tokens(
     optional: bool,
     runtime_crate: &Path,
 ) -> Option<TokenStream> {
-    if field.validation.is_empty() && field.object_fields.is_none() && field.enum_values().is_none()
-    {
+    if field.object_fields.is_none() && field.enum_values().is_none() {
         return None;
     }
 
@@ -6726,80 +6953,6 @@ fn validation_checks(
                 );
             }
         });
-    }
-
-    if let Some(min_length) = field.validation.min_length {
-        checks.push(quote! {
-            if value.chars().count() < #min_length {
-                return #runtime_crate::core::errors::validation_error(
-                    #field_name,
-                    format!("Field `{}` must have at least {} characters", #field_name, #min_length),
-                );
-            }
-        });
-    }
-
-    if let Some(max_length) = field.validation.max_length {
-        checks.push(quote! {
-            if value.chars().count() > #max_length {
-                return #runtime_crate::core::errors::validation_error(
-                    #field_name,
-                    format!("Field `{}` must have at most {} characters", #field_name, #max_length),
-                );
-            }
-        });
-    }
-
-    match field.sql_type.as_str() {
-        sql_type if super::model::is_integer_sql_type(sql_type) => {
-            if let Some(super::model::NumericBound::Integer(minimum)) = &field.validation.minimum {
-                let minimum = Literal::i64_unsuffixed(*minimum);
-                checks.push(quote! {
-                    if *value < #minimum {
-                        return #runtime_crate::core::errors::validation_error(
-                            #field_name,
-                            format!("Field `{}` must be at least {}", #field_name, #minimum),
-                        );
-                    }
-                });
-            }
-            if let Some(super::model::NumericBound::Integer(maximum)) = &field.validation.maximum {
-                let maximum = Literal::i64_unsuffixed(*maximum);
-                checks.push(quote! {
-                    if *value > #maximum {
-                        return #runtime_crate::core::errors::validation_error(
-                            #field_name,
-                            format!("Field `{}` must be at most {}", #field_name, #maximum),
-                        );
-                    }
-                });
-            }
-        }
-        "REAL" => {
-            if let Some(minimum) = &field.validation.minimum {
-                let minimum = Literal::f64_unsuffixed(minimum.as_f64());
-                checks.push(quote! {
-                    if (*value as f64) < #minimum {
-                        return #runtime_crate::core::errors::validation_error(
-                            #field_name,
-                            format!("Field `{}` must be at least {}", #field_name, #minimum),
-                        );
-                    }
-                });
-            }
-            if let Some(maximum) = &field.validation.maximum {
-                let maximum = Literal::f64_unsuffixed(maximum.as_f64());
-                checks.push(quote! {
-                    if (*value as f64) > #maximum {
-                        return #runtime_crate::core::errors::validation_error(
-                            #field_name,
-                            format!("Field `{}` must be at most {}", #field_name, #maximum),
-                        );
-                    }
-                });
-            }
-        }
-        _ => {}
     }
 
     checks

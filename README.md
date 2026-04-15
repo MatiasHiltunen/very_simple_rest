@@ -76,6 +76,12 @@ Install the `vsr` command-line tool from crates.io:
 cargo install vsra --locked
 ```
 
+Install the alternative AWS SDK S3 transfer backend only when you need it:
+
+```bash
+cargo install vsra --locked --features aws-sdk-s3-backup
+```
+
 If you are working from a checkout of this repository, the workspace defaults to the CLI package,
 so a plain root build produces `target/release/vsr`:
 
@@ -950,6 +956,7 @@ vsr backup export --input api.eon --output backups/run1
 vsr backup verify-restore --artifact backups/run1 --format json
 vsr backup push --artifact backups/run1 --remote s3://my-bucket/backups/run1
 vsr backup pull --remote s3://my-bucket/backups/run1 --output restored/run1
+vsr backup push --artifact backups/run1 --remote file:///var/backups/my-service/run1
 ```
 
 The first implementation is intentionally conservative:
@@ -960,7 +967,8 @@ The first implementation is intentionally conservative:
 - it can create and verify snapshot artifacts for SQLite/TursoLocal services
 - it can create Postgres/MySQL logical dump artifacts with `pg_dump` / `mysqldump`, falling back to official Docker client images when those tools are not installed locally
 - `vsr backup verify-restore` can now restore those Postgres/MySQL dump artifacts into disposable local Docker databases and validate the restored schema
-- it can push and pull backup artifact directories to S3-compatible storage
+- it can push and pull backup artifact directories to `s3://...` and `file://...` remotes
+- default backup transfer uses `object_store`; an alternative AWS SDK S3 backend is available with `--features aws-sdk-s3-backup`
 - it does not schedule jobs or orchestrate failover
 - runtime read-routing is still future work
 
@@ -1390,20 +1398,7 @@ Custom relation column renames are not supported. The Rust field name is the dat
 
 Generated `Create` and `Update` handlers can enforce field-level validation before SQL execution.
 
-Derive example:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, RestApi)]
-pub struct Post {
-    pub id: Option<i64>,
-    #[validate(min_length = 3, max_length = 120)]
-    pub title: String,
-    #[validate(minimum = 1, maximum = 10)]
-    pub score: i64,
-}
-```
-
-`.eon` example:
+`.eon` garde example:
 
 ```eon
 {
@@ -1413,30 +1408,38 @@ pub struct Post {
         {
             name: "title"
             type: String
-            validate: {
-                min_length: 3
-                max_length: 120
+            garde: {
+                length: {
+                    min: 3
+                    max: 120
+                    mode: Chars
+                }
             }
         }
         {
             name: "score"
             type: I64
-            validate: {
-                minimum: 1
-                maximum: 10
+            garde: {
+                range: {
+                    min: 1
+                    max: 10
+                }
             }
         }
     ]
 }
 ```
 
-Supported constraints:
+Supported `.eon` garde rules include `length`, `range`, `pattern`, `contains`, `prefix`,
+`suffix`, `ascii`, `alphanumeric`, `email`, `url`, `ip`, `ipv4`, `ipv6`, `required`,
+and recursive `inner`.
 
-- `min_length` and `max_length` for string-like fields
-- `minimum` and `maximum` for integer and floating-point fields
+Derive-based resources still support `#[validate(...)]`, but `.eon` config uses
+`garde: { ... }`.
 
-These constraints are reflected in generated OpenAPI schemas as `minLength`, `maxLength`,
-`minimum`, and `maximum`.
+The generated OpenAPI schema reflects the subset with a clean standard mapping, including
+`minLength`, `maxLength`, `minItems`, `maxItems`, `minimum`, `maximum`, `pattern`,
+and standard string `format` values.
 
 ## Error Responses
 

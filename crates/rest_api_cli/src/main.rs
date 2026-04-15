@@ -594,14 +594,14 @@ enum BackupCommand {
         force: bool,
     },
 
-    /// Upload a local backup artifact directory to an S3-compatible remote prefix
+    /// Upload a local backup artifact directory to an object-store remote such as `s3://bucket/prefix` or `file:///path/to/prefix`
     Push {
         /// Backup artifact directory or manifest.json path
         #[arg(short, long, value_name = "PATH")]
         artifact: PathBuf,
 
-        /// Remote artifact prefix in the form s3://bucket/prefix
-        #[arg(long, value_name = "S3_URI")]
+        /// Remote artifact prefix in the form `s3://bucket/prefix` or `file:///path/to/prefix`
+        #[arg(long, value_name = "REMOTE_URI")]
         remote: String,
 
         /// Optional S3-compatible endpoint override, for example http://127.0.0.1:9000 for MinIO
@@ -621,10 +621,10 @@ enum BackupCommand {
         format: BackupPlanFormatArg,
     },
 
-    /// Download a backup artifact directory from an S3-compatible remote prefix
+    /// Download a backup artifact directory from an object-store remote such as `s3://bucket/prefix` or `file:///path/to/prefix`
     Pull {
-        /// Remote artifact prefix in the form s3://bucket/prefix
-        #[arg(long, value_name = "S3_URI")]
+        /// Remote artifact prefix in the form `s3://bucket/prefix` or `file:///path/to/prefix`
+        #[arg(long, value_name = "REMOTE_URI")]
         remote: String,
 
         /// Local output artifact directory

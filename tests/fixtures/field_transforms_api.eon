@@ -20,7 +20,7 @@ resources: [
                 name: "slug"
                 type: String
                 transforms: [Slugify]
-                validate: { min_length: 3 }
+                garde: { length: { min: 3, mode: Chars } }
             }
             {
                 name: "status"
@@ -35,7 +35,7 @@ resources: [
                         name: "raw"
                         type: String
                         transforms: [CollapseWhitespace]
-                        validate: { min_length: 3 }
+                        garde: { length: { min: 3, mode: Chars } }
                     }
                     {
                         name: "rendered"

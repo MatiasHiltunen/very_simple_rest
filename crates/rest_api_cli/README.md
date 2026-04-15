@@ -52,10 +52,22 @@ repository root target `vsr`. Use `cargo build --workspace` when you want the fu
 cargo install vsra --locked
 ```
 
+Enable the alternative AWS SDK S3 transfer backend only when you need it:
+
+```bash
+cargo install vsra --locked --features aws-sdk-s3-backup
+```
+
 For an unpublished local checkout:
 
 ```bash
 cargo install --path crates/rest_api_cli
+```
+
+For a local checkout with the alternative AWS SDK S3 transfer backend:
+
+```bash
+cargo install --path crates/rest_api_cli --features aws-sdk-s3-backup
 ```
 
 ## Commands
@@ -683,6 +695,7 @@ vsr backup export --input api.eon --output backups/run1
 vsr backup verify-restore --artifact backups/run1 --format json
 vsr backup push --artifact backups/run1 --remote s3://my-bucket/backups/run1
 vsr backup pull --remote s3://my-bucket/backups/run1 --output restored/run1
+vsr backup push --artifact backups/run1 --remote file:///var/backups/my-service/run1
 ```
 
 Current scope:
@@ -693,7 +706,8 @@ Current scope:
 - snapshot artifact creation and restore verification for SQLite/TursoLocal services
 - Postgres/MySQL logical dump artifact creation with native tools or Docker client fallbacks
 - Postgres/MySQL logical dump restore verification in disposable local Docker databases
-- S3-compatible artifact push/pull around the local snapshot format
+- artifact push/pull around the local snapshot format for `s3://...` and `file://...` remotes
+- default backup transfer uses `object_store`; an alternative AWS SDK S3 backend is available with `--features aws-sdk-s3-backup`
 - checked `.eon` resilience vocabulary
 - no scheduling, failover orchestration, or automatic read routing yet
 

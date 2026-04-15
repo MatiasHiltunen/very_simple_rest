@@ -128,9 +128,6 @@ default-features = false
 [dependencies.once_cell]
 version = "1.9.0"
 
-[dependencies.openssl]
-version = "0.10"
-
 [dependencies.percent-encoding]
 version = "2.1.0"
 
@@ -141,6 +138,9 @@ features = [
     "std_rng",
 ]
 default-features = false
+
+[dependencies.rsa]
+version = "0.9"
 
 [dependencies.rust_decimal]
 version = "1.26.1"

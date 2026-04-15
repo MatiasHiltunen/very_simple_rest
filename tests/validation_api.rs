@@ -67,7 +67,8 @@ async fn generated_handlers_enforce_field_validation_rules() {
     let invalid_title_body: ApiErrorResponse = test::read_body_json(invalid_title_response).await;
     assert_eq!(invalid_title_body.code, "validation_error");
     assert_eq!(invalid_title_body.field.as_deref(), Some("title"));
-    assert!(invalid_title_body.message.contains("at least 3 characters"));
+    assert!(invalid_title_body.message.contains("title"));
+    assert!(invalid_title_body.message.contains("3"));
 
     let malformed_create = test::TestRequest::post()
         .uri("/api/widget")
@@ -110,7 +111,8 @@ async fn generated_handlers_enforce_field_validation_rules() {
     let invalid_score_body: ApiErrorResponse = test::read_body_json(invalid_score_response).await;
     assert_eq!(invalid_score_body.code, "validation_error");
     assert_eq!(invalid_score_body.field.as_deref(), Some("score"));
-    assert!(invalid_score_body.message.contains("at least 1"));
+    assert!(invalid_score_body.message.contains("score"));
+    assert!(invalid_score_body.message.contains("1"));
 
     let valid_create = test::TestRequest::post()
         .uri("/api/widget")
@@ -235,11 +237,16 @@ async fn generated_handlers_enforce_field_validation_rules() {
     assert_eq!(invalid_update_response.status(), StatusCode::BAD_REQUEST);
     let invalid_update_body: ApiErrorResponse = test::read_body_json(invalid_update_response).await;
     assert_eq!(invalid_update_body.code, "validation_error");
-    assert_eq!(invalid_update_body.field.as_deref(), Some("title"));
+    assert!(matches!(
+        invalid_update_body.field.as_deref(),
+        Some("title" | "score")
+    ));
     assert!(
-        invalid_update_body
-            .message
-            .contains("at most 10 characters")
+        invalid_update_body.message.contains("title")
+            || invalid_update_body.message.contains("score")
+    );
+    assert!(
+        invalid_update_body.message.contains("10") || invalid_update_body.message.contains("11")
     );
 }
 

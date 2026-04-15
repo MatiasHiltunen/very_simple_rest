@@ -374,7 +374,7 @@ Field configuration controls generated Rust types, SQL columns, validations, and
 | resources[].fields[].transforms | List<Enum> | [] | No | Trim, Lowercase, CollapseWhitespace, Slugify | Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. `Slugify` is limited to non-enum text fields. |
 | resources[].fields[].generated | Enum | Auto-inferred from the field name and ID role when omitted | No | None, AutoIncrement, CreatedAt, UpdatedAt | If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`. |
 | resources[].fields[].relation | Map | None | No | See Relations | Declares a foreign-key style relationship and optional nested route generation. |
-| resources[].fields[].validate | Map | None | No | See Field Validation | Validation is supported for text, integer, and real fields only. |
+| resources[].fields[].garde | Map | None | No | See Field Validation | Validation is supported for text, integer, real, optional, and list fields where the selected garde rules apply. |
 
 ## Relations
 
@@ -392,10 +392,13 @@ Validation is checked at compile time and only certain combinations are allowed.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].fields[].validate.min_length | usize | None | No | Non-negative integer | Only valid for text-like fields. Must be `<= max_length` when both are set. |
-| resources[].fields[].validate.max_length | usize | None | No | Non-negative integer | Only valid for text-like fields. Must be `>= min_length` when both are set. |
-| resources[].fields[].validate.minimum | i64 or f64 | None | No | Integer or float literal | Only valid for integer and real fields. Integer SQL fields require integer bounds. |
-| resources[].fields[].validate.maximum | i64 or f64 | None | No | Integer or float literal | Only valid for integer and real fields. Must be `>= minimum` when both are set. |
+| resources[].fields[].garde.length.min | usize | None | No | Non-negative integer | Minimum length for string or list fields. Use `mode: Chars` for character-count string semantics. |
+| resources[].fields[].garde.length.max | usize | None | No | Non-negative integer | Maximum length for string or list fields. |
+| resources[].fields[].garde.length.equal | usize | None | No | Non-negative integer | Exact length for string or list fields. Cannot be combined with `min`/`max`. |
+| resources[].fields[].garde.length.mode | string | None | No | `Simple`, `Bytes`, `Chars`, `Graphemes`, `Utf16` | Length measurement mode. List fields only support `Simple`. |
+| resources[].fields[].garde.range.min | i64 or f64 | None | No | Integer or float literal | Minimum numeric value for integer and real fields. |
+| resources[].fields[].garde.range.max | i64 or f64 | None | No | Integer or float literal | Maximum numeric value for integer and real fields. |
+| resources[].fields[].garde.range.equal | i64 or f64 | None | No | Integer or float literal | Exact numeric value. Cannot be combined with `min`/`max`. |
 
 ## Write-Time Transforms
 
@@ -861,7 +864,7 @@ resources: {
         list: { default_limit: 20, max_limit: 100 }
         fields: {
             id: { type: I64, id: true }
-            title: { type: String, validate: { min_length: 3, max_length: 120 } }
+            title: { type: String, garde: { length: { min: 3, max: 120, mode: Chars } } }
             created_at: { type: DateTime, generated: CreatedAt }
         }
     }
@@ -905,4 +908,3 @@ security: {
     }
 }
 ```
-

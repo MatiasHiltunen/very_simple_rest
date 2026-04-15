@@ -299,7 +299,7 @@ pub async fn inspect_live_schema(
             } else {
                 field.sql_type.clone()
             };
-            if normalize_sql_type(&column.sql_type) != expected_type {
+            if normalize_sql_type(&column.sql_type, backend) != expected_type {
                 issues.push(format!(
                     "column `{}` on `{}` has type `{}` but `{}` was expected",
                     field_name, resource.table_name, column.sql_type, expected_type
@@ -650,7 +650,7 @@ fn sanitize_migration_stem(value: &str) -> String {
     }
 }
 
-fn normalize_sql_type(raw: &str) -> String {
+fn normalize_sql_type(raw: &str, backend: AuthDbBackend) -> String {
     let value = raw.trim().to_ascii_lowercase();
     if value.contains("bigint") || value.contains("int8") {
         "BIGINT".to_owned()
@@ -663,7 +663,10 @@ fn normalize_sql_type(raw: &str) -> String {
     {
         "TEXT".to_owned()
     } else if value.contains("bool") || value == "tinyint" {
-        "BOOLEAN".to_owned()
+        match backend {
+            AuthDbBackend::Sqlite | AuthDbBackend::Mysql => "INTEGER".to_owned(),
+            AuthDbBackend::Postgres => "BOOLEAN".to_owned(),
+        }
     } else if value.contains("real")
         || value.contains("floa")
         || value.contains("doub")
@@ -1310,7 +1313,7 @@ mod tests {
         BUILTIN_AUTH_MANAGEMENT_MIGRATION, BUILTIN_AUTH_MIGRATION, BUILTIN_AUTHZ_RUNTIME_MIGRATION,
         apply_auth_migration, apply_migrations, apply_setup_migrations, check_derive_migration,
         generate_authz_migration, generate_derive_migration, generate_diff_migration,
-        inspect_live_schema, migration_files, required_index_names,
+        inspect_live_schema, migration_files, normalize_sql_type, required_index_names,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1325,6 +1328,23 @@ mod tests {
 
     fn eon_path(path: &std::path::Path) -> String {
         path.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    fn normalize_sql_type_maps_boolean_by_backend() {
+        assert_eq!(
+            normalize_sql_type("BOOLEAN", AuthDbBackend::Sqlite),
+            "INTEGER"
+        );
+        assert_eq!(normalize_sql_type("bool", AuthDbBackend::Mysql), "INTEGER");
+        assert_eq!(
+            normalize_sql_type("boolean", AuthDbBackend::Postgres),
+            "BOOLEAN"
+        );
+        assert_eq!(
+            normalize_sql_type("tinyint", AuthDbBackend::Mysql),
+            "INTEGER"
+        );
     }
 
     #[test]

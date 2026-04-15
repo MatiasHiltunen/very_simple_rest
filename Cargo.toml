@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-native-tls", "any", "derive", "chrono", "json", "uuid", "rust_decimal"] }
 serde_json = "1.0"
 base64 = "0.22"
-jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
 bcrypt = "0.19"
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = "1.40"
@@ -26,19 +26,21 @@ heck = "0.5"
 dotenvy = "0.15.7"
 rand = "0.10.0"
 uuid = { version = "1.22", features = ["v4", "serde"] }
+garde = { version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }
 rest_macro = { path = "crates/rest_macro", version = "0.1.10" }
 rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.10" }
 log = "0.4"
 env_logger = "0.11"
 actix-cors = "0.7"
 actix-files = "0.6"
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 turso = "0.6.0-pre.2"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
 sha2 = "0.10"
 hex = "0.4"
 rcgen = "0.14"
+object_store = { version = "0.13.2", default-features = false }
 
 [workspace.package]
 version = "0.1.10"
@@ -80,6 +82,7 @@ actix-files.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 uuid.workspace = true
+garde.workspace = true
 dotenvy.workspace = true
 
 # Feature configuration for the top-level crate

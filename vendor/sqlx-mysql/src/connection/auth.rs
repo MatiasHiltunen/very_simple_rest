@@ -2,10 +2,8 @@ use bytes::buf::Chain;
 use bytes::Bytes;
 use digest::{Digest, OutputSizeUser};
 use generic_array::GenericArray;
-use openssl::encrypt::Encrypter;
-use openssl::md::MessageDigest;
-use openssl::pkey::{PKey, Public};
-use openssl::rsa::Padding;
+use rand::thread_rng;
+use rsa::{pkcs8::DecodePublicKey, Oaep, RsaPublicKey};
 use sha1::Sha1;
 use sha2::Sha256;
 
@@ -163,7 +161,10 @@ async fn encrypt_rsa<'s>(
     xor_eq(&mut pass, &nonce);
 
     // client sends an RSA encrypted password
-    encrypt_rsa_with_oaep_sha1(rsa_pub_key, &pass)
+    let pkey = parse_rsa_pub_key(rsa_pub_key)?;
+    let padding = Oaep::new::<sha1::Sha1>();
+    pkey.encrypt(&mut thread_rng(), padding, &pass[..])
+        .map_err(Error::protocol)
 }
 
 // XOR(x, y)
@@ -184,25 +185,13 @@ fn to_asciz(s: &str) -> Vec<u8> {
     z.into_bytes()
 }
 
-fn encrypt_rsa_with_oaep_sha1(key: &[u8], input: &[u8]) -> Result<Vec<u8>, Error> {
-    let public_key = parse_rsa_pub_key(key)?;
-    let mut encrypter = Encrypter::new(&public_key).map_err(Error::protocol)?;
-    let digest = MessageDigest::sha1();
+// https://docs.rs/rsa/0.3.0/rsa/struct.RSAPublicKey.html?search=#example-1
+fn parse_rsa_pub_key(key: &[u8]) -> Result<RsaPublicKey, Error> {
+    let pem = std::str::from_utf8(key).map_err(Error::protocol)?;
 
-    encrypter
-        .set_rsa_padding(Padding::PKCS1_OAEP)
-        .map_err(Error::protocol)?;
-    encrypter.set_rsa_oaep_md(digest).map_err(Error::protocol)?;
-    encrypter.set_rsa_mgf1_md(digest).map_err(Error::protocol)?;
+    // This takes advantage of the knowledge that we know
+    // we are receiving a PKCS#8 RSA Public Key at all
+    // times from MySQL
 
-    let mut output = vec![0_u8; encrypter.encrypt_len(input).map_err(Error::protocol)?];
-    let output_len = encrypter
-        .encrypt(input, &mut output)
-        .map_err(Error::protocol)?;
-    output.truncate(output_len);
-    Ok(output)
-}
-
-fn parse_rsa_pub_key(key: &[u8]) -> Result<PKey<Public>, Error> {
-    PKey::public_key_from_pem(key).map_err(Error::protocol)
+    RsaPublicKey::from_public_key_pem(pem).map_err(Error::protocol)
 }

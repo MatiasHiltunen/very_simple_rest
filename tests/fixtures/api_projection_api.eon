@@ -20,7 +20,7 @@ resources: [
         }
         fields: [
             { name: "id", type: I64 }
-            { name: "title_text", type: String, validate: { min_length: 3 } }
+            { name: "title_text", type: String, garde: { length: { min: 3, mode: Chars } } }
             { name: "author_id", type: I64 }
             { name: "team_id", type: I64 }
             { name: "draft_body", type: String, nullable: true }

@@ -614,20 +614,108 @@ impl ReferentialAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LengthMode {
+    Simple,
+    Bytes,
+    Chars,
+    Graphemes,
+    Utf16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LengthValidation {
+    pub min: Option<usize>,
+    pub max: Option<usize>,
+    pub equal: Option<usize>,
+    pub mode: Option<LengthMode>,
+}
+
+impl LengthValidation {
+    pub fn is_empty(&self) -> bool {
+        self.min.is_none() && self.max.is_none() && self.equal.is_none() && self.mode.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RangeValidation {
+    pub min: Option<NumericBound>,
+    pub max: Option<NumericBound>,
+    pub equal: Option<NumericBound>,
+}
+
+impl RangeValidation {
+    pub fn is_empty(&self) -> bool {
+        self.min.is_none() && self.max.is_none() && self.equal.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FieldValidation {
-    pub min_length: Option<usize>,
-    pub max_length: Option<usize>,
-    pub minimum: Option<NumericBound>,
-    pub maximum: Option<NumericBound>,
+    pub ascii: bool,
+    pub alphanumeric: bool,
+    pub email: bool,
+    pub url: bool,
+    pub ip: bool,
+    pub ipv4: bool,
+    pub ipv6: bool,
+    pub phone_number: bool,
+    pub credit_card: bool,
+    pub required: bool,
+    pub dive: bool,
+    pub contains: Option<String>,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub pattern: Option<String>,
+    pub length: Option<LengthValidation>,
+    pub range: Option<RangeValidation>,
+    pub inner: Option<Box<FieldValidation>>,
 }
 
 impl FieldValidation {
     pub fn is_empty(&self) -> bool {
-        self.min_length.is_none()
-            && self.max_length.is_none()
-            && self.minimum.is_none()
-            && self.maximum.is_none()
+        !self.ascii
+            && !self.alphanumeric
+            && !self.email
+            && !self.url
+            && !self.ip
+            && !self.ipv4
+            && !self.ipv6
+            && !self.phone_number
+            && !self.credit_card
+            && !self.required
+            && !self.dive
+            && self.contains.is_none()
+            && self.prefix.is_none()
+            && self.suffix.is_none()
+            && self.pattern.is_none()
+            && self
+                .length
+                .as_ref()
+                .map(LengthValidation::is_empty)
+                .unwrap_or(true)
+            && self
+                .range
+                .as_ref()
+                .map(RangeValidation::is_empty)
+                .unwrap_or(true)
+            && self.inner.is_none()
+    }
+
+    pub fn has_string_rules(&self) -> bool {
+        self.ascii
+            || self.alphanumeric
+            || self.email
+            || self.url
+            || self.ip
+            || self.ipv4
+            || self.ipv6
+            || self.phone_number
+            || self.credit_card
+            || self.contains.is_some()
+            || self.prefix.is_some()
+            || self.suffix.is_some()
+            || self.pattern.is_some()
     }
 }
 
@@ -1655,139 +1743,218 @@ pub fn validate_field_validations(fields: &[FieldSpec], span: Span) -> syn::Resu
             continue;
         }
 
-        if field.enum_values.is_some() {
+        validate_field_validation(field, validation, span, field.name().as_str())?;
+    }
+
+    Ok(())
+}
+
+fn validate_field_validation(
+    field: &FieldSpec,
+    validation: &FieldValidation,
+    span: Span,
+    label: &str,
+) -> syn::Result<()> {
+    let optional = is_optional_type(&field.ty);
+    let is_list = field.list_item_ty.is_some();
+    let is_object = field.object_fields.is_some();
+    let is_bool = !is_list && is_bool_type(&field.ty);
+    let is_string =
+        !is_list && !is_object && matches!(type_leaf_name(&field.ty).as_deref(), Some("String"));
+    let is_integer = !is_list && !is_bool && is_integer_sql_type(field.sql_type.as_str());
+    let is_float = !is_list && !is_bool && field.sql_type == "REAL";
+
+    if validation.required && !optional {
+        return Err(syn::Error::new(
+            span,
+            format!("field `{label}` only supports `required` on optional fields"),
+        ));
+    }
+
+    if validation.has_string_rules() && !is_string {
+        return Err(syn::Error::new(
+            span,
+            format!("field `{label}` only supports string garde rules on string fields"),
+        ));
+    }
+
+    if validation.dive && !is_object {
+        return Err(syn::Error::new(
+            span,
+            format!("field `{label}` only supports `dive` on object fields"),
+        ));
+    }
+
+    if let Some(length) = &validation.length {
+        if !is_string && !is_list {
+            return Err(syn::Error::new(
+                span,
+                format!("field `{label}` only supports `length` on string or list fields"),
+            ));
+        }
+
+        if length.equal.is_some() && (length.min.is_some() || length.max.is_some()) {
             return Err(syn::Error::new(
                 span,
                 format!(
-                    "enum field `{}` does not support validation constraints",
-                    field.name()
+                    "field `{label}` cannot combine `length.equal` with `length.min` or `length.max`"
                 ),
             ));
         }
 
-        if is_structured_scalar_type(&field.ty) {
+        if length.equal.is_none() && length.min.is_none() && length.max.is_none() {
             return Err(syn::Error::new(
                 span,
                 format!(
-                    "field `{}` does not support validation constraints",
-                    field.name()
+                    "field `{label}` must set at least one of `length.min`, `length.max`, or `length.equal`"
                 ),
             ));
         }
 
-        if is_bool_type(&field.ty) {
+        if let (Some(min), Some(max)) = (length.min, length.max)
+            && min > max
+        {
+            return Err(syn::Error::new(
+                span,
+                format!("field `{label}` has `length.min` greater than `length.max`"),
+            ));
+        }
+
+        if is_list
+            && matches!(
+                length.mode,
+                Some(
+                    LengthMode::Bytes
+                        | LengthMode::Chars
+                        | LengthMode::Graphemes
+                        | LengthMode::Utf16
+                )
+            )
+        {
+            return Err(syn::Error::new(
+                span,
+                format!("field `{label}` only supports `length.mode = Simple` on list fields"),
+            ));
+        }
+    }
+
+    if let Some(range) = &validation.range {
+        if !is_integer && !is_float {
             return Err(syn::Error::new(
                 span,
                 format!(
-                    "field `{}` does not support validation constraints",
-                    field.name()
+                    "field `{label}` only supports `range` on integer or floating-point fields"
                 ),
             ));
         }
 
-        if let (Some(min), Some(max)) = (validation.min_length, validation.max_length) {
-            if min > max {
-                return Err(syn::Error::new(
-                    span,
-                    format!(
-                        "field `{}` has `min_length` greater than `max_length`",
-                        field.name()
-                    ),
-                ));
-            }
+        if range.equal.is_some() && (range.min.is_some() || range.max.is_some()) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "field `{label}` cannot combine `range.equal` with `range.min` or `range.max`"
+                ),
+            ));
         }
 
-        match field.sql_type.as_str() {
-            "TEXT" => {
-                if validation.minimum.is_some() || validation.maximum.is_some() {
-                    return Err(syn::Error::new(
-                        span,
-                        format!(
-                            "field `{}` only supports `min_length` and `max_length` validation",
-                            field.name()
-                        ),
-                    ));
-                }
-            }
-            sql_type if is_integer_sql_type(sql_type) => {
-                if validation.min_length.is_some() || validation.max_length.is_some() {
-                    return Err(syn::Error::new(
-                        span,
-                        format!(
-                            "field `{}` only supports `minimum` and `maximum` validation",
-                            field.name()
-                        ),
-                    ));
-                }
+        if range.equal.is_none() && range.min.is_none() && range.max.is_none() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "field `{label}` must set at least one of `range.min`, `range.max`, or `range.equal`"
+                ),
+            ));
+        }
 
-                if !matches!(
-                    (&validation.minimum, &validation.maximum),
-                    (
-                        None | Some(NumericBound::Integer(_)),
-                        None | Some(NumericBound::Integer(_))
-                    )
-                ) {
-                    return Err(syn::Error::new(
-                        span,
-                        format!(
-                            "integer field `{}` requires integer `minimum` and `maximum` values",
-                            field.name()
-                        ),
-                    ));
-                }
+        if is_integer
+            && !matches!(
+                (&range.min, &range.max, &range.equal),
+                (
+                    None | Some(NumericBound::Integer(_)),
+                    None | Some(NumericBound::Integer(_)),
+                    None | Some(NumericBound::Integer(_))
+                )
+            )
+        {
+            return Err(syn::Error::new(
+                span,
+                format!("integer field `{label}` requires integer `range` bounds"),
+            ));
+        }
 
-                if let (
-                    Some(NumericBound::Integer(minimum)),
-                    Some(NumericBound::Integer(maximum)),
-                ) = (&validation.minimum, &validation.maximum)
-                {
-                    if minimum > maximum {
-                        return Err(syn::Error::new(
-                            span,
-                            format!(
-                                "field `{}` has `minimum` greater than `maximum`",
-                                field.name()
-                            ),
-                        ));
-                    }
-                }
-            }
-            "REAL" => {
-                if validation.min_length.is_some() || validation.max_length.is_some() {
-                    return Err(syn::Error::new(
-                        span,
-                        format!(
-                            "field `{}` only supports `minimum` and `maximum` validation",
-                            field.name()
-                        ),
-                    ));
-                }
+        if let (Some(minimum), Some(maximum)) = (&range.min, &range.max)
+            && minimum.as_f64() > maximum.as_f64()
+        {
+            return Err(syn::Error::new(
+                span,
+                format!("field `{label}` has `range.min` greater than `range.max`"),
+            ));
+        }
+    }
 
-                if let (Some(minimum), Some(maximum)) = (&validation.minimum, &validation.maximum) {
-                    if minimum.as_f64() > maximum.as_f64() {
-                        return Err(syn::Error::new(
-                            span,
-                            format!(
-                                "field `{}` has `minimum` greater than `maximum`",
-                                field.name()
-                            ),
-                        ));
-                    }
-                }
-            }
-            _ => {
-                return Err(syn::Error::new(
-                    span,
-                    format!(
-                        "field `{}` does not support validation constraints",
-                        field.name()
-                    ),
-                ));
-            }
+    if let Some(inner) = validation.inner.as_deref() {
+        if optional {
+            let inner_ty = base_type(&field.ty);
+            let inner_label = format!("{label} inner");
+            validate_nested_inner_validation(
+                inner,
+                &inner_ty,
+                field.list_item_ty.as_ref(),
+                field.object_fields.as_deref(),
+                field.sql_type.as_str(),
+                span,
+                inner_label.as_str(),
+            )?;
+        } else if let Some(item_ty) = field.list_item_ty.as_ref() {
+            let inner_sql_type = infer_sql_type(item_ty, DbBackend::Sqlite);
+            let inner_label = format!("{label} inner");
+            validate_nested_inner_validation(
+                inner,
+                item_ty,
+                None,
+                None,
+                inner_sql_type.as_str(),
+                span,
+                inner_label.as_str(),
+            )?;
+        } else {
+            return Err(syn::Error::new(
+                span,
+                format!("field `{label}` only supports `inner` on optional or list fields"),
+            ));
         }
     }
 
     Ok(())
+}
+
+fn validate_nested_inner_validation(
+    validation: &FieldValidation,
+    ty: &Type,
+    list_item_ty: Option<&Type>,
+    object_fields: Option<&[FieldSpec]>,
+    sql_type: &str,
+    span: Span,
+    label: &str,
+) -> syn::Result<()> {
+    let synthetic_field = FieldSpec {
+        ident: syn::parse_str("inner_value").expect("synthetic field name should parse"),
+        api_name: "inner_value".to_owned(),
+        expose_in_api: true,
+        unique: false,
+        enum_name: None,
+        enum_values: None,
+        transforms: Vec::new(),
+        ty: ty.clone(),
+        list_item_ty: list_item_ty.cloned(),
+        object_fields: object_fields.map(|fields| fields.to_vec()),
+        sql_type: sql_type.to_owned(),
+        is_id: false,
+        generated: GeneratedValue::None,
+        validation: validation.clone(),
+        relation: None,
+    };
+    validate_field_validation(&synthetic_field, validation, span, label)
 }
 
 pub fn validate_field_transforms(fields: &[FieldSpec], span: Span) -> syn::Result<()> {

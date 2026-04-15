@@ -40,7 +40,7 @@ resources: [
         ]
         fields: [
             { name: "id", type: I64, id: true }
-            { name: "title", type: String, validate: { min_length: 5 } }
+            { name: "title", type: String, garde: { length: { min: 5, mode: Chars } } }
             { name: "slug", type: String, transforms: [Slugify] }
             { name: "status", type: String, transforms: [Trim, Lowercase] }
         ]

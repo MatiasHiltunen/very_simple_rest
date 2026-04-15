@@ -12,7 +12,7 @@ resources: [
                 name: "title"
                 type: Object
                 fields: [
-                    { name: "raw", type: String, validate: { min_length: 3 } }
+                    { name: "raw", type: String, garde: { length: { min: 3, mode: Chars } } }
                     { name: "rendered", type: String, nullable: true }
                 ]
             }
@@ -28,7 +28,7 @@ resources: [
                         type: Object
                         nullable: true
                         fields: [
-                            { name: "slug", type: String, validate: { min_length: 2 } }
+                            { name: "slug", type: String, garde: { length: { min: 2, mode: Chars } } }
                         ]
                     }
                 ]

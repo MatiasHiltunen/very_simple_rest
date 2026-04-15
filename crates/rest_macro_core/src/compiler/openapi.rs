@@ -1561,7 +1561,18 @@ fn nested_list_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Valu
 
 fn create_responses() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
-        ("201", plain_response("Created")),
+        (
+            "201",
+            plain_response_with_headers(
+                "Created",
+                json!({
+                    "Location": {
+                        "description": "Canonical URL of the created resource",
+                        "schema": { "type": "string" }
+                    }
+                }),
+            ),
+        ),
         (
             "400",
             api_error_response("Invalid request body or validation error"),
@@ -1633,6 +1644,12 @@ fn plain_response(description: &'static str) -> Value {
     json!({
         "description": description,
     })
+}
+
+fn plain_response_with_headers(description: &'static str, headers: Value) -> Value {
+    let mut response = plain_response(description);
+    response["headers"] = headers;
+    response
 }
 
 fn api_error_response(description: &'static str) -> Value {
@@ -1920,7 +1937,7 @@ fn object_schema(fields: &[&FieldSpec]) -> Value {
     for field in fields {
         let field_name = field.api_name().to_owned();
         properties.insert(field_name.clone(), field_schema(field));
-        if !is_optional_type(&field.ty) {
+        if !is_optional_type(&field.ty) || field.validation.required {
             required.push(field_name);
         }
     }
@@ -2038,7 +2055,9 @@ fn create_payload_schema(resource: &ResourceSpec) -> Value {
             field_name.clone(),
             field_schema_with_optional(field.field, field.allow_admin_override),
         );
-        if !field.allow_admin_override && !is_optional_type(&field.field.ty) {
+        if !field.allow_admin_override
+            && (!is_optional_type(&field.field.ty) || field.field.validation.required)
+        {
             required.push(field_name);
         }
     }
@@ -2076,7 +2095,7 @@ fn action_input_schema(
             .find_field(input.target_field.as_str())
             .expect("validated action input target field should exist");
         properties.insert(input.name.clone(), field_schema(field));
-        if !is_optional_type(&field.ty) {
+        if !is_optional_type(&field.ty) || field.validation.required {
             required.push(input.name.clone());
         }
     }
@@ -2190,17 +2209,60 @@ fn schema_for_type(ty: &syn::Type) -> Value {
 }
 
 fn apply_field_validation_schema(field: &FieldSpec, schema: &mut Value) {
-    if let Some(min_length) = field.validation.min_length {
-        schema["minLength"] = json!(min_length);
+    if let Some(length) = field.validation.length.as_ref() {
+        if is_list_field(field) {
+            if matches!(length.mode, None | Some(super::model::LengthMode::Simple)) {
+                if let Some(min) = length.min {
+                    schema["minItems"] = json!(min);
+                }
+                if let Some(max) = length.max {
+                    schema["maxItems"] = json!(max);
+                }
+                if let Some(equal) = length.equal {
+                    schema["minItems"] = json!(equal);
+                    schema["maxItems"] = json!(equal);
+                }
+            }
+        } else if matches!(length.mode, Some(super::model::LengthMode::Chars)) {
+            if let Some(min) = length.min {
+                schema["minLength"] = json!(min);
+            }
+            if let Some(max) = length.max {
+                schema["maxLength"] = json!(max);
+            }
+            if let Some(equal) = length.equal {
+                schema["minLength"] = json!(equal);
+                schema["maxLength"] = json!(equal);
+            }
+        }
     }
-    if let Some(max_length) = field.validation.max_length {
-        schema["maxLength"] = json!(max_length);
+
+    if let Some(range) = field.validation.range.as_ref() {
+        if let Some(minimum) = &range.min {
+            schema["minimum"] = numeric_bound_json(minimum);
+        }
+        if let Some(maximum) = &range.max {
+            schema["maximum"] = numeric_bound_json(maximum);
+        }
+        if let Some(equal) = &range.equal {
+            let equal = numeric_bound_json(equal);
+            schema["minimum"] = equal.clone();
+            schema["maximum"] = equal;
+        }
     }
-    if let Some(minimum) = &field.validation.minimum {
-        schema["minimum"] = numeric_bound_json(minimum);
+
+    if let Some(pattern) = field.validation.pattern.as_deref() {
+        schema["pattern"] = json!(pattern);
     }
-    if let Some(maximum) = &field.validation.maximum {
-        schema["maximum"] = numeric_bound_json(maximum);
+
+    if field.validation.email {
+        schema["format"] = json!("email");
+    } else if field.validation.url {
+        schema["format"] = json!("uri");
+    } else if field.validation.ipv4 {
+        schema["format"] = json!("ipv4");
+    } else if field.validation.ipv6 {
+        schema["format"] = json!("ipv6");
     }
 }
 
@@ -3747,6 +3809,24 @@ mod tests {
             }
         });
         assert_json_snapshot(&snapshot_path("builtin_auth_admin_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_location_header_for_generic_create_responses() {
+        let service =
+            load_service_from_path(&fixture_path("mapped_api.eon")).expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Mapped API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+
+        assert_eq!(
+            document["paths"]["/post"]["post"]["responses"]["201"]["headers"]["Location"]["schema"]
+                ["type"],
+            "string"
+        );
     }
 
     #[test]

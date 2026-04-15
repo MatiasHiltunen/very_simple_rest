@@ -224,32 +224,44 @@ resources: {
 			name: {
 				type: String
 				transforms: [Trim, CollapseWhitespace]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			slug: {
 				type: String
 				transforms: [Trim, Slugify]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			default_locale: {
 				type: String
 				transforms: [Trim, Lowercase]
-				validate: {
-					min_length: 2
-					max_length: 16
+				garde: {
+					length: {
+						min: 2
+						max: 16
+						mode: Chars
+					}
 				}
 			}
 			public_base_url: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 2048
+				garde: {
+					length: {
+						max: 2048
+						mode: Chars
+					}
 				}
 			}
 			theme_settings: {
@@ -349,31 +361,43 @@ resources: {
 			handle: {
 				type: String
 				transforms: [Trim, Slugify]
-				validate: {
-					min_length: 2
-					max_length: 64
+				garde: {
+					length: {
+						min: 2
+						max: 64
+						mode: Chars
+					}
 				}
 			}
 			display_name: {
 				type: String
 				transforms: [Trim, CollapseWhitespace]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			headline: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 200
+				garde: {
+					length: {
+						max: 200
+						mode: Chars
+					}
 				}
 			}
 			bio: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 5000
+				garde: {
+					length: {
+						max: 5000
+						mode: Chars
+					}
 				}
 			}
 			avatar_asset_id: {
@@ -493,51 +517,69 @@ resources: {
 			file_name: {
 				type: String
 				transforms: [Trim]
-				validate: {
-					min_length: 1
-					max_length: 255
+				garde: {
+					length: {
+						min: 1
+						max: 255
+						mode: Chars
+					}
 				}
 			}
 			mime_type: {
 				type: String
 				transforms: [Trim, Lowercase]
-				validate: {
-					min_length: 3
-					max_length: 120
+				garde: {
+					length: {
+						min: 3
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			byte_size: {
 				type: I64
-				validate: {
-					minimum: 0
+				garde: {
+					range: {
+						min: 0
+					}
 				}
 			}
 			width: {
 				type: I32
 				nullable: true
-				validate: {
-					minimum: 1
+				garde: {
+					range: {
+						min: 1
+					}
 				}
 			}
 			height: {
 				type: I32
 				nullable: true
-				validate: {
-					minimum: 1
+				garde: {
+					range: {
+						min: 1
+					}
 				}
 			}
 			alt_text: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 5000
+				garde: {
+					length: {
+						max: 5000
+						mode: Chars
+					}
 				}
 			}
 			source_url: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 2048
+				garde: {
+					length: {
+						max: 2048
+						mode: Chars
+					}
 				}
 			}
 			focal_point: {
@@ -658,31 +700,43 @@ resources: {
 			name: {
 				type: String
 				transforms: [Trim, CollapseWhitespace]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			slug: {
 				type: String
 				transforms: [Trim, Slugify]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			description: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 2000
+				garde: {
+					length: {
+						max: 2000
+						mode: Chars
+					}
 				}
 			}
 			color: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 32
+				garde: {
+					length: {
+						max: 32
+						mode: Chars
+					}
 				}
 			}
 			meta: {
@@ -855,24 +909,33 @@ resources: {
 			slug: {
 				type: String
 				transforms: [Trim, Slugify]
-				validate: {
-					min_length: 2
-					max_length: 160
+				garde: {
+					length: {
+						min: 2
+						max: 160
+						mode: Chars
+					}
 				}
 			}
 			title: {
 				type: String
 				transforms: [Trim, CollapseWhitespace]
-				validate: {
-					min_length: 2
-					max_length: 200
+				garde: {
+					length: {
+						min: 2
+						max: 200
+						mode: Chars
+					}
 				}
 			}
 			summary: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 4000
+				garde: {
+					length: {
+						max: 4000
+						mode: Chars
+					}
 				}
 			}
 			body_blocks: {
@@ -887,22 +950,31 @@ resources: {
 					meta_title: {
 						type: String
 						nullable: true
-						validate: {
-							max_length: 160
+						garde: {
+							length: {
+								max: 160
+								mode: Chars
+							}
 						}
 					}
 					meta_description: {
 						type: String
 						nullable: true
-						validate: {
-							max_length: 320
+						garde: {
+							length: {
+								max: 320
+								mode: Chars
+							}
 						}
 					}
 					canonical_url: {
 						type: String
 						nullable: true
-						validate: {
-							max_length: 2048
+						garde: {
+							length: {
+								max: 2048
+								mode: Chars
+							}
 						}
 					}
 					index_mode: {
@@ -1125,24 +1197,33 @@ resources: {
 			name: {
 				type: String
 				transforms: [Trim, CollapseWhitespace]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			handle: {
 				type: String
 				transforms: [Trim, Slugify]
-				validate: {
-					min_length: 2
-					max_length: 120
+				garde: {
+					length: {
+						min: 2
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			description: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 1000
+				garde: {
+					length: {
+						max: 1000
+						mode: Chars
+					}
 				}
 			}
 			settings: {
@@ -1239,9 +1320,12 @@ resources: {
 			label: {
 				type: String
 				transforms: [Trim, CollapseWhitespace]
-				validate: {
-					min_length: 1
-					max_length: 120
+				garde: {
+					length: {
+						min: 1
+						max: 120
+						mode: Chars
+					}
 				}
 			}
 			item_kind: MenuItemKind
@@ -1256,15 +1340,20 @@ resources: {
 			external_url: {
 				type: String
 				nullable: true
-				validate: {
-					max_length: 2048
+				garde: {
+					length: {
+						max: 2048
+						mode: Chars
+					}
 				}
 			}
 			target: LinkTarget
 			sort_order: {
 				type: I32
-				validate: {
-					minimum: 0
+				garde: {
+					range: {
+						min: 0
+					}
 				}
 			}
 			meta: {
