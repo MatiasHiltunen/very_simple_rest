@@ -2,6 +2,7 @@
 /target/
 **/*.rs.bk
 Cargo.lock
+!/Cargo.lock
 
 # Database files
 *.db
@@ -21,3 +22,6 @@ Cargo.lock
 
 # Windows files
 Thumbs.db
+
+# mdBook build output
+docs/book/

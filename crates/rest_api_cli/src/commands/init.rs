@@ -401,7 +401,7 @@ resources: [
             {{ name: "id", type: I64, id: true }}
 
             // Scalars, validation, uniqueness, and transforms.
-            {{ name: "title", type: String, validate: {{ min_length: 3, max_length: 120 }} }}
+            {{ name: "title", type: String, garde: {{ length: {{ min: 3, max: 120, mode: Chars }} }} }}
             {{ name: "slug", type: String, unique: true, transforms: [Slugify] }}
             {{ name: "status", type: PostStatus }}
 
@@ -504,6 +504,9 @@ mod tests {
         assert!(api_eon.contains(r#"module: "demo_app""#));
         assert!(api_eon.contains(r#"kind: "DeleteResource""#));
         assert!(api_eon.contains(r#"kind: TursoLocal"#));
+        assert!(api_eon.contains(r#"encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }"#));
+        assert!(api_eon.contains(r#"garde: { length: { min: 3, max: 120, mode: Chars } }"#));
+        assert!(!api_eon.contains("validate:"));
         assert!(api_eon.contains("// Optional declarative actions."));
         assert!(readme.contains("vsr serve api.eon"));
         assert!(project_root.join(".env.example").exists());

@@ -1172,12 +1172,12 @@ referenced by `exists` conditions.\n\n",
                 "Declares a foreign-key style relationship and optional nested route generation.",
             ),
             row(
-                "resources[].fields[].validate",
+                "resources[].fields[].garde",
                 "Map",
                 "None",
                 "No",
                 "See Field Validation",
-                "Validation is supported for text, integer, and real fields only.",
+                "Validation is supported for text, integer, real, optional, and list fields where the selected garde rules apply.",
             ),
         ],
     );
@@ -1220,36 +1220,60 @@ referenced by `exists` conditions.\n\n",
         "Validation is checked at compile time and only certain combinations are allowed.",
         &[
             row(
-                "resources[].fields[].validate.min_length",
+                "resources[].fields[].garde.length.min",
                 "usize",
                 "None",
                 "No",
                 "Non-negative integer",
-                "Only valid for text-like fields. Must be `<= max_length` when both are set.",
+                "Minimum length for string or list fields. Use `mode: Chars` for character-count string semantics.",
             ),
             row(
-                "resources[].fields[].validate.max_length",
+                "resources[].fields[].garde.length.max",
                 "usize",
                 "None",
                 "No",
                 "Non-negative integer",
-                "Only valid for text-like fields. Must be `>= min_length` when both are set.",
+                "Maximum length for string or list fields.",
             ),
             row(
-                "resources[].fields[].validate.minimum",
+                "resources[].fields[].garde.length.equal",
+                "usize",
+                "None",
+                "No",
+                "Non-negative integer",
+                "Exact length for string or list fields. Cannot be combined with `min`/`max`.",
+            ),
+            row(
+                "resources[].fields[].garde.length.mode",
+                "string",
+                "None",
+                "No",
+                "`Simple`, `Bytes`, `Chars`, `Graphemes`, `Utf16`",
+                "Length measurement mode. List fields only support `Simple`.",
+            ),
+            row(
+                "resources[].fields[].garde.range.min",
                 "i64 or f64",
                 "None",
                 "No",
                 "Integer or float literal",
-                "Only valid for integer and real fields. Integer SQL fields require integer bounds.",
+                "Minimum numeric value for integer and real fields.",
             ),
             row(
-                "resources[].fields[].validate.maximum",
+                "resources[].fields[].garde.range.max",
                 "i64 or f64",
                 "None",
                 "No",
                 "Integer or float literal",
-                "Only valid for integer and real fields. Must be `>= minimum` when both are set.",
+                "Maximum numeric value for integer and real fields.",
+            ),
+            row(
+                "resources[].fields[].garde.range.equal",
+                "i64 or f64",
+                "None",
+                "No",
+                "Integer or float literal",
+                "Exact numeric value. Cannot be combined with `min`/`max`.",
             ),
         ],
     );
@@ -3059,7 +3083,7 @@ resources: [
         list: { default_limit: 20, max_limit: 100 }
         fields: {
             id: { type: I64, id: true }
-            title: { type: String, validate: { min_length: 3, max_length: 120 } }
+            title: { type: String, garde: { length: { min: 3, max: 120, mode: Chars } } }
             created_at: { type: DateTime, generated: CreatedAt }
         }
     }
@@ -3163,7 +3187,12 @@ fn push_code_block(markdown: &mut String, language: &str, code: &str) {
 }
 
 fn markdown_cell(value: &str) -> String {
-    value.replace('|', "\\|").replace('\n', "<br>")
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('|', "\\|")
+        .replace('\n', "<br>")
 }
 
 fn format_option(value: Option<&str>) -> String {
@@ -3206,14 +3235,17 @@ mod tests {
         assert!(markdown.contains("## Resource Keys"));
         assert!(markdown.contains("## Security Overview"));
         assert!(markdown.contains("## Auth Claims"));
-        assert!(markdown.contains("authorization.permissions.<permission_name>.actions"));
+        assert!(markdown.contains("authorization.permissions."));
         assert!(markdown.contains("database.resilience.backup.mode"));
         assert!(markdown.contains("build.release.lto"));
         assert!(markdown.contains("build.target_cpu_native"));
         assert!(markdown.contains("build.artifacts.binary.path"));
         assert!(markdown.contains("clients.ts.output_dir.path"));
         assert!(markdown.contains("runtime.compression.static_precompressed"));
-        assert!(markdown.contains("security.auth.claims.<claim_name>"));
+        assert!(markdown.contains("security.auth.claims."));
+        assert!(markdown.contains("resources[].fields[].garde.length.min"));
+        assert!(!markdown.contains("resources[].fields[].validate"));
+        assert!(markdown.contains("authorization.permissions."));
         assert!(markdown.contains("fields: {"));
     }
 

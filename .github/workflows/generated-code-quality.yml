@@ -79,6 +79,14 @@ jobs:
           cargo run -p vsra -- check --input examples/cms/api.eon --strict
           cargo run -p vsra -- check --input examples/family_app/family_app.eon --strict
 
+      - name: Verify Docs Reference, Starter Template, And Book
+        run: |
+          cargo test -p vsra render_eon_reference_mentions_core_sections -- --nocapture
+          cargo test -p vsra checked_in_reference_matches_generator -- --nocapture
+          cargo test -p vsra create_project_writes_local_comment_config_starter -- --nocapture
+          cargo install mdbook --locked --version 0.5.2
+          mdbook build docs
+
       - name: Verify Generated Client Report Snapshot
         run: cargo test -p vsra --test client_cli client_ts_self_test_static_report_matches_snapshot -- --nocapture
 

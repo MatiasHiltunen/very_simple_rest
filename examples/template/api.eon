@@ -7,6 +7,7 @@
 //   vsr migrate generate --input api.eon --output migrations/0001_init.sql
 //   vsr serve api.eon
 //   vsr build api.eon --release
+//   vsr docs --output docs/eon-reference.md
 
 module: "template_example"
 
@@ -14,7 +15,7 @@ database: {
     engine: {
         kind: TursoLocal
         path: "var/data/app.db"
-        encryption_key_env: "TURSO_ENCRYPTION_KEY"
+        encryption_key: { env_or_file: "TURSO_ENCRYPTION_KEY" }
     }
 }
 

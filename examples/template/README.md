@@ -18,6 +18,7 @@ cd examples/template
 cp .env.example .env
 vsr migrate generate --input api.eon --output migrations/0001_init.sql
 vsr serve api.eon
+vsr docs --output docs/eon-reference.md
 ```
 
 ## What It Shows
@@ -34,3 +35,5 @@ vsr serve api.eon
 - This is a reference contract, not a generated app skeleton.
 - `vsr init my-api` now creates the same style of local starter directly, without copying code from
   `examples/` or fetching from GitHub.
+- The generated `.eon` reference from `vsr docs` is the canonical single-file docs surface for
+  local AI/tooling use.

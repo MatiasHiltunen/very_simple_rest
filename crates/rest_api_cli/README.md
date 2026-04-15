@@ -10,6 +10,9 @@ OpenAPI and `.eon` reference docs, and manage setup/auth flows.
 
 The published crate is `vsra`; the installed binary is `vsr`.
 
+For the browsable repo docs, see `docs/src/` and run `mdbook serve docs` from the repository
+root. The exact AI-friendly `.eon` reference stays in `docs/eon-reference.md`.
+
 ## Quick Start
 
 ```bash
@@ -457,6 +460,8 @@ vsr docs --output docs/eon-reference.md
 ```
 
 The checked-in reference document lives at `docs/eon-reference.md`.
+The `mdBook` chapter under `docs/src/reference/` includes that same file directly instead of
+duplicating it.
 
 ### Authorization Explain
 
@@ -994,5 +999,7 @@ vsr create-admin --email $ADMIN_EMAIL --password $ADMIN_PASSWORD
 ## Related Documentation
 
 - [Main Project README](../../README.md)
-- [API Documentation](../../docs/api.md)
-- [Environment Configuration](../../docs/configuration.md) 
+- [Book Overview](../../docs/src/overview.md)
+- [Quickstart](../../docs/src/quickstart.md)
+- [`.eon` Reference](../../docs/eon-reference.md)
+- [Infisical Guide](../../docs/infisical.md)

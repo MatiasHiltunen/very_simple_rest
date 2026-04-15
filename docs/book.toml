@@ -1,0 +1,13 @@
+[book]
+title = "VSR Book"
+description = "Human-oriented documentation for very_simple_rest / vsr"
+authors = ["Matias Hiltunen"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/MatiasHiltunen/very_simple_rest"
+site-url = "/"

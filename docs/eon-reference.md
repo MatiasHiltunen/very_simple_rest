@@ -18,9 +18,9 @@ The parser accepts both the original list-based syntax and the newer keyed-map s
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources | List<Resource> or Map<ResourceName, Resource> | Required | Yes | List entries or keyed map entries | Resource names must be unique. In map form the key is the canonical resource name. If `name` is also present inside the value, it must match the key. |
-| resources[].fields | List<Field> or Map<FieldName, Field \| Type> | Required | Yes | List entries, keyed objects, or shorthand type values | Field names must be unique per resource. In map form the value may be a full field object or just a type such as `title: String`. |
-| resources.<resource>.fields.<field> | Field object or scalar type | Shorthand defaults to a non-null, non-id, non-generated field | No | `String`, `I64`, `Bool`, or any other supported field type | Map shorthand is only available for field maps, not list entries. |
+| resources | List&lt;Resource&gt; or Map&lt;ResourceName, Resource&gt; | Required | Yes | List entries or keyed map entries | Resource names must be unique. In map form the key is the canonical resource name. If `name` is also present inside the value, it must match the key. |
+| resources[].fields | List&lt;Field&gt; or Map&lt;FieldName, Field \| Type&gt; | Required | Yes | List entries, keyed objects, or shorthand type values | Field names must be unique per resource. In map form the value may be a full field object or just a type such as `title: String`. |
+| resources.&lt;resource&gt;.fields.&lt;field&gt; | Field object or scalar type | Shorthand defaults to a non-null, non-id, non-generated field | No | `String`, `I64`, `Bool`, or any other supported field type | Map shorthand is only available for field maps, not list entries. |
 
 ```eon
 resources: {
@@ -50,8 +50,8 @@ These keys are read from the service root.
 | tls | Map | Disabled unless the block is present | No | See TLS | Any configured TLS field enables HTTPS/Rustls handling in emitted servers. |
 | static | Map | No static mounts | No | See Static Mounts | Declares filesystem-backed static directories and SPA mounts. |
 | security | Map | All optional features off / empty | No | See Security | Controls request limits, CORS, trusted proxies, auth settings, headers, and rate limits. |
-| enums | List<Enum> or Map<EnumName, Enum \| List<String>> | None | No | Named enum definitions | Declares reusable string-enum vocabularies that fields can reference by name. |
-| mixins | List<Mixin> or Map<MixinName, Mixin> | None | No | Named local mixin definitions | Declares reusable local field/index bundles that resources can expand with `use`. |
+| enums | List&lt;Enum&gt; or Map&lt;EnumName, Enum \| List&lt;String&gt;&gt; | None | No | Named enum definitions | Declares reusable string-enum vocabularies that fields can reference by name. |
+| mixins | List&lt;Mixin&gt; or Map&lt;MixinName, Mixin&gt; | None | No | Named local mixin definitions | Declares reusable local field/index bundles that resources can expand with `use`. |
 | resources | List or keyed map | None | Yes | Resource definitions | A service must contain at least one resource. |
 
 ## Enums
@@ -60,8 +60,8 @@ The optional `enums` block declares reusable string-enum vocabularies for field 
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| enums.<enum_name>.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Enum names must be unique and are referenced from `resources[].fields[].type`. |
-| enums.<enum_name>.values | List<String> | Required when the enum exists | Yes | One or more unique string values | Enum values are validated at request time and emitted in OpenAPI schemas and exact-filter parameters. |
+| enums.&lt;enum_name&gt;.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Enum names must be unique and are referenced from `resources[].fields[].type`. |
+| enums.&lt;enum_name&gt;.values | List&lt;String&gt; | Required when the enum exists | Yes | One or more unique string values | Enum values are validated at request time and emitted in OpenAPI schemas and exact-filter parameters. |
 
 ## Mixins
 
@@ -69,9 +69,9 @@ The optional `mixins` block declares reusable local field/index bundles. The fir
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| mixins.<mixin_name>.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Mixin names must be unique within the `.eon` file and are referenced from `resources[].use`. |
-| mixins.<mixin_name>.fields | List<Field> or Map<FieldName, Field \| Type> | [] | No | Field definitions | Expanded into each resource that references the mixin. Resource-local fields are appended after mixin fields. |
-| mixins.<mixin_name>.indexes | List<Index> | [] | No | See Indexes | Expanded into each resource that references the mixin after the mixin fields are added. In the first slice, mixin indexes must reference fields declared by the same mixin. |
+| mixins.&lt;mixin_name&gt;.name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Mixin names must be unique within the `.eon` file and are referenced from `resources[].use`. |
+| mixins.&lt;mixin_name&gt;.fields | List&lt;Field&gt; or Map&lt;FieldName, Field \| Type&gt; | [] | No | Field definitions | Expanded into each resource that references the mixin. Resource-local fields are appended after mixin fields. |
+| mixins.&lt;mixin_name&gt;.indexes | List&lt;Index&gt; | [] | No | See Indexes | Expanded into each resource that references the mixin after the mixin fields are added. In the first slice, mixin indexes must reference fields declared by the same mixin. |
 
 ## Authorization Contract
 
@@ -80,9 +80,9 @@ The optional `authorization` block declares static scope, permission, template, 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | authorization.management_api | Map | Disabled | No | See Authorization Management API | Opt-in generated runtime authorization management routes for modules and emitted servers. |
-| authorization.scopes | Map<ScopeName, Scope> | None | No | Keyed scope map | Scope names must be unique valid identifiers. Use this to declare hierarchical authorization scope vocabulary. |
-| authorization.permissions | Map<PermissionName, Permission> | None | No | Keyed permission map | Permission names must be unique valid identifiers. Each permission must declare at least one action and one resource. |
-| authorization.templates | Map<TemplateName, Template> | None | No | Keyed template map | Template names must be unique valid identifiers. Templates currently reference permissions and scopes only. |
+| authorization.scopes | Map&lt;ScopeName, Scope&gt; | None | No | Keyed scope map | Scope names must be unique valid identifiers. Use this to declare hierarchical authorization scope vocabulary. |
+| authorization.permissions | Map&lt;PermissionName, Permission&gt; | None | No | Keyed permission map | Permission names must be unique valid identifiers. Each permission must declare at least one action and one resource. |
+| authorization.templates | Map&lt;TemplateName, Template&gt; | None | No | Keyed template map | Template names must be unique valid identifiers. Templates currently reference permissions and scopes only. |
 | authorization.hybrid_enforcement | Map | None | No | See Authorization Hybrid Enforcement | Opt-in additive runtime grant checks for generated item-scoped CRUD handlers. |
 
 ## Authorization Hybrid Enforcement
@@ -91,15 +91,15 @@ Hybrid enforcement lets generated handlers consult runtime scoped grants after s
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| authorization.hybrid_enforcement.resources | Map<ResourceName, HybridResource> | None | No | Keyed resource map | Each entry must reference a declared resource, declared scope, and at least one matching permission action. |
-| authorization.hybrid_enforcement.resources.<resource>.scope | String | Required | Yes | Declared scope name such as `Family` | Runtime grants are evaluated against this scope for the configured resource. |
-| authorization.hybrid_enforcement.resources.<resource>.scope_field | String | Required | Yes | Declared resource field name such as `family_id` | The generated handler derives the runtime scope value from this row field. |
-| authorization.hybrid_enforcement.resources.<resource>.scope_sources | Map | Action-derived defaults | No | See Hybrid Scope Sources | Explicitly declares which request shapes may derive scope from `scope_field`. Omit it to keep the current action-based defaults. |
-| authorization.hybrid_enforcement.resources.<resource>.scope_sources.item | Bool | true for `Read`/`Update`/`Delete` | No | true, false | Enables row-derived scope for item routes and created-response fallback. `Update` and `Delete` require this source. |
-| authorization.hybrid_enforcement.resources.<resource>.scope_sources.collection_filter | Bool | true for `Read` | No | true, false | Enables top-level collection `Read` when the request includes an exact `filter_<scope_field>` value. |
-| authorization.hybrid_enforcement.resources.<resource>.scope_sources.nested_parent | Bool | true for `Read` | No | true, false | Enables nested collection `Read` when the nested parent filter targets `scope_field`. |
-| authorization.hybrid_enforcement.resources.<resource>.scope_sources.create_payload | Bool | true for `Create` | No | true, false | Enables the create-payload fallback for claim-controlled `policies.create` scope fields. `Create` requires this source. |
-| authorization.hybrid_enforcement.resources.<resource>.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
+| authorization.hybrid_enforcement.resources | Map&lt;ResourceName, HybridResource&gt; | None | No | Keyed resource map | Each entry must reference a declared resource, declared scope, and at least one matching permission action. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope | String | Required | Yes | Declared scope name such as `Family` | Runtime grants are evaluated against this scope for the configured resource. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope_field | String | Required | Yes | Declared resource field name such as `family_id` | The generated handler derives the runtime scope value from this row field. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope_sources | Map | Action-derived defaults | No | See Hybrid Scope Sources | Explicitly declares which request shapes may derive scope from `scope_field`. Omit it to keep the current action-based defaults. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope_sources.item | Bool | true for `Read`/`Update`/`Delete` | No | true, false | Enables row-derived scope for item routes and created-response fallback. `Update` and `Delete` require this source. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope_sources.collection_filter | Bool | true for `Read` | No | true, false | Enables top-level collection `Read` when the request includes an exact `filter_&lt;scope_field&gt;` value. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope_sources.nested_parent | Bool | true for `Read` | No | true, false | Enables nested collection `Read` when the nested parent filter targets `scope_field`. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.scope_sources.create_payload | Bool | true for `Create` | No | true, false | Enables the create-payload fallback for claim-controlled `policies.create` scope fields. `Create` requires this source. |
+| authorization.hybrid_enforcement.resources.&lt;resource&gt;.actions | [Action] | Required | Yes | Create, Read, Update, Delete | `Read`, `Update`, and `Delete` require matching static row policies to supplement. `Create` is allowed only when `scope_field` is already claim-controlled by `policies.create`. |
 
 ## Authorization Management API
 
@@ -108,7 +108,7 @@ When enabled, generated modules and emitted servers automatically mount the runt
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | authorization.management_api.enabled | Bool | true when the block exists; otherwise disabled | No | true, false | Controls whether generated `configure(...)` mounts the runtime authorization management routes automatically. |
-| authorization.management_api.mount | String | `/authz/runtime` | No | Absolute route path such as `/authz/runtime` or `/ops/authz` | Must start with `/`. Trailing `/` is normalized away. The mounted endpoints are `<mount>/evaluate`, `<mount>/assignment-events`, `<mount>/assignments`, `<mount>/assignments/{id}`, `<mount>/assignments/{id}/revoke`, and `<mount>/assignments/{id}/renew`. |
+| authorization.management_api.mount | String | `/authz/runtime` | No | Absolute route path such as `/authz/runtime` or `/ops/authz` | Must start with `/`. Trailing `/` is normalized away. The mounted endpoints are `&lt;mount&gt;/evaluate`, `&lt;mount&gt;/assignment-events`, `&lt;mount&gt;/assignments`, `&lt;mount&gt;/assignments/{id}`, `&lt;mount&gt;/assignments/{id}/revoke`, and `&lt;mount&gt;/assignments/{id}/renew`. |
 
 ## Authorization Scopes
 
@@ -116,8 +116,8 @@ Scopes define named authorization boundaries and optional parent relationships.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| authorization.scopes.<scope_name>.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
-| authorization.scopes.<scope_name>.parent | String | None | No | Another declared scope name | Parent scopes must exist and cannot form cycles. |
+| authorization.scopes.&lt;scope_name&gt;.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
+| authorization.scopes.&lt;scope_name&gt;.parent | String | None | No | Another declared scope name | Parent scopes must exist and cannot form cycles. |
 
 ## Authorization Permissions
 
@@ -125,10 +125,10 @@ Permissions declare which resource actions belong to a named permission.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| authorization.permissions.<permission_name>.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
-| authorization.permissions.<permission_name>.actions | [Action] | Required when the permission exists | Yes | Read, Create, Update, Delete | At least one action is required. |
-| authorization.permissions.<permission_name>.resources | [String] | Required when the permission exists | Yes | Declared resource names such as `Post` or `ScopedDoc` | At least one resource is required. References must match declared `.eon` resources. |
-| authorization.permissions.<permission_name>.scopes | [String] | None | No | Declared scope names | Optional static scope hints for future runtime-managed authorization layers. |
+| authorization.permissions.&lt;permission_name&gt;.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
+| authorization.permissions.&lt;permission_name&gt;.actions | [Action] | Required when the permission exists | Yes | Read, Create, Update, Delete | At least one action is required. |
+| authorization.permissions.&lt;permission_name&gt;.resources | [String] | Required when the permission exists | Yes | Declared resource names such as `Post` or `ScopedDoc` | At least one resource is required. References must match declared `.eon` resources. |
+| authorization.permissions.&lt;permission_name&gt;.scopes | [String] | None | No | Declared scope names | Optional static scope hints for future runtime-managed authorization layers. |
 
 ## Authorization Templates
 
@@ -136,9 +136,9 @@ Templates group permissions and optional scopes into reusable named bundles.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| authorization.templates.<template_name>.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
-| authorization.templates.<template_name>.permissions | [String] | Required when the template exists | Yes | Declared permission names | At least one permission is required. |
-| authorization.templates.<template_name>.scopes | [String] | None | No | Declared scope names | Optional static scope hints attached to the template. |
+| authorization.templates.&lt;template_name&gt;.description | String | None | No | Any non-empty string | Optional human-readable description for tooling and docs. |
+| authorization.templates.&lt;template_name&gt;.permissions | [String] | Required when the template exists | Yes | Declared permission names | At least one permission is required. |
+| authorization.templates.&lt;template_name&gt;.scopes | [String] | None | No | Declared scope names | Optional static scope hints attached to the template. |
 
 ```eon
 authorization: {
@@ -180,13 +180,13 @@ Each resource describes one generated REST model and its CRUD surface.
 | resources[].api_name | String | The resolved table name | No | Valid API path segment | Overrides the public collection/item route segment without changing the storage table name. |
 | resources[].id_field | String | `id` | No | Field name | The named field must exist on the resource. |
 | resources[].roles | Map | No role checks | No | See Resource Roles | Declares coarse role gates for read/create/update/delete. |
-| resources[].policies | Map | `admin_bypass = true`; no row policies | No | See Row Policies | Declares row-level filters and assignments using `user.id` or `claim.<name>` sources. |
+| resources[].policies | Map | `admin_bypass = true`; no row policies | No | See Row Policies | Declares row-level filters and assignments using `user.id` or `claim.&lt;name&gt;` sources. |
 | resources[].list | Map | No custom limit caps | No | See List Settings | Controls generated list endpoint defaults and hard caps. |
 | resources[].api | Map | No API projection or response contexts | No | See Resource API | Separates the public API field surface from storage fields and can define named response contexts. |
-| resources[].use | List<String> | [] | No | Declared mixin names | Expands the listed local mixins into the resource before normal field/index validation. Using the same mixin more than once is rejected. |
-| resources[].indexes | List<Index> | No explicit indexes | No | See Indexes | Declares explicit single-field or composite indexes in addition to the automatic relation and policy-derived index hints. |
-| resources[].many_to_many | List<ManyToMany> | No declared many-to-many routes | No | See Many-to-Many | Declares read-side collection routes over an explicit join resource without changing the underlying storage schema. |
-| resources[].actions | List<Action> | No declared custom actions | No | See Resource Actions | Declares additional resource-scoped routes. The current slice supports item-scoped `POST` actions with declarative `UpdateFields` or `DeleteResource` behaviors. |
+| resources[].use | List&lt;String&gt; | [] | No | Declared mixin names | Expands the listed local mixins into the resource before normal field/index validation. Using the same mixin more than once is rejected. |
+| resources[].indexes | List&lt;Index&gt; | No explicit indexes | No | See Indexes | Declares explicit single-field or composite indexes in addition to the automatic relation and policy-derived index hints. |
+| resources[].many_to_many | List&lt;ManyToMany&gt; | No declared many-to-many routes | No | See Many-to-Many | Declares read-side collection routes over an explicit join resource without changing the underlying storage schema. |
+| resources[].actions | List&lt;Action&gt; | No declared custom actions | No | See Resource Actions | Declares additional resource-scoped routes. The current slice supports item-scoped `POST` actions with declarative `UpdateFields` or `DeleteResource` behaviors. |
 | resources[].fields | List or keyed map | None | Yes | Field definitions | Each resource must define its fields explicitly. |
 
 ## Resource API
@@ -195,9 +195,9 @@ The optional `api` block lets a resource expose a different public field surface
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].api.fields | List<ApiFieldProjection> or Map<ApiFieldName, String \| ApiFieldProjection> | Expose every field by its storage name | No | Projection definitions | When present, only the declared API fields are exposed. Storage-backed entries map one API field name to one storage field via `from`, while computed entries use `template` to interpolate already-exposed scalar API fields at response time. |
+| resources[].api.fields | List&lt;ApiFieldProjection&gt; or Map&lt;ApiFieldName, String \| ApiFieldProjection&gt; | Expose every field by its storage name | No | Projection definitions | When present, only the declared API fields are exposed. Storage-backed entries map one API field name to one storage field via `from`, while computed entries use `template` to interpolate already-exposed scalar API fields at response time. |
 | resources[].api.default_context | String | No default context; responses use the full projected API field set | No | Configured context name | When set, list/get/create responses default to that named context unless a `context` query parameter overrides it. |
-| resources[].api.contexts | List<ResponseContext> or Map<ContextName, ResponseContext \| List<String>> | No named response contexts | No | Named context definitions | Each context is a subset of exposed API field names. Generated handlers and native `vsr serve` apply the selected context at response serialization time. |
+| resources[].api.contexts | List&lt;ResponseContext&gt; or Map&lt;ContextName, ResponseContext \| List&lt;String&gt;&gt; | No named response contexts | No | Named context definitions | Each context is a subset of exposed API field names. Generated handlers and native `vsr serve` apply the selected context at response serialization time. |
 
 ## Computed API Fields
 
@@ -215,7 +215,7 @@ Response contexts are named subsets of already-exposed API fields. They currentl
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].api.contexts[].name | String | Required in list form; implied by the key in map form | Yes in list form | Valid API identifier | Context names must be unique per resource and are exposed through OpenAPI as the `context` query parameter enum. |
-| resources[].api.contexts[].fields | List<String> | [] | No | Exposed API field names | Every listed field must already be exposed on the resource API surface, either directly or through `api.fields` projection. |
+| resources[].api.contexts[].fields | List&lt;String&gt; | [] | No | Exposed API field names | Every listed field must already be exposed on the resource API surface, either directly or through `api.fields` projection. |
 
 ## Resource Access
 
@@ -242,7 +242,7 @@ List settings tune generated list endpoint defaults.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].list.default_limit | u32 | None | No | Positive integer | Must be greater than 0. If both limits are set, `default_limit <= max_limit`. |
+| resources[].list.default_limit | u32 | None | No | Positive integer | Must be greater than 0. If both limits are set, `default_limit &lt;= max_limit`. |
 | resources[].list.max_limit | u32 | None | No | Positive integer | Must be greater than 0. |
 
 ## Indexes
@@ -251,7 +251,7 @@ Resources can declare explicit indexes, while generated migrations and live-sche
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].indexes[].fields | List<String> | Required when the index exists | Yes | One or more storage field names | Field names reference storage columns, not API projection aliases. Composite indexes preserve the configured field order. |
+| resources[].indexes[].fields | List&lt;String&gt; | Required when the index exists | Yes | One or more storage field names | Field names reference storage columns, not API projection aliases. Composite indexes preserve the configured field order. |
 | resources[].indexes[].unique | Bool | false | No | true, false | When true, generated migrations emit `CREATE UNIQUE INDEX ...` for the configured field list. |
 
 ## Many-to-Many
@@ -277,7 +277,7 @@ Resource actions declare extra resource-scoped routes beyond CRUD. The current e
 | resources[].actions[].target | Enum | Item | No | Item | Only item-scoped actions are supported in the first slice. |
 | resources[].actions[].method | Enum | POST | No | POST | Only `POST` is supported in the first slice. |
 | resources[].actions[].behavior.kind | Enum | Required | Yes | UpdateFields, DeleteResource | Selects the built-in declarative action behavior. |
-| resources[].actions[].behavior.set | Map<String, Scalar \| { input: String }> | None | Yes for `UpdateFields` | Storage field names mapped to fixed scalar values or named request-body inputs | Field names reference storage fields, not API projection aliases. The current slice only supports scalar assignment targets, rejects IDs, generated fields, and policy-controlled fields, and applies the normal field transforms and validation rules to fixed values and input-backed assignments alike. Input names become JSON request-body properties for the action route. `DeleteResource` does not accept `behavior.set`. |
+| resources[].actions[].behavior.set | Map&lt;String, Scalar \| { input: String }&gt; | None | Yes for `UpdateFields` | Storage field names mapped to fixed scalar values or named request-body inputs | Field names reference storage fields, not API projection aliases. The current slice only supports scalar assignment targets, rejects IDs, generated fields, and policy-controlled fields, and applies the normal field transforms and validation rules to fixed values and input-backed assignments alike. Input names become JSON request-body properties for the action route. `DeleteResource` does not accept `behavior.set`. |
 
 ## Row Policies
 
@@ -286,10 +286,10 @@ Row policies support both the newer explicit form and older owner/set-owner shor
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].policies.admin_bypass | Bool | true | No | true, false | When true, admin-role users bypass the configured row-level policies. |
-| resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `is_null` and `is_not_null` require a nullable field. `SetOwner` syntax is rejected here. |
-| resources[].policies.create | PolicyAssignment, [PolicyAssignment], { assign, require } | None | No | `field=user.id`, `field=claim.<name>`, `{ field, value }`, `SetOwner:field`, `{ assign: [...], require: PolicyFilter \| [PolicyFilter] \| PolicyGroup }` | Assigns values during create operations and can also enforce preconditions before insert. `require` uses the same boolean filter tree as `read` / `update` / `delete`, plus `input.<field>` sources for the proposed create payload. `Owner` syntax is rejected here. |
-| resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
-| resources[].policies.delete | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.<name>`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters delete queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
+| resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `is_null` and `is_not_null` require a nullable field. `SetOwner` syntax is rejected here. |
+| resources[].policies.create | PolicyAssignment, [PolicyAssignment], { assign, require } | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, value }`, `SetOwner:field`, `{ assign: [...], require: PolicyFilter \| [PolicyFilter] \| PolicyGroup }` | Assigns values during create operations and can also enforce preconditions before insert. `require` uses the same boolean filter tree as `read` / `update` / `delete`, plus `input.&lt;field&gt;` sources for the proposed create payload. `Owner` syntax is rejected here. |
+| resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
+| resources[].policies.delete | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters delete queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
 
 ```eon
 policies: {
@@ -367,11 +367,11 @@ Field configuration controls generated Rust types, SQL columns, validations, and
 | resources[].fields[].name | String | Required in list form; implied by the key in map form | Yes in list form | Valid Rust identifier | Duplicate field names are rejected per resource. |
 | resources[].fields[].type | Enum or raw Rust type string | None | Yes | See Field Types | Supported built-in field type keywords and declared enum names are listed below. Other raw Rust types are parsed with `syn` and inferred to SQL best-effort. |
 | resources[].fields[].items | Built-in field type keyword | None | Yes when `type = List` | See Field Types | Required for `List` fields. The current first version accepts built-in item types only and stores the resulting list as JSON text. |
-| resources[].fields[].fields | List<Field> or Map<FieldName, Field \| Type> | None | Yes when `type = Object` | Nested field definitions | Required for `Object` fields. Nested fields currently support scalar, JSON, nested `Object`, and `List` child shapes and are stored together as a JSON object encoded in text. |
-| resources[].fields[].nullable | Bool | false | No | true, false | Wraps the generated Rust field type in `Option<T>`. `generated` fields are also emitted as optional even when `nullable` is false. |
+| resources[].fields[].fields | List&lt;Field&gt; or Map&lt;FieldName, Field \| Type&gt; | None | Yes when `type = Object` | Nested field definitions | Required for `Object` fields. Nested fields currently support scalar, JSON, nested `Object`, and `List` child shapes and are stored together as a JSON object encoded in text. |
+| resources[].fields[].nullable | Bool | false | No | true, false | Wraps the generated Rust field type in `Option&lt;T&gt;`. `generated` fields are also emitted as optional even when `nullable` is false. |
 | resources[].fields[].id | Bool | false, but the field matching `id_field` is treated as the ID | No | true, false | Primary key semantics are inferred when the field name matches the resource `id_field`. |
 | resources[].fields[].unique | Bool | false | No | true, false | Declares a unique single-column index for supported scalar storage fields. Typed `Object`, `List`, and JSON fields do not support `unique`. |
-| resources[].fields[].transforms | List<Enum> | [] | No | Trim, Lowercase, CollapseWhitespace, Slugify | Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. `Slugify` is limited to non-enum text fields. |
+| resources[].fields[].transforms | List&lt;Enum&gt; | [] | No | Trim, Lowercase, CollapseWhitespace, Slugify | Applies built-in write-time normalization on create and update before validation and persistence. This currently supports text and enum-backed text fields only, including nested text fields inside typed `Object` values. `Slugify` is limited to non-enum text fields. |
 | resources[].fields[].generated | Enum | Auto-inferred from the field name and ID role when omitted | No | None, AutoIncrement, CreatedAt, UpdatedAt | If omitted, IDs become `AutoIncrement`, `created_at` becomes `CreatedAt`, and `updated_at` becomes `UpdatedAt`. |
 | resources[].fields[].relation | Map | None | No | See Relations | Declares a foreign-key style relationship and optional nested route generation. |
 | resources[].fields[].garde | Map | None | No | See Field Validation | Validation is supported for text, integer, real, optional, and list fields where the selected garde rules apply. |
@@ -414,7 +414,7 @@ Static mounts are resolved relative to the `.eon` file and must stay inside the 
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| static.mounts | List<Mount> | No static mounts | No | Mount objects | Duplicate mount paths are rejected. |
+| static.mounts | List&lt;Mount&gt; | No static mounts | No | Mount objects | Duplicate mount paths are rejected. |
 | static.mounts[].mount | String | None | Yes | Absolute URL path beginning with `/` | Cannot conflict with `/api`, `/auth`, `/docs`, or `/openapi.json`. Trailing slashes are normalized except for `/`. |
 | static.mounts[].dir | String | None | Yes | Relative directory path | Must resolve under the service root and point to an existing directory. |
 | static.mounts[].mode | Enum | Directory | No | Directory, Spa | Case-insensitive parsing is supported. `Spa` auto-defaults `index_file` and `fallback_file` to `index.html`. |
@@ -428,27 +428,27 @@ The optional `storage` block declares named object-storage backends, public read
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| storage.backends | List<Backend> | No storage backends | No | Backend objects | Backend names must be unique. |
+| storage.backends | List&lt;Backend&gt; | No storage backends | No | Backend objects | Backend names must be unique. |
 | storage.backends[].name | String | None | Yes | Backend name | Referenced by `storage.public_mounts[].backend`. |
 | storage.backends[].kind | Enum | None | Yes | Local | The current implementation supports `Local` only. |
 | storage.backends[].dir | String | None | Yes | Relative directory path | Resolved relative to the `.eon` file. Unlike static mounts, the directory does not need to exist yet; the runtime creates it when the backend initializes. |
-| storage.public_mounts | List<PublicMount> | No public storage mounts | No | Public mount objects | Duplicate mount paths are rejected, and exact collisions with static mounts are rejected too. |
+| storage.public_mounts | List&lt;PublicMount&gt; | No public storage mounts | No | Public mount objects | Duplicate mount paths are rejected, and exact collisions with static mounts are rejected too. |
 | storage.public_mounts[].mount | String | None | Yes | Absolute URL path beginning with `/` | Cannot conflict with `/api`, `/auth`, `/docs`, or `/openapi.json`. |
 | storage.public_mounts[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
 | storage.public_mounts[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix inside the selected backend before mapping requests to objects. |
 | storage.public_mounts[].cache | Enum | Revalidate | No | NoStore, Revalidate, Immutable | Uses the same cache semantics as static mounts. |
-| storage.uploads | List<Upload> | No upload endpoints | No | Upload endpoint objects | Upload paths live under `/api` and cannot collide with resource route segments or the built-in `/api/auth` namespace. |
+| storage.uploads | List&lt;Upload&gt; | No upload endpoints | No | Upload endpoint objects | Upload paths live under `/api` and cannot collide with resource route segments or the built-in `/api/auth` namespace. |
 | storage.uploads[].name | String | None | Yes | Upload endpoint name | Used for docs/OpenAPI metadata and must be unique. |
-| storage.uploads[].path | String | None | Yes | Relative API path segment | Mounted as `POST /api/<path>` and must stay within the API scope. |
+| storage.uploads[].path | String | None | Yes | Relative API path segment | Mounted as `POST /api/&lt;path&gt;` and must stay within the API scope. |
 | storage.uploads[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
 | storage.uploads[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix before writing uploaded objects into the backend. |
 | storage.uploads[].max_bytes | Integer | 26214400 | No | Positive integer | Maximum accepted multipart file size in bytes. |
 | storage.uploads[].require_auth | Bool | true | No | true, false | When `true`, the upload route requires a valid bearer token even if no roles are listed. |
-| storage.uploads[].roles | List<String> | No role restriction | No | Role names | If present, the authenticated user must have at least one matching role. |
+| storage.uploads[].roles | List&lt;String&gt; | No role restriction | No | Role names | If present, the authenticated user must have at least one matching role. |
 | storage.s3_compat | Object | Disabled | No | S3-compatible local mount config | Mounts a narrow path-style S3-compatible surface for local development only. The current slice does not validate AWS signatures; clients should use a custom endpoint URL and path-style access. |
 | storage.s3_compat.mount | String | "/_s3" | No | Absolute URL path beginning with `/` | Mounted outside `/api` so S3-style bucket paths stay clean. Cannot conflict with static mounts, storage public mounts, `/api`, `/auth`, `/docs`, or `/openapi.json`. |
-| storage.s3_compat.buckets | List<S3Bucket> | No S3-compatible buckets | No | Bucket objects | Bucket names must be unique within the local S3-compatible surface. |
-| storage.s3_compat.buckets[].name | String | None | Yes | Bucket name | Used in path-style URLs like `/_s3/<bucket>/<key>`. |
+| storage.s3_compat.buckets | List&lt;S3Bucket&gt; | No S3-compatible buckets | No | Bucket objects | Bucket names must be unique within the local S3-compatible surface. |
+| storage.s3_compat.buckets[].name | String | None | Yes | Bucket name | Used in path-style URLs like `/_s3/&lt;bucket&gt;/&lt;key&gt;`. |
 | storage.s3_compat.buckets[].backend | String | None | Yes | Declared backend name | Must reference one of `storage.backends[].name`. |
 | storage.s3_compat.buckets[].prefix | String | Empty prefix | No | Relative object key prefix | Prepends a logical key prefix inside the selected backend before bucket paths are resolved. |
 
@@ -458,11 +458,11 @@ Typed secret refs let `.eon` declare where a secret should come from without har
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| <secret>.env | String | None | Exactly one variant is required | Environment variable name | Reads the secret from that exact environment variable only. |
-| <secret>.env_or_file | String | None | Exactly one variant is required | Environment variable name | Reads from `<VAR>` or `<VAR>_FILE`. This is the preferred general-purpose runtime form. |
-| <secret>.systemd_credential | String | None | Exactly one variant is required | Credential id | Reads from `/run/credentials/<id>` for systemd-style secret delivery. |
-| <secret>.external.provider | String | None | Required when using `external` | Provider slug | Declares an external secret-manager contract. Direct runtime resolution is not implemented yet. |
-| <secret>.external.locator | String | None | Required when using `external` | Provider-specific secret locator | Stores the provider-specific secret path, name, or locator. |
+| &lt;secret&gt;.env | String | None | Exactly one variant is required | Environment variable name | Reads the secret from that exact environment variable only. |
+| &lt;secret&gt;.env_or_file | String | None | Exactly one variant is required | Environment variable name | Reads from `&lt;VAR&gt;` or `&lt;VAR&gt;_FILE`. This is the preferred general-purpose runtime form. |
+| &lt;secret&gt;.systemd_credential | String | None | Exactly one variant is required | Credential id | Reads from `/run/credentials/&lt;id&gt;` for systemd-style secret delivery. |
+| &lt;secret&gt;.external.provider | String | None | Required when using `external` | Provider slug | Declares an external secret-manager contract. Direct runtime resolution is not implemented yet. |
+| &lt;secret&gt;.external.locator | String | None | Required when using `external` | Provider-specific secret locator | Stores the provider-specific secret path, name, or locator. |
 
 ```eon
 security: {
@@ -494,7 +494,7 @@ The top-level `db` controls SQL generation. `database.engine` controls the runti
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | database.engine.kind | Enum | If omitted: `TursoLocal` for `db: Sqlite`; `Sqlx` for `db: Postgres\|Mysql` | No | Sqlx, TursoLocal | Accepted aliases include `turso_local` and `turso-local`. `TursoLocal` requires `db: Sqlite`. |
-| database.engine.path | String | For the implicit SQLite runtime engine: `var/data/<module>.db` | Required for explicit `kind = TursoLocal` | Relative path, absolute path, or `:memory:` | The `vsr` runtime resolves relative paths against the service or bundle base directory. |
+| database.engine.path | String | For the implicit SQLite runtime engine: `var/data/&lt;module&gt;.db` | Required for explicit `kind = TursoLocal` | Relative path, absolute path, or `:memory:` | The `vsr` runtime resolves relative paths against the service or bundle base directory. |
 | database.engine.encryption_key | SecretRef | For the implicit SQLite runtime engine: `{ env_or_file: "TURSO_ENCRYPTION_KEY" }` | No | See Secret References | Used only by `TursoLocal`. Prefer `{ env_or_file: "..." }` for runtime-managed file/env secret delivery. |
 | database.engine.encryption_key_env | String (legacy) | None | No | Environment variable name | Backward-compatible shorthand for `database.engine.encryption_key: { env_or_file: "..." }`. |
 
@@ -558,9 +558,9 @@ Build settings affect generated server projects and `vsr build` output without c
 | build.release.lto | Bool or Enum | None | No | true, false, Thin, Fat | `true` maps to thin LTO. `false` disables emitted release-profile LTO overrides. |
 | build.release.codegen_units | u32 | None | No | Positive integer | Emits `codegen-units` in `[profile.release]`. Values must be greater than zero. |
 | build.release.strip_debug_symbols | Bool | false | No | true, false | Emits `strip = "debuginfo"` in `[profile.release]` for generated server projects. |
-| build.artifacts.binary.path | String | Service-relative `<input-stem>` | No | Relative or absolute path | Controls the default binary output path for `vsr build`. Relative paths resolve from the `.eon` file directory. |
+| build.artifacts.binary.path | String | Service-relative `&lt;input-stem&gt;` | No | Relative or absolute path | Controls the default binary output path for `vsr build`. Relative paths resolve from the `.eon` file directory. |
 | build.artifacts.binary.env | String | None | No | Environment variable name | Optional env var override for the binary output path. `vsr` reads it only when this field is declared. |
-| build.artifacts.bundle.path | String | Adjacent `<binary>.bundle` | No | Relative or absolute directory path | Controls the exported runtime bundle directory when the binary output is not overridden explicitly on the CLI. |
+| build.artifacts.bundle.path | String | Adjacent `&lt;binary&gt;.bundle` | No | Relative or absolute directory path | Controls the exported runtime bundle directory when the binary output is not overridden explicitly on the CLI. |
 | build.artifacts.bundle.env | String | None | No | Environment variable name | Optional env var override for the bundle directory. `vsr` reads it only when this field is declared. |
 | build.artifacts.cache.root | String | Service-relative `.vsr-build` | No | Relative or absolute directory path | Base directory for reusable generated-project caches. `vsr build` appends the package name and stable service hash under this root. |
 | build.artifacts.cache.env | String | None | No | Environment variable name | Optional env var override for the build cache root. `vsr` reads it only when this field is declared. |
@@ -572,17 +572,17 @@ Client generation settings control `vsr client ts` defaults and optional build-t
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| clients.ts.output_dir.path | String | Service-relative `<input-stem>.client` | No | Relative or absolute directory path | Controls the default output directory for `vsr client ts`. Relative paths resolve from the `.eon` file directory. |
+| clients.ts.output_dir.path | String | Service-relative `&lt;input-stem&gt;.client` | No | Relative or absolute directory path | Controls the default output directory for `vsr client ts`. Relative paths resolve from the `.eon` file directory. |
 | clients.ts.output_dir.env | String | None | No | Environment variable name | Optional env var override for the TypeScript client output directory. `vsr` reads it only when this field is declared. |
-| clients.ts.package_name.value | String | <input-stem>-client | No | npm package name string | Default package name written to the generated `package.json` for `vsr client ts`. |
+| clients.ts.package_name.value | String | &lt;input-stem&gt;-client | No | npm package name string | Default package name written to the generated `package.json` for `vsr client ts`. |
 | clients.ts.package_name.env | String | None | No | Environment variable name | Optional env var override for the generated client package name. `vsr` reads it only when this field is declared. |
 | clients.ts.server_url | String | /api | No | Relative API base path | Default server URL embedded in the generated TypeScript client when `--server-url` is not passed. |
 | clients.ts.emit_js | Bool | false | No | true, false | When true, emits dependency-free browser-ready `.js` modules alongside the generated TypeScript sources. |
 | clients.ts.include_builtin_auth | Bool | true | No | true, false | Controls whether built-in auth routes are included in the generated TypeScript client when the CLI does not explicitly pass `--without-auth`. |
-| clients.ts.exclude_tables | Array<String> | [] | No | Resource table names | Default resource tables excluded from generated TypeScript client operations. CLI `--exclude-table` values are added on top of this list. |
+| clients.ts.exclude_tables | Array&lt;String&gt; | [] | No | Resource table names | Default resource tables excluded from generated TypeScript client operations. CLI `--exclude-table` values are added on top of this list. |
 | clients.ts.automation.on_build | Bool | false | No | true, false | When true, `vsr build` and `vsr server build` automatically regenerate the TypeScript client after a successful server build. |
 | clients.ts.automation.self_test | Bool | false | No | true, false | When `automation.on_build` is enabled, runs the generated client static self-test after regeneration and writes a JSON report. |
-| clients.ts.automation.self_test_report.path | String | <client-dir>/self-test-report.json | No | Relative or absolute file path | Overrides the automated client self-test report location. Relative paths resolve from the `.eon` file directory. |
+| clients.ts.automation.self_test_report.path | String | &lt;client-dir&gt;/self-test-report.json | No | Relative or absolute file path | Overrides the automated client self-test report location. Relative paths resolve from the `.eon` file directory. |
 | clients.ts.automation.self_test_report.env | String | None | No | Environment variable name | Optional env var override for the automated client self-test report path. `vsr` reads it only when this field is declared. |
 
 ## Runtime
@@ -592,7 +592,7 @@ Runtime settings affect server behavior without changing the data model.
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | runtime.compression.enabled | Bool | false | No | true, false | Enables dynamic HTTP response compression middleware in emitted servers. |
-| runtime.compression.static_precompressed | Bool | false | No | true, false | Enables `.br` / `.gz` companion lookup for generated static mounts and causes `vsr build` to generate those companion files into `<binary>.bundle/`. |
+| runtime.compression.static_precompressed | Bool | false | No | true, false | Enables `.br` / `.gz` companion lookup for generated static mounts and causes `vsr build` to generate those companion files into `&lt;binary&gt;.bundle/`. |
 
 ## TLS
 
@@ -639,19 +639,19 @@ Runtime behavior when lists are empty: methods default to `GET, POST, PUT, PATCH
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| security.cors.origins | List<String> | [] | No | Absolute origins or `*` | Origins are validated as URIs. `*` cannot be combined with `allow_credentials = true`. |
+| security.cors.origins | List&lt;String&gt; | [] | No | Absolute origins or `*` | Origins are validated as URIs. `*` cannot be combined with `allow_credentials = true`. |
 | security.cors.origins_env | String | None | No | Environment variable name | The runtime splits the env value on commas and appends it to `origins`. |
 | security.cors.allow_credentials | Bool | false | No | true, false | Cannot be combined with wildcard `*` origins. |
-| security.cors.allow_methods | List<String> | [] | No | HTTP methods or `*` | Methods are validated using Actix/Web HTTP method parsing. |
-| security.cors.allow_headers | List<String> | [] | No | Header names or `*` | Header names are validated using HTTP header parsing. |
-| security.cors.expose_headers | List<String> | [] | No | Header names or `*` | Header names are validated using HTTP header parsing. |
+| security.cors.allow_methods | List&lt;String&gt; | [] | No | HTTP methods or `*` | Methods are validated using Actix/Web HTTP method parsing. |
+| security.cors.allow_headers | List&lt;String&gt; | [] | No | Header names or `*` | Header names are validated using HTTP header parsing. |
+| security.cors.expose_headers | List&lt;String&gt; | [] | No | Header names or `*` | Header names are validated using HTTP header parsing. |
 | security.cors.max_age_seconds | usize | None | No | Positive integer | Must be greater than 0 when provided. |
 
 ## Trusted Proxies
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| security.trusted_proxies.proxies | List<String> | [] | No | IP addresses | Every entry must parse as an IP address. |
+| security.trusted_proxies.proxies | List&lt;String&gt; | [] | No | IP addresses | Every entry must parse as an IP address. |
 | security.trusted_proxies.proxies_env | String | None | No | Environment variable name | The runtime splits the env value on commas and appends valid IPs to `proxies`. |
 
 ## Rate Limits
@@ -689,7 +689,7 @@ These settings configure the built-in auth/account routes. They do not affect cu
 | security.auth.password_reset_token_ttl_seconds | i64 | 3600 | No | Positive integer | Password-reset token lifetime in seconds. |
 | security.auth.jwt | Map | None | No | See Auth JWT | Structured JWT signing/verification config with algorithm selection, key ids, and rotation support. |
 | security.auth.jwt_secret | SecretRef | { env_or_file: "JWT_SECRET" } | No | See Secret References | Controls how built-in auth resolves the legacy shared-secret signing key. Prefer `security.auth.jwt` for new configs that need explicit algorithms or rotation. |
-| security.auth.claims | Map<ClaimName, ClaimMapping> | None | No | Keyed map of claim names to claim mappings | Makes built-in auth claims explicit. Claim names must be unique and cannot use reserved fields such as `sub`, `roles`, `iss`, `aud`, `exp`, or `id`. |
+| security.auth.claims | Map&lt;ClaimName, ClaimMapping&gt; | None | No | Keyed map of claim names to claim mappings | Makes built-in auth claims explicit. Claim names must be unique and cannot use reserved fields such as `sub`, `roles`, `iss`, `aud`, `exp`, or `id`. |
 | security.auth.session_cookie | Map | None | No | See Session Cookie | Enables cookie-based session auth in addition to bearer tokens. |
 | security.auth.email | Map | None | No | See Auth Email | Configures transactional email for verification and password reset flows. |
 | security.auth.portal | Map | None | No | See Auth UI Pages | Configures a custom account portal page path and title. |
@@ -742,9 +742,9 @@ Explicit auth claim mappings let built-in auth expose predictable claim names wi
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| security.auth.claims.<claim_name> | I64 \| String \| Bool \| String column name \| Map | If shorthand type is used, the column defaults to `<claim_name>` and the type defaults to the shorthand | No | `tenant_id: I64`, `workspace_id: "claim_workspace_id"`, or a full object | String shorthand means `column = <string>` with the default type `I64`. Use the object form when you need a non-`I64` type on a different column. |
-| security.auth.claims.<claim_name>.column | String | The claim key name | No | SQL identifier in the built-in `user` table | When omitted in the object form, the claim key is also used as the column name. |
-| security.auth.claims.<claim_name>.type | Enum | I64 | No | I64, String, Bool | Controls how built-in auth decodes the `user` column and exposes it in JWTs and `/api/auth/me`. |
+| security.auth.claims.&lt;claim_name&gt; | I64 \| String \| Bool \| String column name \| Map | If shorthand type is used, the column defaults to `&lt;claim_name&gt;` and the type defaults to the shorthand | No | `tenant_id: I64`, `workspace_id: "claim_workspace_id"`, or a full object | String shorthand means `column = &lt;string&gt;` with the default type `I64`. Use the object form when you need a non-`I64` type on a different column. |
+| security.auth.claims.&lt;claim_name&gt;.column | String | The claim key name | No | SQL identifier in the built-in `user` table | When omitted in the object form, the claim key is also used as the column name. |
+| security.auth.claims.&lt;claim_name&gt;.type | Enum | I64 | No | I64, String, Bool | Controls how built-in auth decodes the `user` column and exposes it in JWTs and `/api/auth/me`. |
 
 Current runtime boundary:
 
@@ -811,18 +811,18 @@ These are the canonical built-in field type keywords accepted by `.eon`. Raw Rus
 | F32 | Rust field type | n/a | n/a | f32 | Stored as `REAL`. Supports equality filters and sort. |
 | F64 | Rust field type | n/a | n/a | f64 | Stored as `REAL`. Supports equality filters and sort. |
 | Bool | Rust field type | n/a | n/a | bool | Stored as `INTEGER` on SQLite/MySQL and `BOOLEAN` on Postgres. Supports equality filters and sort. |
-| DateTime | Rust field type | n/a | n/a | chrono::DateTime<Utc> | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
+| DateTime | Rust field type | n/a | n/a | chrono::DateTime&lt;Utc&gt; | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Date | Rust field type | n/a | n/a | chrono::NaiveDate | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Time | Rust field type | n/a | n/a | chrono::NaiveTime | Stored as text-compatible values. Supports equality filters, range filters, and sort. |
 | Uuid | Rust field type | n/a | n/a | uuid::Uuid | Stored as text/char values depending on backend. Supports equality filters and sort. |
 | Decimal | Rust field type | n/a | n/a | rust_decimal::Decimal | Stored as text/varchar values. Supports equality filters but not generated sort helpers. |
-| <DeclaredEnumName> | Named enum field type | n/a | n/a | Any name declared under `enums` | Stored as text and validated against the declared string values. Supports exact filters and the normal string sort helpers, but not contains filters. |
+| &lt;DeclaredEnumName&gt; | Named enum field type | n/a | n/a | Any name declared under `enums` | Stored as text and validated against the declared string values. Supports exact filters and the normal string sort helpers, but not contains filters. |
 | Json | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text. Round-trips through the API as native JSON, but current generated/native list helpers do not expose equality, range, or contains filters for it. |
 | JsonObject | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text and validated to be a JSON object. OpenAPI emits it as an object schema. Current list helpers do not expose equality, range, or contains filters for it. |
 | JsonArray | Rust field type | n/a | n/a | serde_json::Value | Stored as JSON text and validated to be a JSON array. OpenAPI emits it as an array schema. Current list helpers do not expose equality, range, or contains filters for it. |
 | List | Built-in collection field type | n/a | n/a | Use with `items`, for example `{ type: List, items: I64 }` | Stored as a JSON array encoded in text. OpenAPI emits an array schema based on `items`. Current generated/native list helpers do not expose equality, range, or contains filters for `List` fields. |
 | Object | Built-in structured field type | n/a | n/a | Use with `fields`, for example `{ type: Object, fields: [{ name: "raw", type: String }] }` | Stored as a JSON object encoded in text. Nested fields are validated recursively in generated handlers and native `vsr serve`, and OpenAPI emits a closed object schema with nested properties. |
-| "<raw Rust type>" | Rust field type | n/a | n/a | Any type parsable by `syn` | SQL type inference is best-effort. Structured-scalar-specific validation and filter helpers only apply to the built-in scalar keywords above. |
+| "&lt;raw Rust type&gt;" | Rust field type | n/a | n/a | Any type parsable by `syn` | SQL type inference is best-effort. Structured-scalar-specific validation and filter helpers only apply to the built-in scalar keywords above. |
 
 ## Derived Behavior
 
@@ -835,7 +835,7 @@ These behaviors are not separate config keys, but they are part of the current `
 | Generated fields | Derived rule | n/a | n/a | n/a | Generated fields (`AutoIncrement`, `CreatedAt`, `UpdatedAt`) become optional in generated Rust types and are skipped from normal write payloads. |
 | Field map shorthand | Derived rule | n/a | n/a | n/a | A field map entry like `title: String` is equivalent to `{ name: "title", type: String, nullable: false, id: false, generated: None }`. |
 | Static SPA defaults | Derived rule | n/a | n/a | n/a | SPA mounts default both `index_file` and `fallback_file` to `index.html`. |
-| SQLite runtime defaults | Derived rule | n/a | n/a | n/a | When `db: Sqlite` and `database.engine` is omitted, the runtime defaults to `TursoLocal(var/data/<module>.db)` with encrypted-local support via `TURSO_ENCRYPTION_KEY`. |
+| SQLite runtime defaults | Derived rule | n/a | n/a | n/a | When `db: Sqlite` and `database.engine` is omitted, the runtime defaults to `TursoLocal(var/data/&lt;module&gt;.db)` with encrypted-local support via `TURSO_ENCRYPTION_KEY`. |
 | Static precompression | Derived rule | n/a | n/a | n/a | When `runtime.compression.static_precompressed = true`, generated static mounts serve `.br`/`.gz` companion assets and `vsr build` generates those companions into the sidecar bundle. |
 
 ## Examples
@@ -908,3 +908,4 @@ security: {
     }
 }
 ```
+
