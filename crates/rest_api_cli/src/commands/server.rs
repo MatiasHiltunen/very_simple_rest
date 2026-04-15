@@ -1332,6 +1332,7 @@ edition = "2024"
 {actix_web_dependency}
 dotenvy = "0.15.7"
 serde = {{ version = "1", features = ["derive"] }}
+garde = {{ version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }}
 {dependency}
 {release_profile}
 "#

@@ -20,6 +20,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async token verification
 - Rate limiting and security enhancements
 
+## [0.1.11] - 2026-04-15
+
+### Added
+
+- Typed temporal inputs in the generated TypeScript client surface
+- Explicit public read access controls for generated/public catalog surfaces
+- Feature-gated S3 backup transfer backend selection for the CLI
+- An `mdBook` docs shell that includes the generated `.eon` reference directly
+
+### Changed
+
+- `.eon` validation docs and starter surfaces now consistently use `garde` terminology and examples
+- OpenAPI output now documents the create `Location` header
+- Bool handling is normalized more consistently across supported database backends
+- Maintained examples and docs entry points now align with the current contract-first CLI workflow
+
+### Fixed
+
+- Windows TypeScript client self-test execution and related example-client regressions
+- `sqlx-mysql` RSA auth handling for compatible MySQL connections
+- The family app shopping-item toggle payload flow
+- Dependency vulnerability updates in the published CLI surface
+
 ## [0.1.5] - 2026-04-02
 
 ### Added

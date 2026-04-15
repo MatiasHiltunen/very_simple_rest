@@ -8,6 +8,8 @@ pub mod blog_api
   type __VsrJson
   type __VsrJsonObject
   type __VsrJsonArray
+  fn garde_validation_error_post
+  fn prefixed_garde_validation_error_post
   pub struct Post
   impl Post
     fn from_row
@@ -59,6 +61,8 @@ pub mod blog_api
       fn create
       fn update
       fn delete
+  fn garde_validation_error_comment
+  fn prefixed_garde_validation_error_comment
   pub struct Comment
   impl Comment
     fn from_row

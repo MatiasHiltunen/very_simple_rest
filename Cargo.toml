@@ -27,8 +27,8 @@ dotenvy = "0.15.7"
 rand = "0.10.0"
 uuid = { version = "1.22", features = ["v4", "serde"] }
 garde = { version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }
-rest_macro = { path = "crates/rest_macro", version = "0.1.10" }
-rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.10" }
+rest_macro = { path = "crates/rest_macro", version = "0.1.11" }
+rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.11" }
 log = "0.4"
 env_logger = "0.11"
 actix-cors = "0.7"
@@ -43,7 +43,7 @@ rcgen = "0.14"
 object_store = { version = "0.13.2", default-features = false }
 
 [workspace.package]
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 authors = ["Matias Hiltunen"]
 description = "An opinionated macro wrapper for building REST APIs with Actix Web and SQLx"

@@ -8,6 +8,8 @@ pub mod modern_cms_api
   type __VsrJson
   type __VsrJsonObject
   type __VsrJsonArray
+  fn garde_validation_error_workspace
+  fn prefixed_garde_validation_error_workspace
   pub struct Workspace
   impl Workspace
     fn from_row
@@ -62,6 +64,8 @@ pub mod modern_cms_api
       fn create
       fn update
       fn delete
+  fn garde_validation_error_member_profile
+  fn prefixed_garde_validation_error_member_profile
   pub struct MemberProfile
   impl MemberProfile
     fn from_row
@@ -119,6 +123,8 @@ pub mod modern_cms_api
       fn update
       fn delete
       fn get_by_user_id
+  fn garde_validation_error_media_asset
+  fn prefixed_garde_validation_error_media_asset
   pub struct MediaAsset
   impl MediaAsset
     fn from_row
@@ -176,6 +182,8 @@ pub mod modern_cms_api
       fn update
       fn delete
       fn get_by_uploader_user_id
+  fn garde_validation_error_topic
+  fn prefixed_garde_validation_error_topic
   pub struct Topic
   impl Topic
     fn from_row
@@ -234,6 +242,8 @@ pub mod modern_cms_api
       fn create
       fn update
       fn delete
+  fn garde_validation_error_entry
+  fn prefixed_garde_validation_error_entry
   struct EntrySeoObjectSchema
   impl EntrySeoObjectSchema
     fn validate
@@ -297,6 +307,8 @@ pub mod modern_cms_api
       fn update
       fn delete
       fn get_by_author_user_id
+  fn garde_validation_error_entry_topic
+  fn prefixed_garde_validation_error_entry_topic
   pub struct EntryTopic
   impl EntryTopic
     fn from_row
@@ -352,6 +364,8 @@ pub mod modern_cms_api
       fn create
       fn update
       fn delete
+  fn garde_validation_error_navigation_menu
+  fn prefixed_garde_validation_error_navigation_menu
   pub struct NavigationMenu
   impl NavigationMenu
     fn from_row
@@ -408,6 +422,8 @@ pub mod modern_cms_api
       fn create
       fn update
       fn delete
+  fn garde_validation_error_navigation_item
+  fn prefixed_garde_validation_error_navigation_item
   pub struct NavigationItem
   impl NavigationItem
     fn from_row
