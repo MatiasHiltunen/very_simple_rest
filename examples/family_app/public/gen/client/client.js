@@ -1,3 +1,67 @@
+export class VsrDate {
+  constructor(year, month, day) {
+    if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+      throw new Error("VsrDate values must be integers.");
+    }
+    const normalized = new Date(Date.UTC(year, month - 1, day));
+    if (
+      normalized.getUTCFullYear() !== year ||
+      normalized.getUTCMonth() !== month - 1 ||
+      normalized.getUTCDate() !== day
+    ) {
+      throw new Error("Invalid VsrDate value.");
+    }
+    this.year = year;
+    this.month = month;
+    this.day = day;
+  }
+
+  toString() {
+    return `${padNumber(this.year, 4)}-${padNumber(this.month, 2)}-${padNumber(this.day, 2)}`;
+  }
+
+  toJSON() {
+    return this.toString();
+  }
+}
+
+export class VsrTime {
+  constructor(hour, minute, second = 0, microsecond = 0) {
+    if (
+      !Number.isInteger(hour) ||
+      !Number.isInteger(minute) ||
+      !Number.isInteger(second) ||
+      !Number.isInteger(microsecond)
+    ) {
+      throw new Error("VsrTime values must be integers.");
+    }
+    if (hour < 0 || hour > 23) {
+      throw new Error("VsrTime hour must be between 0 and 23.");
+    }
+    if (minute < 0 || minute > 59) {
+      throw new Error("VsrTime minute must be between 0 and 59.");
+    }
+    if (second < 0 || second > 59) {
+      throw new Error("VsrTime second must be between 0 and 59.");
+    }
+    if (microsecond < 0 || microsecond > 999999) {
+      throw new Error("VsrTime microsecond must be between 0 and 999999.");
+    }
+    this.hour = hour;
+    this.minute = minute;
+    this.second = second;
+    this.microsecond = microsecond;
+  }
+
+  toString() {
+    return `${padNumber(this.hour, 2)}:${padNumber(this.minute, 2)}:${padNumber(this.second, 2)}.${padNumber(this.microsecond, 6)}`;
+  }
+
+  toJSON() {
+    return this.toString();
+  }
+}
+
 export class ApiError extends Error {
   constructor(message, status, body, headers) {
     super(message);
@@ -9,6 +73,11 @@ export class ApiError extends Error {
 }
 
 const DEFAULT_SERVER_URL = "/api";
+
+function requestNeedsCsrf(method) {
+  const normalized = method.toUpperCase();
+  return normalized === "POST" || normalized === "PUT" || normalized === "PATCH" || normalized === "DELETE";
+}
 
 export function createClient(config = {}) {
   const resolvedConfig = {
@@ -43,10 +112,10 @@ export function createClient(config = {}) {
           body = request.body instanceof FormData ? request.body : objectToFormData(request.body);
         } else if (request.contentType === "application/json") {
           headers.set("content-type", "application/json");
-          body = JSON.stringify(request.body);
+          body = JSON.stringify(normalizeJsonValue(request.body));
         } else if (request.contentType === "text/plain") {
           headers.set("content-type", "text/plain");
-          body = typeof request.body === "string" ? request.body : String(request.body);
+          body = stringifyScalarLikeValue(request.body);
         } else {
           if (request.contentType) {
             headers.set("content-type", request.contentType);
@@ -55,7 +124,7 @@ export function createClient(config = {}) {
         }
       }
 
-      if (body !== undefined && resolvedConfig.getCsrfToken) {
+      if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken) {
         const csrfToken = await resolvedConfig.getCsrfToken();
         if (csrfToken) {
           headers.set(resolvedConfig.csrfHeaderName, csrfToken);
@@ -125,7 +194,7 @@ export function interpolatePath(template, params) {
     if (value === undefined || value === null) {
       throw new Error(`Missing required path parameter: ${key}`);
     }
-    return encodeURIComponent(String(value));
+    return encodeURIComponent(stringifyScalarValue(value));
   });
 }
 
@@ -137,7 +206,7 @@ function appendQuery(searchParams, query) {
     if (Array.isArray(value)) {
       for (const item of value) {
         if (item !== undefined && item !== null) {
-          searchParams.append(key, stringifyQueryValue(item));
+          searchParams.append(key, stringifyScalarValue(item));
         }
       }
       continue;
@@ -145,12 +214,31 @@ function appendQuery(searchParams, query) {
     if (value instanceof Blob) {
       continue;
     }
-    searchParams.append(key, stringifyQueryValue(value));
+    searchParams.append(key, stringifyScalarValue(value));
   }
 }
 
-function stringifyQueryValue(value) {
-  return typeof value === "string" ? value : String(value);
+function stringifyScalarValue(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return stringifyTemporalValue(value);
+}
+
+function stringifyScalarLikeValue(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (isTemporalValue(value)) {
+    return stringifyTemporalValue(value);
+  }
+  return String(value);
 }
 
 function objectToFormData(value) {
@@ -181,6 +269,10 @@ function appendFormDataValue(formData, key, value) {
     formData.append(key, value);
     return;
   }
+  if (isTemporalValue(value)) {
+    formData.append(key, stringifyTemporalValue(value));
+    return;
+  }
   if (typeof value === "string") {
     formData.append(key, value);
     return;
@@ -207,4 +299,45 @@ async function parseResponseBody(response) {
   }
   const text = await response.text();
   return text ? text : undefined;
+}
+
+function normalizeJsonValue(value) {
+  if (value === undefined || value === null) {
+    return value;
+  }
+  if (isTemporalValue(value)) {
+    return stringifyTemporalValue(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeJsonValue(entry));
+  }
+  if (value instanceof Blob || value instanceof FormData || value instanceof URLSearchParams) {
+    return value;
+  }
+  if (typeof value === "object") {
+    const normalized = {};
+    for (const [key, entry] of Object.entries(value)) {
+      normalized[key] = normalizeJsonValue(entry);
+    }
+    return normalized;
+  }
+  return value;
+}
+
+function isTemporalValue(value) {
+  return value instanceof Date || value instanceof VsrDate || value instanceof VsrTime;
+}
+
+function stringifyTemporalValue(value) {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new Error("Invalid DateTimeInput value.");
+    }
+    return `${padNumber(value.getUTCFullYear(), 4)}-${padNumber(value.getUTCMonth() + 1, 2)}-${padNumber(value.getUTCDate(), 2)}T${padNumber(value.getUTCHours(), 2)}:${padNumber(value.getUTCMinutes(), 2)}:${padNumber(value.getUTCSeconds(), 2)}.${padNumber(value.getUTCMilliseconds() * 1000, 6)}+00:00`;
+  }
+  return value.toString();
+}
+
+function padNumber(value, width) {
+  return String(value).padStart(width, "0");
 }

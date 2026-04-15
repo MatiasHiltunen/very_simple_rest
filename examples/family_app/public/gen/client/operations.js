@@ -2,1054 +2,880 @@
 
 import { interpolatePath } from "./client.js";
 
-/** Get the authenticated account record */
+const r = (p) => ({ headers: p.headers, signal: p.signal });
+
 export async function getAccountRecord(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/auth/account",
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Change the authenticated account password */
 export async function changeAccountPassword(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/account/password",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Resend the authenticated account verification email */
 export async function resendAccountVerificationEmail(client, params = {}) {
   return client.request({
     method: "POST",
     path: "/auth/account/verification",
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List built-in auth users */
 export async function listBuiltinAuthUsers(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/auth/admin/users",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create a built-in auth user */
 export async function createBuiltinAuthUser(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/admin/users",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get a built-in auth user */
 export async function getBuiltinAuthUser(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/auth/admin/users/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update a built-in auth user */
 export async function updateBuiltinAuthUser(client, params) {
   return client.request({
     method: "PATCH",
     path: interpolatePath("/auth/admin/users/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete a built-in auth user */
 export async function deleteBuiltinAuthUser(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/auth/admin/users/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Resend verification email for a built-in auth user */
 export async function resendBuiltinAuthUserVerification(client, params) {
   return client.request({
     method: "POST",
     path: interpolatePath("/auth/admin/users/{id}/verification", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Login and receive a JWT token or configured session cookie */
 export async function loginUser(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/login",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Clear configured auth session cookies */
 export async function logoutUser(client, params = {}) {
   return client.request({
     method: "POST",
     path: "/auth/logout",
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Get the authenticated account context */
 export async function getAuthenticatedAccount(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/auth/me",
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Open the built-in password reset page */
 export async function openPasswordResetPage(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/auth/password-reset",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Confirm a password reset with a token */
 export async function confirmPasswordReset(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/password-reset/confirm",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Request a password reset email */
 export async function requestPasswordReset(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/password-reset/request",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Register a new user */
 export async function registerUser(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/register",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Resend a verification email by email address */
 export async function resendVerificationEmail(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/verification/resend",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Open the built-in email verification page */
 export async function openVerifyEmailPage(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/auth/verify-email",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** Verify an email address with a token */
 export async function verifyEmailAddress(client, params) {
   return client.request({
     method: "POST",
     path: "/auth/verify-email",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
   });
 }
 
-/** List runtime authorization assignment events for a user */
 export async function listRuntimeAuthorizationAssignmentEvents(client, params) {
   return client.request({
     method: "GET",
     path: "/authz/runtime/assignment-events",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List runtime authorization assignments for a user */
 export async function listRuntimeAuthorizationAssignments(client, params) {
   return client.request({
     method: "GET",
     path: "/authz/runtime/assignments",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create a runtime authorization assignment */
 export async function createRuntimeAuthorizationAssignment(client, params) {
   return client.request({
     method: "POST",
     path: "/authz/runtime/assignments",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete a runtime authorization assignment */
 export async function deleteRuntimeAuthorizationAssignment(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/authz/runtime/assignments/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Renew a runtime authorization assignment */
 export async function renewRuntimeAuthorizationAssignment(client, params) {
   return client.request({
     method: "POST",
     path: interpolatePath("/authz/runtime/assignments/{id}/renew", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Revoke a runtime authorization assignment */
 export async function revokeRuntimeAuthorizationAssignment(client, params) {
   return client.request({
     method: "POST",
     path: interpolatePath("/authz/runtime/assignments/{id}/revoke", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Evaluate runtime authorization access */
 export async function evaluateRuntimeAuthorizationAccess(client, params) {
   return client.request({
     method: "POST",
     path: "/authz/runtime/evaluate",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List CalendarEvent */
 export async function listCalendarEvent(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/calendar_event",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create CalendarEvent */
 export async function createCalendarEvent(client, params) {
   return client.request({
     method: "POST",
     path: "/calendar_event",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get CalendarEvent */
 export async function getCalendarEvent(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/calendar_event/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update CalendarEvent */
 export async function updateCalendarEvent(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/calendar_event/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete CalendarEvent */
 export async function deleteCalendarEvent(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/calendar_event/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List CarePlan */
 export async function listCarePlan(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/care_plan",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create CarePlan */
 export async function createCarePlan(client, params) {
   return client.request({
     method: "POST",
     path: "/care_plan",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get CarePlan */
 export async function getCarePlan(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/care_plan/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update CarePlan */
 export async function updateCarePlan(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/care_plan/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete CarePlan */
 export async function deleteCarePlan(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/care_plan/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List ChildProfile */
 export async function listChildProfile(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/child_profile",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create ChildProfile */
 export async function createChildProfile(client, params) {
   return client.request({
     method: "POST",
     path: "/child_profile",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get ChildProfile */
 export async function getChildProfile(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/child_profile/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update ChildProfile */
 export async function updateChildProfile(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/child_profile/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete ChildProfile */
 export async function deleteChildProfile(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/child_profile/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List CarePlan by child_profile */
 export async function listCarePlanByChildProfile(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/child_profile/{parent_id}/care_plan", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List GuardianNote by child_profile */
 export async function listGuardianNoteByChildProfile(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/child_profile/{parent_id}/guardian_note", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List Family */
 export async function listFamily(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/family",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create Family */
 export async function createFamily(client, params) {
   return client.request({
     method: "POST",
     path: "/family",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get Family */
 export async function getFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update Family */
 export async function updateFamily(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/family/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete Family */
 export async function deleteFamily(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/family/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List CarePlan by family */
 export async function listCarePlanByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/care_plan", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List ChildProfile by family */
 export async function listChildProfileByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/child_profile", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List FamilyDelegate by family */
 export async function listFamilyDelegateByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/family_delegate", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List FamilyMember by family */
 export async function listFamilyMemberByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/family_member", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List GuardianNote by family */
 export async function listGuardianNoteByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/guardian_note", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List Household by family */
 export async function listHouseholdByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/household", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List ShoppingItem by family */
 export async function listShoppingItemByFamily(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family/{parent_id}/shopping_item", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List FamilyDelegate */
 export async function listFamilyDelegate(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/family_delegate",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create FamilyDelegate */
 export async function createFamilyDelegate(client, params) {
   return client.request({
     method: "POST",
     path: "/family_delegate",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get FamilyDelegate */
 export async function getFamilyDelegate(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family_delegate/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update FamilyDelegate */
 export async function updateFamilyDelegate(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/family_delegate/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete FamilyDelegate */
 export async function deleteFamilyDelegate(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/family_delegate/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List FamilyMember */
 export async function listFamilyMember(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/family_member",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create FamilyMember */
 export async function createFamilyMember(client, params) {
   return client.request({
     method: "POST",
     path: "/family_member",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get FamilyMember */
 export async function getFamilyMember(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/family_member/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update FamilyMember */
 export async function updateFamilyMember(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/family_member/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete FamilyMember */
 export async function deleteFamilyMember(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/family_member/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List GuardianNote */
 export async function listGuardianNote(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/guardian_note",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create GuardianNote */
 export async function createGuardianNote(client, params) {
   return client.request({
     method: "POST",
     path: "/guardian_note",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get GuardianNote */
 export async function getGuardianNote(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/guardian_note/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update GuardianNote */
 export async function updateGuardianNote(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/guardian_note/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete GuardianNote */
 export async function deleteGuardianNote(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/guardian_note/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List Household */
 export async function listHousehold(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/household",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create Household */
 export async function createHousehold(client, params) {
   return client.request({
     method: "POST",
     path: "/household",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get Household */
 export async function getHousehold(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/household/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update Household */
 export async function updateHousehold(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/household/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete Household */
 export async function deleteHousehold(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/household/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List CalendarEvent by household */
 export async function listCalendarEventByHousehold(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/household/{parent_id}/calendar_event", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List ChildProfile by household */
 export async function listChildProfileByHousehold(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/household/{parent_id}/child_profile", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List ShoppingItem by household */
 export async function listShoppingItemByHousehold(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/household/{parent_id}/shopping_item", params.path),
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List HouseholdAnnouncement */
 export async function listHouseholdAnnouncement(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/household_announcement",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create HouseholdAnnouncement */
 export async function createHouseholdAnnouncement(client, params) {
   return client.request({
     method: "POST",
     path: "/household_announcement",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get HouseholdAnnouncement */
 export async function getHouseholdAnnouncement(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/household_announcement/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update HouseholdAnnouncement */
 export async function updateHouseholdAnnouncement(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/household_announcement/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete HouseholdAnnouncement */
 export async function deleteHouseholdAnnouncement(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/household_announcement/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** List ShoppingItem */
 export async function listShoppingItem(client, params = {}) {
   return client.request({
     method: "GET",
     path: "/shopping_item",
     query: params.query,
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Create ShoppingItem */
 export async function createShoppingItem(client, params) {
   return client.request({
     method: "POST",
     path: "/shopping_item",
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Get ShoppingItem */
 export async function getShoppingItem(client, params) {
   return client.request({
     method: "GET",
     path: interpolatePath("/shopping_item/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Update ShoppingItem */
 export async function updateShoppingItem(client, params) {
   return client.request({
     method: "PUT",
     path: interpolatePath("/shopping_item/{id}", params.path),
-    headers: params.headers,
     body: params.body,
     contentType: "application/json",
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
 
-/** Delete ShoppingItem */
 export async function deleteShoppingItem(client, params) {
   return client.request({
     method: "DELETE",
     path: interpolatePath("/shopping_item/{id}", params.path),
-    headers: params.headers,
-    signal: params.signal,
+    ...r(params),
     requiresBearerAuth: true,
   });
 }
