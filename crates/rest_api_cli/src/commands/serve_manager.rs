@@ -43,6 +43,12 @@ const PROCESS_SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
 const DETACHED_PROCESS_FLAG: u32 = 0x0000_0008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP_FLAG: u32 = 0x0000_0200;
+#[cfg(windows)]
+const CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
+#[cfg(windows)]
+const CREATE_BREAKAWAY_FROM_JOB_FLAG: u32 = 0x0100_0000;
+#[cfg(windows)]
+const ERROR_ACCESS_DENIED: i32 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -271,10 +277,15 @@ pub fn spawn_background_serve(
     #[cfg(windows)]
     {
         clear_standard_handle_inheritance()?;
-        command.creation_flags(DETACHED_PROCESS_FLAG | CREATE_NEW_PROCESS_GROUP_FLAG);
+        command.creation_flags(
+            DETACHED_PROCESS_FLAG
+                | CREATE_NEW_PROCESS_GROUP_FLAG
+                | CREATE_NO_WINDOW_FLAG
+                | CREATE_BREAKAWAY_FROM_JOB_FLAG,
+        );
     }
 
-    let mut child = command.spawn().with_context(|| {
+    let mut child = spawn_background_child(&mut command).with_context(|| {
         format!(
             "failed to start background `vsr serve` for {}",
             input.display()
@@ -856,6 +867,30 @@ fn process_is_running(pid: u32) -> anyhow::Result<bool> {
             .status()
             .context("failed to invoke kill -0")?;
         Ok(status.success())
+    }
+}
+
+fn spawn_background_child(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        match command.spawn() {
+            Ok(child) => Ok(child),
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                log::debug!(
+                    "CreateProcess rejected CREATE_BREAKAWAY_FROM_JOB; retrying without it"
+                );
+                command.creation_flags(
+                    DETACHED_PROCESS_FLAG | CREATE_NEW_PROCESS_GROUP_FLAG | CREATE_NO_WINDOW_FLAG,
+                );
+                command.spawn()
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        command.spawn()
     }
 }
 
