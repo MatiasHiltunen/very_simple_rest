@@ -197,9 +197,9 @@ pub mod auth {
         auth_routes_with_settings, change_password, confirm_password_reset, create_managed_user,
         delete_managed_user, ensure_admin_exists, ensure_admin_exists_with_settings,
         ensure_jwt_secret_configured, list_managed_users, login, login_with_request, logout,
-        managed_user, me, register, request_password_reset, resend_account_verification,
-        resend_managed_user_verification, resend_verification, update_managed_user,
-        validate_auth_claim_mappings, verify_email_page, verify_email_token,
+        managed_user, me, register, register_builtin_auth_html_pages, request_password_reset,
+        resend_account_verification, resend_managed_user_verification, resend_verification,
+        update_managed_user, validate_auth_claim_mappings, verify_email_page, verify_email_token,
     };
 }
 

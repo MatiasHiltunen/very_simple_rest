@@ -4405,8 +4405,16 @@ fn prompt_admin_credentials() -> (String, String) {
     // Prompt for email
     let mut email = String::new();
     print!("Admin email: ");
-    stdout().flush().unwrap();
-    stdin().read_line(&mut email).unwrap();
+    if let Err(error) = stdout().flush() {
+        eprintln!("[ERROR] Failed to flush stdout while prompting for admin email: {error}");
+        println!("[WARN] Using default admin credentials as fallback.");
+        return create_default_admin();
+    }
+    if let Err(error) = stdin().read_line(&mut email) {
+        eprintln!("[ERROR] Failed to read admin email from stdin: {error}");
+        println!("[WARN] Using default admin credentials as fallback.");
+        return create_default_admin();
+    }
     let email = email.trim().to_string();
 
     // Prompt for password securely (no echo)
@@ -4489,14 +4497,32 @@ pub fn auth_routes_with_settings(
     auth_api_routes_with_settings(cfg, db, settings);
 }
 
+/// Registers the account portal and admin dashboard HTML pages at their
+/// configured absolute paths. These pages are meant to be loaded directly by a
+/// browser, so they must be mounted OUTSIDE any scope guarded by the anonymous
+/// client middleware. Safe to call at the `App::configure` level.
+pub fn register_builtin_auth_html_pages(cfg: &mut web::ServiceConfig, settings: AuthSettings) {
+    let portal = settings.portal.clone();
+    let admin_dashboard = settings.admin_dashboard.clone();
+    cfg.app_data(web::Data::new(settings));
+
+    if let Some(portal) = portal {
+        cfg.route(portal.path.as_str(), web::get().to(account_portal_page));
+    }
+    if let Some(dashboard) = admin_dashboard {
+        cfg.route(
+            dashboard.path.as_str(),
+            web::get().to(admin_dashboard_page),
+        );
+    }
+}
+
 pub fn auth_api_routes_with_settings(
     cfg: &mut web::ServiceConfig,
     db: impl Into<DbPool>,
     settings: AuthSettings,
 ) {
     let db = web::Data::new(db.into());
-    let enable_portal = settings.portal.clone();
-    let enable_admin_dashboard = settings.admin_dashboard.clone();
     let settings = web::Data::new(settings);
     let limiter = web::Data::new(AuthRateLimiter::default());
     errors::configure_extractor_errors(cfg);
@@ -4544,13 +4570,6 @@ pub fn auth_api_routes_with_settings(
         "/auth/admin/users/{id}/verification",
         web::post().to(resend_managed_user_verification),
     );
-
-    if let Some(portal) = enable_portal {
-        cfg.route(portal.path.as_str(), web::get().to(account_portal_page));
-    }
-    if let Some(dashboard) = enable_admin_dashboard {
-        cfg.route(dashboard.path.as_str(), web::get().to(admin_dashboard_page));
-    }
 }
 
 fn auth_settings_from_request(req: &HttpRequest) -> AuthSettings {

@@ -3753,7 +3753,7 @@ resources: [
         assert_eq!(admin_requests.get("total").and_then(Value::as_i64), Some(1));
 
         let portal_response = client
-            .get(format!("{base_url}/api/auth/portal"))
+            .get(format!("{base_url}/auth/portal"))
             .send()
             .expect("account portal should load");
         assert_eq!(portal_response.status(), reqwest::StatusCode::OK);
@@ -3761,7 +3761,7 @@ resources: [
         assert!(portal_body.contains("Bridgeboard Account"));
 
         let dashboard_response = client
-            .get(format!("{base_url}/api/auth/admin"))
+            .get(format!("{base_url}/auth/admin"))
             .bearer_auth(&admin_token)
             .send()
             .expect("admin dashboard should load");

@@ -6,7 +6,7 @@ Warnings: 3
 Findings:
 - [Warning] authorization.management_api_without_targets at `authorization.management_api`: authorization management API is enabled, but no permissions or templates are declared
   Suggestion: Declare `authorization.permissions` or `authorization.templates`, or disable the management API until runtime assignments are modeled.
-- [Warning] security.auth.ui_path_overlaps_static_mount at `security.auth.portal.path`: built-in auth UI path `/api/auth/portal` overlaps static mount `/api/auth/portal`
+- [Warning] security.auth.ui_path_overlaps_static_mount at `security.auth.portal.path`: built-in auth UI path `/auth/portal` overlaps static mount `/auth/portal`
   Suggestion: Move the static mount or auth UI page so a root-level static handler cannot shadow the built-in auth UI route.
-- [Warning] security.auth.ui_path_overlaps_upload_namespace at `security.auth.admin_dashboard.path`: built-in auth UI path `/dashboard` shares the `/api` namespace used by storage upload `dashboard_upload`
-  Suggestion: Move the auth UI path or the upload route so each owns a distinct first path segment inside `/api`.
+- [Warning] security.auth.ui_path_inside_api_namespace at `security.auth.admin_dashboard.path`: built-in auth UI path `/api/admin` is nested under `/api`, which requires anonymous client keys and blocks browser loads
+  Suggestion: Configure the auth UI path as an absolute path outside `/api`, for example under `/auth/...`, so browsers can reach the page without an anonymous client key header.
