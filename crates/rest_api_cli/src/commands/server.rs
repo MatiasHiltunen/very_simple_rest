@@ -510,9 +510,9 @@ fn export_generated_runtime_artifacts(
         copy_dir_recursive(&migrations, &artifact_dir.join("migrations"))?;
     }
 
-    copy_generated_static_artifacts(project_dir, &artifact_dir, service.as_ref())?;
-    generate_precompressed_static_artifacts(&artifact_dir, service.as_ref())?;
-    copy_generated_tls_artifacts(project_dir, &artifact_dir, service.as_ref())?;
+    copy_generated_static_artifacts(project_dir, artifact_dir, service.as_ref())?;
+    generate_precompressed_static_artifacts(artifact_dir, service.as_ref())?;
+    copy_generated_tls_artifacts(project_dir, artifact_dir, service.as_ref())?;
 
     Ok(artifact_dir.to_path_buf())
 }
@@ -575,7 +575,7 @@ fn copy_generated_tls_artifacts(
         return Ok(());
     };
 
-    for relative_path in configured_tls_relative_paths(&service) {
+    for relative_path in configured_tls_relative_paths(service) {
         let source = project_dir.join(&relative_path);
         if !source.exists() {
             continue;
@@ -759,15 +759,15 @@ fn resolve_build_artifact_path_from_config(
     input: &Path,
     config: &BuildArtifactPathConfig,
 ) -> Result<Option<PathBuf>> {
-    if let Some(env_name) = config.env.as_deref() {
-        if let Ok(value) = std::env::var(env_name) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Ok(Some(resolve_config_relative_path(
-                    input,
-                    Path::new(trimmed),
-                )));
-            }
+    if let Some(env_name) = config.env.as_deref()
+        && let Ok(value) = std::env::var(env_name)
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(resolve_config_relative_path(
+                input,
+                Path::new(trimmed),
+            )));
         }
     }
 

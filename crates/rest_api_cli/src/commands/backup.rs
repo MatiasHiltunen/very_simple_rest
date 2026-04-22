@@ -2788,6 +2788,7 @@ fn read_routing_name(mode: DatabaseReadRoutingMode) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use std::{
         fs,

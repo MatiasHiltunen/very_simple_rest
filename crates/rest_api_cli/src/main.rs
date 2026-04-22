@@ -1295,7 +1295,7 @@ async fn run_cli() -> Result<()> {
                 name,
                 description
                     .clone()
-                    .unwrap_or_else(|| format!("A REST API built with very_simple_rest")),
+                    .unwrap_or_else(|| "A REST API built with very_simple_rest".to_string()),
                 author.clone().unwrap_or_else(|| "Anonymous".to_string()),
                 license,
                 output_dir.clone().unwrap_or_else(|| ".".to_string()),

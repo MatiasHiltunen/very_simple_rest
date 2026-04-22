@@ -2260,10 +2260,10 @@ fn schema_for_type(ty: &syn::Type) -> Value {
         }
     };
 
-    if let Some(kind) = structured_scalar_kind(ty) {
-        if let Some(format) = kind.openapi_format() {
-            schema["format"] = json!(format);
-        }
+    if let Some(kind) = structured_scalar_kind(ty)
+        && let Some(format) = kind.openapi_format()
+    {
+        schema["format"] = json!(format);
     }
 
     schema

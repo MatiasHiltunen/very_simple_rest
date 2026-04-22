@@ -162,7 +162,7 @@ impl AuthorizationHybridScopeSources {
 
 impl AuthorizationHybridResource {
     pub fn supports_action(&self, action: AuthorizationAction) -> bool {
-        self.actions.iter().any(|candidate| *candidate == action)
+        self.actions.contains(&action)
     }
 
     pub fn supports_item_action(&self, action: AuthorizationAction) -> bool {
@@ -1077,13 +1077,14 @@ impl AuthorizationModel {
             },
         };
 
-        if !input.scoped_assignments.is_empty() && input.scope.is_none() {
-            if input.hybrid_source.is_none() {
-                return Err(
-                    "runtime scoped assignments require a simulated scope; pass `--scope ScopeName=value`"
-                        .to_owned(),
-                );
-            }
+        if !input.scoped_assignments.is_empty()
+            && input.scope.is_none()
+            && input.hybrid_source.is_none()
+        {
+            return Err(
+                "runtime scoped assignments require a simulated scope; pass `--scope ScopeName=value`"
+                    .to_owned(),
+            );
         }
 
         self.validate_scoped_assignments(&input.scoped_assignments)?;
@@ -1284,13 +1285,12 @@ impl AuthorizationModel {
             if scope_matched {
                 match &assignment.target {
                     AuthorizationScopedAssignmentTarget::Permission { name } => {
-                        if let Some(permission) = self.contract.permission(name) {
-                            if permission.matches_resource_action(&resource.resource, input.action)
-                            {
-                                target_matched = true;
-                                resolved_permissions.push(permission.name.clone());
-                                resolved.permissions.insert(permission.name.clone());
-                            }
+                        if let Some(permission) = self.contract.permission(name)
+                            && permission.matches_resource_action(&resource.resource, input.action)
+                        {
+                            target_matched = true;
+                            resolved_permissions.push(permission.name.clone());
+                            resolved.permissions.insert(permission.name.clone());
                         }
                     }
                     AuthorizationScopedAssignmentTarget::Template { name } => {
@@ -1478,7 +1478,7 @@ impl AuthorizationPermission {
         action: AuthorizationAction,
     ) -> bool {
         self.resources.iter().any(|candidate| candidate == resource)
-            && self.actions.iter().any(|candidate| *candidate == action)
+            && self.actions.contains(&action)
     }
 }
 
@@ -2921,9 +2921,7 @@ fn runtime_assignment_storage_error(error: sqlx::Error) -> String {
             "runtime authorization assignment tables `{AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE}` / `{AUTHORIZATION_RUNTIME_ASSIGNMENT_EVENT_TABLE}` do not exist; generate and apply the authz runtime migration first"
         )
     } else if is_outdated_runtime_assignment_table(&error) {
-        format!(
-            "runtime authorization assignment tables are missing required lifecycle or audit columns; regenerate and apply the authz runtime migration"
-        )
+        "runtime authorization assignment tables are missing required lifecycle or audit columns; regenerate and apply the authz runtime migration".to_string()
     } else {
         error.to_string()
     }

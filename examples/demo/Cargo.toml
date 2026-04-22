@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
+garde = { workspace = true }
 very_simple_rest = { path = "../..", default-features = false, features = ["macros", "sqlite", "turso-local"] }
 log = { workspace = true }
 env_logger = { workspace = true }

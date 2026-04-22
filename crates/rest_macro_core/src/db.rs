@@ -1425,6 +1425,7 @@ fn parse_turso_local_url(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     #[cfg(feature = "sqlite")]
     use super::connect;

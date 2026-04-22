@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};

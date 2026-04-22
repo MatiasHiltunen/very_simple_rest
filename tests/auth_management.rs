@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -267,9 +269,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     assert_eq!(account_body.role, "admin");
     assert!(account_body.email_verified);
 
-    let portal_request = test::TestRequest::get()
-        .uri("/auth/portal")
-        .to_request();
+    let portal_request = test::TestRequest::get().uri("/auth/portal").to_request();
     let portal_response = test::call_service(&app, portal_request).await;
     assert_eq!(portal_response.status(), StatusCode::OK);
     let portal_body = String::from_utf8(test::read_body(portal_response).await.to_vec())

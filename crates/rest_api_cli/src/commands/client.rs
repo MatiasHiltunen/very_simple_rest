@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -363,15 +365,15 @@ fn resolve_client_path_from_config(
     input: &Path,
     config: &BuildArtifactPathConfig,
 ) -> Result<Option<PathBuf>> {
-    if let Some(env_name) = config.env.as_deref() {
-        if let Ok(value) = std::env::var(env_name) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Ok(Some(resolve_config_relative_path(
-                    input,
-                    Path::new(trimmed),
-                )?));
-            }
+    if let Some(env_name) = config.env.as_deref()
+        && let Ok(value) = std::env::var(env_name)
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(resolve_config_relative_path(
+                input,
+                Path::new(trimmed),
+            )?));
         }
     }
 
@@ -398,12 +400,12 @@ pub(crate) fn resolve_configured_client_self_test_report_path(
 }
 
 fn resolve_client_value_from_config(config: &ClientValueConfig) -> Option<String> {
-    if let Some(env_name) = config.env.as_deref() {
-        if let Ok(value) = std::env::var(env_name) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
-            }
+    if let Some(env_name) = config.env.as_deref()
+        && let Ok(value) = std::env::var(env_name)
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
         }
     }
 
@@ -2082,7 +2084,7 @@ fn render_page_sort_union(
     }
 
     (limit && offset && cursor && order)
-        .then(|| sort_union)
+        .then_some(sort_union)
         .flatten()
 }
 
@@ -2543,15 +2545,12 @@ fn run_typescript_client_self_test(
     generated: &GeneratedClientArtifacts,
     options: &TypescriptClientSelfTestOptions,
 ) -> Result<ClientSelfTestReport> {
-    let mut checks = Vec::new();
-
-    checks.push(check_generated_client_manifest(&generated.output_dir)?);
-    checks.push(check_generated_client_import_graph(&generated.output_dir)?);
-    checks.push(run_node_import_smoke_check(&generated.output_dir, options)?);
-    checks.push(run_typescript_compile_check(
-        &generated.output_dir,
-        options,
-    )?);
+    let mut checks = vec![
+        check_generated_client_manifest(&generated.output_dir)?,
+        check_generated_client_import_graph(&generated.output_dir)?,
+        run_node_import_smoke_check(&generated.output_dir, options)?,
+        run_typescript_compile_check(&generated.output_dir, options)?,
+    ];
 
     if let Some(base_url) = options.runtime_base_url.as_deref() {
         checks.extend(run_runtime_probe_checks(generated, base_url, options)?);

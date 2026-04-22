@@ -49,7 +49,7 @@ pub fn configure_static_mounts_with_runtime(
     runtime: &RuntimeConfig,
 ) {
     let mut ordered = mounts.to_vec();
-    ordered.sort_by(|left, right| right.mount_path.len().cmp(&left.mount_path.len()));
+    ordered.sort_by_key(|mount| std::cmp::Reverse(mount.mount_path.len()));
 
     for mount in ordered {
         register_mount(cfg, mount, runtime.clone());

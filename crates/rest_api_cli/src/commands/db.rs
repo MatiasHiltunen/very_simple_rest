@@ -111,6 +111,7 @@ fn is_missing_user_table(error: &dyn sqlx::error::DatabaseError) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::{check_connection, connect_database, database_url_from_service_config};
     use rest_macro_core::db::query;

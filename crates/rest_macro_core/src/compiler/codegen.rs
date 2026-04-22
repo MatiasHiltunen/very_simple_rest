@@ -3424,7 +3424,7 @@ fn resource_impl_tokens(
         quote!()
     };
     let create_admin_override =
-        resource.policies.admin_bypass && resource.policies.create.iter().next().is_some();
+        resource.policies.admin_bypass && !resource.policies.create.is_empty();
     let create_require_runtime = if hybrid.map(|config| config.create_payload).unwrap_or(false) {
         quote!(Some(runtime.get_ref()))
     } else {
@@ -6445,7 +6445,7 @@ fn collect_policy_expression_bind_kinds(
             let target_resource = resources
                 .iter()
                 .find(|candidate| {
-                    candidate.struct_ident.to_string() == filter.resource
+                    candidate.struct_ident == filter.resource.as_str()
                         || candidate.table_name == filter.resource
                 })
                 .unwrap_or_else(|| {
@@ -6901,9 +6901,7 @@ fn typed_object_payload_validation_tokens(
     field: &super::model::FieldSpec,
     runtime_crate: &Path,
 ) -> Option<TokenStream> {
-    if field.object_fields.is_none() {
-        return None;
-    }
+    field.object_fields.as_ref()?;
 
     let field_name = field.api_name().to_owned();
     let field_name_lit = Literal::string(&field_name);
@@ -7409,6 +7407,7 @@ fn create_requirement_method_tokens(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_requirement_expression_plan_tokens(
     resource: &ResourceSpec,
     resources: &[ResourceSpec],
@@ -7557,7 +7556,7 @@ fn create_requirement_expression_plan_tokens(
             let target_resource = resources
                 .iter()
                 .find(|candidate| {
-                    candidate.struct_ident.to_string() == filter.resource
+                    candidate.struct_ident == filter.resource.as_str()
                         || candidate.table_name == filter.resource
                 })
                 .unwrap_or_else(|| {
@@ -7596,6 +7595,7 @@ fn create_requirement_expression_plan_tokens(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_requirement_exists_condition_tokens(
     resource: &ResourceSpec,
     target_resource: &ResourceSpec,
@@ -8103,6 +8103,7 @@ fn create_raw_input_field_value_tokens(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn policy_expression_plan_tokens(
     resource: &ResourceSpec,
     resources: &[ResourceSpec],
@@ -8206,7 +8207,7 @@ fn policy_expression_plan_tokens(
             let target_resource = resources
                 .iter()
                 .find(|candidate| {
-                    candidate.struct_ident.to_string() == filter.resource
+                    candidate.struct_ident == filter.resource.as_str()
                         || candidate.table_name == filter.resource
                 })
                 .unwrap_or_else(|| {
@@ -8246,6 +8247,7 @@ fn policy_expression_plan_tokens(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exists_condition_plan_tokens(
     target_resource: &ResourceSpec,
     condition: &super::model::PolicyExistsCondition,

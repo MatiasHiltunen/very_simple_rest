@@ -305,7 +305,7 @@ pub fn cors_middleware(security: &SecurityConfig) -> Cors {
             .map(String::as_str)
             .collect()
     };
-    cors = if methods.iter().any(|method| *method == "*") {
+    cors = if methods.contains(&"*") {
         cors.allow_any_method()
     } else {
         cors.allowed_methods(methods)
@@ -333,7 +333,7 @@ pub fn cors_middleware(security: &SecurityConfig) -> Cors {
         }
         headers
     };
-    cors = if headers.iter().any(|header| *header == "*") {
+    cors = if headers.contains(&"*") {
         cors.allow_any_header()
     } else {
         cors.allowed_headers(headers)
@@ -346,7 +346,7 @@ pub fn cors_middleware(security: &SecurityConfig) -> Cors {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        cors = if expose_headers.iter().any(|header| *header == "*") {
+        cors = if expose_headers.contains(&"*") {
             cors.expose_any_header()
         } else {
             cors.expose_headers(expose_headers)
@@ -379,10 +379,10 @@ pub fn request_client_ip(req: &HttpRequest, security: &SecurityConfig) -> Option
     let peer_ip = req.peer_addr().map(|addr| addr.ip());
     let trusted_proxies = resolved_trusted_proxies(&security.trusted_proxies);
 
-    if let Some(peer_ip) = peer_ip {
-        if !trusted_proxies.contains(&peer_ip) {
-            return Some(peer_ip);
-        }
+    if let Some(peer_ip) = peer_ip
+        && !trusted_proxies.contains(&peer_ip)
+    {
+        return Some(peer_ip);
     }
 
     forwarded_client_ip(req).or(peer_ip)
@@ -391,16 +391,16 @@ pub fn request_client_ip(req: &HttpRequest, security: &SecurityConfig) -> Option
 fn resolved_cors_origins(cors: &CorsSecurity) -> Vec<String> {
     let mut origins = cors.origins.clone();
 
-    if let Some(env_var) = &cors.origins_env {
-        if let Ok(value) = env::var(env_var) {
-            origins.extend(
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|origin| !origin.is_empty())
-                    .map(ToOwned::to_owned),
-            );
-        }
+    if let Some(env_var) = &cors.origins_env
+        && let Ok(value) = env::var(env_var)
+    {
+        origins.extend(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(ToOwned::to_owned),
+        );
     }
 
     origins.sort();
@@ -418,19 +418,19 @@ fn resolved_trusted_proxies(config: &TrustedProxySecurity) -> Vec<IpAddr> {
         }
     }
 
-    if let Some(env_var) = &config.proxies_env {
-        if let Ok(value) = env::var(env_var) {
-            for proxy in value
-                .split(',')
-                .map(str::trim)
-                .filter(|proxy| !proxy.is_empty())
-            {
-                match IpAddr::from_str(proxy) {
-                    Ok(proxy) => proxies.push(proxy),
-                    Err(_) => log::warn!(
-                        "Ignoring invalid trusted proxy IP `{proxy}` from environment variable {env_var}"
-                    ),
-                }
+    if let Some(env_var) = &config.proxies_env
+        && let Ok(value) = env::var(env_var)
+    {
+        for proxy in value
+            .split(',')
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
+        {
+            match IpAddr::from_str(proxy) {
+                Ok(proxy) => proxies.push(proxy),
+                Err(_) => log::warn!(
+                    "Ignoring invalid trusted proxy IP `{proxy}` from environment variable {env_var}"
+                ),
             }
         }
     }
@@ -484,10 +484,10 @@ fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
         return Some(ip);
     }
 
-    if value.matches(':').count() == 1 {
-        if let Ok(addr) = std::net::SocketAddr::from_str(value) {
-            return Some(addr.ip());
-        }
+    if value.matches(':').count() == 1
+        && let Ok(addr) = std::net::SocketAddr::from_str(value)
+    {
+        return Some(addr.ip());
     }
 
     None

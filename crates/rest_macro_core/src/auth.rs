@@ -1379,14 +1379,14 @@ async fn register_with_settings(
         }
     };
     let now = now_timestamp_string();
-    if let Err(error) = initialize_user_management_timestamps(&tx, backend, user.id, &now).await {
-        if settings.email.is_some() || settings.require_email_verification {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
-            }
-            return errors::internal_error("Database error");
+    if let Err(error) = initialize_user_management_timestamps(&tx, backend, user.id, &now).await
+        && (settings.email.is_some() || settings.require_email_verification)
+    {
+        let _ = tx.rollback().await;
+        if is_missing_auth_management_schema(&error) {
+            return missing_auth_management_schema_response();
         }
+        return errors::internal_error("Database error");
     }
 
     if settings.email.is_some() {
@@ -4510,10 +4510,7 @@ pub fn register_builtin_auth_html_pages(cfg: &mut web::ServiceConfig, settings: 
         cfg.route(portal.path.as_str(), web::get().to(account_portal_page));
     }
     if let Some(dashboard) = admin_dashboard {
-        cfg.route(
-            dashboard.path.as_str(),
-            web::get().to(admin_dashboard_page),
-        );
+        cfg.route(dashboard.path.as_str(), web::get().to(admin_dashboard_page));
     }
 }
 
@@ -4581,10 +4578,9 @@ fn auth_settings_from_request(req: &HttpRequest) -> AuthSettings {
 fn security_from_request(req: &HttpRequest) -> SecurityConfig {
     req.app_data::<web::Data<SecurityConfig>>()
         .map(|security| security.get_ref().clone())
-        .unwrap_or_else(|| {
-            let mut security = SecurityConfig::default();
-            security.auth = auth_settings_from_request(req);
-            security
+        .unwrap_or_else(|| SecurityConfig {
+            auth: auth_settings_from_request(req),
+            ..SecurityConfig::default()
         })
 }
 
@@ -4679,6 +4675,7 @@ impl AuthRateLimiter {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::{
         AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
@@ -4706,6 +4703,8 @@ mod tests {
     use actix_web::body::to_bytes;
     use actix_web::http::StatusCode;
     use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    use actix_web::web;
     use chrono::{Duration, Utc};
     use jsonwebtoken::{
         DecodingKey, encode,

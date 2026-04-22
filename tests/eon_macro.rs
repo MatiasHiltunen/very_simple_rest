@@ -425,8 +425,8 @@ fn eon_macro_generates_datetime_types_and_range_filters() {
     let _event = datetime_api::Event {
         id: Some(1),
         title: "Launch".to_owned(),
-        starts_at: starts_at.clone(),
-        ends_at: Some(ends_at.clone()),
+        starts_at,
+        ends_at: Some(ends_at),
         created_at: Some(created_at),
         updated_at: Some(
             "2026-03-17T09:30:00Z"
@@ -436,12 +436,12 @@ fn eon_macro_generates_datetime_types_and_range_filters() {
     };
     let _create = datetime_api::EventCreate {
         title: "Launch".to_owned(),
-        starts_at: starts_at.clone(),
-        ends_at: Some(ends_at.clone()),
+        starts_at,
+        ends_at: Some(ends_at),
     };
     let _update = datetime_api::EventUpdate {
         title: "Retimed".to_owned(),
-        starts_at: starts_at.clone(),
+        starts_at,
         ends_at: None,
     };
     let _query = datetime_api::EventListQuery {
@@ -471,19 +471,19 @@ fn eon_macro_generates_portable_scalar_types() {
         run_on,
         run_at,
         external_id,
-        amount: amount.clone(),
+        amount,
     };
     let _create = scalar_types_api::ScheduleCreate {
         run_on,
         run_at,
         external_id,
-        amount: amount.clone(),
+        amount,
     };
     let _update = scalar_types_api::ScheduleUpdate {
         run_on,
         run_at,
         external_id,
-        amount: amount.clone(),
+        amount,
     };
     let _query = scalar_types_api::ScheduleListQuery {
         filter_run_on_gte: Some(run_on),

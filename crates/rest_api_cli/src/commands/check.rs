@@ -1069,8 +1069,7 @@ fn resolve_resource_reference<'a>(
     target_resource: &str,
 ) -> Option<&'a ResourceSpec> {
     resources.iter().find(|resource| {
-        resource.table_name == target_resource
-            || resource.struct_ident.to_string() == target_resource
+        resource.table_name == target_resource || resource.struct_ident == target_resource
     })
 }
 
@@ -1204,7 +1203,10 @@ mod tests {
     }
 
     fn normalize_snapshot_text(value: &str) -> String {
-        value.replace("\r\n", "\n").trim_end_matches('\n').to_owned()
+        value
+            .replace("\r\n", "\n")
+            .trim_end_matches('\n')
+            .to_owned()
     }
 
     fn normalize_report_source(report: &ServiceCheckReport, source: &str) -> ServiceCheckReport {
@@ -1651,11 +1653,7 @@ resources: [
 ]
 "#
         .replace("__BUNDLE_DIR__", bundle_dir);
-        fs::write(
-            &config,
-            config_body,
-        )
-        .expect("fixture should write");
+        fs::write(&config, config_body).expect("fixture should write");
 
         let report = build_service_check_report(&config, &[], true).expect("fixture should load");
         let codes = report

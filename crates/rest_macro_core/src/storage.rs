@@ -692,7 +692,7 @@ pub fn configure_public_mounts_with_runtime(
     _runtime: &RuntimeConfig,
 ) {
     let mut ordered = mounts.to_vec();
-    ordered.sort_by(|left, right| right.mount_path.len().cmp(&left.mount_path.len()));
+    ordered.sort_by_key(|mount| std::cmp::Reverse(mount.mount_path.len()));
 
     for mount in ordered {
         register_public_mount(cfg, storage.clone(), mount);

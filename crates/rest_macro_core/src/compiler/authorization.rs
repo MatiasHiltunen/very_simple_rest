@@ -184,7 +184,7 @@ fn compile_filter_expression(
             table: resources
                 .iter()
                 .find(|resource| {
-                    resource.struct_ident.to_string() == filter.resource
+                    resource.struct_ident == filter.resource.as_str()
                         || resource.table_name == filter.resource
                 })
                 .map(|resource| resource.table_name.clone())

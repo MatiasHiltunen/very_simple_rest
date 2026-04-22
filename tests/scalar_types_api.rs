@@ -57,7 +57,7 @@ async fn generated_handlers_support_portable_scalar_payloads_filters_and_cursors
     query("INSERT INTO schedule (run_on, run_at, external_id, amount) VALUES (?, ?, ?, ?)")
         .bind(parse_date("2026-03-18"))
         .bind(parse_time("09:30:00"))
-        .bind(beta_uuid.clone())
+        .bind(beta_uuid)
         .bind(parse_decimal("12.3400"))
         .execute(&pool)
         .await

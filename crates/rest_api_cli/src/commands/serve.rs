@@ -376,7 +376,7 @@ fn parent_watch_enabled(managed_context: Option<&ServeInstanceContext>) -> bool 
         return false;
     }
 
-    managed_context.map_or(true, ServeInstanceContext::should_watch_parent)
+    managed_context.is_none_or(ServeInstanceContext::should_watch_parent)
 }
 
 #[cfg(not(windows))]
@@ -587,9 +587,8 @@ impl DynamicResource {
         let api_field_index = fields
             .iter()
             .enumerate()
-            .filter_map(|(index, field)| {
-                field.expose_in_api.then(|| (field.api_name.clone(), index))
-            })
+            .filter(|(_, field)| field.expose_in_api)
+            .map(|(index, field)| (field.api_name.clone(), index))
             .collect::<HashMap<_, _>>();
         let response_contexts = spec
             .response_contexts
@@ -2444,43 +2443,43 @@ fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), Http
         return Ok(());
     }
 
-    if let Some(length) = field.validation.length.as_ref() {
-        if let BoundValue::Text(text) = value {
-            let measured = measured_text_length(text, length.mode);
+    if let Some(length) = field.validation.length.as_ref()
+        && let BoundValue::Text(text) = value
+    {
+        let measured = measured_text_length(text, length.mode);
 
-            if let Some(min_length) = length.min
-                && measured < min_length
-            {
-                return Err(errors::validation_error(
-                    field.api_name.clone(),
-                    format!(
-                        "Field `{}` must have at least {} characters",
-                        field.api_name, min_length
-                    ),
-                ));
-            }
-            if let Some(max_length) = length.max
-                && measured > max_length
-            {
-                return Err(errors::validation_error(
-                    field.api_name.clone(),
-                    format!(
-                        "Field `{}` must have at most {} characters",
-                        field.api_name, max_length
-                    ),
-                ));
-            }
-            if let Some(equal) = length.equal
-                && measured != equal
-            {
-                return Err(errors::validation_error(
-                    field.api_name.clone(),
-                    format!(
-                        "Field `{}` must have exactly {} characters",
-                        field.api_name, equal
-                    ),
-                ));
-            }
+        if let Some(min_length) = length.min
+            && measured < min_length
+        {
+            return Err(errors::validation_error(
+                field.api_name.clone(),
+                format!(
+                    "Field `{}` must have at least {} characters",
+                    field.api_name, min_length
+                ),
+            ));
+        }
+        if let Some(max_length) = length.max
+            && measured > max_length
+        {
+            return Err(errors::validation_error(
+                field.api_name.clone(),
+                format!(
+                    "Field `{}` must have at most {} characters",
+                    field.api_name, max_length
+                ),
+            ));
+        }
+        if let Some(equal) = length.equal
+            && measured != equal
+        {
+            return Err(errors::validation_error(
+                field.api_name.clone(),
+                format!(
+                    "Field `{}` must have exactly {} characters",
+                    field.api_name, equal
+                ),
+            ));
         }
     }
 
@@ -2763,14 +2762,13 @@ fn json_field_to_scope_value(value: &Value) -> Option<String> {
 }
 
 fn require_role(user: &UserContext, role: Option<&str>) -> Result<(), HttpResponse> {
-    if let Some(role) = role {
-        if !user
+    if let Some(role) = role
+        && !user
             .roles
             .iter()
             .any(|candidate| candidate == "admin" || candidate == role)
-        {
-            return Err(errors::forbidden("forbidden", "Insufficient privileges"));
-        }
+    {
+        return Err(errors::forbidden("forbidden", "Insufficient privileges"));
     }
     Ok(())
 }
@@ -3159,7 +3157,7 @@ fn build_row_exists_plan(
 }
 
 fn build_row_exists_condition_plan(
-    current: &DynamicResource,
+    _current: &DynamicResource,
     target: &DynamicResource,
     condition: &PolicyExistsCondition,
     user: &UserContext,
@@ -3198,7 +3196,7 @@ fn build_row_exists_condition_plan(
             let plans = conditions
                 .iter()
                 .map(|condition| {
-                    build_row_exists_condition_plan(current, target, condition, user, alias)
+                    build_row_exists_condition_plan(_current, target, condition, user, alias)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             Ok(combine_all_plans(plans))
@@ -3207,13 +3205,13 @@ fn build_row_exists_condition_plan(
             let plans = conditions
                 .iter()
                 .map(|condition| {
-                    build_row_exists_condition_plan(current, target, condition, user, alias)
+                    build_row_exists_condition_plan(_current, target, condition, user, alias)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             Ok(combine_any_plans(plans))
         }
         PolicyExistsCondition::Not(condition) => Ok(negate_plan(build_row_exists_condition_plan(
-            current, target, condition, user, alias,
+            _current, target, condition, user, alias,
         )?)),
     }
 }
@@ -3930,11 +3928,11 @@ fn finalize_list_response(
 ) -> Result<ListResponse, HttpResponse> {
     let mut has_more = false;
     if plan.cursor_mode {
-        if let Some(limit) = plan.limit {
-            if items.len() > limit as usize {
-                has_more = true;
-                items.pop();
-            }
+        if let Some(limit) = plan.limit
+            && items.len() > limit as usize
+        {
+            has_more = true;
+            items.pop();
         }
     } else if plan.limit.is_some() {
         has_more = (plan.offset as i64) + (items.len() as i64) < total;
@@ -4427,17 +4425,9 @@ fn action_update_assignments(
             ActionAssignmentSource::InputField(name) => {
                 let mut input_field = field.clone();
                 input_field.api_name = name.clone();
-                let value = match parse_body_value(
-                    &input_field,
-                    payload.get(name.as_str()),
-                    field.optional,
-                ) {
-                    Ok(value) => value,
-                    Err(response) => return Err(response),
-                };
-                if let Err(response) = apply_validation(&input_field, &value) {
-                    return Err(response);
-                }
+                let value =
+                    parse_body_value(&input_field, payload.get(name.as_str()), field.optional)?;
+                apply_validation(&input_field, &value)?;
                 value
             }
         };
@@ -4674,6 +4664,7 @@ async fn delete_hybrid_fallback(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::{
         BoundValue, DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,

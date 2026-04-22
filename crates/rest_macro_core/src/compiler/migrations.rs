@@ -459,8 +459,7 @@ fn resolve_exists_target_table<'a>(
     resources
         .iter()
         .find(|resource| {
-            resource.table_name == target_resource
-                || resource.struct_ident.to_string() == target_resource
+            resource.table_name == target_resource || resource.struct_ident == target_resource
         })
         .map(|resource| resource.table_name.as_str())
 }

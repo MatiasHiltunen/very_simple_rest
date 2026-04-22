@@ -650,6 +650,7 @@ fn print_setup_summary(report: &SetupBootstrapReport) {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::run_setup;
     use crate::commands::db::database_url_from_service_config;

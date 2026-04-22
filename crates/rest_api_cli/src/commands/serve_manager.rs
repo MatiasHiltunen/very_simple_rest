@@ -748,7 +748,7 @@ fn local_reset_targets(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
         );
     };
 
-    if database_target != PathBuf::from(":memory:") {
+    if database_target != Path::new(":memory:") {
         let database_target = canonicalize_existing_or_logical(&database_target)?;
         if !path_is_within(&base_dir, &database_target) {
             bail!(
@@ -814,7 +814,7 @@ fn terminate_process(pid: u32, force: bool) -> anyhow::Result<()> {
             run_taskkill(pid, true)?;
         }
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(windows))]
@@ -841,7 +841,7 @@ fn process_is_running(pid: u32) -> anyhow::Result<bool> {
             }
             let wait = WaitForSingleObject(handle, 0);
             let _ = CloseHandle(handle);
-            return Ok(wait == WAIT_TIMEOUT);
+            Ok(wait == WAIT_TIMEOUT)
         }
     }
 

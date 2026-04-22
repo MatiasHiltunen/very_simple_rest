@@ -1180,6 +1180,7 @@ enum MixinMapValueDocument {
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 enum FieldMapValueDocument {
     Type(FieldTypeDocument),
     Config(FieldMapConfigDocument),
@@ -1343,12 +1344,12 @@ impl ResourceMapValueDocument {
     where
         E: de::Error,
     {
-        if let Some(name) = self.name.as_deref() {
-            if name != key {
-                return Err(E::custom(format!(
-                    "resource map entry `{key}` has mismatched `name` value `{name}`"
-                )));
-            }
+        if let Some(name) = self.name.as_deref()
+            && name != key
+        {
+            return Err(E::custom(format!(
+                "resource map entry `{key}` has mismatched `name` value `{name}`"
+            )));
         }
 
         Ok(ResourceDocument {
@@ -1417,12 +1418,12 @@ impl FieldMapConfigDocument {
     where
         E: de::Error,
     {
-        if let Some(name) = self.name.as_deref() {
-            if name != key {
-                return Err(E::custom(format!(
-                    "field map entry `{key}` has mismatched `name` value `{name}`"
-                )));
-            }
+        if let Some(name) = self.name.as_deref()
+            && name != key
+        {
+            return Err(E::custom(format!(
+                "field map entry `{key}` has mismatched `name` value `{name}`"
+            )));
         }
 
         Ok(FieldDocument {
@@ -1448,12 +1449,12 @@ impl MixinConfigDocument {
     where
         E: de::Error,
     {
-        if let Some(name) = self.name.as_deref() {
-            if name != key {
-                return Err(E::custom(format!(
-                    "mixin map entry `{key}` has mismatched `name` value `{name}`"
-                )));
-            }
+        if let Some(name) = self.name.as_deref()
+            && name != key
+        {
+            return Err(E::custom(format!(
+                "mixin map entry `{key}` has mismatched `name` value `{name}`"
+            )));
         }
 
         Ok(MixinDocument {
@@ -1485,12 +1486,12 @@ impl ApiFieldProjectionConfigDocument {
     where
         E: de::Error,
     {
-        if let Some(name) = self.name.as_deref() {
-            if name != key {
-                return Err(E::custom(format!(
-                    "api.fields map entry `{key}` has mismatched `name` value `{name}`"
-                )));
-            }
+        if let Some(name) = self.name.as_deref()
+            && name != key
+        {
+            return Err(E::custom(format!(
+                "api.fields map entry `{key}` has mismatched `name` value `{name}`"
+            )));
         }
 
         Ok(ApiFieldProjectionDocument {
@@ -1518,12 +1519,12 @@ impl ResponseContextConfigDocument {
     where
         E: de::Error,
     {
-        if let Some(name) = self.name.as_deref() {
-            if name != key {
-                return Err(E::custom(format!(
-                    "api.contexts map entry `{key}` has mismatched `name` value `{name}`"
-                )));
-            }
+        if let Some(name) = self.name.as_deref()
+            && name != key
+        {
+            return Err(E::custom(format!(
+                "api.contexts map entry `{key}` has mismatched `name` value `{name}`"
+            )));
         }
 
         Ok(ResponseContextDocument {
@@ -1550,12 +1551,12 @@ impl EnumConfigDocument {
     where
         E: de::Error,
     {
-        if let Some(name) = self.name.as_deref() {
-            if name != key {
-                return Err(E::custom(format!(
-                    "enums map entry `{key}` has mismatched `name` value `{name}`"
-                )));
-            }
+        if let Some(name) = self.name.as_deref()
+            && name != key
+        {
+            return Err(E::custom(format!(
+                "enums map entry `{key}` has mismatched `name` value `{name}`"
+            )));
         }
 
         Ok(EnumDocument {
@@ -5331,18 +5332,17 @@ fn validate_distinct_public_mounts(
             ));
         }
     }
-    if let Some(s3_compat) = &storage.s3_compat {
-        if let Some(existing) =
+    if let Some(s3_compat) = &storage.s3_compat
+        && let Some(existing) =
             mounts.insert(s3_compat.mount_path.as_str(), "storage s3_compat mount")
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                format!(
-                    "mount path `{}` is already declared by a {existing}",
-                    s3_compat.mount_path
-                ),
-            ));
-        }
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "mount path `{}` is already declared by a {existing}",
+                s3_compat.mount_path
+            ),
+        ));
     }
     Ok(())
 }
@@ -8797,7 +8797,7 @@ resources: [
             build_resources(document.db, document.resources).expect("resources should build");
         let resource = resources
             .iter()
-            .find(|resource| resource.struct_ident.to_string() == "SharedDoc")
+            .find(|resource| resource.struct_ident == "SharedDoc")
             .expect("shared doc resource should exist");
         let read = resource
             .policies
@@ -8871,7 +8871,7 @@ resources: [
             build_resources(document.db, document.resources).expect("resources should build");
         let resource = resources
             .iter()
-            .find(|resource| resource.struct_ident.to_string() == "FamilyMember")
+            .find(|resource| resource.struct_ident == "FamilyMember")
             .expect("family member resource should exist");
 
         assert_eq!(resource.policies.create.len(), 1);
@@ -8979,7 +8979,7 @@ resources: [
             build_resources(document.db, document.resources).expect("resources should build");
         let resource = resources
             .iter()
-            .find(|resource| resource.struct_ident.to_string() == "SharedDoc")
+            .find(|resource| resource.struct_ident == "SharedDoc")
             .expect("shared doc resource should exist");
         let read = resource
             .policies

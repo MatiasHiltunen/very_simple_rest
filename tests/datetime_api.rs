@@ -56,7 +56,7 @@ async fn generated_handlers_support_datetime_payloads_filters_and_cursors() {
 
     query("INSERT INTO event (title, starts_at, ends_at) VALUES (?, ?, ?)")
         .bind("beta")
-        .bind(beta_start.clone())
+        .bind(beta_start)
         .bind(Option::<very_simple_rest::chrono::DateTime<very_simple_rest::chrono::Utc>>::None)
         .execute(&pool)
         .await
@@ -64,7 +64,7 @@ async fn generated_handlers_support_datetime_payloads_filters_and_cursors() {
 
     query("INSERT INTO event (title, starts_at, ends_at) VALUES (?, ?, ?)")
         .bind("gamma")
-        .bind(gamma_start.clone())
+        .bind(gamma_start)
         .bind(Some(parse_datetime("2026-03-17T15:00:00Z")))
         .execute(&pool)
         .await

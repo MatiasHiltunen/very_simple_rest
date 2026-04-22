@@ -313,12 +313,11 @@ pub async fn inspect_live_schema(
                 ));
             }
 
-            let expected_nullable = if field.is_id {
-                false
-            } else if matches!(
-                field.generated,
-                compiler::GeneratedValue::CreatedAt | compiler::GeneratedValue::UpdatedAt
-            ) {
+            let expected_nullable = if field.is_id
+                || matches!(
+                    field.generated,
+                    compiler::GeneratedValue::CreatedAt | compiler::GeneratedValue::UpdatedAt
+                ) {
                 false
             } else {
                 compiler::is_optional_type(&field.ty)
@@ -1064,7 +1063,7 @@ fn exists_target_index_fields(
                 .iter()
                 .find(|candidate| {
                     candidate.table_name == target_resource
-                        || candidate.struct_ident.to_string() == target_resource
+                        || candidate.struct_ident == target_resource
                 })
                 .map(|resource| resource.table_name.as_str())
             else {
@@ -1297,6 +1296,7 @@ enum ApplyResult {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use crate::commands::db::{connect_database, database_url_from_service_config};
     use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};

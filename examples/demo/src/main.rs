@@ -1,5 +1,7 @@
 use std::env;
 
+#[allow(unused_imports)]
+use very_simple_rest::garde;
 use very_simple_rest::prelude::*;
 
 const DEFAULT_DB_PATH: &str = "var/data/demo.db";

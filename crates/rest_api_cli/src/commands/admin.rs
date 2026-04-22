@@ -713,6 +713,7 @@ fn quote_ident(backend: DbBackend, ident: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::{configured_auth_claims, create_admin_in_pool, create_admin_with_options};
     use rest_macro_core::db::{DbPool, query};

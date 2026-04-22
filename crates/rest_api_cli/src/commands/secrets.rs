@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::error::{Error, Result};
 use clap::ValueEnum;
 use rest_macro_core::{
@@ -777,11 +779,11 @@ fn check_binding_resolution(binding: &SecretBindingSpec) -> SecretBindingCheck {
 
     let status = if binding.var_name == "DATABASE_URL" {
         DoctorStatus::Pass
-    } else if detail.starts_with("Missing required") || detail.contains("resolved to an empty") {
-        DoctorStatus::Fail
-    } else if detail.contains("unreadable file") {
-        DoctorStatus::Fail
-    } else if binding.required {
+    } else if detail.starts_with("Missing required")
+        || detail.contains("resolved to an empty")
+        || detail.contains("unreadable file")
+        || binding.required
+    {
         DoctorStatus::Fail
     } else {
         DoctorStatus::Warn

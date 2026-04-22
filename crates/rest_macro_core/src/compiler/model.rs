@@ -1221,14 +1221,14 @@ fn type_leaf_name(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(type_path) => {
             let segment = type_path.path.segments.last()?;
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    let inner_ty = args.args.iter().find_map(|arg| match arg {
-                        syn::GenericArgument::Type(inner_ty) => Some(inner_ty),
-                        _ => None,
-                    })?;
-                    return type_leaf_name(inner_ty);
-                }
+            if segment.ident == "Option"
+                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            {
+                let inner_ty = args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(inner_ty) => Some(inner_ty),
+                    _ => None,
+                })?;
+                return type_leaf_name(inner_ty);
             }
             Some(segment.ident.to_string())
         }
@@ -1689,7 +1689,7 @@ fn validate_policy_claim_sources_in_expression(
         ),
         PolicyFilterExpression::Exists(filter) => {
             let target_resource = resources.iter().find(|candidate| {
-                candidate.struct_ident.to_string() == filter.resource
+                candidate.struct_ident == filter.resource.as_str()
                     || candidate.table_name == filter.resource
             });
             let Some(target_resource) = target_resource else {
@@ -2017,13 +2017,13 @@ pub fn validate_list_config(list: &ListConfig, span: Span) -> syn::Result<()> {
         return Err(syn::Error::new(span, "`max_limit` must be greater than 0"));
     }
 
-    if let (Some(default_limit), Some(max_limit)) = (list.default_limit, list.max_limit) {
-        if default_limit > max_limit {
-            return Err(syn::Error::new(
-                span,
-                "`default_limit` cannot be greater than `max_limit`",
-            ));
-        }
+    if let (Some(default_limit), Some(max_limit)) = (list.default_limit, list.max_limit)
+        && default_limit > max_limit
+    {
+        return Err(syn::Error::new(
+            span,
+            "`default_limit` cannot be greater than `max_limit`",
+        ));
     }
 
     Ok(())
@@ -2058,16 +2058,16 @@ pub fn validate_authorization_contract(
     }
 
     for scope in &contract.scopes {
-        if let Some(parent) = &scope.parent {
-            if !scope_names.contains(parent.as_str()) {
-                return Err(syn::Error::new(
-                    span,
-                    format!(
-                        "`authorization.scopes.{}` references unknown parent scope `{parent}`",
-                        scope.name
-                    ),
-                ));
-            }
+        if let Some(parent) = &scope.parent
+            && !scope_names.contains(parent.as_str())
+        {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`authorization.scopes.{}` references unknown parent scope `{parent}`",
+                    scope.name
+                ),
+            ));
         }
     }
     for scope in &contract.scopes {
@@ -2235,7 +2235,7 @@ fn validate_authorization_hybrid_enforcement(
 
         let resource = resources
             .iter()
-            .find(|resource| resource.struct_ident.to_string() == config.resource)
+            .find(|resource| resource.struct_ident == config.resource.as_str())
             .ok_or_else(|| {
                 syn::Error::new(
                     span,
@@ -2522,13 +2522,13 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         ));
     }
 
-    if let Some(hsts) = &security.headers.hsts {
-        if hsts.max_age_seconds == 0 {
-            return Err(syn::Error::new(
-                span,
-                "`security.headers.hsts.max_age_seconds` must be greater than 0",
-            ));
-        }
+    if let Some(hsts) = &security.headers.hsts
+        && hsts.max_age_seconds == 0
+    {
+        return Err(syn::Error::new(
+            span,
+            "`security.headers.hsts.max_age_seconds` must be greater than 0",
+        ));
     }
 
     if security.auth.access_token_ttl_seconds <= 0 {
@@ -3350,7 +3350,7 @@ fn validate_exists_policy_filter(
     span: Span,
 ) -> syn::Result<()> {
     let target_resource = resources.iter().find(|candidate| {
-        candidate.struct_ident.to_string() == filter.resource
+        candidate.struct_ident == filter.resource.as_str()
             || candidate.table_name == filter.resource
     });
     let Some(target_resource) = target_resource else {
@@ -3554,16 +3554,15 @@ fn validate_policy_filter_operator(
 
             if let (Some(enum_values), PolicyLiteralValue::String(value)) =
                 (field.enum_values(), literal)
+                && !enum_values.iter().any(|candidate| candidate == value)
             {
-                if !enum_values.iter().any(|candidate| candidate == value) {
-                    return Err(syn::Error::new(
-                        span,
-                        format!(
-                            "{scope} row policy field `{field_name}` must use one of declared enum values [{}]",
-                            enum_values.join(", ")
-                        ),
-                    ));
-                }
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "{scope} row policy field `{field_name}` must use one of declared enum values [{}]",
+                        enum_values.join(", ")
+                    ),
+                ));
             }
 
             Ok(())
@@ -3648,19 +3647,21 @@ mod tests {
 
     #[test]
     fn rejects_combined_structured_and_legacy_jwt_config() {
-        let mut security = SecurityConfig::default();
-        security.auth = AuthSettings {
-            jwt: Some(AuthJwtSettings {
-                algorithm: AuthJwtAlgorithm::EdDsa,
-                active_kid: Some("current".to_owned()),
-                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
-                verification_keys: vec![AuthJwtVerificationKey {
-                    kid: "current".to_owned(),
-                    key: SecretRef::env_or_file("JWT_VERIFYING_KEY"),
-                }],
-            }),
-            jwt_secret: Some(SecretRef::env_or_file("JWT_SECRET")),
-            ..AuthSettings::default()
+        let security = SecurityConfig {
+            auth: AuthSettings {
+                jwt: Some(AuthJwtSettings {
+                    algorithm: AuthJwtAlgorithm::EdDsa,
+                    active_kid: Some("current".to_owned()),
+                    signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                    verification_keys: vec![AuthJwtVerificationKey {
+                        kid: "current".to_owned(),
+                        key: SecretRef::env_or_file("JWT_VERIFYING_KEY"),
+                    }],
+                }),
+                jwt_secret: Some(SecretRef::env_or_file("JWT_SECRET")),
+                ..AuthSettings::default()
+            },
+            ..SecurityConfig::default()
         };
 
         let error =
@@ -3674,16 +3675,18 @@ mod tests {
 
     #[test]
     fn rejects_asymmetric_jwt_without_verification_keys() {
-        let mut security = SecurityConfig::default();
-        security.auth = AuthSettings {
-            jwt: Some(AuthJwtSettings {
-                algorithm: AuthJwtAlgorithm::EdDsa,
-                active_kid: None,
-                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
-                verification_keys: Vec::new(),
-            }),
-            jwt_secret: None,
-            ..AuthSettings::default()
+        let security = SecurityConfig {
+            auth: AuthSettings {
+                jwt: Some(AuthJwtSettings {
+                    algorithm: AuthJwtAlgorithm::EdDsa,
+                    active_kid: None,
+                    signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                    verification_keys: Vec::new(),
+                }),
+                jwt_secret: None,
+                ..AuthSettings::default()
+            },
+            ..SecurityConfig::default()
         };
 
         let error =
@@ -3695,19 +3698,21 @@ mod tests {
 
     #[test]
     fn rejects_active_kid_not_present_in_verification_keys() {
-        let mut security = SecurityConfig::default();
-        security.auth = AuthSettings {
-            jwt: Some(AuthJwtSettings {
-                algorithm: AuthJwtAlgorithm::EdDsa,
-                active_kid: Some("current".to_owned()),
-                signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
-                verification_keys: vec![AuthJwtVerificationKey {
-                    kid: "previous".to_owned(),
-                    key: SecretRef::env_or_file("JWT_VERIFYING_KEY_PREVIOUS"),
-                }],
-            }),
-            jwt_secret: None,
-            ..AuthSettings::default()
+        let security = SecurityConfig {
+            auth: AuthSettings {
+                jwt: Some(AuthJwtSettings {
+                    algorithm: AuthJwtAlgorithm::EdDsa,
+                    active_kid: Some("current".to_owned()),
+                    signing_key: SecretRef::env_or_file("JWT_SIGNING_KEY"),
+                    verification_keys: vec![AuthJwtVerificationKey {
+                        kid: "previous".to_owned(),
+                        key: SecretRef::env_or_file("JWT_VERIFYING_KEY_PREVIOUS"),
+                    }],
+                }),
+                jwt_secret: None,
+                ..AuthSettings::default()
+            },
+            ..SecurityConfig::default()
         };
 
         let error =

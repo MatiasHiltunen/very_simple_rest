@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::{
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -345,7 +347,6 @@ fn response_cookie<B>(
     response
         .headers()
         .get_all(very_simple_rest::actix_web::http::header::SET_COOKIE)
-        .into_iter()
         .filter_map(|value| value.to_str().ok())
         .filter_map(|value| Cookie::parse(value.to_owned()).ok())
         .find(|cookie| cookie.name() == name)
