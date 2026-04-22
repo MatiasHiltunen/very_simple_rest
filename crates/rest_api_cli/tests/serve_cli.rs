@@ -98,6 +98,24 @@ fn wait_for_http_ready(client: &Client, url: &str, timeout: Duration) -> Result<
     Err(last_error.unwrap_or_else(|| "server never became ready".to_owned()))
 }
 
+fn wait_for_http_stopped(client: &Client, url: &str, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_status = None;
+
+    while Instant::now() < deadline {
+        match client.get(url).send() {
+            Ok(response) if response.status().is_success() => {
+                last_status = Some(format!("server still responded with {}", response.status()));
+            }
+            Ok(_response) => return Ok(()),
+            Err(_) => return Ok(()),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    Err(last_status.unwrap_or_else(|| "server never stopped".to_owned()))
+}
+
 fn http_client() -> Client {
     client(false)
 }
@@ -275,6 +293,22 @@ impl Drop for SpawnedBinary {
     }
 }
 
+#[cfg(windows)]
+struct SpawnedPidGuard {
+    pid: u32,
+}
+
+#[cfg(windows)]
+impl Drop for SpawnedPidGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &self.pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 #[test]
 fn vsr_serve_starts_native_runtime_from_eon() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -392,6 +426,110 @@ fn vsr_serve_starts_native_runtime_from_eon() {
     let api_body: Value = api_response.json().expect("page list should decode");
     assert_eq!(api_body["total"], 1);
     assert_eq!(api_body["items"][0]["title"], "Landing page copy");
+}
+
+#[cfg(windows)]
+#[test]
+fn vsr_serve_stops_when_parent_process_exits() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("public_catalog_api.eon");
+    fs::copy(fixture_path("public_catalog_api.eon"), &config).expect("fixture should copy");
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let launcher = root.join("launch_parent.ps1");
+    let pid_file = root.join("serve.pid");
+    let child_stdout_log = root.join("serve.stdout.log");
+    let child_stderr_log = root.join("serve.stderr.log");
+    let parent_stdout_log = root.join("parent.stdout.log");
+    let parent_stderr_log = root.join("parent.stderr.log");
+    let vsr_path = PathBuf::from(env!("CARGO_BIN_EXE_vsr"));
+
+    let launcher_body = format!(
+        "\
+$env:TURSO_ENCRYPTION_KEY = '{turso_key}'\n\
+$child = Start-Process -FilePath '{vsr}' -ArgumentList @('serve','{config}','--without-auth','--bind-addr','{bind_addr}') -WorkingDirectory '{root}' -RedirectStandardOutput '{child_stdout}' -RedirectStandardError '{child_stderr}' -PassThru\n\
+Set-Content -Path '{pid_file}' -Value $child.Id\n\
+Wait-Process -Id $child.Id\n",
+        turso_key = TEST_TURSO_KEY,
+        vsr = vsr_path.display().to_string().replace('\'', "''"),
+        config = config.display().to_string().replace('\'', "''"),
+        bind_addr = bind_addr,
+        root = root.display().to_string().replace('\'', "''"),
+        child_stdout = child_stdout_log.display().to_string().replace('\'', "''"),
+        child_stderr = child_stderr_log.display().to_string().replace('\'', "''"),
+        pid_file = pid_file.display().to_string().replace('\'', "''"),
+    );
+    fs::write(&launcher, launcher_body).expect("launcher should write");
+
+    let parent_stdout =
+        fs::File::create(&parent_stdout_log).expect("parent stdout log should open");
+    let parent_stderr =
+        fs::File::create(&parent_stderr_log).expect("parent stderr log should open");
+    let child = Command::new("powershell.exe")
+        .current_dir(&root)
+        .arg("-NoProfile")
+        .arg("-File")
+        .arg(&launcher)
+        .stdout(Stdio::from(parent_stdout))
+        .stderr(Stdio::from(parent_stderr))
+        .spawn()
+        .expect("launcher parent should start");
+    let mut parent =
+        SpawnedBinary::new(child, parent_stdout_log.clone(), parent_stderr_log.clone());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pid_file.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        pid_file.exists(),
+        "launcher never wrote child pid\n{}",
+        parent.logs()
+    );
+    let child_pid: u32 = fs::read_to_string(&pid_file)
+        .expect("pid file should read")
+        .trim()
+        .parse()
+        .expect("pid should parse");
+    let _child_guard = SpawnedPidGuard { pid: child_pid };
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "vsr serve never became ready: {error}\nparent logs:\n{}\nchild stdout:\n{}\nchild stderr:\n{}",
+            parent.logs(),
+            fs::read_to_string(&child_stdout_log).unwrap_or_default(),
+            fs::read_to_string(&child_stderr_log).unwrap_or_default(),
+        );
+    }
+
+    parent
+        .child
+        .kill()
+        .expect("launcher parent should be killable");
+    let _ = parent.child.wait();
+
+    if let Err(error) = wait_for_http_stopped(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(15),
+    ) {
+        panic!(
+            "server still responded after parent exit: {error}\nparent logs:\n{}\nchild stdout:\n{}\nchild stderr:\n{}",
+            parent.logs(),
+            fs::read_to_string(&child_stdout_log).unwrap_or_default(),
+            fs::read_to_string(&child_stderr_log).unwrap_or_default(),
+        );
+    }
 }
 
 #[test]

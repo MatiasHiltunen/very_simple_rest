@@ -40,9 +40,26 @@ use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::mem::{size_of, zeroed};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcessId, INFINITE, OpenProcess, WaitForSingleObject,
+};
+
 const BIND_MARKER: &str = "__vsr_bind__";
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
 const HTTP_WORKERS_ENV: &str = "VSR_HTTP_WORKERS";
+#[cfg(windows)]
+const PROCESS_SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
 
 pub async fn serve_service(
     input: &Path,
@@ -208,18 +225,120 @@ pub async fn serve_service(
         server
     };
 
-    if let Some(rustls_config) = rustls_config {
+    let server = if let Some(rustls_config) = rustls_config {
         log::info!("Server listening on https://{}", bind_addr);
-        server
-            .bind_rustls_0_23(&bind_addr, rustls_config)?
-            .run()
-            .await?;
+        server.bind_rustls_0_23(&bind_addr, rustls_config)?.run()
     } else {
         log::info!("Server listening on http://{}", bind_addr);
-        server.bind(&bind_addr)?.run().await?;
-    }
+        server.bind(&bind_addr)?.run()
+    };
+    spawn_parent_shutdown_watch(server.handle());
+    server.await?;
 
     Ok(())
+}
+
+fn spawn_parent_shutdown_watch(server_handle: actix_web::dev::ServerHandle) {
+    #[cfg(windows)]
+    {
+        let Some(parent_pid) = (match current_parent_pid() {
+            Ok(Some(parent_pid)) => Some(parent_pid),
+            Ok(None) => None,
+            Err(error) => {
+                log::debug!("Skipping parent-process watcher: {error}");
+                None
+            }
+        }) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || wait_for_parent_exit(parent_pid)).await {
+                Ok(Ok(())) => {
+                    log::warn!("Parent process {parent_pid} exited; stopping foreground server");
+                    server_handle.stop(true).await;
+                }
+                Ok(Err(error)) => {
+                    log::debug!("Parent-process watcher for pid {parent_pid} stopped: {error}");
+                }
+                Err(error) => {
+                    log::debug!("Parent-process watcher task failed: {error}");
+                }
+            }
+        });
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = server_handle;
+    }
+}
+
+#[cfg(windows)]
+fn current_parent_pid() -> std::io::Result<Option<u32>> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let current_pid = GetCurrentProcessId();
+        let mut entry: PROCESSENTRY32W = zeroed();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut parent_pid = None;
+        if Process32FirstW(snapshot, &mut entry) == 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = CloseHandle(snapshot);
+            return Err(error);
+        }
+
+        loop {
+            if entry.th32ProcessID == current_pid {
+                parent_pid = Some(entry.th32ParentProcessID);
+                break;
+            }
+            if Process32NextW(snapshot, &mut entry) == 0 {
+                break;
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+        Ok(parent_pid.filter(|pid| *pid != 0 && *pid != current_pid))
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_parent_exit(parent_pid: u32) -> std::io::Result<()> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE_RIGHT, 0, parent_pid);
+        if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(87) | Some(1168) => Ok(()),
+                _ => Err(error),
+            };
+        }
+
+        let wait_result = WaitForSingleObject(handle, INFINITE);
+        let wait_error = if wait_result == WAIT_FAILED {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        let _ = CloseHandle(handle);
+
+        match wait_result {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_FAILED => {
+                Err(wait_error
+                    .unwrap_or_else(|| std::io::Error::other("parent-process wait failed")))
+            }
+            other => Err(std::io::Error::other(format!(
+                "unexpected wait result {other} while watching parent process {parent_pid}"
+            ))),
+        }
+    }
 }
 
 fn http_workers_from_env() -> anyhow::Result<Option<usize>> {
