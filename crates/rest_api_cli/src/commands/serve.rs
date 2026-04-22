@@ -40,6 +40,8 @@ use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use uuid::Uuid;
 
+use super::serve_manager::{self, ServeInstanceContext};
+
 #[cfg(windows)]
 use std::mem::{size_of, zeroed};
 #[cfg(windows)]
@@ -66,6 +68,7 @@ pub async fn serve_service(
     database_url: &str,
     bind_addr_override: Option<&str>,
     include_builtin_auth: bool,
+    managed_context: Option<&ServeInstanceContext>,
 ) -> anyhow::Result<()> {
     let service = compiler::load_service_from_path(input)
         .map_err(|error| anyhow!(error.to_string()))
@@ -116,6 +119,7 @@ pub async fn serve_service(
         .map(ToOwned::to_owned)
         .or_else(|| std::env::var("BIND_ADDR").ok())
         .unwrap_or_else(|| default_bind_addr_from_tls(dynamic_service.tls.is_enabled()).to_owned());
+    let managed_context = managed_context.cloned();
 
     let state = NativeServeState {
         pool: pool.clone(),
@@ -232,13 +236,36 @@ pub async fn serve_service(
         log::info!("Server listening on http://{}", bind_addr);
         server.bind(&bind_addr)?.run()
     };
-    spawn_parent_shutdown_watch(server.handle());
-    server.await?;
+    if let Some(context) = managed_context.as_ref() {
+        serve_manager::register_running_instance(
+            context,
+            input,
+            &bind_addr,
+            &dynamic_service.module_name,
+            dynamic_service.tls.is_enabled(),
+            include_builtin_auth,
+        )?;
+    }
+    spawn_parent_shutdown_watch(
+        server.handle(),
+        managed_context
+            .as_ref()
+            .map_or(true, ServeInstanceContext::should_watch_parent),
+    );
+    let server_result = server.await;
+    if let Some(context) = managed_context.as_ref() {
+        let _ = serve_manager::unregister_instance(&context.id);
+    }
+    server_result?;
 
     Ok(())
 }
 
-fn spawn_parent_shutdown_watch(server_handle: actix_web::dev::ServerHandle) {
+fn spawn_parent_shutdown_watch(server_handle: actix_web::dev::ServerHandle, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
     #[cfg(windows)]
     {
         let Some(parent_pid) = (match current_parent_pid() {
@@ -368,6 +395,7 @@ struct NativeServeState {
 
 #[derive(Clone)]
 struct DynamicService {
+    module_name: String,
     runtime: rest_macro_core::runtime::RuntimeConfig,
     security: rest_macro_core::security::SecurityConfig,
     tls: rest_macro_core::tls::TlsConfig,
@@ -409,6 +437,7 @@ impl DynamicService {
         let storage_s3_compat = Arc::new(service.storage.s3_compat.clone());
 
         Ok(Self {
+            module_name: service.module_ident.to_string(),
             runtime: service.runtime.clone(),
             security: service.security.clone(),
             tls: service.tls.clone(),

@@ -195,6 +195,51 @@ enum Commands {
         /// Exclude built-in auth routes
         #[arg(long, alias = "no-auth")]
         without_auth: bool,
+
+        /// Start the native runtime server in the background and return immediately
+        #[arg(long)]
+        bg: bool,
+    },
+
+    /// Show tracked native `vsr serve` instances
+    Status {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Show every tracked instance across service directories
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Stop tracked native `vsr serve` instances
+    Kill {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Stop a specific tracked instance by registry id
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+
+        /// Stop every tracked instance
+        #[arg(long)]
+        all: bool,
+
+        /// Force termination instead of requesting a graceful shutdown
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Delete local development state for a service so the next `vsr serve` bootstraps it again
+    Reset {
+        /// Path to the `.eon` service file; falls back to `--config` when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Skip the destructive-action confirmation prompt
+        #[arg(long)]
+        accept_permanent_data_loss: bool,
     },
 
     /// Generate an OpenAPI document from a `.eon` service or derive-based Rust sources
@@ -787,6 +832,10 @@ enum ServerCommand {
         /// Exclude built-in auth routes
         #[arg(long, alias = "no-auth")]
         without_auth: bool,
+
+        /// Start the native runtime server in the background and return immediately
+        #[arg(long)]
+        bg: bool,
     },
 }
 
@@ -1512,8 +1561,8 @@ async fn run_cli() -> Result<()> {
                 bind_addr,
                 with_auth,
                 without_auth,
+                bg,
             } => {
-                println!("{}", "Starting native runtime server...".green().bold());
                 let include_builtin_auth = include_builtin_auth(*with_auth, *without_auth);
                 let serve_env_database_url = prepare_serve_environment(
                     input,
@@ -1529,13 +1578,39 @@ async fn run_cli() -> Result<()> {
                     Some(input),
                     &database_url,
                 )?;
-                commands::serve::serve_service(
-                    input,
-                    &serve_database_url,
-                    bind_addr.as_deref(),
-                    include_builtin_auth,
-                )
-                .await?;
+                if *bg {
+                    println!(
+                        "{}",
+                        "Starting native runtime server in background..."
+                            .green()
+                            .bold()
+                    );
+                    let spawn = commands::serve_manager::spawn_background_serve(
+                        &std::env::current_exe()?,
+                        input,
+                        bind_addr.as_deref(),
+                        include_builtin_auth,
+                        commands::serve_manager::ServeCommandFlavor::GeneratedServer,
+                    )?;
+                    println!(
+                        "Started background serve instance {} (pid {}) on {}://{}",
+                        spawn.instance_id, spawn.pid, spawn.scheme, spawn.bind_addr
+                    );
+                    println!("stdout: {}", spawn.stdout_log.display());
+                    println!("stderr: {}", spawn.stderr_log.display());
+                } else {
+                    println!("{}", "Starting native runtime server...".green().bold());
+                    let managed_context = commands::serve_manager::managed_context_from_env()
+                        .unwrap_or_else(commands::serve_manager::new_foreground_context);
+                    commands::serve::serve_service(
+                        input,
+                        &serve_database_url,
+                        bind_addr.as_deref(),
+                        include_builtin_auth,
+                        Some(&managed_context),
+                    )
+                    .await?;
+                }
             }
         },
 
@@ -1577,8 +1652,8 @@ async fn run_cli() -> Result<()> {
             bind_addr,
             with_auth,
             without_auth,
+            bg,
         } => {
-            println!("{}", "Starting native runtime server...".green().bold());
             let input = input
                 .clone()
                 .or_else(|| config_path.clone())
@@ -1598,13 +1673,75 @@ async fn run_cli() -> Result<()> {
                 Some(input.as_path()),
                 &database_url,
             )?;
-            commands::serve::serve_service(
-                &input,
-                &serve_database_url,
-                bind_addr.as_deref(),
-                include_builtin_auth,
-            )
-            .await?;
+            if *bg {
+                println!(
+                    "{}",
+                    "Starting native runtime server in background..."
+                        .green()
+                        .bold()
+                );
+                let spawn = commands::serve_manager::spawn_background_serve(
+                    &std::env::current_exe()?,
+                    &input,
+                    bind_addr.as_deref(),
+                    include_builtin_auth,
+                    commands::serve_manager::ServeCommandFlavor::TopLevel,
+                )?;
+                println!(
+                    "Started background serve instance {} (pid {}) on {}://{}",
+                    spawn.instance_id, spawn.pid, spawn.scheme, spawn.bind_addr
+                );
+                println!("stdout: {}", spawn.stdout_log.display());
+                println!("stderr: {}", spawn.stderr_log.display());
+            } else {
+                println!("{}", "Starting native runtime server...".green().bold());
+                let managed_context = commands::serve_manager::managed_context_from_env()
+                    .unwrap_or_else(commands::serve_manager::new_foreground_context);
+                commands::serve::serve_service(
+                    &input,
+                    &serve_database_url,
+                    bind_addr.as_deref(),
+                    include_builtin_auth,
+                    Some(&managed_context),
+                )
+                .await?;
+            }
+        }
+
+        Commands::Status { input, all } => {
+            let input = input.as_deref().or(config_path.as_deref());
+            let report = commands::serve_manager::status_instances(input, *all)?;
+            commands::serve_manager::print_status(&report);
+        }
+
+        Commands::Kill {
+            input,
+            id,
+            all,
+            force,
+        } => {
+            println!(
+                "{}",
+                "Stopping native runtime server instances...".green().bold()
+            );
+            let input = input.as_deref().or(config_path.as_deref());
+            let report =
+                commands::serve_manager::kill_instances(input, id.as_deref(), *all, *force)?;
+            commands::serve_manager::print_kill_report(&report);
+        }
+
+        Commands::Reset {
+            input,
+            accept_permanent_data_loss,
+        } => {
+            println!("{}", "Resetting local development state...".green().bold());
+            let input = input
+                .as_deref()
+                .or(config_path.as_deref())
+                .ok_or_else(|| anyhow!("reset requires a `.eon` input path or --config"))?;
+            let report =
+                commands::serve_manager::reset_local_state(input, *accept_permanent_data_loss)?;
+            commands::serve_manager::print_reset_report(&report);
         }
 
         Commands::OpenApi {
@@ -2700,6 +2837,39 @@ mod tests {
     }
 
     #[test]
+    fn serve_command_accepts_bg_flag() {
+        assert!(Cli::try_parse_from(["vsr", "serve", "todo_app.eon", "--bg"]).is_ok());
+    }
+
+    #[test]
+    fn status_command_accepts_input_and_all() {
+        assert!(Cli::try_parse_from(["vsr", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["vsr", "status", "--input", "todo_app.eon"]).is_ok());
+        assert!(Cli::try_parse_from(["vsr", "status", "--all"]).is_ok());
+    }
+
+    #[test]
+    fn kill_command_accepts_targeting_flags() {
+        assert!(Cli::try_parse_from(["vsr", "kill", "--input", "todo_app.eon"]).is_ok());
+        assert!(Cli::try_parse_from(["vsr", "kill", "--id", "instance-123"]).is_ok());
+        assert!(Cli::try_parse_from(["vsr", "kill", "--all", "--force"]).is_ok());
+    }
+
+    #[test]
+    fn reset_command_accepts_confirmation_bypass() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "reset",
+                "--input",
+                "todo_app.eon",
+                "--accept-permanent-data-loss",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn init_command_accepts_starter_flag() {
         assert!(Cli::try_parse_from(["vsr", "init", "demo", "--starter", "minimal"]).is_ok());
     }
@@ -2721,6 +2891,14 @@ mod tests {
                 "--no-auth",
             ])
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn server_serve_subcommand_accepts_bg_flag() {
+        assert!(
+            Cli::try_parse_from(["vsr", "server", "serve", "--input", "todo_app.eon", "--bg",])
+                .is_ok()
         );
     }
 

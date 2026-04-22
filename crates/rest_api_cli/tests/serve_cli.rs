@@ -1,7 +1,7 @@
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -309,6 +309,30 @@ impl Drop for SpawnedPidGuard {
     }
 }
 
+fn command_output_logs(output: &Output) -> String {
+    format!(
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn extract_background_pid(stdout: &str) -> u32 {
+    let pid_start = stdout
+        .find("(pid ")
+        .expect("background serve output should include a pid")
+        + "(pid ".len();
+    let pid_end = stdout[pid_start..]
+        .find(')')
+        .map(|index| pid_start + index)
+        .expect("background serve output should close the pid marker");
+    stdout[pid_start..pid_end]
+        .trim()
+        .parse()
+        .expect("background pid should parse")
+}
+
 #[test]
 fn vsr_serve_starts_native_runtime_from_eon() {
     let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
@@ -530,6 +554,178 @@ Wait-Process -Id $child.Id\n",
             fs::read_to_string(&child_stderr_log).unwrap_or_default(),
         );
     }
+}
+
+#[test]
+fn vsr_serve_bg_supports_status_kill_and_reset() {
+    let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    unsafe {
+        std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+    }
+
+    let root = test_root();
+    fs::create_dir_all(&root).expect("test root should exist");
+
+    let config = root.join("static_site_api.eon");
+    fs::copy(fixture_path("static_site_api.eon"), &config).expect("fixture should copy");
+    copy_dir_all(&fixture_path("static_site"), &root.join("static_site"));
+
+    let database_url =
+        database_url_from_service_config(&config).expect("database url should resolve");
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime should initialize")
+        .block_on(async {
+            apply_setup_migrations(&database_url, Some(&config))
+                .await
+                .expect("setup migrations should apply");
+
+            let pool = connect_database(&database_url, Some(&config))
+                .await
+                .expect("database should connect");
+            query("INSERT INTO page (title) VALUES ('Background page copy')")
+                .execute(&pool)
+                .await
+                .expect("page seed should insert");
+        });
+    fs::create_dir_all(root.join("var")).expect("var dir should exist");
+    fs::write(root.join("var/marker.txt"), "marker").expect("marker file should write");
+    fs::write(root.join("keep.txt"), "keep").expect("keep file should write");
+
+    let bind_addr = free_bind_addr();
+    let base_url = format!("http://{bind_addr}");
+    let start_output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("serve")
+        .arg(&config)
+        .arg("--without-auth")
+        .arg("--bg")
+        .arg("--bind-addr")
+        .arg(&bind_addr)
+        .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
+        .output()
+        .expect("background serve should start");
+    assert!(
+        start_output.status.success(),
+        "{}",
+        command_output_logs(&start_output)
+    );
+    let start_stdout = String::from_utf8_lossy(&start_output.stdout);
+    let child_pid = extract_background_pid(&start_stdout);
+    #[cfg(windows)]
+    let _child_guard = SpawnedPidGuard { pid: child_pid };
+
+    let client = http_client();
+    if let Err(error) = wait_for_http_ready(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(30),
+    ) {
+        panic!(
+            "background serve never became ready: {error}\n{}",
+            command_output_logs(&start_output)
+        );
+    }
+
+    let status_output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("status")
+        .arg("--input")
+        .arg(&config)
+        .output()
+        .expect("status should run");
+    assert!(
+        status_output.status.success(),
+        "{}",
+        command_output_logs(&status_output)
+    );
+    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(status_stdout.contains("[background]"));
+    assert!(status_stdout.contains(&bind_addr));
+    assert!(status_stdout.contains("static_site_api"));
+
+    let reset_while_running = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("reset")
+        .arg("--input")
+        .arg(&config)
+        .arg("--accept-permanent-data-loss")
+        .output()
+        .expect("reset should run");
+    assert!(
+        !reset_while_running.status.success(),
+        "{}",
+        command_output_logs(&reset_while_running)
+    );
+    let reset_stderr = String::from_utf8_lossy(&reset_while_running.stderr);
+    assert!(
+        reset_stderr.contains("Refusing to reset while tracked serve instances are still running")
+    );
+
+    let kill_output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("kill")
+        .arg("--input")
+        .arg(&config)
+        .arg("--force")
+        .output()
+        .expect("kill should run");
+    assert!(
+        kill_output.status.success(),
+        "{}",
+        command_output_logs(&kill_output)
+    );
+    let kill_stdout = String::from_utf8_lossy(&kill_output.stdout);
+    assert!(kill_stdout.contains("Stopped background instance"));
+
+    if let Err(error) = wait_for_http_stopped(
+        &client,
+        &format!("{base_url}/openapi.json"),
+        Duration::from_secs(15),
+    ) {
+        panic!(
+            "background serve never stopped after kill: {error}\n{}",
+            command_output_logs(&kill_output)
+        );
+    }
+
+    let reset_output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("reset")
+        .arg("--input")
+        .arg(&config)
+        .arg("--accept-permanent-data-loss")
+        .output()
+        .expect("reset should run");
+    assert!(
+        reset_output.status.success(),
+        "{}",
+        command_output_logs(&reset_output)
+    );
+    assert!(
+        !root.join("var").exists(),
+        "reset should remove var directory"
+    );
+    assert!(
+        root.join("keep.txt").is_file(),
+        "reset should not touch unrelated files"
+    );
+
+    let final_status_output = Command::new(env!("CARGO_BIN_EXE_vsr"))
+        .current_dir(&root)
+        .arg("status")
+        .arg("--input")
+        .arg(&config)
+        .output()
+        .expect("final status should run");
+    assert!(
+        final_status_output.status.success(),
+        "{}",
+        command_output_logs(&final_status_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&final_status_output.stdout)
+            .contains("No tracked serve instances.")
+    );
 }
 
 #[test]

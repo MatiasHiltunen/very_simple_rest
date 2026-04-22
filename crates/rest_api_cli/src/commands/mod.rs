@@ -13,6 +13,7 @@ pub mod openapi;
 pub(crate) mod schema;
 pub mod secrets;
 pub mod serve;
+pub mod serve_manager;
 pub mod server;
 pub mod setup;
 pub mod tls;
