@@ -38,17 +38,10 @@ const MANAGED_MODE_BACKGROUND: &str = "background";
 const MANAGED_MODE_FOREGROUND: &str = "foreground";
 const MANAGED_PARENT_WATCH_DISABLED_ENV: &str = "VSR_MANAGED_DISABLE_PARENT_WATCH";
 const PROCESS_SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
-
 #[cfg(windows)]
 const DETACHED_PROCESS_FLAG: u32 = 0x0000_0008;
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP_FLAG: u32 = 0x0000_0200;
-#[cfg(windows)]
-const CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
-#[cfg(windows)]
-const CREATE_BREAKAWAY_FROM_JOB_FLAG: u32 = 0x0100_0000;
-#[cfg(windows)]
-const ERROR_ACCESS_DENIED: i32 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,19 +266,13 @@ pub fn spawn_background_serve(
             fs::File::create(&log_paths.stderr)
                 .with_context(|| format!("failed to create {}", log_paths.stderr.display()))?,
         ));
-
     #[cfg(windows)]
     {
         clear_standard_handle_inheritance()?;
-        command.creation_flags(
-            DETACHED_PROCESS_FLAG
-                | CREATE_NEW_PROCESS_GROUP_FLAG
-                | CREATE_NO_WINDOW_FLAG
-                | CREATE_BREAKAWAY_FROM_JOB_FLAG,
-        );
+        command.creation_flags(DETACHED_PROCESS_FLAG | CREATE_NEW_PROCESS_GROUP_FLAG);
     }
 
-    let mut child = spawn_background_child(&mut command).with_context(|| {
+    let child_pid = spawn_background_process(&mut command).with_context(|| {
         format!(
             "failed to start background `vsr serve` for {}",
             input.display()
@@ -294,7 +281,7 @@ pub fn spawn_background_serve(
 
     let starting = ServeInstanceRecord {
         id: instance_id.clone(),
-        pid: child.id(),
+        pid: child_pid,
         mode: ServeInstanceMode::Background,
         state: ServeInstanceState::Starting,
         module_name: service.module_ident.to_string(),
@@ -318,14 +305,10 @@ pub fn spawn_background_serve(
 
     let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to poll background serve child")?
-        {
+        if !process_is_running(child_pid).context("failed to poll background serve child")? {
             let _ = unregister_instance(&instance_id);
             bail!(
-                "background serve exited immediately with status {}. Logs:\n- {}\n- {}",
-                status,
+                "background serve exited before becoming ready. Logs:\n- {}\n- {}",
                 log_paths.stdout.display(),
                 log_paths.stderr.display()
             );
@@ -345,7 +328,7 @@ pub fn spawn_background_serve(
 
     Ok(BackgroundServeSpawn {
         instance_id,
-        pid: child.id(),
+        pid: child_pid,
         bind_addr: resolved_bind_addr,
         scheme: if service.tls.is_enabled() {
             "https".to_owned()
@@ -818,15 +801,19 @@ fn path_is_within(base_dir: &Path, candidate: &Path) -> bool {
 fn terminate_process(pid: u32, force: bool) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
-        let mut command = Command::new("taskkill");
-        command.args(["/PID", &pid.to_string(), "/T"]);
         if force {
-            command.arg("/F");
+            run_taskkill(pid, true)?;
+            return Ok(());
         }
-        let status = command.status().context("failed to invoke taskkill")?;
-        if !status.success() {
-            bail!("taskkill exited with status {status}");
+
+        if let Err(error) = run_taskkill(pid, false) {
+            log::warn!(
+                "graceful taskkill for pid {} failed: {error}; retrying with /F",
+                pid
+            );
+            run_taskkill(pid, true)?;
         }
+
         return Ok(());
     }
 
@@ -870,27 +857,21 @@ fn process_is_running(pid: u32) -> anyhow::Result<bool> {
     }
 }
 
-fn spawn_background_child(command: &mut Command) -> std::io::Result<std::process::Child> {
+fn spawn_background_process(command: &mut Command) -> anyhow::Result<u32> {
     #[cfg(windows)]
     {
-        match command.spawn() {
-            Ok(child) => Ok(child),
-            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-                log::debug!(
-                    "CreateProcess rejected CREATE_BREAKAWAY_FROM_JOB; retrying without it"
-                );
-                command.creation_flags(
-                    DETACHED_PROCESS_FLAG | CREATE_NEW_PROCESS_GROUP_FLAG | CREATE_NO_WINDOW_FLAG,
-                );
-                command.spawn()
-            }
-            Err(error) => Err(error),
-        }
+        let child = command
+            .spawn()
+            .context("failed to spawn background serve child")?;
+        Ok(child.id())
     }
 
     #[cfg(not(windows))]
     {
-        command.spawn()
+        let child = command
+            .spawn()
+            .context("failed to spawn background serve child")?;
+        Ok(child.id())
     }
 }
 
@@ -918,6 +899,28 @@ fn clear_standard_handle_inheritance() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_taskkill(pid: u32, force: bool) -> anyhow::Result<()> {
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if force {
+        command.arg("/F");
+    }
+    let output = command.output().context("failed to invoke taskkill")?;
+    if !output.status.success() {
+        if !process_is_running(pid).unwrap_or(false) {
+            return Ok(());
+        }
+        bail!(
+            "taskkill exited with status {}.\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 

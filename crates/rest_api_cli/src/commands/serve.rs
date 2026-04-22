@@ -21,8 +21,8 @@ use rest_macro_core::compiler::{
     supports_exact_filters, supports_field_sort, supports_range_filters,
 };
 use rest_macro_core::database::{
-    prepare_database_engine, resolve_database_config, resolve_database_url,
-    service_base_dir_from_config_path,
+    DatabaseConfig, DatabaseEngine, prepare_database_engine, resolve_database_config,
+    resolve_database_url, service_base_dir_from_config_path,
 };
 use rest_macro_core::db::{DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
@@ -61,6 +61,8 @@ const BIND_MARKER: &str = "__vsr_bind__";
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
 const HTTP_WORKERS_ENV: &str = "VSR_HTTP_WORKERS";
 #[cfg(windows)]
+const PARENT_WATCH_ENV: &str = "VSR_WATCH_PARENT_PROCESS";
+#[cfg(windows)]
 const PROCESS_SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
 
 pub async fn serve_service(
@@ -96,7 +98,7 @@ pub async fn serve_service(
 
     prepare_database_engine(&database_config)
         .await
-        .map_err(|error| anyhow!("database engine bootstrap failed: {error}"))?;
+        .map_err(|error| database_engine_bootstrap_error(input, &database_config, &error))?;
 
     let pool = DbPool::connect_with_config(&resolved_database_url, &database_config)
         .await
@@ -253,13 +255,15 @@ pub async fn serve_service(
     }
     spawn_parent_shutdown_watch(
         server.handle(),
-        managed_context
-            .as_ref()
-            .map_or(true, ServeInstanceContext::should_watch_parent),
+        parent_watch_enabled(managed_context.as_ref()),
     );
     let server_result = server.await;
     if let Some(context) = managed_context.as_ref() {
         let _ = serve_manager::unregister_instance(&context.id);
+    }
+    match &server_result {
+        Ok(()) => log::info!("Server stopped"),
+        Err(error) => log::error!("Server stopped with error: {error}"),
     }
     server_result?;
 
@@ -285,15 +289,42 @@ fn install_diagnostic_panic_hook() {
                 .unwrap_or_else(|| "<unknown location>".to_owned());
             let thread = std::thread::current();
             let thread_name = thread.name().unwrap_or("<unnamed>");
-            log::error!(
-                "vsr panic on thread '{thread_name}' at {location}: {message}"
-            );
-            eprintln!(
-                "[vsr panic] thread='{thread_name}' at {location}: {message}"
-            );
+            log::error!("vsr panic on thread '{thread_name}' at {location}: {message}");
+            eprintln!("[vsr panic] thread='{thread_name}' at {location}: {message}");
             default_hook(info);
         }));
     });
+}
+
+fn database_engine_bootstrap_error(
+    input: &Path,
+    database_config: &DatabaseConfig,
+    error: &dyn std::fmt::Display,
+) -> anyhow::Error {
+    let message = error.to_string();
+    if let DatabaseEngine::TursoLocal(engine) = &database_config.engine
+        && looks_like_turso_decryption_mismatch(&message)
+    {
+        return anyhow!(
+            "database engine bootstrap failed: {message}\n\
+Detected a TursoLocal decryption mismatch for `{}`.\n\
+The local database at `{}` was likely created with a different `TURSO_ENCRYPTION_KEY`.\n\
+If this local data is disposable, run:\n  vsr reset --input {} --accept-permanent-data-loss\n\
+Then start `vsr serve` again. Otherwise restore the matching key or a backup first.",
+            input.display(),
+            engine.path,
+            input.display()
+        );
+    }
+
+    anyhow!("database engine bootstrap failed: {message}")
+}
+
+fn looks_like_turso_decryption_mismatch(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("decryption failed")
+        || lower.contains("failed to decrypt")
+        || lower.contains("invalid tag")
 }
 
 fn spawn_parent_shutdown_watch(server_handle: actix_web::dev::ServerHandle, enabled: bool) {
@@ -334,6 +365,23 @@ fn spawn_parent_shutdown_watch(server_handle: actix_web::dev::ServerHandle, enab
     {
         let _ = server_handle;
     }
+}
+
+#[cfg(windows)]
+fn parent_watch_enabled(managed_context: Option<&ServeInstanceContext>) -> bool {
+    if !matches!(
+        std::env::var(PARENT_WATCH_ENV).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    ) {
+        return false;
+    }
+
+    managed_context.map_or(true, ServeInstanceContext::should_watch_parent)
+}
+
+#[cfg(not(windows))]
+fn parent_watch_enabled(managed_context: Option<&ServeInstanceContext>) -> bool {
+    managed_context.map_or(true, ServeInstanceContext::should_watch_parent)
 }
 
 #[cfg(windows)]
@@ -4629,14 +4677,15 @@ async fn delete_hybrid_fallback(
 mod tests {
     use super::{
         BoundValue, DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,
-        build_openapi_json, parse_json_value,
+        build_openapi_json, database_engine_bootstrap_error, parse_json_value,
     };
     use actix_web::{App, HttpResponse, http::StatusCode, test, web};
     use jsonwebtoken::{EncodingKey, Header, encode};
     use rest_macro_core::authorization::AuthorizationRuntime;
     use rest_macro_core::compiler::{self, GeneratedValue};
     use rest_macro_core::database::{
-        prepare_database_engine, resolve_database_config, service_base_dir_from_config_path,
+        DatabaseConfig, DatabaseEngine, TursoLocalConfig, prepare_database_engine,
+        resolve_database_config, service_base_dir_from_config_path,
     };
     use rest_macro_core::db::{DbPool, query, query_scalar};
     use rest_macro_core::static_files::configure_static_mounts_with_runtime;
@@ -4648,7 +4697,10 @@ mod tests {
     use sqlx::Row;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     const TEST_TURSO_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const TEST_JWT_SECRET: &str = "serve-object-fields-secret";
@@ -4698,6 +4750,27 @@ mod tests {
             &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
         )
         .expect("test token should encode")
+    }
+
+    #[::core::prelude::v1::test]
+    fn turso_decryption_mismatch_error_suggests_reset() {
+        let config = DatabaseConfig {
+            engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
+                path: "var/data/example.db".to_owned(),
+                encryption_key: None,
+            }),
+            resilience: None,
+        };
+        let error = database_engine_bootstrap_error(
+            Path::new("examples/cms/api.eon"),
+            &config,
+            &"failed to initialize local Turso database: Decryption failed for page=1",
+        );
+        let message = error.to_string();
+        assert!(message.contains("Detected a TursoLocal decryption mismatch"));
+        assert!(
+            message.contains("vsr reset --input examples/cms/api.eon --accept-permanent-data-loss")
+        );
     }
 
     async fn build_test_state(

@@ -476,6 +476,7 @@ fn vsr_serve_stops_when_parent_process_exits() {
     let launcher_body = format!(
         "\
 $env:TURSO_ENCRYPTION_KEY = '{turso_key}'\n\
+$env:VSR_WATCH_PARENT_PROCESS = '1'\n\
 $child = Start-Process -FilePath '{vsr}' -ArgumentList @('serve','{config}','--without-auth','--bind-addr','{bind_addr}') -WorkingDirectory '{root}' -RedirectStandardOutput '{child_stdout}' -RedirectStandardError '{child_stderr}' -PassThru\n\
 Set-Content -Path '{pid_file}' -Value $child.Id\n\
 Wait-Process -Id $child.Id\n",
@@ -666,7 +667,6 @@ fn vsr_serve_bg_supports_status_kill_and_reset() {
         .arg("kill")
         .arg("--input")
         .arg(&config)
-        .arg("--force")
         .output()
         .expect("kill should run");
     assert!(
