@@ -10,11 +10,14 @@ use rest_macro_core::compiler::{
     self, BuildArtifactPathConfig, ClientValueConfig, OpenApiSpecOptions,
 };
 use rest_macro_core::database::service_base_dir_from_config_path;
+use rest_macro_core::security::{
+    DEFAULT_ANON_CLIENT_HEADER_NAME, resolved_default_anon_client_key,
+};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::commands::schema::load_schema_service;
+use crate::commands::{env, schema::load_schema_service};
 
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
 const DEFAULT_SERVER_URL: &str = "/api";
@@ -162,8 +165,9 @@ fn generate_typescript_client_artifacts(
     let document: Value =
         serde_json::from_str(&document_json).context("generated OpenAPI JSON was invalid")?;
     let ir = ClientDocument::from_openapi(&document)?;
+    let anon_key = resolve_client_anon_key(input)?;
 
-    write_generated_client(&output_dir, &package_name, &ir, emit_js)?;
+    write_generated_client(&output_dir, &package_name, &ir, &anon_key, emit_js)?;
 
     println!(
         "{} {}",
@@ -219,6 +223,16 @@ fn load_client_generation_service(
     let exclude_tables = merged_client_exclude_tables(&service, cli_exclude_tables);
     apply_client_table_exclusions(&mut service, &exclude_tables, input)?;
     Ok(service)
+}
+
+fn resolve_client_anon_key(input: &Path) -> Result<String> {
+    let env_path =
+        env::default_env_path(Some(input)).map_err(|error| anyhow!(error.to_string()))?;
+    if env_path.exists() {
+        env::load_env_file(&env_path).map_err(|error| anyhow!(error.to_string()))?;
+    }
+
+    resolved_default_anon_client_key().map_err(|error| anyhow!(error))
 }
 
 fn merged_client_exclude_tables(
@@ -413,6 +427,7 @@ fn write_generated_client(
     output_dir: &Path,
     package_name: &str,
     document: &ClientDocument,
+    anon_key: &str,
     emit_js: bool,
 ) -> Result<()> {
     let input_schema_aliases = compute_input_schema_aliases(&document.schemas);
@@ -425,7 +440,7 @@ fn write_generated_client(
     write_file(&output_dir.join("index.ts"), &render_index_ts())?;
     write_file(
         &output_dir.join("client.ts"),
-        &render_client_ts(&document.server_url),
+        &render_client_ts(&document.server_url, &document.anon_header_name, anon_key),
     )?;
     write_file(
         &output_dir.join("types.ts"),
@@ -439,7 +454,7 @@ fn write_generated_client(
         write_file(&output_dir.join("index.js"), &render_index_js())?;
         write_file(
             &output_dir.join("client.js"),
-            &render_client_js(&document.server_url),
+            &render_client_js(&document.server_url, &document.anon_header_name, anon_key),
         )?;
         write_file(
             &output_dir.join("operations.js"),
@@ -508,6 +523,7 @@ struct ClientSelfTestReport {
 #[derive(Clone, Debug)]
 struct ClientDocument {
     server_url: String,
+    anon_header_name: String,
     schemas: BTreeMap<String, Value>,
     operations: Vec<ClientOperation>,
 }
@@ -521,6 +537,17 @@ impl ClientDocument {
             .and_then(|server| server.get("url"))
             .and_then(Value::as_str)
             .unwrap_or(DEFAULT_SERVER_URL)
+            .to_owned();
+        let anon_header_name = document
+            .get("components")
+            .and_then(|components| components.get("securitySchemes"))
+            .and_then(Value::as_object)
+            .and_then(|schemes| schemes.get("anonKey"))
+            .and_then(Value::as_object)
+            .filter(|scheme| scheme.get("in").and_then(Value::as_str) == Some("header"))
+            .and_then(|scheme| scheme.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_ANON_CLIENT_HEADER_NAME)
             .to_owned();
 
         let schemas = document
@@ -555,6 +582,7 @@ impl ClientDocument {
 
         Ok(Self {
             server_url,
+            anon_header_name,
             schemas,
             operations,
         })
@@ -881,7 +909,7 @@ fn render_index_js() -> String {
     .join("\n")
 }
 
-fn render_client_ts(server_url: &str) -> String {
+fn render_client_ts(server_url: &str, anon_header_name: &str, anon_key: &str) -> String {
     format!(
         r#"export type DateTimeInput = string | Date;
 export type DateInput = string | VsrDate;
@@ -916,6 +944,8 @@ export type ClientConfig = {{
   fetch?: typeof fetch;
   defaultHeaders?: HeadersInit;
   credentials?: RequestCredentials;
+  anonKey?: string;
+  anonHeaderName?: string;
   getAccessToken?: () => string | null | undefined | Promise<string | null | undefined>;
   getCsrfToken?: () => string | null | undefined | Promise<string | null | undefined>;
   csrfHeaderName?: string;
@@ -927,6 +957,8 @@ export type ResolvedClientConfig = {{
   fetch: typeof fetch;
   defaultHeaders?: HeadersInit;
   credentials: RequestCredentials;
+  anonKey?: string;
+  anonHeaderName: string;
   getAccessToken?: () => string | null | undefined | Promise<string | null | undefined>;
   getCsrfToken?: () => string | null | undefined | Promise<string | null | undefined>;
   csrfHeaderName: string;
@@ -1025,6 +1057,8 @@ export interface VsrClient {{
 }}
 
 const DEFAULT_SERVER_URL = {server_url:?};
+const DEFAULT_ANON_HEADER_NAME = {anon_header_name:?};
+const DEFAULT_ANON_KEY = {anon_key:?};
 
 function requestNeedsCsrf(method: string): boolean {{
   const normalized = method.toUpperCase();
@@ -1038,6 +1072,8 @@ export function createClient(config: ClientConfig = {{}}): VsrClient {{
     fetch: bindFetch(config.fetch ?? globalThis.fetch),
     defaultHeaders: config.defaultHeaders,
     credentials: config.credentials ?? "include",
+    anonKey: config.anonKey ?? DEFAULT_ANON_KEY,
+    anonHeaderName: config.anonHeaderName ?? DEFAULT_ANON_HEADER_NAME,
     getAccessToken: config.getAccessToken,
     getCsrfToken: config.getCsrfToken,
     csrfHeaderName: config.csrfHeaderName ?? "x-csrf-token",
@@ -1049,6 +1085,10 @@ export function createClient(config: ClientConfig = {{}}): VsrClient {{
       const headers = new Headers(resolvedConfig.defaultHeaders ?? undefined);
       if (request.headers) {{
         new Headers(request.headers).forEach((value, key) => headers.set(key, value));
+      }}
+
+      if (resolvedConfig.anonKey) {{
+        headers.set(resolvedConfig.anonHeaderName, resolvedConfig.anonKey);
       }}
 
       if (request.requiresBearerAuth && resolvedConfig.getAccessToken) {{
@@ -1300,7 +1340,7 @@ function padNumber(value: number, width: number): string {{
     )
 }
 
-fn render_client_js(server_url: &str) -> String {
+fn render_client_js(server_url: &str, anon_header_name: &str, anon_key: &str) -> String {
     format!(
         r#"export class VsrDate {{
   constructor(year, month, day) {{
@@ -1377,6 +1417,8 @@ export class ApiError extends Error {{
 }}
 
 const DEFAULT_SERVER_URL = {server_url:?};
+const DEFAULT_ANON_HEADER_NAME = {anon_header_name:?};
+const DEFAULT_ANON_KEY = {anon_key:?};
 
 function requestNeedsCsrf(method) {{
   const normalized = method.toUpperCase();
@@ -1390,6 +1432,8 @@ export function createClient(config = {{}}) {{
     fetch: bindFetch(config.fetch ?? globalThis.fetch),
     defaultHeaders: config.defaultHeaders,
     credentials: config.credentials ?? "include",
+    anonKey: config.anonKey ?? DEFAULT_ANON_KEY,
+    anonHeaderName: config.anonHeaderName ?? DEFAULT_ANON_HEADER_NAME,
     getAccessToken: config.getAccessToken,
     getCsrfToken: config.getCsrfToken,
     csrfHeaderName: config.csrfHeaderName ?? "x-csrf-token",
@@ -1401,6 +1445,10 @@ export function createClient(config = {{}}) {{
       const headers = new Headers(resolvedConfig.defaultHeaders ?? undefined);
       if (request.headers) {{
         new Headers(request.headers).forEach((value, key) => headers.set(key, value));
+      }}
+
+      if (resolvedConfig.anonKey) {{
+        headers.set(resolvedConfig.anonHeaderName, resolvedConfig.anonKey);
       }}
 
       if (request.requiresBearerAuth && resolvedConfig.getAccessToken) {{
@@ -3204,12 +3252,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ClientParameter, ClientSelfTestStatus, ParameterLocation, TypescriptClientSelfTestOptions,
-        compute_input_schema_aliases, generate_automated_typescript_client_for_build,
-        generate_typescript_client, render_operation_query_type, render_types_ts,
-        run_node_import_smoke_check,
+        ClientParameter, ParameterLocation, compute_input_schema_aliases,
+        generate_automated_typescript_client_for_build, generate_typescript_client,
+        render_operation_query_type, render_types_ts,
     };
 
+    #[cfg(unix)]
+    use super::{
+        ClientSelfTestStatus, TypescriptClientSelfTestOptions, run_node_import_smoke_check,
+    };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 

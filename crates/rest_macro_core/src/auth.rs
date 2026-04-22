@@ -4468,14 +4468,16 @@ pub fn public_auth_discovery_routes_with_settings(
 ) {
     let settings = web::Data::new(settings);
     cfg.app_data(settings.clone());
-    if settings
-        .get_ref()
+    if public_jwks_enabled(settings.get_ref()) {
+        cfg.route("/.well-known/jwks.json", web::get().to(jwks));
+    }
+}
+
+pub fn public_jwks_enabled(settings: &AuthSettings) -> bool {
+    settings
         .jwt
         .as_ref()
         .is_some_and(|jwt| !jwt.algorithm.is_symmetric() && !jwt.verification_keys.is_empty())
-    {
-        cfg.route("/.well-known/jwks.json", web::get().to(jwks));
-    }
 }
 
 pub fn auth_routes_with_settings(
@@ -4683,8 +4685,8 @@ mod tests {
     use actix_web::App;
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     use actix_web::body::to_bytes;
+    use actix_web::http::StatusCode;
     use actix_web::test::{TestRequest, call_service, init_service, read_body_json};
-    use actix_web::{http::StatusCode, web};
     use chrono::{Duration, Utc};
     use jsonwebtoken::{
         DecodingKey, encode,
@@ -5079,11 +5081,9 @@ mod tests {
             ..AuthSettings::default()
         };
 
-        let app = init_service(
-            App::new()
-                .app_data(web::Data::new(settings))
-                .route("/.well-known/jwks.json", web::get().to(super::jwks)),
-        )
+        let app = init_service(App::new().configure(|cfg| {
+            super::public_auth_discovery_routes_with_settings(cfg, settings.clone())
+        }))
         .await;
 
         let response = call_service(

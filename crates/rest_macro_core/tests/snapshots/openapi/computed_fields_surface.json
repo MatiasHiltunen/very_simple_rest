@@ -185,6 +185,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "List Post",
         "tags": [
           "Post"
@@ -218,7 +223,15 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "Location": {
+                "description": "Canonical URL of the created resource",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -276,6 +289,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -350,6 +364,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -439,6 +454,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Get Post",
         "tags": [
           "Post"
@@ -538,6 +558,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],

@@ -145,6 +145,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "List Tag by posts",
         "tags": [
           "Tag"

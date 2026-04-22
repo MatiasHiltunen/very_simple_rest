@@ -33,6 +33,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -60,6 +61,11 @@
             "description": "Password reset page"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Open the built-in password reset page",
         "tags": [
           "Auth"
@@ -104,6 +110,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Confirm a password reset with a token",
         "tags": [
           "Auth"
@@ -148,6 +159,11 @@
             "description": "Email delivery unavailable"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Request a password reset email",
         "tags": [
           "Auth"
@@ -192,6 +208,11 @@
             "description": "Email delivery unavailable"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Resend a verification email by email address",
         "tags": [
           "Auth"
@@ -216,6 +237,11 @@
             "description": "Verification result page"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Open the built-in email verification page",
         "tags": [
           "Auth"
@@ -258,6 +284,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Verify an email address with a token",
         "tags": [
           "Auth"

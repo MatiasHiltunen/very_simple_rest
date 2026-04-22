@@ -25,6 +25,7 @@
             "description": "Internal server error"
           }
         },
+        "security": [],
         "summary": "Get the public JWKS for JWT verification",
         "tags": [
           "Auth"
@@ -106,6 +107,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Login and receive a JWT token or configured session cookie",
         "tags": [
           "Auth"
@@ -139,6 +145,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],

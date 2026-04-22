@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use proc_macro2::Span;
 use serde_json::{Map, Value, json};
 
-use crate::auth::AuthClaimType;
+use crate::{auth::AuthClaimType, security::DEFAULT_ANON_CLIENT_HEADER_NAME};
 
 use super::model::{
     ComputedFieldSpec, FieldSpec, GeneratedValue, PolicyValueSource, ResourceActionMethod,
@@ -182,6 +182,8 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         );
     }
 
+    apply_default_client_security(&mut paths);
+
     json!({
         "openapi": "3.0.3",
         "info": {
@@ -196,6 +198,11 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         "tags": tags,
         "components": {
             "securitySchemes": {
+                "anonKey": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": DEFAULT_ANON_CLIENT_HEADER_NAME
+                },
                 "bearerAuth": {
                     "type": "http",
                     "scheme": "bearer",
@@ -588,6 +595,7 @@ fn append_builtin_auth_components(
                     "tags": ["Auth"],
                     "summary": "Get the public JWKS for JWT verification",
                     "operationId": "getJsonWebKeySet",
+                    "security": [],
                     "responses": {
                         "200": json_response("OK", schema_ref("JwksResponse")),
                         "500": api_error_response("Internal server error")
@@ -1705,6 +1713,59 @@ fn bearer_security() -> Value {
     ])
 }
 
+fn client_security() -> Value {
+    json!([
+        {
+            "anonKey": []
+        }
+    ])
+}
+
+fn apply_default_client_security(paths: &mut Map<String, Value>) {
+    for path_item in paths.values_mut() {
+        let Some(path_item) = path_item.as_object_mut() else {
+            continue;
+        };
+
+        for method in ["get", "post", "put", "patch", "delete", "options", "head"] {
+            let Some(operation) = path_item.get_mut(method).and_then(Value::as_object_mut) else {
+                continue;
+            };
+
+            match operation.get_mut("security") {
+                Some(security) => {
+                    let Some(entries) = security.as_array_mut() else {
+                        *security = client_security();
+                        continue;
+                    };
+                    if entries.is_empty() {
+                        continue;
+                    }
+
+                    let transformed = entries
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .map(|entry| {
+                            let mut entry = entry.clone();
+                            entry.insert("anonKey".to_owned(), json!([]));
+                            Value::Object(entry)
+                        })
+                        .collect::<Vec<_>>();
+
+                    if transformed.is_empty() {
+                        *security = client_security();
+                    } else {
+                        *security = Value::Array(transformed);
+                    }
+                }
+                None => {
+                    operation.insert("security".to_owned(), client_security());
+                }
+            }
+        }
+    }
+}
+
 fn schema_ref(name: impl Into<String>) -> Value {
     json!({
         "$ref": format!("#/components/schemas/{}", name.into()),
@@ -2631,7 +2692,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_openapi_public_reads_without_bearer_security_and_with_contains_filters() {
+    fn renders_openapi_public_reads_with_anon_client_security_and_contains_filters() {
         let service = load_service_from_path(&fixture_path("public_catalog_api.eon"))
             .expect("fixture should parse");
         let json = render_service_openapi_json(
@@ -2649,20 +2710,24 @@ mod tests {
             .find(|parameter| parameter["name"] == "filter_name_contains")
             .expect("contains filter should exist");
 
-        assert!(
-            document["paths"]["/organization"]["get"]["security"].is_null(),
-            "public list routes should not advertise bearer auth"
+        assert_eq!(
+            document["paths"]["/organization"]["get"]["security"][0]["anonKey"],
+            json!([])
         );
-        assert!(
-            document["paths"]["/organization/{id}"]["get"]["security"].is_null(),
-            "public item routes should not advertise bearer auth"
+        assert_eq!(
+            document["paths"]["/organization/{id}"]["get"]["security"][0]["anonKey"],
+            json!([])
         );
-        assert!(
-            document["paths"]["/organization/{parent_id}/interest"]["get"]["security"].is_null(),
-            "public nested list routes should not advertise bearer auth"
+        assert_eq!(
+            document["paths"]["/organization/{parent_id}/interest"]["get"]["security"][0]["anonKey"],
+            json!([])
         );
         assert_eq!(
             document["paths"]["/organization"]["post"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/organization"]["post"]["security"][0]["anonKey"],
             json!([])
         );
         assert_eq!(contains["schema"]["type"], json!("string"));
@@ -3548,9 +3613,16 @@ mod tests {
                 .is_object()
         );
         assert_eq!(document["paths"]["/auth/me"]["get"]["tags"][0], "Account");
-        assert!(document["paths"]["/auth/login"]["post"]["security"].is_null());
+        assert_eq!(
+            document["paths"]["/auth/login"]["post"]["security"][0]["anonKey"],
+            json!([])
+        );
         assert_eq!(
             document["paths"]["/auth/me"]["get"]["security"][0]["bearerAuth"],
+            json!([])
+        );
+        assert_eq!(
+            document["paths"]["/auth/me"]["get"]["security"][0]["anonKey"],
             json!([])
         );
         assert_eq!(
@@ -3743,6 +3815,10 @@ mod tests {
             document["paths"]["/.well-known/jwks.json"]["get"]["responses"]["200"]["content"]["application/json"]
                 ["schema"]["$ref"],
             "#/components/schemas/JwksResponse"
+        );
+        assert_eq!(
+            document["paths"]["/.well-known/jwks.json"]["get"]["security"],
+            json!([])
         );
         assert!(document["components"]["schemas"]["JwksResponse"].is_object());
 

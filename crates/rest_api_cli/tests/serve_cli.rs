@@ -9,6 +9,9 @@ use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::blocking::Client;
 use rest_macro_core::db::query;
+use rest_macro_core::security::{
+    DEFAULT_ANON_CLIENT_FALLBACK_KEY, DEFAULT_ANON_CLIENT_HEADER_NAME,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -106,7 +109,15 @@ fn https_client() -> Client {
 fn client(accept_invalid_certs: bool) -> Client {
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(0);
+        .pool_max_idle_per_host(0)
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::HeaderName::from_static(DEFAULT_ANON_CLIENT_HEADER_NAME),
+                reqwest::header::HeaderValue::from_static(DEFAULT_ANON_CLIENT_FALLBACK_KEY),
+            );
+            headers
+        });
     if accept_invalid_certs {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -531,6 +542,30 @@ fn vsr_serve_supports_builtin_auth_and_authz_management() {
             server.logs()
         );
     }
+
+    let unauthenticated_client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("bare http client should build");
+    let docs_response = unauthenticated_client
+        .get(format!("{base_url}/docs"))
+        .send()
+        .expect("docs page should load");
+    assert!(docs_response.status().is_success());
+    let public_openapi_response = unauthenticated_client
+        .get(format!("{base_url}/openapi.json"))
+        .send()
+        .expect("openapi probe should execute");
+    assert!(public_openapi_response.status().is_success());
+    let missing_anon_list = unauthenticated_client
+        .get(format!("{base_url}/api/organization"))
+        .send()
+        .expect("anonymous list probe should execute");
+    assert_eq!(
+        missing_anon_list.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
 
     let openapi_response = client
         .get(format!("{base_url}/openapi.json"))
@@ -1326,6 +1361,17 @@ resources: [
     assert!(openapi["paths"].get("/auth/login").is_some());
     assert!(openapi["paths"].get("/.well-known/jwks.json").is_some());
 
+    let unauthenticated_client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("bare http client should build");
+    let public_jwks_response = unauthenticated_client
+        .get(format!("{base_url}/.well-known/jwks.json"))
+        .send()
+        .expect("jwks probe should execute");
+    assert_eq!(public_jwks_response.status(), reqwest::StatusCode::OK);
+
     let jwks_response = client
         .get(format!("{base_url}/.well-known/jwks.json"))
         .send()
@@ -1967,7 +2013,10 @@ fn vsr_serve_supports_public_catalog_routes_in_spawned_process() {
             .get("/organization/{parent_id}/interest")
             .is_some()
     );
-    assert!(openapi["paths"]["/organization"]["get"]["security"].is_null());
+    assert_eq!(
+        openapi["paths"]["/organization"]["get"]["security"][0]["anonKey"],
+        json!([])
+    );
 
     let list_response = client
         .get(format!("{base_url}/api/organization"))

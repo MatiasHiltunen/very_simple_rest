@@ -1,14 +1,26 @@
-use std::{env, net::IpAddr, str::FromStr};
+use std::{env, net::IpAddr, rc::Rc, str::FromStr};
 
 use actix_cors::Cors;
 use actix_web::{
-    HttpRequest,
+    Error, HttpRequest,
+    body::{EitherBody, MessageBody},
+    dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
     http::header::{HeaderName, HeaderValue},
     middleware::DefaultHeaders,
     web,
 };
+use dotenvy::dotenv;
+use futures_util::future::{LocalBoxFuture, Ready, ready};
 
-use crate::{auth::AuthSettings, errors};
+use crate::{
+    auth::AuthSettings,
+    errors,
+    secret::{SecretRef, load_optional_secret},
+};
+
+pub const DEFAULT_ANON_CLIENT_HEADER_NAME: &str = "x-vsr-anon-key";
+pub const DEFAULT_ANON_CLIENT_KEY_ENV: &str = "VSR_ANON_KEY";
+pub const DEFAULT_ANON_CLIENT_FALLBACK_KEY: &str = "vsr-default-anon-client-key";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RequestSecurity {
@@ -121,10 +133,108 @@ pub struct SecurityConfig {
     pub auth: AuthSettings,
 }
 
+#[derive(Clone, Debug)]
+pub struct RequireAnonClient {
+    header_name: HeaderName,
+    expected_key: String,
+}
+
+impl RequireAnonClient {
+    pub fn new(header_name: HeaderName, expected_key: impl Into<String>) -> Self {
+        Self {
+            header_name,
+            expected_key: expected_key.into(),
+        }
+    }
+}
+
+impl<S, B> Transform<S, ServiceRequest> for RequireAnonClient
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    S::Future: 'static,
+    B: MessageBody + 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type InitError = ();
+    type Transform = RequireAnonClientMiddleware<S>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ready(Ok(RequireAnonClientMiddleware {
+            service: Rc::new(service),
+            header_name: self.header_name.clone(),
+            expected_key: self.expected_key.clone(),
+        }))
+    }
+}
+
+pub struct RequireAnonClientMiddleware<S> {
+    service: Rc<S>,
+    header_name: HeaderName,
+    expected_key: String,
+}
+
+impl<S, B> Service<ServiceRequest> for RequireAnonClientMiddleware<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    S::Future: 'static,
+    B: MessageBody + 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    forward_ready!(service);
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let header_name = self.header_name.clone();
+        let expected_key = self.expected_key.clone();
+        let service = Rc::clone(&self.service);
+
+        Box::pin(async move {
+            if !request_has_valid_anon_client_key(
+                req.request(),
+                &header_name,
+                expected_key.as_str(),
+            ) {
+                let response = errors::unauthorized(
+                    "invalid_anon_client",
+                    "Missing or invalid anonymous client key",
+                );
+                return Ok(req.into_response(response).map_into_right_body());
+            }
+
+            service
+                .call(req)
+                .await
+                .map(ServiceResponse::map_into_left_body)
+        })
+    }
+}
+
 pub fn configure_scope_security(cfg: &mut web::ServiceConfig, security: &SecurityConfig) {
     errors::configure_extractor_errors_with_limit(cfg, security.requests.json_max_bytes);
     cfg.app_data(web::Data::new(security.clone()));
     cfg.app_data(web::Data::new(security.auth.clone()));
+}
+
+pub fn require_default_anon_client_middleware() -> Result<RequireAnonClient, String> {
+    let header_name = HeaderName::from_static(DEFAULT_ANON_CLIENT_HEADER_NAME);
+    let expected_key = resolved_default_anon_client_key()?;
+    Ok(RequireAnonClient::new(header_name, expected_key))
+}
+
+pub fn resolved_default_anon_client_key() -> Result<String, String> {
+    let _ = dotenv();
+    match load_optional_secret(
+        &SecretRef::env_or_file(DEFAULT_ANON_CLIENT_KEY_ENV),
+        "anonymous client key",
+    ) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Ok(DEFAULT_ANON_CLIENT_FALLBACK_KEY.to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub fn security_headers_middleware(security: &SecurityConfig) -> DefaultHeaders {
@@ -202,14 +312,26 @@ pub fn cors_middleware(security: &SecurityConfig) -> Cors {
     };
 
     let headers = if security.cors.allow_headers.is_empty() {
-        vec!["authorization", "content-type", "accept"]
+        vec![
+            "authorization",
+            "content-type",
+            "accept",
+            DEFAULT_ANON_CLIENT_HEADER_NAME,
+        ]
     } else {
-        security
+        let mut headers = security
             .cors
             .allow_headers
             .iter()
             .map(String::as_str)
-            .collect()
+            .collect::<Vec<_>>();
+        if !headers
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case(DEFAULT_ANON_CLIENT_HEADER_NAME))
+        {
+            headers.push(DEFAULT_ANON_CLIENT_HEADER_NAME);
+        }
+        headers
     };
     cors = if headers.iter().any(|header| *header == "*") {
         cors.allow_any_header()
@@ -240,6 +362,17 @@ pub fn cors_middleware(security: &SecurityConfig) -> Cors {
     }
 
     cors
+}
+
+fn request_has_valid_anon_client_key(
+    req: &HttpRequest,
+    header_name: &HeaderName,
+    expected_key: &str,
+) -> bool {
+    req.headers()
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected_key)
 }
 
 pub fn request_client_ip(req: &HttpRequest, security: &SecurityConfig) -> Option<IpAddr> {
@@ -358,4 +491,59 @@ fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CorsSecurity, DEFAULT_ANON_CLIENT_HEADER_NAME, SecurityConfig, cors_middleware};
+    use actix_web::{
+        App, HttpResponse,
+        http::{Method, header},
+        test, web,
+    };
+
+    #[actix_web::test]
+    async fn cors_explicit_allow_headers_still_allows_anon_client_header() {
+        let security = SecurityConfig {
+            cors: CorsSecurity {
+                origins: vec!["https://app.example".to_owned()],
+                allow_headers: vec!["content-type".to_owned()],
+                ..CorsSecurity::default()
+            },
+            ..SecurityConfig::default()
+        };
+
+        let app = test::init_service(App::new().wrap(cors_middleware(&security)).route(
+            "/items",
+            web::get().to(|| async { HttpResponse::Ok().finish() }),
+        ))
+        .await;
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::default()
+                .method(Method::OPTIONS)
+                .uri("/items")
+                .insert_header((header::ORIGIN, "https://app.example"))
+                .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "GET"))
+                .insert_header((
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    format!("content-type, {DEFAULT_ANON_CLIENT_HEADER_NAME}"),
+                ))
+                .to_request(),
+        )
+        .await;
+
+        assert!(
+            response.status().is_success(),
+            "preflight should accept the anonymous client header"
+        );
+        let allow_headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .expect("preflight should advertise allowed headers")
+            .to_ascii_lowercase();
+        assert!(allow_headers.contains(DEFAULT_ANON_CLIENT_HEADER_NAME));
+    }
 }

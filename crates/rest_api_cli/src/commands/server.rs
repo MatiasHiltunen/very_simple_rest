@@ -19,6 +19,7 @@ use rest_macro_core::compiler::{
 use rest_macro_core::database::{
     DatabaseEngine, service_base_dir_from_config_path, sqlite_url_for_path,
 };
+use rest_macro_core::security::DEFAULT_ANON_CLIENT_KEY_ENV;
 use rest_macro_core::tls::{
     DEFAULT_TLS_CERT_PATH, DEFAULT_TLS_CERT_PATH_ENV, DEFAULT_TLS_KEY_PATH,
     DEFAULT_TLS_KEY_PATH_ENV,
@@ -1555,10 +1556,13 @@ async fn main() -> std::io::Result<()> {{
 
 {tls_setup}    let api_runtime = api_runtime.clone();
     let api_security = api_security.clone();
+    let anon_client_middleware = very_simple_rest::core::security::require_default_anon_client_middleware()
+        .map_err(|error| std::io::Error::other(format!("anonymous client configuration error: {{error}}")))?;
     let server_pool = pool.clone();
     let server = HttpServer::new(move || {{
         let api_runtime = api_runtime.clone();
         let api_security = api_security.clone();
+        let anon_client_middleware = anon_client_middleware.clone();
         App::new()
             .wrap(Logger::default())
             .wrap(very_simple_rest::core::runtime::compression_middleware(&api_runtime))
@@ -1568,6 +1572,7 @@ async fn main() -> std::io::Result<()> {{
             .route("/docs", web::get().to(swagger_ui))
 {public_auth_config}            .service(
                 scope("/api")
+                    .wrap(anon_client_middleware.clone())
 {auth_config}                    .configure(|cfg| generated::{module_name}::configure(cfg, server_pool.clone()))
             )
             .configure(generated::{module_name}::configure_static)
@@ -1648,6 +1653,9 @@ fn render_env_example(
 }
 
 fn render_auth_env_example(service: &ServiceSpec, include_builtin_auth: bool) -> String {
+    let anon_client_comment = format!(
+        "# Anonymous client key automatically attached by generated clients\n{DEFAULT_ANON_CLIENT_KEY_ENV}=change-me\n# Or mount a secret file and set {DEFAULT_ANON_CLIENT_KEY_ENV}_FILE=/run/secrets/{DEFAULT_ANON_CLIENT_KEY_ENV}\n"
+    );
     let jwt_secret_var = auth_jwt_signing_secret_ref(&service.security.auth)
         .and_then(|secret| secret.env_binding_name())
         .unwrap_or("JWT_SECRET");
@@ -1696,7 +1704,8 @@ fn render_auth_env_example(service: &ServiceSpec, include_builtin_auth: bool) ->
     };
 
     format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
+        anon_client_comment,
         jwt_comment,
         verification_keys,
         render_auth_email_env_example(service),
@@ -3484,6 +3493,18 @@ resources: [
         let client = Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(10))
+            .default_headers({
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::HeaderName::from_static(
+                        rest_macro_core::security::DEFAULT_ANON_CLIENT_HEADER_NAME,
+                    ),
+                    reqwest::header::HeaderValue::from_static(
+                        rest_macro_core::security::DEFAULT_ANON_CLIENT_FALLBACK_KEY,
+                    ),
+                );
+                headers
+            })
             .build()
             .expect("http client should build");
         if let Err(error) =

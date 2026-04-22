@@ -7,6 +7,7 @@ use rest_macro_core::auth::{
 use rest_macro_core::compiler::{self, default_service_database_url};
 use rest_macro_core::database::{DEFAULT_TURSO_LOCAL_ENCRYPTION_KEY_ENV, DatabaseEngine};
 use rest_macro_core::secret::SecretRef;
+use rest_macro_core::security::DEFAULT_ANON_CLIENT_KEY_ENV;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ pub struct EnvFileReport {
 
 struct EnvTemplateConfig {
     database_url: String,
+    anon_key_var: String,
     jwt_secret_var: Option<String>,
     jwt_algorithm: Option<AuthJwtAlgorithm>,
     turso_encryption_var: Option<String>,
@@ -79,6 +81,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
     let Some(path) = config_path else {
         return Ok(EnvTemplateConfig {
             database_url: "sqlite:var/data/app.db?mode=rwc".to_owned(),
+            anon_key_var: DEFAULT_ANON_CLIENT_KEY_ENV.to_owned(),
             jwt_secret_var: Some("JWT_SECRET".to_owned()),
             jwt_algorithm: Some(AuthJwtAlgorithm::Hs256),
             turso_encryption_var: None,
@@ -128,6 +131,7 @@ fn env_template_config(config_path: Option<&Path>) -> Result<EnvTemplateConfig> 
 
     Ok(EnvTemplateConfig {
         database_url: default_service_database_url(&service),
+        anon_key_var: DEFAULT_ANON_CLIENT_KEY_ENV.to_owned(),
         jwt_secret_var,
         jwt_algorithm,
         turso_encryption_var,
@@ -230,6 +234,18 @@ fn render_env_template_with_config(config: &EnvTemplateConfig, mode: EnvTemplate
     }
 
     writeln!(&mut output, "# Authentication").unwrap();
+    writeln!(
+        &mut output,
+        "# Optional override for the anonymous client key attached by generated clients"
+    )
+    .unwrap();
+    writeln!(
+        &mut output,
+        "# Leave this unset to use the built-in default key for generated clients."
+    )
+    .unwrap();
+    render_secret_binding_comment(&mut output, &config.anon_key_var, "change-me");
+    writeln!(&mut output).unwrap();
     writeln!(
         &mut output,
         "# Required secret key used for JWT token generation and verification"
@@ -687,6 +703,7 @@ fn merge_preserved_assignments_with_current_env(
     let mut merged = existing_assignments.clone();
     let mut candidate_keys = BTreeSet::new();
     candidate_keys.insert("DATABASE_URL".to_owned());
+    candidate_keys.insert(config.anon_key_var.clone());
     if let Some(var_name) = &config.jwt_secret_var {
         candidate_keys.insert(var_name.clone());
     }

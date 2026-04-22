@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use rest_macro_core::db::query;
+use rest_macro_core::security::{
+    DEFAULT_ANON_CLIENT_FALLBACK_KEY, DEFAULT_ANON_CLIENT_HEADER_NAME,
+};
 use serde_json::Value;
 use uuid::Uuid;
 use vsra::commands::db::{connect_database, database_url_from_service_config};
@@ -44,6 +47,14 @@ fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(10))
         .pool_max_idle_per_host(0)
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::HeaderName::from_static(DEFAULT_ANON_CLIENT_HEADER_NAME),
+                reqwest::header::HeaderValue::from_static(DEFAULT_ANON_CLIENT_FALLBACK_KEY),
+            );
+            headers
+        })
         .build()
         .expect("http client should build")
 }

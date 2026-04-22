@@ -41,6 +41,9 @@ resources: [
     }
     {
         name: "AppUser"
+        indexes: [
+            { fields: ["account_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -60,6 +63,9 @@ resources: [
     }
     {
         name: "Category"
+        indexes: [
+            { fields: ["account_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -79,6 +85,9 @@ resources: [
     }
     {
         name: "Supplier"
+        indexes: [
+            { fields: ["account_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -98,6 +107,9 @@ resources: [
     }
     {
         name: "Warehouse"
+        indexes: [
+            { fields: ["account_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -118,6 +130,11 @@ resources: [
     }
     {
         name: "Product"
+        indexes: [
+            { fields: ["account_id"] }
+            { fields: ["category_id"] }
+            { fields: ["supplier_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -155,6 +172,9 @@ resources: [
     }
     {
         name: "Customer"
+        indexes: [
+            { fields: ["account_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -175,6 +195,9 @@ resources: [
     }
     {
         name: "Address"
+        indexes: [
+            { fields: ["customer_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -197,6 +220,10 @@ resources: [
     }
     {
         name: "SalesOrder"
+        indexes: [
+            { fields: ["account_id"] }
+            { fields: ["customer_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -239,6 +266,11 @@ resources: [
     }
     {
         name: "SalesOrderItem"
+        indexes: [
+            { fields: ["order_id"] }
+            { fields: ["product_id"] }
+            { fields: ["warehouse_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -275,6 +307,9 @@ resources: [
     }
     {
         name: "Payment"
+        indexes: [
+            { fields: ["order_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -295,6 +330,10 @@ resources: [
     }
     {
         name: "Shipment"
+        indexes: [
+            { fields: ["order_id"] }
+            { fields: ["warehouse_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -324,6 +363,10 @@ resources: [
     }
     {
         name: "ShipmentItem"
+        indexes: [
+            { fields: ["shipment_id"] }
+            { fields: ["order_item_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -349,6 +392,11 @@ resources: [
     }
     {
         name: "InventoryLot"
+        indexes: [
+            { fields: ["product_id"] }
+            { fields: ["warehouse_id"] }
+            { fields: ["supplier_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -386,6 +434,10 @@ resources: [
     }
     {
         name: "ReturnRequest"
+        indexes: [
+            { fields: ["order_id"] }
+            { fields: ["customer_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -413,6 +465,10 @@ resources: [
     }
     {
         name: "ReturnItem"
+        indexes: [
+            { fields: ["return_request_id"] }
+            { fields: ["order_item_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {
@@ -439,6 +495,10 @@ resources: [
     }
     {
         name: "AuditEvent"
+        indexes: [
+            { fields: ["account_id"] }
+            { fields: ["user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             {

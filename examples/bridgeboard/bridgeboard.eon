@@ -43,7 +43,6 @@ security: {
 		email: {
 			from_email: "noreply@example.com"
 			from_name: "Bridgeboard"
-			public_base_url: "https://127.0.0.1:8443"
 			provider: {
 				kind: Resend
 				api_key_env: "RESEND_API_KEY"
@@ -198,6 +197,11 @@ resources: {
 			update: "admin"
 			delete: "admin"
 		}
+		indexes: [
+			{
+				fields: ["organization_id"]
+			}
+		]
 		fields: {
 			id: {
 				type: I64
@@ -258,6 +262,11 @@ resources: {
 			update: "admin"
 			delete: "admin"
 		}
+		indexes: [
+			{
+				fields: ["organization_id"]
+			}
+		]
 		fields: {
 			id: {
 				type: I64
@@ -358,6 +367,14 @@ resources: {
 				field: "requester_user_id"
 			}
 		}
+		indexes: [
+			{
+				fields: ["organization_id"]
+			}
+			{
+				fields: ["requester_user_id"]
+			}
+		]
 		fields: {
 			id: {
 				type: I64

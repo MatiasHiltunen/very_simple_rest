@@ -56,6 +56,10 @@ resources: [
                 { field: "owner_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["tenant_id"] }
+            { fields: ["owner_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -85,6 +89,11 @@ resources: [
                 { field: "lead_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["workspace_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["lead_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -122,6 +131,11 @@ resources: [
                 { field: "author_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["project_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["author_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -159,6 +173,11 @@ resources: [
                 { field: "owner_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["workspace_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["owner_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -196,6 +215,11 @@ resources: [
                 { field: "commander_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["project_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["commander_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -233,6 +257,11 @@ resources: [
                 { field: "author_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["incident_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["author_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -269,6 +298,11 @@ resources: [
                 { field: "approver_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["project_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["approver_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -310,6 +344,11 @@ resources: [
                 { field: "subscriber_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["project_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["subscriber_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -349,6 +388,11 @@ resources: [
                 { field: "user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["incident_id"] }
+            { fields: ["tenant_id"] }
+            { fields: ["user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }
@@ -389,6 +433,10 @@ resources: [
                 { field: "requested_by_user_id", equals: "user.id" }
             ]
         }
+        indexes: [
+            { fields: ["tenant_id"] }
+            { fields: ["requested_by_user_id"] }
+        ]
         fields: [
             { name: "id", type: I64 }
             { name: "tenant_id", type: I64 }

@@ -84,6 +84,9 @@ resources: [
             update: { kind: Owner, field: "user_id" }
             delete: { kind: Owner, field: "user_id" }
         }
+        indexes: [
+            { fields: ["user_id"] }
+        ]
         fields: [
             { name: "id", type: I64, id: true }
             {

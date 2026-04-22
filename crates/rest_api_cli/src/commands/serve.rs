@@ -105,6 +105,9 @@ pub async fn serve_service(
         authorization_runtime: AuthorizationRuntime::new(authorization_model, pool),
         dynamic_service: dynamic_service.clone(),
     };
+    let anon_client_middleware =
+        rest_macro_core::security::require_default_anon_client_middleware()
+            .map_err(|error| anyhow!("anonymous client configuration error: {error}"))?;
 
     let tls_base_dir = base_dir.clone();
     let tls_config = dynamic_service.tls.clone();
@@ -121,6 +124,7 @@ pub async fn serve_service(
     let server = HttpServer::new({
         let dynamic_service = dynamic_service.clone();
         let state = state.clone();
+        let anon_client_middleware = anon_client_middleware.clone();
         move || {
             let api_runtime = dynamic_service.runtime.clone();
             let api_security = dynamic_service.security.clone();
@@ -173,7 +177,10 @@ pub async fn serve_service(
                         );
                     }
                 })
-                .service(build_api_scope(dynamic_service.clone(), state.clone()))
+                .service(
+                    build_api_scope(dynamic_service.clone(), state.clone())
+                        .wrap(anon_client_middleware.clone()),
+                )
                 .configure(move |cfg| {
                     configure_public_mounts_with_runtime(
                         cfg,

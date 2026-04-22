@@ -31,6 +31,8 @@ export type ClientConfig = {
   fetch?: typeof fetch;
   defaultHeaders?: HeadersInit;
   credentials?: RequestCredentials;
+  anonKey?: string;
+  anonHeaderName?: string;
   getAccessToken?: () => string | null | undefined | Promise<string | null | undefined>;
   getCsrfToken?: () => string | null | undefined | Promise<string | null | undefined>;
   csrfHeaderName?: string;
@@ -42,6 +44,8 @@ export type ResolvedClientConfig = {
   fetch: typeof fetch;
   defaultHeaders?: HeadersInit;
   credentials: RequestCredentials;
+  anonKey?: string;
+  anonHeaderName: string;
   getAccessToken?: () => string | null | undefined | Promise<string | null | undefined>;
   getCsrfToken?: () => string | null | undefined | Promise<string | null | undefined>;
   csrfHeaderName: string;
@@ -140,6 +144,8 @@ export interface VsrClient {
 }
 
 const DEFAULT_SERVER_URL = "/api";
+const DEFAULT_ANON_HEADER_NAME = "x-vsr-anon-key";
+const DEFAULT_ANON_KEY = "vsr-default-anon-client-key";
 
 function requestNeedsCsrf(method: string): boolean {
   const normalized = method.toUpperCase();
@@ -153,6 +159,8 @@ export function createClient(config: ClientConfig = {}): VsrClient {
     fetch: bindFetch(config.fetch ?? globalThis.fetch),
     defaultHeaders: config.defaultHeaders,
     credentials: config.credentials ?? "include",
+    anonKey: config.anonKey ?? DEFAULT_ANON_KEY,
+    anonHeaderName: config.anonHeaderName ?? DEFAULT_ANON_HEADER_NAME,
     getAccessToken: config.getAccessToken,
     getCsrfToken: config.getCsrfToken,
     csrfHeaderName: config.csrfHeaderName ?? "x-csrf-token",
@@ -164,6 +172,10 @@ export function createClient(config: ClientConfig = {}): VsrClient {
       const headers = new Headers(resolvedConfig.defaultHeaders ?? undefined);
       if (request.headers) {
         new Headers(request.headers).forEach((value, key) => headers.set(key, value));
+      }
+
+      if (resolvedConfig.anonKey) {
+        headers.set(resolvedConfig.anonHeaderName, resolvedConfig.anonKey);
       }
 
       if (request.requiresBearerAuth && resolvedConfig.getAccessToken) {

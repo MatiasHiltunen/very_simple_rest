@@ -192,6 +192,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "List Organization",
         "tags": [
           "Organization"
@@ -211,7 +216,15 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "Location": {
+                "description": "Canonical URL of the created resource",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -269,6 +282,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -343,6 +357,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -420,6 +435,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "Get Organization",
         "tags": [
           "Organization"
@@ -519,6 +539,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -703,6 +724,11 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "anonKey": []
+          }
+        ],
         "summary": "List Interest by organization",
         "tags": [
           "Interest"

@@ -50,7 +50,6 @@ The example is configured for Resend in `.eon`:
 email: {
     from_email: "noreply@example.com"
     from_name: "Bridgeboard"
-    public_base_url: "https://127.0.0.1:8443"
     provider: {
         kind: Resend
         api_key_env: "RESEND_API_KEY"
@@ -65,7 +64,7 @@ For real delivery:
 
 1. Set `RESEND_API_KEY`.
 2. Replace `from_email` with a sender that your provider accepts.
-3. Update `public_base_url` if the app is not running on `https://127.0.0.1:8443`.
+3. If auth emails need a fixed public origin outside request scope, set `public_base_url` to your published HTTPS site.
 
 If you prefer SMTP/`lettre`, swap the provider block in `bridgeboard.eon` to:
 

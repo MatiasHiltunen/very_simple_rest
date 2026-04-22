@@ -78,6 +78,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -200,6 +201,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -281,6 +283,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -357,6 +360,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -473,6 +477,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
@@ -557,6 +562,7 @@
         },
         "security": [
           {
+            "anonKey": [],
             "bearerAuth": []
           }
         ],
