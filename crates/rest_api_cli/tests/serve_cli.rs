@@ -1050,7 +1050,7 @@ fn vsr_serve_supports_builtin_auth_portal_dashboard_and_admin_users() {
     );
 
     let portal_response = client
-        .get(format!("{base_url}/api/auth/portal"))
+        .get(format!("{base_url}/auth/portal"))
         .send()
         .expect("account portal should load");
     assert_eq!(portal_response.status(), reqwest::StatusCode::OK);
@@ -1058,7 +1058,7 @@ fn vsr_serve_supports_builtin_auth_portal_dashboard_and_admin_users() {
     assert!(portal_body.contains("Account Portal"));
 
     let unauthorized_admin_page = client
-        .get(format!("{base_url}/api/auth/admin"))
+        .get(format!("{base_url}/auth/admin"))
         .send()
         .expect("admin page should respond");
     assert_eq!(
@@ -1082,7 +1082,7 @@ fn vsr_serve_supports_builtin_auth_portal_dashboard_and_admin_users() {
         .to_owned();
 
     let admin_page_response = client
-        .get(format!("{base_url}/api/auth/admin"))
+        .get(format!("{base_url}/auth/admin"))
         .bearer_auth(&token)
         .send()
         .expect("admin dashboard should load");
@@ -4168,7 +4168,7 @@ fn vsr_serve_bridgeboard_example_supports_clean_room_e2e() {
     assert_eq!(admin_requests.get("total").and_then(Value::as_i64), Some(1));
 
     let portal_response = client
-        .get(format!("{base_url}/api/auth/portal"))
+        .get(format!("{base_url}/auth/portal"))
         .send()
         .expect("account portal should load");
     assert_eq!(portal_response.status(), reqwest::StatusCode::OK);
@@ -4176,7 +4176,7 @@ fn vsr_serve_bridgeboard_example_supports_clean_room_e2e() {
     assert!(portal_body.contains("Bridgeboard Account"));
 
     let dashboard_response = client
-        .get(format!("{base_url}/api/auth/admin"))
+        .get(format!("{base_url}/auth/admin"))
         .bearer_auth(&admin_token)
         .send()
         .expect("admin dashboard should load");

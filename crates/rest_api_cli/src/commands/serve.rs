@@ -87,6 +87,7 @@ pub async fn serve_service(
 
     let mut logger = service.logging.build_env_logger();
     let _ = logger.try_init();
+    install_diagnostic_panic_hook();
 
     if include_builtin_auth {
         auth::ensure_jwt_secret_configured_with_settings(&service.security.auth)
@@ -190,12 +191,16 @@ pub async fn serve_service(
                         }
                     }),
                 )
-                .configure(move |cfg| {
-                    if include_builtin_auth {
-                        auth::public_auth_discovery_routes_with_settings(
-                            cfg,
-                            api_security.auth.clone(),
-                        );
+                .configure({
+                    let auth_settings = api_security.auth.clone();
+                    move |cfg| {
+                        if include_builtin_auth {
+                            auth::public_auth_discovery_routes_with_settings(
+                                cfg,
+                                auth_settings.clone(),
+                            );
+                            auth::register_builtin_auth_html_pages(cfg, auth_settings);
+                        }
                     }
                 })
                 .service(
@@ -259,6 +264,36 @@ pub async fn serve_service(
     server_result?;
 
     Ok(())
+}
+
+fn install_diagnostic_panic_hook() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .map(ToOwned::to_owned)
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+            let location = info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| "<unknown location>".to_owned());
+            let thread = std::thread::current();
+            let thread_name = thread.name().unwrap_or("<unnamed>");
+            log::error!(
+                "vsr panic on thread '{thread_name}' at {location}: {message}"
+            );
+            eprintln!(
+                "[vsr panic] thread='{thread_name}' at {location}: {message}"
+            );
+            default_hook(info);
+        }));
+    });
 }
 
 fn spawn_parent_shutdown_watch(server_handle: actix_web::dev::ServerHandle, enabled: bool) {

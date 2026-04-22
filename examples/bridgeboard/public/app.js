@@ -28,8 +28,8 @@ import {
   updateCollaborationRequest as updateCollaborationRequestOperation,
 } from "./gen/client/index.js";
 
-const AUTH_PORTAL_URL = "/api/auth/portal";
-const AUTH_ADMIN_URL = "/api/auth/admin";
+const AUTH_PORTAL_URL = "/auth/portal";
+const AUTH_ADMIN_URL = "/auth/admin";
 const CSRF_COOKIE_NAME = "vsr_csrf";
 const MOBILE_NAV_BREAKPOINT = 980;
 const ROUTE_ORDER = new Map([

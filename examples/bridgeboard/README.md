@@ -79,8 +79,8 @@ provider: {
 
 Bridgeboard enables the built-in HTML pages as part of the example:
 
-- Account portal: `https://127.0.0.1:8443/api/auth/portal`
-- Admin dashboard: `https://127.0.0.1:8443/api/auth/admin`
+- Account portal: `https://127.0.0.1:8443/auth/portal`
+- Admin dashboard: `https://127.0.0.1:8443/auth/admin`
 
 The browser client also exposes:
 

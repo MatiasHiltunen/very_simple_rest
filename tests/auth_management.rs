@@ -172,10 +172,16 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
         .as_mut()
         .expect("auth management fixture should define email settings")
         .public_base_url = Some("https://app.example".to_owned());
-    let app = test::init_service(App::new().service(scope("/api").configure(|cfg| {
-        auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
-        auth_management_api::configure(cfg, pool.clone());
-    })))
+    let app = test::init_service(
+        App::new()
+            .configure(|cfg| {
+                auth::register_builtin_auth_html_pages(cfg, security.auth.clone());
+            })
+            .service(scope("/api").configure(|cfg| {
+                auth::auth_routes_with_settings(cfg, pool.clone(), security.auth.clone());
+                auth_management_api::configure(cfg, pool.clone());
+            })),
+    )
     .await;
 
     let register_alice = test::TestRequest::post()
@@ -262,7 +268,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     assert!(account_body.email_verified);
 
     let portal_request = test::TestRequest::get()
-        .uri("/api/auth/portal")
+        .uri("/auth/portal")
         .to_request();
     let portal_response = test::call_service(&app, portal_request).await;
     assert_eq!(portal_response.status(), StatusCode::OK);
@@ -336,7 +342,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     );
 
     let admin_page_request = test::TestRequest::get()
-        .uri("/api/auth/admin")
+        .uri("/auth/admin")
         .insert_header(("Authorization", format!("Bearer {}", token_body.token)))
         .to_request();
     let admin_page_response = test::call_service(&app, admin_page_request).await;

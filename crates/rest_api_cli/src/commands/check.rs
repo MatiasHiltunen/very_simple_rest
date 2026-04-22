@@ -297,68 +297,30 @@ fn auth_ui_path_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
         let Some(path) = path else {
             continue;
         };
-        let external_path = auth_ui_external_path(path);
 
-        if let Some(resource_name) = auth_ui_resource_namespace_overlap(service, path) {
+        if path_is_inside_api_namespace(path) {
             findings.push(CheckFinding {
-                code: "security.auth.ui_path_overlaps_resource_namespace".to_owned(),
+                code: "security.auth.ui_path_inside_api_namespace".to_owned(),
                 severity: CheckSeverity::Warning,
                 path: format!("security.auth.{label}.path"),
                 message: format!(
-                    "built-in auth UI path `{path}` shares the `/api/{}` namespace with resource `{}`",
-                    resource_name, resource_name
+                    "built-in auth UI path `{path}` is nested under `/api`, which requires anonymous client keys and blocks browser loads"
                 ),
                 suggestion: Some(
-                    "Move the auth UI path outside resource namespaces, for example under `/auth/...`, so built-in pages do not shadow generated resource routes."
-                        .to_owned(),
-                ),
-            });
-        }
-
-        if let Some(upload_name) = auth_ui_upload_namespace_overlap(service, path) {
-            findings.push(CheckFinding {
-                code: "security.auth.ui_path_overlaps_upload_namespace".to_owned(),
-                severity: CheckSeverity::Warning,
-                path: format!("security.auth.{label}.path"),
-                message: format!(
-                    "built-in auth UI path `{path}` shares the `/api` namespace used by storage upload `{upload_name}`",
-                ),
-                suggestion: Some(
-                    "Move the auth UI path or the upload route so each owns a distinct first path segment inside `/api`."
-                        .to_owned(),
-                ),
-            });
-        }
-
-        if service.authorization.management_api.enabled
-            && auth_ui_matches_or_overlaps(
-                path,
-                service.authorization.management_api.mount.as_str(),
-            )
-        {
-            findings.push(CheckFinding {
-                code: "security.auth.ui_path_overlaps_authorization_management".to_owned(),
-                severity: CheckSeverity::Warning,
-                path: format!("security.auth.{label}.path"),
-                message: format!(
-                    "built-in auth UI path `{path}` overlaps the authorization management mount `{}` inside `/api`",
-                    service.authorization.management_api.mount
-                ),
-                suggestion: Some(
-                    "Keep auth UI pages and runtime authorization management under separate `/api` prefixes."
+                    "Configure the auth UI path as an absolute path outside `/api`, for example under `/auth/...`, so browsers can reach the page without an anonymous client key header."
                         .to_owned(),
                 ),
             });
         }
 
         for mount in &service.static_mounts {
-            if auth_ui_matches_or_overlaps(external_path.as_str(), mount.mount_path.as_str()) {
+            if auth_ui_matches_or_overlaps(path, mount.mount_path.as_str()) {
                 findings.push(CheckFinding {
                     code: "security.auth.ui_path_overlaps_static_mount".to_owned(),
                     severity: CheckSeverity::Warning,
                     path: format!("security.auth.{label}.path"),
                     message: format!(
-                        "built-in auth UI path `{external_path}` overlaps static mount `{}`",
+                        "built-in auth UI path `{path}` overlaps static mount `{}`",
                         mount.mount_path
                     ),
                     suggestion: Some(
@@ -373,44 +335,8 @@ fn auth_ui_path_findings(service: &ServiceSpec) -> Vec<CheckFinding> {
     findings
 }
 
-fn auth_ui_external_path(path: &str) -> String {
-    if path == "/" {
-        "/api".to_owned()
-    } else {
-        format!("/api{path}")
-    }
-}
-
-fn auth_ui_resource_namespace_overlap(service: &ServiceSpec, path: &str) -> Option<String> {
-    let first_segment = first_path_segment(path)?;
-    service
-        .resources
-        .iter()
-        .find(|resource| resource.api_name() == first_segment)
-        .map(|resource| resource.api_name().to_owned())
-}
-
-fn auth_ui_upload_namespace_overlap(service: &ServiceSpec, path: &str) -> Option<String> {
-    let first_segment = first_path_segment(path)?;
-    service
-        .storage
-        .uploads
-        .iter()
-        .find(|upload| {
-            upload
-                .path
-                .split('/')
-                .next()
-                .map(|segment| segment == first_segment)
-                .unwrap_or(false)
-        })
-        .map(|upload| upload.name.clone())
-}
-
-fn first_path_segment(path: &str) -> Option<&str> {
-    path.trim_matches('/')
-        .split('/')
-        .find(|segment| !segment.is_empty())
+fn path_is_inside_api_namespace(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
 }
 
 fn auth_ui_matches_or_overlaps(left: &str, right: &str) -> bool {
@@ -2098,7 +2024,7 @@ authorization: {
 static: {
     mounts: [
         {
-            mount: "/api/auth/portal"
+            mount: "/auth/portal"
             dir: "public"
             mode: Spa
             cache: NoStore
@@ -2124,11 +2050,11 @@ storage: {
 security: {
     auth: {
         portal: {
-            path: "/note"
+            path: "/auth/portal"
             title: "Portal"
         }
         admin_dashboard: {
-            path: "/ops/authz"
+            path: "/api/admin"
             title: "Admin Dashboard"
         }
     }
@@ -2151,13 +2077,13 @@ resources: [
             .iter()
             .map(|finding| finding.code.as_str())
             .collect::<Vec<_>>();
-        assert!(codes.contains(&"security.auth.ui_path_overlaps_resource_namespace"));
-        assert!(codes.contains(&"security.auth.ui_path_overlaps_authorization_management"));
+        assert!(codes.contains(&"security.auth.ui_path_overlaps_static_mount"));
+        assert!(codes.contains(&"security.auth.ui_path_inside_api_namespace"));
 
         let rendered =
             render_service_check_report(&report, OutputFormat::Text).expect("text should render");
-        assert!(rendered.contains("security.auth.ui_path_overlaps_resource_namespace"));
-        assert!(rendered.contains("security.auth.ui_path_overlaps_authorization_management"));
+        assert!(rendered.contains("security.auth.ui_path_overlaps_static_mount"));
+        assert!(rendered.contains("security.auth.ui_path_inside_api_namespace"));
     }
 
     #[test]
@@ -2178,7 +2104,7 @@ authorization: {
 static: {
     mounts: [
         {
-            mount: "/api/auth/portal"
+            mount: "/auth/portal"
             dir: "public"
             mode: Spa
             cache: NoStore
@@ -2208,7 +2134,7 @@ security: {
             title: "Portal"
         }
         admin_dashboard: {
-            path: "/dashboard"
+            path: "/api/admin"
             title: "Admin Dashboard"
         }
     }
