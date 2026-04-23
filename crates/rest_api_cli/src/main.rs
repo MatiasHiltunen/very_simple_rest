@@ -2417,7 +2417,17 @@ async fn run_cli() -> Result<()> {
 }
 
 #[cfg(not(test))]
-#[tokio::main]
+// Short-lived CLI commands on Windows ARM64 have been observed to crash during
+// Tokio multithread runtime teardown in cargo-install builds, so keep the CLI
+// entrypoint on a single-thread runtime there.
+#[cfg_attr(
+    all(target_os = "windows", target_arch = "aarch64"),
+    tokio::main(flavor = "current_thread")
+)]
+#[cfg_attr(
+    not(all(target_os = "windows", target_arch = "aarch64")),
+    tokio::main
+)]
 async fn main() -> Result<()> {
     run_cli().await
 }
