@@ -52,8 +52,8 @@ flate2 = "1.1.0"
 sha2.workspace = true
 futures-util = "0.3"
 object_store = { workspace = true, features = ["aws", "fs"] }
-aws-config = { version = "1.8", optional = true }
-aws-sdk-s3 = { version = "1.84", optional = true }
+aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "default-https-client", "rt-tokio"], optional = true }
+aws-sdk-s3 = { version = "1.131", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 log.workspace = true
 syn.workspace = true
 prettyplease = "0.2"
