@@ -256,9 +256,9 @@ These are the rules of the road. Future PRs should be able to cite them.
 ### 4.1 Contract First, Always
 
 The `.eon` file is the single source of truth. Every generated artifact —
-migrations, emitted servers, OpenAPI, TypeScript client, docs — is a pure
-function of that contract plus a versioned compiler. No feature ships that
-violates this.
+migrations, emitted servers, OpenAPI, `.proto`, GraphQL schema, generated
+clients, docs — is a pure function of that contract plus a versioned compiler.
+No feature ships that violates this.
 
 Why: this is what lets AI co-development work. The model generates the
 contract; the compiler produces everything downstream; the operator audits the
@@ -273,18 +273,22 @@ IR before branching into:
 - emitted-server codegen
 - native `vsr serve` runtime
 - OpenAPI rendering
+- Protobuf / `.proto` rendering
 - TypeScript client rendering
+- Rust client rendering
+- additional client-language emitters
 - docs/reference rendering
 - (future) GraphQL schema rendering
+- (future) gRPC server rendering
 
 This is already the stated rule in
 [`docs/src/roadmaps/eon-vnext.md`](roadmaps/eon-vnext.md#shared-normalized-ir-first)
 and [`docs/src/roadmaps/nordic-bridge-api-primitives.md`](roadmaps/nordic-bridge-api-primitives.md).
 We promote it here to a workspace-wide invariant.
 
-Why: GraphQL, relation embeds, and aggregates cannot be implemented three
-times. If they can be implemented three times, they will drift, and the
-contract-first promise breaks.
+Why: GraphQL, gRPC, relation embeds, aggregates, and generated clients cannot
+be implemented separately per surface. If they can be implemented separately,
+they will drift, and the contract-first promise breaks.
 
 ### 4.3 Native `vsr serve` And Emitted Servers Must Be Behavior-Identical
 
@@ -292,7 +296,7 @@ For every runtime feature, the definition of done includes:
 
 - runtime path wired and tested in `vsr serve`
 - runtime path wired and tested in emitted server
-- OpenAPI and TypeScript client updated
+- OpenAPI and generated clients updated
 - at least one integration test that exercises the feature in both paths
 
 Why: the dev loop uses `vsr serve`; production uses the emitted binary. If
@@ -584,6 +588,43 @@ Rules:
 - Runtime traits must be understandable from `cargo doc` without reading an
   adapter implementation.
 
+### 4.15 Protocol And Client Generation Are Extension Points
+
+REST is the current production surface. GraphQL, protobuf, and gRPC are future
+surfaces that must be made possible by the groundwork, not bolted on later.
+The compiler therefore exposes two explicit extension contracts:
+
+- `ProtocolEmitter` — turns IR into a protocol artifact: OpenAPI, GraphQL SDL,
+  `.proto`, or future protocol descriptions.
+- `ClientGenerator` — turns IR plus a selected protocol surface into a
+  language client: TypeScript today, Rust next, then additional languages such
+  as Go, Python, Kotlin, or Swift when demand justifies them.
+
+Rules:
+
+- Client generators consume the same normalized IR and capability metadata as
+  OpenAPI and server generation. They do not parse generated Rust, OpenAPI, or
+  each other's output as their source of truth.
+- Rust is the next client target after TypeScript because it unlocks
+  multi-service VSR systems without hand-writing HTTP bindings between
+  services.
+- `.proto` generation is treated as a protocol artifact even before a gRPC
+  server exists. The `.proto` output lets us validate naming, scalar mapping,
+  streaming boundaries, and backward-compatibility rules early.
+- A future gRPC server is an adapter over the same service/action IR used by
+  REST and GraphQL. Resource semantics, auth, authz, audit, validation, and
+  database behavior stay in VSR-owned runtime logic.
+- Future `.eon` service-to-service declarations should describe dependencies
+  at the contract level: remote service name, generated client target,
+  protocol preference, timeout/retry policy, auth mechanism, and version
+  compatibility. This roadmap does not implement that syntax, but the IR and
+  generator registry must leave room for it.
+
+Why: multi-service architecture should be designed around contracts, not
+around hand-written HTTP clients. If the first extra client or protocol
+requires special paths, every later language and protocol will inherit that
+debt.
+
 ## 5. Target Workspace Structure
 
 The target workspace, after migration. Names are subject to bikeshedding; the
@@ -721,6 +762,10 @@ Module map:
   is the IR that principle 4.2 references. It owns:
   - `ir/resource.rs`, `ir/field.rs`, `ir/relation.rs`, `ir/policy.rs`,
     `ir/auth.rs`, `ir/runtime.rs`, `ir/database.rs`.
+  - `ir/action.rs` — service/action shape shared by REST, GraphQL, and future
+    gRPC surfaces.
+  - `ir/service_link.rs` — future placeholder for `.eon`-declared
+    service-to-service dependencies and generated-client wiring.
   - `ir/projection.rs` — new. Shared read-augmentation IR
     (`From`, `Template`, `AggregateCount`, `Exists`, `Embed`) per the
     Nordic Bridge roadmap.
@@ -735,9 +780,17 @@ Module map:
     invocation, and snapshot-friendly formatting.
   - `emit/proc_macro.rs` — compatibility adapter that turns source-first
     output into the proc-macro-facing token stream while that surface exists.
-- `openapi/` — today's 3,984-line `compiler/openapi.rs` split:
-  - `openapi/paths.rs`, `openapi/schemas.rs`, `openapi/security.rs`,
-    `openapi/auth.rs`, `openapi/snapshot.rs` (for CI parity tests).
+- `protocol/` — protocol artifact emitters:
+  - `protocol/openapi/` — today's 3,984-line `compiler/openapi.rs` split:
+    `paths.rs`, `schemas.rs`, `security.rs`, `auth.rs`, `snapshot.rs`.
+  - `protocol/graphql/` — future SDL/runtime schema emitter.
+  - `protocol/protobuf/` — future `.proto` emitter, including scalar mapping,
+    package naming, service/action mapping, and backward-compatibility checks.
+- `clients/` — language client generators behind a `ClientGenerator` trait:
+  - `clients/typescript/` — today's TypeScript generator.
+  - `clients/rust/` — next target; emits a typed Rust client suitable for
+    VSR-to-VSR service calls.
+  - `clients/registry.rs` — dispatch, feature gating, and shared naming rules.
 - `docs/` — today's 3,276-line `commands/docs.rs`, moved out of the CLI.
   The CLI keeps a thin wrapper that calls it.
 - `derive/` — today's `compiler/derive_parser.rs` and the derive path.
@@ -843,7 +896,10 @@ vsr
 │   ├── server             # Emit Rust project (current `server emit`)
 │   ├── expand             # Current `server expand`
 │   ├── client ts          # Current `client ts`
+│   ├── client rust        # Future typed Rust client for service-to-service use
 │   ├── openapi            # Current `openapi`
+│   ├── proto              # Future `.proto` artifact generation
+│   ├── graphql            # Future GraphQL schema generation
 │   ├── docs               # Current `docs`
 │   └── env                # Current `gen-env`
 │
@@ -877,9 +933,9 @@ Key principles applied:
   through 0.3 and removed in 0.4.)
 - **One home for diagnostics.** Every "is this healthy?" answer lives under
   `doctor`. Searchable, documentable.
-- **`gen` groups all generation.** A new GraphQL or Swift client fits there
-  naturally (`gen graphql`, `gen client swift`) without a new top-level
-  command.
+- **`gen` groups all generation.** New protocol artifacts and clients fit
+  there naturally (`gen proto`, `gen graphql`, `gen client rust`,
+  `gen client swift`) without a new top-level command.
 - **`schema` subsumes `migrate`.** The word "migrate" implies a verb;
   "schema" describes what you are working on, and verbs go under it.
 - **`grants` renames `authz runtime`.** Users do not think of persisted
@@ -900,8 +956,10 @@ Feature flags fall on four independent axes.
    `backup`, `replication`, `secrets-infisical`, `secrets-vault`,
    `secrets-aws`.
 3. **Observability** — `tracing`, `metrics`, `otel`. All no-ops when off.
-4. **Forward-looking** — `graphql` (placeholder, compiles empty), `ws` (for
-   eventual websocket subscriptions), `grpc` (possible future RPC surface).
+4. **Forward-looking** — `graphql` (placeholder, compiles empty), `proto`
+   (protocol artifact generation), `grpc` (possible future RPC surface),
+   `rust-client` (next client target), and `ws` (for eventual websocket
+   subscriptions).
 
 ### 7.2 Per-Crate Feature Tables
 
@@ -943,6 +1001,9 @@ turso-local = ["vsr-core/turso-local"]
 default = []
 openapi = []
 typescript-client = []
+rust-client = []
+proto = []
+graphql-schema = []
 rust-emit = []
 derive = ["dep:syn", "dep:quote", "dep:proc-macro2"]
 ```
@@ -1071,7 +1132,7 @@ Phases are not strictly sequential. Parallelism where it exists:
 Phase 0 ──▶ Phase 1 ─┬─▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4 ──▶ Phase 5 ──▶ Phase 6 ──▶ Phase 7
                      │                                                                   ▲
                      └───────────── Phase 8 prep ─────────────────────────────────────────┘
-                              (GraphQL IR sketch, no code)
+                              (protocol/client IR sketches, no runtime code)
 ```
 
 - Phase 1 (observability) and Phase 2 (auth split) can run in parallel with
@@ -1168,6 +1229,12 @@ Deliverable: `serve.rs` ≤ 500 LOC; runtime testable without the compiler.
 - Introduce `GeneratedProject` / `GeneratedFile` as the source-first emitter
   contract. Emitted Rust is a stable module tree on disk, formatted by
   `rustfmt`, with deterministic comments and import ordering.
+- Introduce `ProtocolEmitter` and `ClientGenerator` traits, with TypeScript
+  moved behind the same registry that will later host Rust, `.proto`, GraphQL,
+  and other language/protocol emitters.
+- Add placeholder IR for service actions and future service-to-service links
+  so multi-service `.eon` declarations do not require another compiler
+  restructuring later.
 - Turn the proc-macro path into an adapter over the source-first emitter, or
   document why that is not feasible and produce a sunset plan with migration
   tooling.
@@ -1177,7 +1244,8 @@ Deliverable: `serve.rs` ≤ 500 LOC; runtime testable without the compiler.
 
 Deliverable: 10k + 11k LOC files are now ~20 files averaging ~1k LOC each,
 with ownable test boundaries; generated Rust is reviewable source first,
-proc-macro output second.
+proc-macro output second; new protocol/client emitters have a documented
+registry contract.
 
 ### Phase 5 — Extract `vsr-ops` (weeks 11–12)
 
@@ -1208,20 +1276,31 @@ on top of a layered and feature-flagged base. It is deliberately last so that
 Deliverable: `aggregate`, `embed`, `viewer_relation` and related primitives
 shipped with native/emitted parity, OpenAPI parity, and unit tests per layer.
 
-### Phase 8 — GraphQL Surface (separate roadmap)
+### Phase 8 — Additional Protocol Surfaces (separate roadmaps)
 
-Out of scope here but enabled by Phases 4 and 7: `gen graphql` emits a
-GraphQL schema from the shared IR; a `graphql` feature adds a runtime
-executor. Design follows in a dedicated roadmap.
+Out of scope here but enabled by Phases 4 and 7:
+
+- `gen graphql` emits a GraphQL schema from the shared IR; a `graphql`
+  feature adds a runtime executor.
+- `gen proto` emits `.proto` files from the shared service/action IR.
+- A future `grpc` feature adds a gRPC server adapter over the same runtime
+  logic used by REST and GraphQL.
+- `gen client rust` emits the first non-TypeScript client and proves the
+  `ClientGenerator` contract for later languages.
+
+Design for each surface follows in dedicated roadmaps. The commitment in this
+roadmap is the groundwork: shared IR, generator registry, deterministic
+artifact contracts, and tests that make later surfaces additive.
 
 ## 10. Testing Strategy
 
 Target layout for `tests/`:
 
 - `tests/contract/` — snapshot tests: given `.eon`, check generated
-  OpenAPI, generated TypeScript client, generated Rust module, generated
-  migrations. Snapshots live under `tests/snapshots/`. `cargo insta` (or a
-  home-grown snapshot) enforces parity.
+  OpenAPI, generated `.proto` (once implemented), generated TypeScript client,
+  generated Rust client, generated Rust server module, generated migrations.
+  Snapshots live under `tests/snapshots/`. `cargo insta` (or a home-grown
+  snapshot) enforces parity.
 - `tests/runtime/` — end-to-end integration tests that boot `vsr serve` *and*
   the emitted binary for the same `.eon` and run the same assertions against
   both. This is how principle 4.3 becomes enforceable.
@@ -1245,6 +1324,9 @@ CI enforces:
 - `mdbook build docs` (already present)
 - a runtime parity suite that fails if `vsr serve` and emitted-server
   behavior diverge on any of a fixed list of resource shapes.
+- a generator contract suite that runs every registered `ClientGenerator` and
+  `ProtocolEmitter` against the same IR fixtures, so adding Rust, `.proto`,
+  or a later language cannot bypass naming, determinism, or capability rules.
 
 ## 11. Observability Strategy
 
@@ -1370,14 +1452,29 @@ Listed here so reviewers have a place to push back. Each carries a
    The `minimal` feature produces a small binary; do we also ship
    capability-segmented binaries (e.g. `vsr-backup`, `vsr-doctor`) for
    constrained environments? Default position: one binary, many features.
+9. **Client language order after Rust.** *Decide by end of Phase 7.* Rust is
+   the next client target because it unlocks VSR-to-VSR service calls. After
+   that, choose based on real consumers rather than novelty. Likely candidates:
+   Go for backend services, Python for automation/AI workflows, Kotlin/Swift
+   for mobile clients.
+10. **Protocol surface order (`graphql`, `.proto`, `grpc`).** *Decide by end
+   of Phase 7.* GraphQL and `.proto` can begin as generated artifacts. gRPC is
+   larger because it requires a server adapter and streaming/error semantics.
+   Default position: artifact emitters first, runtime protocols second.
+11. **Service-to-service declarations in `.eon`.** *Decide in the protocol
+   roadmap, after Phase 7.* We need a contract for declaring remote services,
+   generated clients, protocol preference, auth, timeouts, retries, and version
+   compatibility. Default position: reserve IR shape now; do not add syntax
+   until the Rust client and at least one protocol artifact are proven.
 
 ## 16. Non-Goals (For This Roadmap)
 
 - Replacing the `.eon` format with a different DSL.
 - Changing the storage-first model of `.eon` resources.
-- Introducing a separate runtime for WebSockets or gRPC.
+- Shipping production gRPC, WebSocket, or GraphQL runtimes in this roadmap.
+  The groundwork belongs here; the runtime surfaces get separate roadmaps.
 - Adding a plugin system with dynamic loading.
-- Adding GraphQL as part of these phases (its own roadmap follows).
+- Adding `.eon` service-to-service syntax as part of these phases.
 
 ## 17. Acceptance Criteria For "This Roadmap Is Done"
 
@@ -1406,8 +1503,14 @@ This document's success state is not "we executed every phase". It is:
 9. Generated Rust is source-first, `rustfmt`-clean, deterministic, and
    reviewable without `cargo expand`. The proc-macro path is either a thin
    documented compatibility adapter or has an accepted sunset plan.
-10. The non-functional targets in §18 hold, verified by CI benchmarks.
-11. Every risk in §19 has either been mitigated or has an accepted
+10. TypeScript, Rust-client, OpenAPI, and future `.proto`/GraphQL emitters
+    plug into a common generator registry and pass the same determinism,
+    naming, and capability tests.
+11. The IR contains an explicit place for service/action shape and future
+    service-to-service links, so adding `.eon` service connections does not
+    require another compiler split.
+12. The non-functional targets in §18 hold, verified by CI benchmarks.
+13. Every risk in §19 has either been mitigated or has an accepted
    contingency plan documented.
 
 When those hold, we have the architecture we need to ship the next two years
@@ -1524,8 +1627,11 @@ removed**.
 
 - OpenAPI output: structurally backward-compatible within a minor; breaking
   changes bump minor and appear in the CHANGELOG.
-- TypeScript client: public API backward-compatible within a minor; private
-  internals may change.
+- Generated clients: public API backward-compatible within a minor for each
+  language target; private internals may change. Rust client follows normal
+  Rust semver expectations for public types and traits.
+- `.proto` output: package, message, field number, and service naming changes
+  are compatibility-sensitive. Once published, field numbers are never reused.
 - Migrations: forward-only by default; `vsr schema diff` shows destructive
   changes requiring `--allow-destructive`.
 
