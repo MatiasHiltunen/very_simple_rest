@@ -23,6 +23,15 @@ chrono = ["dep:chrono"]
 # Enables tracing integration stubs (no-ops when disabled).
 tracing = ["dep:tracing"]
 
+# ── Database back-end stubs ───────────────────────────────────────────────────
+# These are empty today. Phase 3 adds concrete sqlx-backed `DbPool` impls
+# behind each flag. Defined here so vsr-runtime can re-export them without
+# depending on sqlx directly in its own Cargo.toml.
+sqlite     = []
+postgres   = []
+mysql      = []
+turso-local = ["sqlite"]
+
 [dependencies.chrono]
 version = "0.4"
 features = ["serde"]

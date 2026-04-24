@@ -2,6 +2,7 @@
 members = [
     # ── New layered architecture (target state) ───────────────────────────
     "crates/vsr-core",          # Foundational traits, errors, secret/db/clock
+    "crates/vsr-runtime",       # HTTP, auth, authz, storage, audit trait seams
 
     # ── Existing crates (being migrated incrementally) ────────────────────
     "crates/rest_api_cli",
@@ -38,6 +39,7 @@ panic = "warn"
 [workspace.dependencies]
 # ── New VSR crates ──────────────────────────────────────────────────────
 vsr-core = { path = "crates/vsr-core" }
+vsr-runtime = { path = "crates/vsr-runtime" }
 
 # ── Existing dependencies ───────────────────────────────────────────────
 actix-web = "4"

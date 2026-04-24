@@ -1,0 +1,73 @@
+[package]
+name = "vsr-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Framework-neutral runtime traits for VSR services: HTTP, auth, authz, storage, audit"
+license.workspace = true
+repository.workspace = true
+
+# vsr-runtime defines the contracts that all runtime implementations must satisfy.
+# Default features are intentionally empty — consumers opt in to the implementations
+# they need. This keeps the trait layer compilable without any heavy dependencies.
+[dependencies]
+vsr-core.workspace = true
+bytes = "1"
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+
+# ── HTTP implementations ──────────────────────────────────────────────────────
+# Enable the actix-web adapter (default runtime implementation).
+http-actix = ["dep:actix-web"]
+# Enable the axum adapter (decision window: end of Phase 3, see §15.2).
+http-axum = ["dep:axum", "dep:tower"]
+
+# ── Auth capabilities ──────────────────────────────────────────────────────────
+# Email / OTP flows (pulls lettre).
+auth-email = ["dep:lettre"]
+
+# ── Storage ────────────────────────────────────────────────────────────────────
+storage-local = []
+storage-s3 = ["dep:object_store"]
+
+# ── Rate limiting ──────────────────────────────────────────────────────────────
+rate-limit-redis = []  # placeholder; implementation added when needed
+
+# ── Observability ──────────────────────────────────────────────────────────────
+tracing = ["dep:tracing", "vsr-core/tracing"]
+
+# ── Database back-ends (re-exported from vsr-core) ────────────────────────────
+sqlite     = ["vsr-core/sqlite"]
+postgres   = ["vsr-core/postgres"]
+mysql      = ["vsr-core/mysql"]
+turso-local = ["vsr-core/turso-local"]
+
+[dependencies.actix-web]
+version = "4"
+optional = true
+
+[dependencies.axum]
+version = "0.8"
+optional = true
+
+[dependencies.tower]
+version = "0.5"
+optional = true
+
+[dependencies.lettre]
+version = "0.11"
+default-features = false
+features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"]
+optional = true
+
+[dependencies.object_store]
+version = "0.13"
+default-features = false
+optional = true
+
+[dependencies.tracing]
+version = "0.1"
+optional = true
