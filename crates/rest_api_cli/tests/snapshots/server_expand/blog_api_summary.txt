@@ -48,6 +48,8 @@ pub mod blog_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn sort_supports_cursor
       fn cursor_id_for_item
       fn cursor_value_for_item
@@ -57,6 +59,7 @@ pub mod blog_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -101,6 +104,8 @@ pub mod blog_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn sort_supports_cursor
       fn cursor_id_for_item
       fn cursor_value_for_item
@@ -110,6 +115,7 @@ pub mod blog_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update

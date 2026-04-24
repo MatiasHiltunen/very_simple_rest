@@ -49,6 +49,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn sort_supports_cursor
@@ -60,6 +62,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -105,6 +108,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -118,6 +123,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -164,6 +170,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -177,6 +185,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -224,6 +233,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -238,6 +249,7 @@ pub mod modern_cms_api
       fn build_many_to_many_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -289,6 +301,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -302,6 +316,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -347,6 +362,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -360,6 +377,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -405,6 +423,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -418,6 +438,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update
@@ -463,6 +484,8 @@ pub mod modern_cms_api
       fn created_location
       fn created_response
       fn list_placeholder
+      fn list_placeholders
+      fn parse_filter_in_values
       fn take_list_placeholder
       fn read_policy_plan
       fn update_policy_plan
@@ -476,6 +499,7 @@ pub mod modern_cms_api
       fn build_list_plan
       fn finalize_list_response
       fn get_all
+      fn count
       fn get_one
       fn create
       fn update

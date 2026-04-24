@@ -286,6 +286,13 @@ function appendQuery(searchParams: URLSearchParams, query: QueryParams): void {
       continue;
     }
     if (Array.isArray(value)) {
+      if (key.endsWith("__in")) {
+        const items = value.filter((item): item is ScalarValue => item !== undefined && item !== null);
+        if (items.length > 0) {
+          searchParams.append(key, items.map((item) => stringifyScalarValue(item)).join(","));
+        }
+        continue;
+      }
       for (const item of value) {
         if (item !== undefined && item !== null) {
           searchParams.append(key, stringifyScalarValue(item));

@@ -181,7 +181,7 @@ Each resource describes one generated REST model and its CRUD surface.
 | resources[].id_field | String | `id` | No | Field name | The named field must exist on the resource. |
 | resources[].roles | Map | No role checks | No | See Resource Roles | Declares coarse role gates for read/create/update/delete. |
 | resources[].policies | Map | `admin_bypass = true`; no row policies | No | See Row Policies | Declares row-level filters and assignments using `user.id` or `claim.&lt;name&gt;` sources. |
-| resources[].list | Map | No custom limit caps | No | See List Settings | Controls generated list endpoint defaults and hard caps. |
+| resources[].list | Map | `count_endpoint = true`; no custom limit caps or `__in` filters | No | See List Settings | Controls generated list endpoint defaults, hard caps, count endpoint generation, and opt-in multi-value filters. |
 | resources[].api | Map | No API projection or response contexts | No | See Resource API | Separates the public API field surface from storage fields and can define named response contexts. |
 | resources[].use | List&lt;String&gt; | [] | No | Declared mixin names | Expands the listed local mixins into the resource before normal field/index validation. Using the same mixin more than once is rejected. |
 | resources[].indexes | List&lt;Index&gt; | No explicit indexes | No | See Indexes | Declares explicit single-field or composite indexes in addition to the automatic relation and policy-derived index hints. |
@@ -227,23 +227,25 @@ Resource access controls whether reads stay legacy/inferred, become explicitly p
 
 ## Resource Roles
 
-Role checks are string comparisons against the authenticated user's role list.
+Role checks are string comparisons against the authenticated user's role list. The literal JWT role string `"admin"` is reserved as a super-role and satisfies every `roles.<action>` gate, even when the configured role is a different business role.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].roles.read | String | None | No | Role name | When set, reads require the named role. |
-| resources[].roles.create | String | Falls back to `roles.update` when `create` is omitted and `update` is set | No | Role name | Write-role compatibility with the original shorthand is preserved. |
-| resources[].roles.update | String | None | No | Role name | When set, updates require the named role. |
-| resources[].roles.delete | String | None | No | Role name | When set, deletes require the named role. |
+| resources[].roles.read | String | None | No | Role name | When set, reads require the named role. `"admin"` also passes this gate. |
+| resources[].roles.create | String | Falls back to `roles.update` when `create` is omitted and `update` is set | No | Role name | Write-role compatibility with the original shorthand is preserved. `"admin"` also passes this gate. |
+| resources[].roles.update | String | None | No | Role name | When set, updates require the named role. `"admin"` also passes this gate. |
+| resources[].roles.delete | String | None | No | Role name | When set, deletes require the named role. `"admin"` also passes this gate. |
 
 ## List Settings
 
-List settings tune generated list endpoint defaults.
+List settings tune generated list endpoint defaults, count endpoint generation, and explicitly allowed multi-value filters. List endpoints accept `limit=0` as a supported count-only list request: the response keeps the normal pagination envelope, returns `items: []`, and sets `total` to the number of matching rows. Use `/count` when you only need `{ "count": N }`.
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | resources[].list.default_limit | u32 | None | No | Positive integer | Must be greater than 0. If both limits are set, `default_limit &lt;= max_limit`. |
 | resources[].list.max_limit | u32 | None | No | Positive integer | Must be greater than 0. |
+| resources[].list.filterable_in | List&lt;String&gt; | [] | No | Exposed exact-filter field names | Enables `filter_&lt;field&gt;__in=...` for the listed API-exposed storage fields. Each field must already support exact filters. Values are comma-separated and use the same coercion rules as `filter_&lt;field&gt;`. |
+| resources[].list.count_endpoint | Bool | true | No | true, false | When true, generates `GET /api/&lt;resource&gt;/count`, returning `{ "count": N }` with the same filter and read-policy semantics as the list endpoint. |
 
 ## Indexes
 
@@ -285,7 +287,7 @@ Row policies support both the newer explicit form and older owner/set-owner shor
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| resources[].policies.admin_bypass | Bool | true | No | true, false | When true, admin-role users bypass the configured row-level policies. |
+| resources[].policies.admin_bypass | Bool | true | No | true, false | When true, users whose JWT roles include the literal string `"admin"` bypass the configured row-level policies. |
 | resources[].policies.read | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters read queries. Arrays imply `all_of`. `exists.where` accepts either leaf comparisons or nested `all_of` / `any_of` / `not` groups; list entries still imply `all_of`. `is_null` and `is_not_null` require a nullable field. `SetOwner` syntax is rejected here. |
 | resources[].policies.create | PolicyAssignment, [PolicyAssignment], { assign, require } | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, value }`, `SetOwner:field`, `{ assign: [...], require: PolicyFilter \| [PolicyFilter] \| PolicyGroup }` | Assigns values during create operations and can also enforce preconditions before insert. `require` uses the same boolean filter tree as `read` / `update` / `delete`, plus `input.&lt;field&gt;` sources for the proposed create payload. `Owner` syntax is rejected here. |
 | resources[].policies.update | PolicyFilter, [PolicyFilter], PolicyGroup | None | No | `field=user.id`, `field=claim.&lt;name&gt;`, `{ field, equals }`, `{ field, is_null: true }`, `{ field, is_not_null: true }`, `Owner:field`, `{ all_of: [...] }`, `{ any_of: [...] }`, `{ not: ... }`, `{ exists: { resource, where } }` | Filters update queries. Arrays imply `all_of`. `is_null` and `is_not_null` require a nullable field. |
@@ -611,7 +613,7 @@ Every key inside `security` is optional. Unset blocks keep the default open beha
 
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
-| security.requests | Map | No custom extractor limits | No | See Request Security | Currently used for JSON body size limits. |
+| security.requests | Map | No custom extractor or query limits | No | See Request Security | Controls JSON body size limits and the maximum number of values accepted by `filter_&lt;field&gt;__in`. |
 | security.cors | Map | No custom CORS policy | No | See CORS | Empty methods/headers lists fall back to runtime defaults. |
 | security.trusted_proxies | Map | No trusted proxies | No | See Trusted Proxies | Used when extracting the client IP from forwarded headers. |
 | security.rate_limits | Map | No auth rate limits | No | See Rate Limits | Currently applies to built-in auth login and register flows. |
@@ -632,6 +634,7 @@ Use this when you want authenticated reads by default and explicit opt-in for pu
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | security.requests.json_max_bytes | usize | None | No | Positive integer | Sets the generated JSON extractor limit. Must be greater than 0 when provided. |
+| security.requests.max_filter_in_values | usize | 100 | No | Positive integer | Caps the number of comma-separated values accepted by each `filter_&lt;field&gt;__in` query parameter. Must be greater than 0 when provided. |
 
 ## CORS
 

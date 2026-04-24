@@ -719,10 +719,23 @@ impl FieldValidation {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListConfig {
     pub default_limit: Option<u32>,
     pub max_limit: Option<u32>,
+    pub filterable_in: Vec<String>,
+    pub count_endpoint: bool,
+}
+
+impl Default for ListConfig {
+    fn default() -> Self {
+        Self {
+            default_limit: None,
+            max_limit: None,
+            filterable_in: Vec::new(),
+            count_endpoint: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2041,6 +2054,16 @@ fn validate_field_validation(
     let is_integer = !is_list && !is_bool && is_integer_sql_type(field.sql_type.as_str());
     let is_float = !is_list && !is_bool && field.sql_type == "REAL";
 
+    if field.enum_name.is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "enum field `{}` does not support validation constraints",
+                field.name()
+            ),
+        ));
+    }
+
     if validation.required && !optional {
         return Err(syn::Error::new(
             span,
@@ -2282,7 +2305,11 @@ pub fn validate_field_transforms(fields: &[FieldSpec], span: Span) -> syn::Resul
     Ok(())
 }
 
-pub fn validate_list_config(list: &ListConfig, span: Span) -> syn::Result<()> {
+pub fn validate_list_config(
+    resource: &ResourceSpec,
+    list: &ListConfig,
+    span: Span,
+) -> syn::Result<()> {
     if matches!(list.default_limit, Some(0)) {
         return Err(syn::Error::new(
             span,
@@ -2301,6 +2328,50 @@ pub fn validate_list_config(list: &ListConfig, span: Span) -> syn::Result<()> {
             span,
             "`default_limit` cannot be greater than `max_limit`",
         ));
+    }
+
+    let mut seen_filterable_in = HashSet::new();
+    for field_name in &list.filterable_in {
+        if field_name.trim().is_empty() {
+            return Err(syn::Error::new(
+                span,
+                "`filterable_in` cannot contain empty field names",
+            ));
+        }
+        if !seen_filterable_in.insert(field_name.as_str()) {
+            return Err(syn::Error::new(
+                span,
+                format!("duplicate `filterable_in` field `{field_name}`"),
+            ));
+        }
+
+        let Some(field) = resource.find_field(field_name) else {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`filterable_in` references missing field `{field_name}` on resource `{}`",
+                    resource.struct_ident
+                ),
+            ));
+        };
+        if !field.expose_in_api() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`filterable_in` field `{field_name}` on resource `{}` must be exposed in the API",
+                    resource.struct_ident
+                ),
+            ));
+        }
+        if !supports_exact_filters(field) {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`filterable_in` field `{field_name}` on resource `{}` must support exact filters",
+                    resource.struct_ident
+                ),
+            ));
+        }
     }
 
     Ok(())
@@ -2796,6 +2867,13 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
         return Err(syn::Error::new(
             span,
             "`security.requests.json_max_bytes` must be greater than 0",
+        ));
+    }
+
+    if matches!(security.requests.max_filter_in_values, Some(0)) {
+        return Err(syn::Error::new(
+            span,
+            "`security.requests.max_filter_in_values` must be greater than 0",
         ));
     }
 

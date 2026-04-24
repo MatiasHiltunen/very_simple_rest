@@ -1599,11 +1599,11 @@ mod tests {
     #[cfg(feature = "turso-local")]
     #[actix_web::test]
     async fn turso_local_pool_executes_queries_and_transactions() {
-        let path = std::env::temp_dir().join(format!(
-            "vsr_turso_local_{}_{}.db",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("main")
-        ));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vsr_turso_local_{stamp}.db"));
         let config = DatabaseConfig {
             engine: DatabaseEngine::TursoLocal(TursoLocalConfig {
                 path: path.to_string_lossy().into_owned(),

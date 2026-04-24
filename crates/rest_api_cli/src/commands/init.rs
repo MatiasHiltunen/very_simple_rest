@@ -91,7 +91,9 @@ pub fn create_project(
                         name,
                         description.as_str(),
                     ),
-                    StarterKind::Minimal => minimal_typescript_service_template(module_name.as_str()),
+                    StarterKind::Minimal => {
+                        minimal_typescript_service_template(module_name.as_str())
+                    }
                 },
             )?;
         }
@@ -843,8 +845,7 @@ mod tests {
 
     #[test]
     fn commented_typescript_template_is_comment_rich() {
-        let template =
-            commented_typescript_service_template("sample_app", "Sample", "Sample API");
+        let template = commented_typescript_service_template("sample_app", "Sample", "Sample API");
         assert!(template.contains("// Optional declarative actions."));
         assert!(template.contains("export default defineService"));
         assert!(template.contains("typed config"));

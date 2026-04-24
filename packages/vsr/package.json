@@ -1,6 +1,6 @@
 {
   "name": "@matiashiltunen/vsr",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "TypeScript-first wrapper for very_simple_rest",
   "license": "MIT",
   "repository": {

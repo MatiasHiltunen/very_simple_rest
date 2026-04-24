@@ -138,7 +138,7 @@ test("rewriteArgsForSchemaConfig points check commands at the generated api.eon"
 });
 
 test("rewriteArgsForSchemaConfig rewrites explicit config input paths", () => {
-  const root = "/tmp/example-project";
+  const root = resolve(tmpdir(), "example-project");
   const configPath = join(root, "vsr.config.ts");
   const generatedPath = generatedEonPath(configPath);
   const resolved = rewriteArgsForSchemaConfig(

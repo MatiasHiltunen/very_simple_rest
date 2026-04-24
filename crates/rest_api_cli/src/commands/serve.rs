@@ -26,6 +26,7 @@ use rest_macro_core::database::{
 };
 use rest_macro_core::db::{DbExecutor, DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
+use rest_macro_core::security::DEFAULT_MAX_FILTER_IN_VALUES;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
 use rest_macro_core::storage::{
     StoragePublicMount, StorageRegistry, StorageS3CompatConfig, StorageUploadEndpoint,
@@ -552,6 +553,8 @@ struct DynamicResource {
     policies: RowPolicies,
     default_limit: Option<u32>,
     max_limit: Option<u32>,
+    filterable_in: BTreeSet<String>,
+    count_endpoint: bool,
     create_assignment_sources: HashMap<String, PolicyValueSource>,
     fields: Vec<DynamicField>,
     field_index: HashMap<String, usize>,
@@ -707,6 +710,8 @@ impl DynamicResource {
             policies: spec.policies.clone(),
             default_limit: spec.list.default_limit,
             max_limit: spec.list.max_limit,
+            filterable_in: spec.list.filterable_in.iter().cloned().collect(),
+            count_endpoint: spec.list.count_endpoint,
             create_assignment_sources,
             fields,
             field_index,
@@ -1199,6 +1204,27 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
         ));
     }
     cfg.service(collection);
+
+    if resource.count_endpoint {
+        let count_path = format!("/{}/count", resource.api_name);
+        let count_resource = resource.clone();
+        let count = web::resource(count_path).route(if resource.read_requires_auth {
+            web::get().to(
+                move |req: HttpRequest, user: UserContext, state: web::Data<NativeServeState>| {
+                    let resource = count_resource.clone();
+                    async move { count_handler(req, Some(user), state, resource).await }
+                },
+            )
+        } else {
+            web::get().to(
+                move |req: HttpRequest, state: web::Data<NativeServeState>| {
+                    let resource = count_resource.clone();
+                    async move { count_handler(req, None, state, resource).await }
+                },
+            )
+        });
+        cfg.service(count);
+    }
 
     let get_resource = resource.clone();
     let mut item = web::resource(item_path).route(if resource.read_requires_auth {
@@ -3583,6 +3609,30 @@ fn parse_list_query(req: &HttpRequest) -> HashMap<String, String> {
         .collect()
 }
 
+fn bind_markers(count: usize) -> String {
+    (0..count)
+        .map(|_| BIND_MARKER)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parse_filter_in_values(value: &str, max_values: usize) -> Result<Vec<&str>, HttpResponse> {
+    let values = value.split(',').map(str::trim).collect::<Vec<_>>();
+    if values.is_empty() || values.iter().any(|value| value.is_empty()) {
+        return Err(errors::bad_request(
+            "invalid_query",
+            "Query parameters are invalid",
+        ));
+    }
+    if values.len() > max_values {
+        return Err(errors::bad_request(
+            "invalid_query",
+            "Query parameters are invalid",
+        ));
+    }
+    Ok(values)
+}
+
 fn build_list_plan(
     resource: &DynamicResource,
     service: &DynamicService,
@@ -3623,24 +3673,8 @@ fn build_list_plan(
     let default_limit = resource.default_limit;
     let max_limit = resource.max_limit;
     let effective_limit = match (requested_limit.or(default_limit), max_limit) {
-        (Some(limit), Some(max_limit)) => {
-            if limit == 0 {
-                return Err(errors::bad_request(
-                    "invalid_pagination",
-                    "`limit` must be greater than 0",
-                ));
-            }
-            Some(limit.min(max_limit))
-        }
-        (Some(limit), None) => {
-            if limit == 0 {
-                return Err(errors::bad_request(
-                    "invalid_pagination",
-                    "`limit` must be greater than 0",
-                ));
-            }
-            Some(limit)
-        }
+        (Some(limit), Some(max_limit)) => Some(limit.min(max_limit)),
+        (Some(limit), None) => Some(limit),
         (None, _) => None,
     };
 
@@ -3686,6 +3720,12 @@ fn build_list_plan(
         return Err(errors::bad_request(
             "invalid_cursor",
             "`cursor` requires `limit` or a configured `default_limit`",
+        ));
+    }
+    if cursor_mode && effective_limit == Some(0) {
+        return Err(errors::bad_request(
+            "invalid_cursor",
+            "`cursor` requires `limit` to be greater than 0",
         ));
     }
     if cursor_mode
@@ -3766,6 +3806,31 @@ fn build_list_plan(
                 })?;
                 conditions.push(format!("{} = {}", field.name, BIND_MARKER));
                 filter_binds.push(parsed);
+            }
+
+            if resource.filterable_in.contains(field.name.as_str()) {
+                let in_name = format!("filter_{}__in", field.api_name);
+                if let Some(value) = query.remove(in_name.as_str()) {
+                    let values = parse_filter_in_values(
+                        value.as_str(),
+                        service
+                            .security
+                            .requests
+                            .max_filter_in_values
+                            .unwrap_or(DEFAULT_MAX_FILTER_IN_VALUES),
+                    )?;
+                    conditions.push(format!(
+                        "{} IN ({})",
+                        field.name,
+                        bind_markers(values.len())
+                    ));
+                    for value in values {
+                        let parsed = parse_query_value(field, value).map_err(|_| {
+                            errors::bad_request("invalid_query", "Query parameters are invalid")
+                        })?;
+                        filter_binds.push(parsed);
+                    }
+                }
             }
         }
 
@@ -4003,7 +4068,7 @@ fn finalize_list_response(
             has_more = true;
             items.pop();
         }
-    } else if plan.limit.is_some() {
+    } else if plan.limit.is_some() && plan.limit != Some(0) {
         has_more = (plan.offset as i64) + (items.len() as i64) < total;
     }
 
@@ -4297,6 +4362,62 @@ async fn list_handler(
             }
         }
         Err(response) => response,
+    }
+}
+
+async fn count_handler(
+    req: HttpRequest,
+    user: Option<UserContext>,
+    state: web::Data<NativeServeState>,
+    resource: Arc<DynamicResource>,
+) -> HttpResponse {
+    let dynamic_service = state.dynamic_service.clone();
+    let user = user.unwrap_or_else(anonymous_user_context);
+    if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Read)) {
+        return response;
+    }
+
+    let query_map = parse_list_query(&req);
+    let skip_static = match (&resource.hybrid, user.id != 0) {
+        (Some(hybrid), true) if hybrid.collection_read => {
+            match list_scope_binding(&resource, &query_map, None) {
+                Some(scope) => match hybrid_runtime_allows(
+                    &resource,
+                    &user,
+                    state.get_ref(),
+                    AuthorizationAction::Read,
+                    scope,
+                )
+                .await
+                {
+                    Ok(allowed) => allowed,
+                    Err(response) => return response,
+                },
+                None => false,
+            }
+        }
+        _ => false,
+    };
+
+    let plan = match build_list_plan(
+        &resource,
+        dynamic_service.as_ref(),
+        &req,
+        &user,
+        None,
+        skip_static,
+    ) {
+        Ok(plan) => plan,
+        Err(response) => return response,
+    };
+
+    let mut count_query = query_scalar::<sqlx::Any, i64>(&plan.count_sql);
+    for bind in &plan.filter_binds {
+        count_query = bind_scalar_query(count_query, bind);
+    }
+    match count_query.fetch_one(&state.pool).await {
+        Ok(count) => HttpResponse::Ok().json(json!({ "count": count })),
+        Err(error) => errors::internal_error(error.to_string()),
     }
 }
 
@@ -5759,6 +5880,73 @@ mod tests {
             .to_request();
         let create_response = test::call_service(&app, create_request).await;
         assert_eq!(create_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn native_serve_supports_filter_in_count_and_limit_zero() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("batched_list_api.eon", false).await;
+        query(
+            "INSERT INTO entry (category, score) VALUES
+                ('news', 2),
+                ('docs', 7),
+                ('news', 11)",
+        )
+        .execute(&state.pool)
+        .await
+        .expect("seed rows should insert");
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+
+        let filter_in_request = test::TestRequest::get()
+            .uri("/api/entry?filter_score__in=2,7&sort=score")
+            .to_request();
+        let filter_in_response = test::call_service(&app, filter_in_request).await;
+        assert_eq!(filter_in_response.status(), StatusCode::OK);
+        let filter_in_body: Value = test::read_body_json(filter_in_response).await;
+        assert_eq!(filter_in_body["total"], 2);
+        assert_eq!(filter_in_body["count"], 2);
+        assert_eq!(filter_in_body["items"][0]["score"], 2);
+        assert_eq!(filter_in_body["items"][1]["score"], 7);
+
+        let limit_zero_request = test::TestRequest::get()
+            .uri("/api/entry?limit=0")
+            .to_request();
+        let limit_zero_response = test::call_service(&app, limit_zero_request).await;
+        assert_eq!(limit_zero_response.status(), StatusCode::OK);
+        let limit_zero_body: Value = test::read_body_json(limit_zero_response).await;
+        assert_eq!(limit_zero_body["total"], 3);
+        assert_eq!(limit_zero_body["count"], 0);
+        assert_eq!(limit_zero_body["limit"], 0);
+        assert_eq!(limit_zero_body["items"].as_array().map(Vec::len), Some(0));
+        assert!(limit_zero_body["next_offset"].is_null());
+        assert!(limit_zero_body["next_cursor"].is_null());
+
+        let count_request = test::TestRequest::get()
+            .uri("/api/entry/count?filter_score__in=2,7")
+            .to_request();
+        let count_response = test::call_service(&app, count_request).await;
+        assert_eq!(count_response.status(), StatusCode::OK);
+        let count_body: Value = test::read_body_json(count_response).await;
+        assert_eq!(count_body["count"], 2);
+
+        let too_many_request = test::TestRequest::get()
+            .uri("/api/entry?filter_score__in=2,7,11")
+            .to_request();
+        let too_many_response = test::call_service(&app, too_many_request).await;
+        assert_eq!(too_many_response.status(), StatusCode::BAD_REQUEST);
+
+        let not_configured_request = test::TestRequest::get()
+            .uri("/api/entry?filter_category__in=news,docs")
+            .to_request();
+        let not_configured_response = test::call_service(&app, not_configured_request).await;
+        assert_eq!(not_configured_response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[actix_web::test]

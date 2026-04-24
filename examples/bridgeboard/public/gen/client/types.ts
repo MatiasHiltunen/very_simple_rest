@@ -136,6 +136,10 @@ export type CollaborationRequestUpdateInput = {
   "title": string;
 };
 
+export type CountResponse = {
+  "count": number;
+};
+
 export type Interest = {
   "created_at"?: (string) | null;
   "desired_start_on"?: (string) | null;

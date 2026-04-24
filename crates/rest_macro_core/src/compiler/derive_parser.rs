@@ -221,7 +221,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
     )?;
     validate_relations(&parsed.fields, struct_ident.span())?;
     validate_field_validations(&parsed.fields, struct_ident.span())?;
-    validate_list_config(&parsed.list, struct_ident.span())?;
+    validate_list_config(&parsed, &parsed.list, struct_ident.span())?;
 
     Ok(parsed)
 }

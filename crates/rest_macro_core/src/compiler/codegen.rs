@@ -22,7 +22,7 @@ use crate::{
         DatabaseReplicationMode, DatabaseResilienceProfile,
     },
     logging::LogTimestampPrecision,
-    security::{DefaultReadAccess, FrameOptions, ReferrerPolicy},
+    security::{DEFAULT_MAX_FILTER_IN_VALUES, DefaultReadAccess, FrameOptions, ReferrerPolicy},
 };
 
 pub fn expand_resource_impl(
@@ -31,8 +31,30 @@ pub fn expand_resource_impl(
     authorization: Option<&AuthorizationContract>,
     runtime_crate: &Path,
 ) -> syn::Result<TokenStream> {
+    expand_resource_impl_with_options(
+        resource,
+        resources,
+        authorization,
+        DEFAULT_MAX_FILTER_IN_VALUES,
+        runtime_crate,
+    )
+}
+
+fn expand_resource_impl_with_options(
+    resource: &ResourceSpec,
+    resources: &[ResourceSpec],
+    authorization: Option<&AuthorizationContract>,
+    max_filter_in_values: usize,
+    runtime_crate: &Path,
+) -> syn::Result<TokenStream> {
     let impl_module_ident = &resource.impl_module_ident;
-    let impl_body = resource_impl_tokens(resource, resources, authorization, runtime_crate);
+    let impl_body = resource_impl_tokens(
+        resource,
+        resources,
+        authorization,
+        max_filter_in_values,
+        runtime_crate,
+    );
 
     Ok(quote! {
         mod #impl_module_ident {
@@ -131,6 +153,11 @@ pub fn expand_service_module(
         type #json_array_alias_ident = #runtime_crate::serde_json::Value;
     };
     let include_path_lit = Literal::string(include_path);
+    let max_filter_in_values = service
+        .security
+        .requests
+        .max_filter_in_values
+        .unwrap_or(DEFAULT_MAX_FILTER_IN_VALUES);
     let resources = service
         .resources
         .iter()
@@ -141,10 +168,11 @@ pub fn expand_service_module(
                 Some(&service.authorization),
                 runtime_crate,
             );
-            let impl_tokens = expand_resource_impl(
+            let impl_tokens = expand_resource_impl_with_options(
                 resource,
                 &service.resources,
                 Some(&service.authorization),
+                max_filter_in_values,
                 runtime_crate,
             )?;
             Ok(quote! {
@@ -1245,6 +1273,7 @@ fn storage_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
 fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
     let security = &service.security;
     let json_max_bytes = option_usize_tokens(security.requests.json_max_bytes);
+    let max_filter_in_values = option_usize_tokens(security.requests.max_filter_in_values);
     let cors_origins = vec_string_tokens(&security.cors.origins);
     let cors_origins_env = option_string_tokens(security.cors.origins_env.as_deref());
     let cors_allow_methods = vec_string_tokens(&security.cors.allow_methods);
@@ -1334,6 +1363,7 @@ fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
         #runtime_crate::core::security::SecurityConfig {
             requests: #runtime_crate::core::security::RequestSecurity {
                 json_max_bytes: #json_max_bytes,
+                max_filter_in_values: #max_filter_in_values,
             },
             cors: #runtime_crate::core::security::CorsSecurity {
                 origins: #cors_origins,
@@ -2839,6 +2869,20 @@ fn list_query_tokens(
                 #[serde(rename = #rename)]
                 pub #filter_ident: Option<#base_ty>,
             });
+
+            if resource
+                .list
+                .filterable_in
+                .iter()
+                .any(|candidate| candidate == &field.name())
+            {
+                let filter_in_ident = format_ident!("filter_{}__in", field.ident);
+                let rename = Literal::string(&format!("filter_{}__in", field.api_name()));
+                tokens.push(quote! {
+                    #[serde(rename = #rename)]
+                    pub #filter_in_ident: Option<String>,
+                });
+            }
         }
 
         if super::model::supports_contains_filters(field) {
@@ -3017,6 +3061,7 @@ fn resource_impl_tokens(
     resource: &ResourceSpec,
     resources: &[ResourceSpec],
     authorization: Option<&AuthorizationContract>,
+    max_filter_in_values: usize,
     runtime_crate: &Path,
 ) -> TokenStream {
     let struct_ident = &resource.struct_ident;
@@ -3387,7 +3432,8 @@ fn resource_impl_tokens(
             })
         }
     };
-    let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
+    let query_filter_conditions =
+        list_query_condition_tokens(resource, max_filter_in_values, runtime_crate);
     let list_bind_matches = list_bind_match_tokens(resource, resources, "q");
     let count_bind_matches = list_bind_match_tokens(resource, resources, "count_query");
     let query_bind_matches = list_bind_match_tokens(resource, resources, "q");
@@ -5902,6 +5948,94 @@ fn resource_impl_tokens(
             }
         }
     };
+    let count_handler = if read_requires_auth {
+        if hybrid.map(|config| config.collection_read).unwrap_or(false) {
+            quote! {
+                async fn count(
+                    query: web::Query<#list_query_ty>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                    runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
+                ) -> impl Responder {
+                    #read_check
+                    let query = query.into_inner();
+                    let plan = match Self::build_list_plan_with_hybrid_read(
+                        &query,
+                        &user,
+                        runtime.get_ref(),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
+                    };
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    match count_query.fetch_one(db.get_ref()).await {
+                        Ok(count) => HttpResponse::Ok().json(#runtime_crate::serde_json::json!({ "count": count })),
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                }
+            }
+        } else {
+            quote! {
+                async fn count(
+                    query: web::Query<#list_query_ty>,
+                    user: #runtime_crate::core::auth::UserContext,
+                    db: web::Data<DbPool>,
+                ) -> impl Responder {
+                    #read_check
+                    let query = query.into_inner();
+                    let plan = match Self::build_list_plan(&query, &user, None) {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
+                    };
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    match count_query.fetch_one(db.get_ref()).await {
+                        Ok(count) => HttpResponse::Ok().json(#runtime_crate::serde_json::json!({ "count": count })),
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {
+            async fn count(
+                query: web::Query<#list_query_ty>,
+                db: web::Data<DbPool>,
+            ) -> impl Responder {
+                let query = query.into_inner();
+                let user = Self::anonymous_user_context();
+                let plan = match Self::build_list_plan(&query, &user, None) {
+                    Ok(parts) => parts,
+                    Err(response) => return response,
+                };
+                let mut count_query =
+                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                for bind in &plan.filter_binds {
+                    count_query = match bind.clone() {
+                        #(#count_bind_matches)*
+                    };
+                }
+                match count_query.fetch_one(db.get_ref()).await {
+                    Ok(count) => HttpResponse::Ok().json(#runtime_crate::serde_json::json!({ "count": count })),
+                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                }
+            }
+        }
+    };
     let get_one_handler = if read_requires_auth {
         if hybrid.map(|config| config.item_read).unwrap_or(false) {
             quote! {
@@ -5985,6 +6119,16 @@ fn resource_impl_tokens(
     } else {
         quote!(.route(web::post().to(Self::create)))
     };
+    let count_route_registration = if resource.list.count_endpoint {
+        quote! {
+            cfg.service(
+                web::resource(format!("/{}/count", #resource_api_name))
+                    .route(web::get().to(Self::count))
+            );
+        }
+    } else {
+        quote!()
+    };
     let item_write_routes = if is_audit_sink {
         quote!()
     } else {
@@ -6011,8 +6155,9 @@ fn resource_impl_tokens(
                     web::resource(format!("/{}", #resource_api_name))
                         .route(web::get().to(Self::get_all))
                         #collection_post_route
-                )
-                .service(
+                );
+                #count_route_registration
+                cfg.service(
                     web::resource(format!("/{}/{{id}}", #resource_api_name))
                         .route(web::get().to(Self::get_one))
                         #item_write_routes
@@ -6183,6 +6328,36 @@ fn resource_impl_tokens(
                 #list_placeholder_body
             }
 
+            fn list_placeholders(start_index: usize, count: usize) -> String {
+                (start_index..start_index + count)
+                    .map(Self::list_placeholder)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+
+            fn parse_filter_in_values<'a>(
+                value: &'a str,
+                max_values: usize,
+            ) -> Result<Vec<&'a str>, HttpResponse> {
+                let values = value
+                    .split(',')
+                    .map(str::trim)
+                    .collect::<Vec<_>>();
+                if values.is_empty() || values.iter().any(|value| value.is_empty()) {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ));
+                }
+                if values.len() > max_values {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ));
+                }
+                Ok(values)
+            }
+
             #next_list_placeholder_helper
 
             #policy_plan_methods
@@ -6264,23 +6439,9 @@ fn resource_impl_tokens(
                 let requested_limit = query.limit.or(#default_limit_tokens);
                 let effective_limit = match (requested_limit, #max_limit_tokens) {
                     (Some(limit), Some(max_limit)) => {
-                        if limit == 0 {
-                            return Err(#runtime_crate::core::errors::bad_request(
-                                "invalid_pagination",
-                                "`limit` must be greater than 0",
-                            ));
-                        }
                         Some(limit.min(max_limit))
                     }
-                    (Some(limit), None) => {
-                        if limit == 0 {
-                            return Err(#runtime_crate::core::errors::bad_request(
-                                "invalid_pagination",
-                                "`limit` must be greater than 0",
-                            ));
-                        }
-                        Some(limit)
-                    }
+                    (Some(limit), None) => Some(limit),
                     (None, _) => None,
                 };
                 let offset = query.offset.unwrap_or(0);
@@ -6335,6 +6496,12 @@ fn resource_impl_tokens(
                     return Err(#runtime_crate::core::errors::bad_request(
                         "invalid_cursor",
                         "`cursor` requires `limit` or a configured `default_limit`",
+                    ));
+                }
+                if cursor_mode && effective_limit == Some(0) {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_cursor",
+                        "`cursor` requires `limit` to be greater than 0",
                     ));
                 }
                 if cursor_mode && !Self::sort_supports_cursor(&sort) {
@@ -6488,6 +6655,7 @@ fn resource_impl_tokens(
                 let count = items.len();
                 if !plan.cursor_mode {
                     has_more = match plan.limit {
+                        Some(0) => false,
                         Some(_) => (plan.offset as i64) + (count as i64) < total,
                         None => false,
                     };
@@ -6520,6 +6688,7 @@ fn resource_impl_tokens(
             }
 
             #get_all_handler
+            #count_handler
 
             #get_one_handler
 
@@ -6607,6 +6776,17 @@ fn resource_action_input_field_ident(index: usize) -> syn::Ident {
     format_ident!("field_{index}")
 }
 
+fn resource_action_garde_validation_error_helper(
+    resource: &ResourceSpec,
+    action: &super::model::ResourceActionSpec,
+) -> syn::Ident {
+    format_ident!(
+        "garde_validation_error_{}_{}_action_input",
+        resource.struct_ident.to_string().to_snake_case(),
+        action.name.to_snake_case()
+    )
+}
+
 fn resource_action_input_struct_tokens(
     resource: &ResourceSpec,
     action: &super::model::ResourceActionSpec,
@@ -6617,6 +6797,7 @@ fn resource_action_input_struct_tokens(
     }
 
     let ident = resource_action_input_ident(resource, action);
+    let error_helper = resource_action_garde_validation_error_helper(resource, action);
     let fields = action
         .input_fields
         .iter()
@@ -6640,8 +6821,44 @@ fn resource_action_input_struct_tokens(
             }
         })
         .collect::<Vec<_>>();
+    let field_name_matches = action
+        .input_fields
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let field_ident = resource_action_input_field_ident(index).to_string();
+            let field_name = Literal::string(input.name.as_str());
+            quote! {
+                #field_ident => #field_name.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>();
 
     Some(quote! {
+        #[allow(dead_code)]
+        fn #error_helper(
+            report: #runtime_crate::garde::Report,
+        ) -> (Option<String>, String) {
+            match report.iter().next() {
+                Some((path, error)) => {
+                    let field = match path.to_string().as_str() {
+                        #(#field_name_matches)*
+                        other => other.to_owned(),
+                    };
+                    let message = error.to_string();
+                    if field.is_empty() {
+                        (None, message)
+                    } else {
+                        (
+                            Some(field.clone()),
+                            format!("Field `{}` {}", field, message),
+                        )
+                    }
+                }
+                None => (None, "Validation failed".to_owned()),
+            }
+        }
+
         #[derive(
             Debug,
             Clone,
@@ -6839,7 +7056,8 @@ fn resource_action_handler_tokens(
                     )
                 })
                 .collect::<Vec<_>>();
-            let garde_error_helper = garde_validation_error_helper(resource);
+            let garde_error_helper =
+                resource_action_garde_validation_error_helper(resource, action);
             let action_garde_validation = if action.input_fields.is_empty() {
                 quote! {}
             } else {
@@ -6920,6 +7138,10 @@ fn resource_action_handler_tokens(
             let update_sql_literal = Literal::string(&update_sql);
             let admin_bypass = resource.policies.admin_bypass;
             let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
+            let update_audit_event_kind =
+                update_audit_event_kind(resource, Some(action.name.as_str()))
+                    .as_deref()
+                    .map(Literal::string);
 
             if !resource.policies.has_update_filters() {
                 let sql = format!(
@@ -6929,28 +7151,104 @@ fn resource_action_handler_tokens(
                     resource.id_field,
                     resource.db.placeholder(where_index)
                 );
-                quote! {
-                    async fn #handler_ident(
-                        path: web::Path<i64>,
-                        user: #runtime_crate::core::auth::UserContext,
-                        #action_payload_arg
-                        db: web::Data<DbPool>
-                        #runtime_arg
-                    ) -> impl Responder {
-                        let _ = (&path, &user, &db);
-                        #update_check
-                        let id = path.into_inner();
-                        #action_payload_setup
-                        let sql = #sql;
-                        let mut q = #runtime_crate::db::query(sql);
-                        #(#action_bind_statements)*
-                        q = q.bind(id);
-                        match q.execute(db.get_ref()).await {
-                            Ok(result) if result.rows_affected() == 0 => {
-                                #runtime_crate::core::errors::not_found("Not found")
+                if let Some(ref event_kind) = update_audit_event_kind {
+                    quote! {
+                        async fn #handler_ident(
+                            path: web::Path<i64>,
+                            user: #runtime_crate::core::auth::UserContext,
+                            #action_payload_arg
+                            db: web::Data<DbPool>
+                            #runtime_arg
+                        ) -> impl Responder {
+                            let _ = (&path, &user, &db);
+                            #update_check
+                            let id = path.into_inner();
+                            #action_payload_setup
+                            let tx = match db.get_ref().begin().await {
+                                Ok(tx) => tx,
+                                Err(error) => {
+                                    return #runtime_crate::core::errors::internal_error(error.to_string());
+                                }
+                            };
+                            let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                Ok(item) => item,
+                                Err(error) => {
+                                    let _ = tx.rollback().await;
+                                    return #runtime_crate::core::errors::internal_error(error.to_string());
+                                }
+                            };
+                            let sql = #sql;
+                            let mut q = #runtime_crate::db::query(sql);
+                            #(#action_bind_statements)*
+                            q = q.bind(id);
+                            match q.execute(&tx).await {
+                                Ok(result) if result.rows_affected() == 0 => {
+                                    let _ = tx.rollback().await;
+                                    #runtime_crate::core::errors::not_found("Not found")
+                                }
+                                Ok(_) => {
+                                    let after = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                        Ok(Some(item)) => item,
+                                        Ok(None) => {
+                                            let _ = tx.rollback().await;
+                                            return #runtime_crate::core::errors::internal_error(
+                                                "updated row could not be reloaded for audit",
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = tx.rollback().await;
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                    };
+                                    if let Err(response) = Self::insert_audit_event(
+                                        &tx,
+                                        &user,
+                                        #event_kind,
+                                        id,
+                                        before.as_ref(),
+                                        Some(&after),
+                                    )
+                                    .await
+                                    {
+                                        let _ = tx.rollback().await;
+                                        return response;
+                                    }
+                                    if let Err(error) = tx.commit().await {
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                    HttpResponse::Ok().finish()
+                                }
+                                Err(error) => {
+                                    let _ = tx.rollback().await;
+                                    #runtime_crate::core::errors::internal_error(error.to_string())
+                                }
                             }
-                            Ok(_) => HttpResponse::Ok().finish(),
-                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                } else {
+                    quote! {
+                        async fn #handler_ident(
+                            path: web::Path<i64>,
+                            user: #runtime_crate::core::auth::UserContext,
+                            #action_payload_arg
+                            db: web::Data<DbPool>
+                            #runtime_arg
+                        ) -> impl Responder {
+                            let _ = (&path, &user, &db);
+                            #update_check
+                            let id = path.into_inner();
+                            #action_payload_setup
+                            let sql = #sql;
+                            let mut q = #runtime_crate::db::query(sql);
+                            #(#action_bind_statements)*
+                            q = q.bind(id);
+                            match q.execute(db.get_ref()).await {
+                                Ok(result) if result.rows_affected() == 0 => {
+                                    #runtime_crate::core::errors::not_found("Not found")
+                                }
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
                         }
                     }
                 }
@@ -6965,17 +7263,295 @@ fn resource_action_handler_tokens(
                 );
                 let hybrid_update_fallback = if hybrid.map(|config| config.update).unwrap_or(false)
                 {
+                    if let Some(ref event_kind) = update_audit_event_kind {
+                        quote! {
+                            match Self::fetch_runtime_authorized_by_id(
+                                id,
+                                &user,
+                                runtime.get_ref(),
+                                db.get_ref(),
+                                #runtime_crate::core::authorization::AuthorizationAction::Update,
+                            )
+                            .await
+                            {
+                                Ok(Some(_)) => {
+                                    let tx = match db.get_ref().begin().await {
+                                        Ok(tx) => tx,
+                                        Err(error) => {
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                    };
+                                    let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                        Ok(item) => item,
+                                        Err(error) => {
+                                            let _ = tx.rollback().await;
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                    };
+                                    let sql = #admin_sql;
+                                    let mut q = #runtime_crate::db::query(sql);
+                                    #(#action_bind_statements)*
+                                    q = q.bind(id);
+                                    match q.execute(&tx).await {
+                                        Ok(result) if result.rows_affected() == 0 => {
+                                            let _ = tx.rollback().await;
+                                            #runtime_crate::core::errors::not_found("Not found")
+                                        }
+                                        Ok(_) => {
+                                            let after = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                                Ok(Some(item)) => item,
+                                                Ok(None) => {
+                                                    let _ = tx.rollback().await;
+                                                    return #runtime_crate::core::errors::internal_error(
+                                                        "updated row could not be reloaded for audit",
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    let _ = tx.rollback().await;
+                                                    return #runtime_crate::core::errors::internal_error(error.to_string());
+                                                }
+                                            };
+                                            if let Err(response) = Self::insert_audit_event(
+                                                &tx,
+                                                &user,
+                                                #event_kind,
+                                                id,
+                                                before.as_ref(),
+                                                Some(&after),
+                                            )
+                                            .await
+                                            {
+                                                let _ = tx.rollback().await;
+                                                return response;
+                                            }
+                                            if let Err(error) = tx.commit().await {
+                                                return #runtime_crate::core::errors::internal_error(error.to_string());
+                                            }
+                                            HttpResponse::Ok().finish()
+                                        }
+                                        Err(error) => {
+                                            let _ = tx.rollback().await;
+                                            #runtime_crate::core::errors::internal_error(error.to_string())
+                                        }
+                                    }
+                                }
+                                Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                                Err(response) => response,
+                            }
+                        }
+                    } else {
+                        quote! {
+                            match Self::fetch_runtime_authorized_by_id(
+                                id,
+                                &user,
+                                runtime.get_ref(),
+                                db.get_ref(),
+                                #runtime_crate::core::authorization::AuthorizationAction::Update,
+                            )
+                            .await
+                            {
+                                Ok(Some(_)) => {
+                                    let sql = #admin_sql;
+                                    let mut q = #runtime_crate::db::query(sql);
+                                    #(#action_bind_statements)*
+                                    q = q.bind(id);
+                                    match q.execute(db.get_ref()).await {
+                                        Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                        Ok(_) => HttpResponse::Ok().finish(),
+                                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                    }
+                                }
+                                Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                                Err(response) => response,
+                            }
+                        }
+                    }
+                } else {
+                    quote!(#runtime_crate::core::errors::not_found("Not found"))
+                };
+                let filtered_update = if let Some(ref event_kind) = update_audit_event_kind {
                     quote! {
-                        match Self::fetch_runtime_authorized_by_id(
-                            id,
-                            &user,
-                            runtime.get_ref(),
-                            db.get_ref(),
-                            #runtime_crate::core::authorization::AuthorizationAction::Update,
-                        )
-                        .await
-                        {
-                            Ok(Some(_)) => {
+                        match Self::update_policy_plan(&user, #policy_start_index) {
+                            #plan_ident::Resolved { condition, binds } => {
+                                let tx = match db.get_ref().begin().await {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                    Ok(item) => item,
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let sql = format!(
+                                    "UPDATE {} SET {} WHERE {} = {} AND {}",
+                                    #table_name,
+                                    #update_sql_literal,
+                                    #id_field,
+                                    Self::list_placeholder(#where_index_literal),
+                                    condition
+                                );
+                                let mut q = #runtime_crate::db::query(&sql);
+                                #(#action_bind_statements)*
+                                q = q.bind(id);
+                                for bind in binds {
+                                    q = match bind {
+                                        #(#query_bind_matches)*
+                                    };
+                                }
+                                match q.execute(&tx).await {
+                                    Ok(result) if result.rows_affected() == 0 => {
+                                        let _ = tx.rollback().await;
+                                        #hybrid_update_fallback
+                                    }
+                                    Ok(_) => {
+                                        let after = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                            Ok(Some(item)) => item,
+                                            Ok(None) => {
+                                                let _ = tx.rollback().await;
+                                                return #runtime_crate::core::errors::internal_error(
+                                                    "updated row could not be reloaded for audit",
+                                                );
+                                            }
+                                            Err(error) => {
+                                                let _ = tx.rollback().await;
+                                                return #runtime_crate::core::errors::internal_error(error.to_string());
+                                            }
+                                        };
+                                        if let Err(response) = Self::insert_audit_event(
+                                            &tx,
+                                            &user,
+                                            #event_kind,
+                                            id,
+                                            before.as_ref(),
+                                            Some(&after),
+                                        )
+                                        .await
+                                        {
+                                            let _ = tx.rollback().await;
+                                            return response;
+                                        }
+                                        if let Err(error) = tx.commit().await {
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                        HttpResponse::Ok().finish()
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        #runtime_crate::core::errors::internal_error(error.to_string())
+                                    }
+                                }
+                            }
+                            #plan_ident::Indeterminate => #hybrid_update_fallback,
+                        }
+                    }
+                } else {
+                    quote! {
+                        match Self::update_policy_plan(&user, #policy_start_index) {
+                            #plan_ident::Resolved { condition, binds } => {
+                                let sql = format!(
+                                    "UPDATE {} SET {} WHERE {} = {} AND {}",
+                                    #table_name,
+                                    #update_sql_literal,
+                                    #id_field,
+                                    Self::list_placeholder(#where_index_literal),
+                                    condition
+                                );
+                                let mut q = #runtime_crate::db::query(&sql);
+                                #(#action_bind_statements)*
+                                q = q.bind(id);
+                                for bind in binds {
+                                    q = match bind {
+                                        #(#query_bind_matches)*
+                                    };
+                                }
+                                match q.execute(db.get_ref()).await {
+                                    Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
+                                    Ok(_) => HttpResponse::Ok().finish(),
+                                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                }
+                            }
+                            #plan_ident::Indeterminate => #hybrid_update_fallback,
+                        }
+                    }
+                };
+                let action_body = if admin_bypass {
+                    if let Some(ref event_kind) = update_audit_event_kind {
+                        quote! {
+                            let id = path.into_inner();
+                            #action_payload_setup
+                            if #is_admin {
+                                let tx = match db.get_ref().begin().await {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                    Ok(item) => item,
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let sql = #admin_sql;
+                                let mut q = #runtime_crate::db::query(sql);
+                                #(#action_bind_statements)*
+                                q = q.bind(id);
+                                match q.execute(&tx).await {
+                                    Ok(result) if result.rows_affected() == 0 => {
+                                        let _ = tx.rollback().await;
+                                        #runtime_crate::core::errors::not_found("Not found")
+                                    }
+                                    Ok(_) => {
+                                        let after = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                            Ok(Some(item)) => item,
+                                            Ok(None) => {
+                                                let _ = tx.rollback().await;
+                                                return #runtime_crate::core::errors::internal_error(
+                                                    "updated row could not be reloaded for audit",
+                                                );
+                                            }
+                                            Err(error) => {
+                                                let _ = tx.rollback().await;
+                                                return #runtime_crate::core::errors::internal_error(error.to_string());
+                                            }
+                                        };
+                                        if let Err(response) = Self::insert_audit_event(
+                                            &tx,
+                                            &user,
+                                            #event_kind,
+                                            id,
+                                            before.as_ref(),
+                                            Some(&after),
+                                        )
+                                        .await
+                                        {
+                                            let _ = tx.rollback().await;
+                                            return response;
+                                        }
+                                        if let Err(error) = tx.commit().await {
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                        HttpResponse::Ok().finish()
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        #runtime_crate::core::errors::internal_error(error.to_string())
+                                    }
+                                }
+                            } else {
+                                #filtered_update
+                            }
+                        }
+                    } else {
+                        quote! {
+                            let id = path.into_inner();
+                            #action_payload_setup
+                            if #is_admin {
                                 let sql = #admin_sql;
                                 let mut q = #runtime_crate::db::query(sql);
                                 #(#action_bind_statements)*
@@ -6985,58 +7561,9 @@ fn resource_action_handler_tokens(
                                     Ok(_) => HttpResponse::Ok().finish(),
                                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                                 }
+                            } else {
+                                #filtered_update
                             }
-                            Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
-                            Err(response) => response,
-                        }
-                    }
-                } else {
-                    quote!(#runtime_crate::core::errors::not_found("Not found"))
-                };
-                let filtered_update = quote! {
-                    match Self::update_policy_plan(&user, #policy_start_index) {
-                        #plan_ident::Resolved { condition, binds } => {
-                            let sql = format!(
-                                "UPDATE {} SET {} WHERE {} = {} AND {}",
-                                #table_name,
-                                #update_sql_literal,
-                                #id_field,
-                                Self::list_placeholder(#where_index_literal),
-                                condition
-                            );
-                            let mut q = #runtime_crate::db::query(&sql);
-                            #(#action_bind_statements)*
-                            q = q.bind(id);
-                            for bind in binds {
-                                q = match bind {
-                                    #(#query_bind_matches)*
-                                };
-                            }
-                            match q.execute(db.get_ref()).await {
-                                Ok(result) if result.rows_affected() == 0 => #hybrid_update_fallback,
-                                Ok(_) => HttpResponse::Ok().finish(),
-                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                            }
-                        }
-                        #plan_ident::Indeterminate => #hybrid_update_fallback,
-                    }
-                };
-                let action_body = if admin_bypass {
-                    quote! {
-                        let id = path.into_inner();
-                        #action_payload_setup
-                        if #is_admin {
-                            let sql = #admin_sql;
-                            let mut q = #runtime_crate::db::query(sql);
-                            #(#action_bind_statements)*
-                            q = q.bind(id);
-                            match q.execute(db.get_ref()).await {
-                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                                Ok(_) => HttpResponse::Ok().finish(),
-                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                            }
-                        } else {
-                            #filtered_update
                         }
                     }
                 } else {
@@ -7073,32 +7600,107 @@ fn resource_action_handler_tokens(
             let id_field = Literal::string(&resource.id_field);
             let admin_bypass = resource.policies.admin_bypass;
             let is_admin = quote! { user.roles.iter().any(|candidate| candidate == "admin") };
+            let delete_audit_event_kind =
+                delete_audit_event_kind(resource, Some(action.name.as_str()))
+                    .as_deref()
+                    .map(Literal::string);
 
             if !resource.policies.has_delete_filters() {
                 let id_placeholder = resource.db.placeholder(1);
-                quote! {
-                    async fn #handler_ident(
-                        path: web::Path<i64>,
-                        user: #runtime_crate::core::auth::UserContext,
-                        db: web::Data<DbPool>
-                        #delete_runtime_arg
-                    ) -> impl Responder {
-                        let _ = (&path, &user, &db);
-                        #delete_check
-                        let sql = format!(
-                            "DELETE FROM {} WHERE {} = {}",
-                            #table_name,
-                            #id_field,
-                            #id_placeholder
-                        );
-                        match #runtime_crate::db::query(&sql)
-                            .bind(path.into_inner())
-                            .execute(db.get_ref())
-                            .await
-                        {
-                            Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                            Ok(_) => HttpResponse::Ok().finish(),
-                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                if let Some(ref event_kind) = delete_audit_event_kind {
+                    quote! {
+                        async fn #handler_ident(
+                            path: web::Path<i64>,
+                            user: #runtime_crate::core::auth::UserContext,
+                            db: web::Data<DbPool>
+                            #delete_runtime_arg
+                        ) -> impl Responder {
+                            let _ = (&path, &user, &db);
+                            #delete_check
+                            let id = path.into_inner();
+                            let tx = match db.get_ref().begin().await {
+                                Ok(tx) => tx,
+                                Err(error) => {
+                                    return #runtime_crate::core::errors::internal_error(error.to_string());
+                                }
+                            };
+                            let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                Ok(Some(item)) => item,
+                                Ok(None) => {
+                                    let _ = tx.rollback().await;
+                                    return #runtime_crate::core::errors::not_found("Not found");
+                                }
+                                Err(error) => {
+                                    let _ = tx.rollback().await;
+                                    return #runtime_crate::core::errors::internal_error(error.to_string());
+                                }
+                            };
+                            let sql = format!(
+                                "DELETE FROM {} WHERE {} = {}",
+                                #table_name,
+                                #id_field,
+                                #id_placeholder
+                            );
+                            match #runtime_crate::db::query(&sql)
+                                .bind(id)
+                                .execute(&tx)
+                                .await
+                            {
+                                Ok(result) if result.rows_affected() == 0 => {
+                                    let _ = tx.rollback().await;
+                                    #runtime_crate::core::errors::not_found("Not found")
+                                }
+                                Ok(_) => {
+                                    if let Err(response) = Self::insert_audit_event(
+                                        &tx,
+                                        &user,
+                                        #event_kind,
+                                        id,
+                                        Some(&before),
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        let _ = tx.rollback().await;
+                                        return response;
+                                    }
+                                    if let Err(error) = tx.commit().await {
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                    HttpResponse::Ok().finish()
+                                }
+                                Err(error) => {
+                                    let _ = tx.rollback().await;
+                                    #runtime_crate::core::errors::internal_error(error.to_string())
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        async fn #handler_ident(
+                            path: web::Path<i64>,
+                            user: #runtime_crate::core::auth::UserContext,
+                            db: web::Data<DbPool>
+                            #delete_runtime_arg
+                        ) -> impl Responder {
+                            let _ = (&path, &user, &db);
+                            #delete_check
+                            let sql = format!(
+                                "DELETE FROM {} WHERE {} = {}",
+                                #table_name,
+                                #id_field,
+                                #id_placeholder
+                            );
+                            match #runtime_crate::db::query(&sql)
+                                .bind(path.into_inner())
+                                .execute(db.get_ref())
+                                .await
+                            {
+                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                Ok(_) => HttpResponse::Ok().finish(),
+                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                            }
                         }
                     }
                 }
@@ -7112,17 +7714,270 @@ fn resource_action_handler_tokens(
                 );
                 let hybrid_delete_fallback = if hybrid.map(|config| config.delete).unwrap_or(false)
                 {
+                    if let Some(ref event_kind) = delete_audit_event_kind {
+                        quote! {
+                            match Self::fetch_runtime_authorized_by_id(
+                                id,
+                                &user,
+                                runtime.get_ref(),
+                                db.get_ref(),
+                                #runtime_crate::core::authorization::AuthorizationAction::Delete,
+                            )
+                            .await
+                            {
+                                Ok(Some(_)) => {
+                                    let tx = match db.get_ref().begin().await {
+                                        Ok(tx) => tx,
+                                        Err(error) => {
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                    };
+                                    let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                        Ok(Some(item)) => item,
+                                        Ok(None) => {
+                                            let _ = tx.rollback().await;
+                                            return #runtime_crate::core::errors::not_found("Not found");
+                                        }
+                                        Err(error) => {
+                                            let _ = tx.rollback().await;
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                    };
+                                    let sql = #admin_sql;
+                                    match #runtime_crate::db::query(sql)
+                                        .bind(id)
+                                        .execute(&tx)
+                                        .await
+                                    {
+                                        Ok(result) if result.rows_affected() == 0 => {
+                                            let _ = tx.rollback().await;
+                                            #runtime_crate::core::errors::not_found("Not found")
+                                        }
+                                        Ok(_) => {
+                                            if let Err(response) = Self::insert_audit_event(
+                                                &tx,
+                                                &user,
+                                                #event_kind,
+                                                id,
+                                                Some(&before),
+                                                None,
+                                            )
+                                            .await
+                                            {
+                                                let _ = tx.rollback().await;
+                                                return response;
+                                            }
+                                            if let Err(error) = tx.commit().await {
+                                                return #runtime_crate::core::errors::internal_error(error.to_string());
+                                            }
+                                            HttpResponse::Ok().finish()
+                                        }
+                                        Err(error) => {
+                                            let _ = tx.rollback().await;
+                                            #runtime_crate::core::errors::internal_error(error.to_string())
+                                        }
+                                    }
+                                }
+                                Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                                Err(response) => response,
+                            }
+                        }
+                    } else {
+                        quote! {
+                            match Self::fetch_runtime_authorized_by_id(
+                                id,
+                                &user,
+                                runtime.get_ref(),
+                                db.get_ref(),
+                                #runtime_crate::core::authorization::AuthorizationAction::Delete,
+                            )
+                            .await
+                            {
+                                Ok(Some(_)) => {
+                                    let sql = #admin_sql;
+                                    match #runtime_crate::db::query(sql)
+                                        .bind(id)
+                                        .execute(db.get_ref())
+                                        .await
+                                    {
+                                        Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
+                                        Ok(_) => HttpResponse::Ok().finish(),
+                                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                    }
+                                }
+                                Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
+                                Err(response) => response,
+                            }
+                        }
+                    }
+                } else {
+                    quote!(#runtime_crate::core::errors::not_found("Not found"))
+                };
+                let filtered_delete = if let Some(ref event_kind) = delete_audit_event_kind {
                     quote! {
-                        match Self::fetch_runtime_authorized_by_id(
-                            id,
-                            &user,
-                            runtime.get_ref(),
-                            db.get_ref(),
-                            #runtime_crate::core::authorization::AuthorizationAction::Delete,
-                        )
-                        .await
-                        {
-                            Ok(Some(_)) => {
+                        match Self::delete_policy_plan(&user, 2) {
+                            #plan_ident::Resolved { condition, binds } => {
+                                let tx = match db.get_ref().begin().await {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                    Ok(item) => item,
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let sql = format!(
+                                    "DELETE FROM {} WHERE {} = {} AND {}",
+                                    #table_name,
+                                    #id_field,
+                                    Self::list_placeholder(1),
+                                    condition
+                                );
+                                let mut q = #runtime_crate::db::query(&sql);
+                                q = q.bind(id);
+                                for bind in binds {
+                                    q = match bind {
+                                        #(#query_bind_matches)*
+                                    };
+                                }
+                                match q.execute(&tx).await {
+                                    Ok(result) if result.rows_affected() == 0 => {
+                                        let _ = tx.rollback().await;
+                                        #hybrid_delete_fallback
+                                    }
+                                    Ok(_) => {
+                                        let before = match before {
+                                            Some(item) => item,
+                                            None => {
+                                                let _ = tx.rollback().await;
+                                                return #runtime_crate::core::errors::internal_error(
+                                                    "deleted row could not be reloaded for audit",
+                                                );
+                                            }
+                                        };
+                                        if let Err(response) = Self::insert_audit_event(
+                                            &tx,
+                                            &user,
+                                            #event_kind,
+                                            id,
+                                            Some(&before),
+                                            None,
+                                        )
+                                        .await
+                                        {
+                                            let _ = tx.rollback().await;
+                                            return response;
+                                        }
+                                        if let Err(error) = tx.commit().await {
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                        HttpResponse::Ok().finish()
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        #runtime_crate::core::errors::internal_error(error.to_string())
+                                    }
+                                }
+                            }
+                            #plan_ident::Indeterminate => #hybrid_delete_fallback,
+                        }
+                    }
+                } else {
+                    quote! {
+                        match Self::delete_policy_plan(&user, 2) {
+                            #plan_ident::Resolved { condition, binds } => {
+                                let sql = format!(
+                                    "DELETE FROM {} WHERE {} = {} AND {}",
+                                    #table_name,
+                                    #id_field,
+                                    Self::list_placeholder(1),
+                                    condition
+                                );
+                                let mut q = #runtime_crate::db::query(&sql);
+                                q = q.bind(id);
+                                for bind in binds {
+                                    q = match bind {
+                                        #(#query_bind_matches)*
+                                    };
+                                }
+                                match q.execute(db.get_ref()).await {
+                                    Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
+                                    Ok(_) => HttpResponse::Ok().finish(),
+                                    Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                                }
+                            }
+                            #plan_ident::Indeterminate => #hybrid_delete_fallback,
+                        }
+                    }
+                };
+                let delete_body = if admin_bypass {
+                    if let Some(ref event_kind) = delete_audit_event_kind {
+                        quote! {
+                            let id = path.into_inner();
+                            if #is_admin {
+                                let tx = match db.get_ref().begin().await {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let before = match Self::fetch_unfiltered_by_id_for_audit(id, &tx).await {
+                                    Ok(Some(item)) => item,
+                                    Ok(None) => {
+                                        let _ = tx.rollback().await;
+                                        return #runtime_crate::core::errors::not_found("Not found");
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        return #runtime_crate::core::errors::internal_error(error.to_string());
+                                    }
+                                };
+                                let sql = #admin_sql;
+                                match #runtime_crate::db::query(sql)
+                                    .bind(id)
+                                    .execute(&tx)
+                                    .await
+                                {
+                                    Ok(result) if result.rows_affected() == 0 => {
+                                        let _ = tx.rollback().await;
+                                        #runtime_crate::core::errors::not_found("Not found")
+                                    }
+                                    Ok(_) => {
+                                        if let Err(response) = Self::insert_audit_event(
+                                            &tx,
+                                            &user,
+                                            #event_kind,
+                                            id,
+                                            Some(&before),
+                                            None,
+                                        )
+                                        .await
+                                        {
+                                            let _ = tx.rollback().await;
+                                            return response;
+                                        }
+                                        if let Err(error) = tx.commit().await {
+                                            return #runtime_crate::core::errors::internal_error(error.to_string());
+                                        }
+                                        HttpResponse::Ok().finish()
+                                    }
+                                    Err(error) => {
+                                        let _ = tx.rollback().await;
+                                        #runtime_crate::core::errors::internal_error(error.to_string())
+                                    }
+                                }
+                            } else {
+                                #filtered_delete
+                            }
+                        }
+                    } else {
+                        quote! {
+                            let id = path.into_inner();
+                            if #is_admin {
                                 let sql = #admin_sql;
                                 match #runtime_crate::db::query(sql)
                                     .bind(id)
@@ -7133,56 +7988,9 @@ fn resource_action_handler_tokens(
                                     Ok(_) => HttpResponse::Ok().finish(),
                                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                                 }
+                            } else {
+                                #filtered_delete
                             }
-                            Ok(None) => #runtime_crate::core::errors::not_found("Not found"),
-                            Err(response) => response,
-                        }
-                    }
-                } else {
-                    quote!(#runtime_crate::core::errors::not_found("Not found"))
-                };
-                let filtered_delete = quote! {
-                    match Self::delete_policy_plan(&user, 2) {
-                        #plan_ident::Resolved { condition, binds } => {
-                            let sql = format!(
-                                "DELETE FROM {} WHERE {} = {} AND {}",
-                                #table_name,
-                                #id_field,
-                                Self::list_placeholder(1),
-                                condition
-                            );
-                            let mut q = #runtime_crate::db::query(&sql);
-                            q = q.bind(id);
-                            for bind in binds {
-                                q = match bind {
-                                    #(#query_bind_matches)*
-                                };
-                            }
-                            match q.execute(db.get_ref()).await {
-                                Ok(result) if result.rows_affected() == 0 => #hybrid_delete_fallback,
-                                Ok(_) => HttpResponse::Ok().finish(),
-                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                            }
-                        }
-                        #plan_ident::Indeterminate => #hybrid_delete_fallback,
-                    }
-                };
-                let delete_body = if admin_bypass {
-                    quote! {
-                        let id = path.into_inner();
-                        if #is_admin {
-                            let sql = #admin_sql;
-                            match #runtime_crate::db::query(sql)
-                                .bind(id)
-                                .execute(db.get_ref())
-                                .await
-                            {
-                                Ok(result) if result.rows_affected() == 0 => #runtime_crate::core::errors::not_found("Not found"),
-                                Ok(_) => HttpResponse::Ok().finish(),
-                                Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
-                            }
-                        } else {
-                            #filtered_delete
                         }
                     }
                 } else {
@@ -7534,8 +8342,101 @@ fn list_filter_field_ty(field: &super::model::FieldSpec, runtime_crate: &Path) -
     }
 }
 
-fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
+fn filter_in_bind_tokens(
+    field: &super::model::FieldSpec,
+    bind_ident: &syn::Ident,
+    runtime_crate: &Path,
+) -> TokenStream {
+    if super::model::is_structured_scalar_type(&field.ty) {
+        let ty = list_filter_field_ty(field, runtime_crate);
+        let text_value = structured_scalar_to_text_tokens(&field.ty, quote!(parsed), runtime_crate)
+            .expect("structured scalar should render as text");
+        return quote! {
+            let parsed: #ty = match value.parse() {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ));
+                }
+            };
+            filter_binds.push(#bind_ident::Text(#text_value));
+        };
+    }
+
+    if super::model::is_bool_type(&field.ty) {
+        return quote! {
+            let parsed = match value.parse::<bool>() {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ));
+                }
+            };
+            filter_binds.push(#bind_ident::Boolean(parsed));
+        };
+    }
+
+    match field.sql_type.as_str() {
+        sql_type if super::model::is_integer_sql_type(sql_type) => quote! {
+            let parsed = match value.parse::<i64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ));
+                }
+            };
+            filter_binds.push(#bind_ident::Integer(parsed));
+        },
+        "REAL" => quote! {
+            let parsed = match value.parse::<f64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ));
+                }
+            };
+            filter_binds.push(#bind_ident::Real(parsed));
+        },
+        _ => {
+            let enum_check = if let Some(enum_values) = field.enum_values() {
+                let enum_values = enum_values
+                    .iter()
+                    .map(|value| Literal::string(value.as_str()))
+                    .collect::<Vec<_>>();
+                quote! {
+                    if ![#(#enum_values),*].contains(&value) {
+                        return Err(#runtime_crate::core::errors::bad_request(
+                            "invalid_query",
+                            "Query parameters are invalid",
+                        ));
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            quote! {
+                #enum_check
+                filter_binds.push(#bind_ident::Text(value.to_owned()));
+            }
+        }
+    }
+}
+
+fn list_query_condition_tokens(
+    resource: &ResourceSpec,
+    max_filter_in_values: usize,
+    runtime_crate: &Path,
+) -> Vec<TokenStream> {
     let bind_ident = list_bind_ident(resource);
+    let max_filter_in_values_lit = Literal::usize_unsuffixed(max_filter_in_values);
     resource
         .fields
         .iter()
@@ -7691,8 +8592,34 @@ fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) ->
                     }
                 }
             };
+            let filter_in_tokens = if super::model::supports_exact_filters(field)
+                && resource
+                    .list
+                    .filterable_in
+                    .iter()
+                    .any(|candidate| candidate == &field.name())
+            {
+                let filter_in_ident = format_ident!("filter_{}__in", field.ident);
+                let bind_value_tokens = filter_in_bind_tokens(field, &bind_ident, runtime_crate);
+                quote! {
+                    if let Some(value) = &query.#filter_in_ident {
+                        let values = Self::parse_filter_in_values(value, #max_filter_in_values_lit)?;
+                        conditions.push(format!(
+                            "{} IN ({})",
+                            #field_name,
+                            Self::list_placeholders(filter_binds.len() + 1, values.len())
+                        ));
+                        for value in values {
+                            #bind_value_tokens
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
             quote! {
                 #exact_filter_tokens
+                #filter_in_tokens
                 #contains_filter_tokens
             }
         })

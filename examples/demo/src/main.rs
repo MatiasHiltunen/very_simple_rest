@@ -64,6 +64,7 @@ fn security_config() -> core::security::SecurityConfig {
     core::security::SecurityConfig {
         requests: core::security::RequestSecurity {
             json_max_bytes: Some(262_144),
+            max_filter_in_values: None,
         },
         cors: core::security::CorsSecurity {
             origins: vec!["http://127.0.0.1:8080".to_owned()],

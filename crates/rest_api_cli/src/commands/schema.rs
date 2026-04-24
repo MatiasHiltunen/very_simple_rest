@@ -37,10 +37,7 @@ pub(crate) fn load_filtered_derive_service(
     Ok(service)
 }
 
-pub fn render_schema_document(
-    input: Option<&Path>,
-    output: Option<&Path>,
-) -> Result<()> {
+pub fn render_schema_document(input: Option<&Path>, output: Option<&Path>) -> Result<()> {
     let json = read_render_input(input)?;
     let document: ServiceInputDocument =
         serde_json::from_str(&json).context("failed to parse schema JSON")?;
@@ -49,8 +46,7 @@ pub fn render_schema_document(
         .context("failed to render canonical .eon")?;
 
     if let Some(path) = output {
-        fs::write(path, rendered)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
     } else {
         print!("{rendered}");
     }
@@ -131,8 +127,8 @@ mod tests {
         }
         "#;
         let document: ServiceInputDocument = serde_json::from_str(json)?;
-        let rendered =
-            render_input_document_to_eon(document.clone()).map_err(|error| anyhow::anyhow!(error))?;
+        let rendered = render_input_document_to_eon(document.clone())
+            .map_err(|error| anyhow::anyhow!(error))?;
         let normalized =
             normalize_input_document(document).map_err(|error| anyhow::anyhow!(error))?;
         let reparsed = parse_eon_document(&rendered).map_err(|error| anyhow::anyhow!(error))?;

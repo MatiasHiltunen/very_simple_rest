@@ -73,6 +73,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
         .collect::<Vec<_>>();
 
     schemas.insert("ApiErrorResponse".to_owned(), api_error_schema());
+    schemas.insert("CountResponse".to_owned(), count_response_schema());
     if !service.storage.uploads.is_empty() {
         schemas.insert(
             "StorageUploadResponse".to_owned(),
@@ -99,6 +100,12 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
             format!("/{}", resource.api_name()),
             collection_path_item(resource, is_audit_sink),
         );
+        if resource.list.count_endpoint {
+            paths.insert(
+                format!("/{}/count", resource.api_name()),
+                count_path_item(resource),
+            );
+        }
         paths.insert(
             format!("/{}/{{id}}", resource.api_name()),
             item_path_item(resource, is_audit_sink),
@@ -295,6 +302,20 @@ fn collection_path_item(resource: &ResourceSpec, is_audit_sink: bool) -> Value {
     }
 
     path
+}
+
+fn count_path_item(resource: &ResourceSpec) -> Value {
+    let mut get = json!({
+        "tags": [resource_name(resource)],
+        "summary": format!("Count {}", resource_name(resource)),
+        "operationId": format!("count{}", resource_name(resource)),
+        "parameters": count_query_parameters(resource),
+        "responses": count_responses(),
+    });
+    if read_requires_auth(resource) {
+        get["security"] = bearer_security();
+    }
+    json!({ "get": get })
 }
 
 fn item_path_item(resource: &ResourceSpec, is_audit_sink: bool) -> Value {
@@ -1555,6 +1576,16 @@ fn list_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Value> {
     ])
 }
 
+fn count_responses() -> BTreeMap<&'static str, Value> {
+    BTreeMap::from([
+        ("200", json_response("OK", schema_ref("CountResponse"))),
+        ("400", api_error_response("Invalid query parameters")),
+        ("401", plain_response("Authentication required")),
+        ("403", api_error_response("Forbidden")),
+        ("500", api_error_response("Internal server error")),
+    ])
+}
+
 fn get_one_responses(resource: &ResourceSpec) -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
         (
@@ -1848,7 +1879,7 @@ fn list_query_parameters(
     let mut limit_schema = json!({
         "type": "integer",
         "format": "int64",
-        "minimum": 1
+        "minimum": 0
     });
     if let Some(default_limit) = resource.list.default_limit {
         limit_schema["default"] = json!(default_limit);
@@ -1910,6 +1941,19 @@ fn list_query_parameters(
         parameters.push(parameter);
     }
 
+    parameters.extend(filter_query_parameters(resource, parent_relation_field));
+    parameters
+}
+
+fn count_query_parameters(resource: &ResourceSpec) -> Vec<Value> {
+    filter_query_parameters(resource, None)
+}
+
+fn filter_query_parameters(
+    resource: &ResourceSpec,
+    parent_relation_field: Option<&str>,
+) -> Vec<Value> {
+    let mut parameters = Vec::new();
     for field in resource.api_fields() {
         let api_field_name = field.api_name().to_owned();
         if supports_exact_filters(field) {
@@ -1927,6 +1971,27 @@ fn list_query_parameters(
                 "description": description,
                 "schema": query_parameter_schema(field),
             }));
+
+            if resource
+                .list
+                .filterable_in
+                .iter()
+                .any(|candidate| candidate == &field.name())
+            {
+                parameters.push(json!({
+                    "name": format!("filter_{api_field_name}__in"),
+                    "in": "query",
+                    "required": false,
+                    "description": format!("Comma-separated multi-value filter for `{api_field_name}`"),
+                    "style": "form",
+                    "explode": false,
+                    "schema": {
+                        "type": "array",
+                        "items": query_parameter_schema(field),
+                        "minItems": 1
+                    },
+                }));
+            }
         }
 
         if supports_contains_filters(field) {
@@ -2092,7 +2157,7 @@ fn list_response_schema(resource: &ResourceSpec) -> Value {
                 "type": "integer",
                 "format": "int64",
                 "nullable": true,
-                "minimum": 1
+                "minimum": 0
             },
             "offset": {
                 "type": "integer",
@@ -2111,6 +2176,20 @@ fn list_response_schema(resource: &ResourceSpec) -> Value {
             }
         },
         "required": ["items", "total", "count", "offset"]
+    })
+}
+
+fn count_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "count": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+            }
+        },
+        "required": ["count"]
     })
 }
 
@@ -2760,6 +2839,38 @@ mod tests {
             }
         });
         assert_json_snapshot(&snapshot_path("public_catalog_surface.json"), &snapshot);
+    }
+
+    #[test]
+    fn renders_openapi_filter_in_and_count_endpoint() {
+        let service = load_service_from_path(&fixture_path("batched_list_api.eon"))
+            .expect("fixture should parse");
+        let json = render_service_openapi_json(
+            &service,
+            &OpenApiSpecOptions::new("Batched List API", "1.0.0", "/api"),
+        )
+        .expect("openapi should render");
+        let document: Value = serde_json::from_str(&json).expect("json should parse");
+        let parameters = document["paths"]["/entry"]["get"]["parameters"]
+            .as_array()
+            .expect("list parameters should be an array");
+        let filter_in = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "filter_score__in")
+            .expect("filter_in parameter should exist");
+
+        assert_eq!(filter_in["schema"]["type"], json!("array"));
+        assert_eq!(filter_in["schema"]["items"]["type"], json!("integer"));
+        assert_eq!(filter_in["explode"], json!(false));
+        assert_eq!(
+            document["paths"]["/entry/count"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            json!("#/components/schemas/CountResponse")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["CountResponse"]["required"],
+            json!(["count"])
+        );
     }
 
     #[test]
@@ -3512,7 +3623,7 @@ mod tests {
         );
         assert_eq!(
             document["paths"]["/post"]["get"]["parameters"][0]["schema"]["minimum"],
-            json!(1)
+            json!(0)
         );
         assert_eq!(
             document["paths"]["/post"]["get"]["parameters"][2]["schema"]["type"],

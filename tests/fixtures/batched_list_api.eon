@@ -1,0 +1,22 @@
+module: "batched_list_api"
+security: {
+    requests: {
+        max_filter_in_values: 2
+    }
+}
+resources: [
+    {
+        name: "Entry"
+        access: {
+            read: "public"
+        }
+        list: {
+            filterable_in: ["score"]
+        }
+        fields: [
+            { name: "id", type: I64 }
+            { name: "category", type: String }
+            { name: "score", type: I64 }
+        ]
+    }
+]

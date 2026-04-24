@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -85,6 +85,14 @@ export function ensureNativeBinary() {
 export function resolveNativeInvocation() {
   const overridden = process.env.VSR_NATIVE_BINARY;
   if (overridden) {
+    if ([".cjs", ".js", ".mjs"].includes(extname(overridden).toLowerCase())) {
+      return {
+        command: process.execPath,
+        argsPrefix: [overridden],
+        cwd: process.cwd()
+      };
+    }
+
     return {
       command: overridden,
       argsPrefix: [],

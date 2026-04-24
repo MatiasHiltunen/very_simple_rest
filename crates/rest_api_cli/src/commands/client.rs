@@ -1201,6 +1201,13 @@ function appendQuery(searchParams: URLSearchParams, query: QueryParams): void {{
       continue;
     }}
     if (Array.isArray(value)) {{
+      if (key.endsWith("__in")) {{
+        const items = value.filter((item): item is ScalarValue => item !== undefined && item !== null);
+        if (items.length > 0) {{
+          searchParams.append(key, items.map((item) => stringifyScalarValue(item)).join(","));
+        }}
+        continue;
+      }}
       for (const item of value) {{
         if (item !== undefined && item !== null) {{
           searchParams.append(key, stringifyScalarValue(item));
@@ -1558,6 +1565,13 @@ function appendQuery(searchParams, query) {{
       continue;
     }}
     if (Array.isArray(value)) {{
+      if (key.endsWith("__in")) {{
+        const items = value.filter((item) => item !== undefined && item !== null);
+        if (items.length > 0) {{
+          searchParams.append(key, items.map((item) => stringifyScalarValue(item)).join(","));
+        }}
+        continue;
+      }}
       for (const item of value) {{
         if (item !== undefined && item !== null) {{
           searchParams.append(key, stringifyScalarValue(item));
@@ -3384,6 +3398,7 @@ esac
         assert!(
             client.contains("if (requestNeedsCsrf(request.method) && resolvedConfig.getCsrfToken)")
         );
+        assert!(client.contains("key.endsWith(\"__in\")"));
         assert!(!client.contains("if (body !== undefined && resolvedConfig.getCsrfToken)"));
         assert!(
             client.contains("if (request.requiresBearerAuth && resolvedConfig.getAccessToken)")
@@ -3482,11 +3497,21 @@ esac
                     required: false,
                     location: ParameterLocation::Query,
                 },
+                ClientParameter {
+                    name: "filter_publication_year__in".to_owned(),
+                    schema: serde_json::json!({
+                        "type": "array",
+                        "items": { "type": "integer", "format": "int64" }
+                    }),
+                    required: false,
+                    location: ParameterLocation::Query,
+                },
             ],
             &BTreeSet::new(),
         );
         assert!(numeric_query.contains("Page<\"id\" | \"publication_year\">"));
         assert!(numeric_query.contains("Range<\"filter_publication_year\", number>"));
+        assert!(numeric_query.contains("\"filter_publication_year__in\"?: Array<number>;"));
 
         let temporal_query = render_operation_query_type(
             &[

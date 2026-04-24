@@ -2447,10 +2447,7 @@ async fn run_cli() -> Result<()> {
     all(target_os = "windows", target_arch = "aarch64"),
     tokio::main(flavor = "current_thread")
 )]
-#[cfg_attr(
-    not(all(target_os = "windows", target_arch = "aarch64")),
-    tokio::main
-)]
+#[cfg_attr(not(all(target_os = "windows", target_arch = "aarch64")), tokio::main)]
 async fn main() -> Result<()> {
     run_cli().await
 }

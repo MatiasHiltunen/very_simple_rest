@@ -351,6 +351,34 @@ export async function createCollaborationRequest(client: VsrClient, params: Crea
   });
 }
 
+export type CountCollaborationRequestQuery = DR<"filter_preferred_start_on", DateInput>
+  & DR<"filter_created_at" | "filter_updated_at">
+  & {
+  "filter_id"?: number;
+  "filter_organization_id"?: number;
+  "filter_requester_user_id"?: number;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+  "filter_message"?: string;
+  "filter_message_contains"?: string;
+  "filter_status"?: string;
+  "filter_status_contains"?: string;
+};
+export type CountCollaborationRequestRequest = {
+  "query"?: CountCollaborationRequestQuery;
+} &
+  Req;
+
+export async function countCollaborationRequest(client: VsrClient, params: CountCollaborationRequestRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/collaboration_request/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export type GetCollaborationRequestRequest = {
   "path": {
   "id": number;
@@ -444,6 +472,32 @@ export async function createInterest(client: VsrClient, params: CreateInterestRe
     contentType: "application/json",
     ...r(params),
     requiresBearerAuth: true,
+  });
+}
+
+export type CountInterestQuery = DR<"filter_desired_start_on", DateInput>
+  & DR<"filter_created_at" | "filter_updated_at">
+  & {
+  "filter_id"?: number;
+  "filter_organization_id"?: number;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+  "filter_work_mode"?: string;
+  "filter_work_mode_contains"?: string;
+  "filter_summary"?: string;
+  "filter_summary_contains"?: string;
+};
+export type CountInterestRequest = {
+  "query"?: CountInterestQuery;
+} &
+  Req;
+
+export async function countInterest(client: VsrClient, params: CountInterestRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/interest/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
   });
 }
 
@@ -547,6 +601,40 @@ export async function createOrganization(client: VsrClient, params: CreateOrgani
     contentType: "application/json",
     ...r(params),
     requiresBearerAuth: true,
+  });
+}
+
+export type CountOrganizationQuery = DR<"filter_created_at" | "filter_updated_at">
+  & {
+  "filter_id"?: number;
+  "filter_slug"?: string;
+  "filter_slug_contains"?: string;
+  "filter_name"?: string;
+  "filter_name_contains"?: string;
+  "filter_country"?: string;
+  "filter_country_contains"?: string;
+  "filter_city"?: string;
+  "filter_city_contains"?: string;
+  "filter_website_url"?: string;
+  "filter_website_url_contains"?: string;
+  "filter_contact_email"?: string;
+  "filter_contact_email_contains"?: string;
+  "filter_collaboration_stage"?: string;
+  "filter_collaboration_stage_contains"?: string;
+  "filter_summary"?: string;
+  "filter_summary_contains"?: string;
+};
+export type CountOrganizationRequest = {
+  "query"?: CountOrganizationQuery;
+} &
+  Req;
+
+export async function countOrganization(client: VsrClient, params: CountOrganizationRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/organization/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
   });
 }
 
@@ -748,6 +836,36 @@ export async function createThesisTopic(client: VsrClient, params: CreateThesisT
     contentType: "application/json",
     ...r(params),
     requiresBearerAuth: true,
+  });
+}
+
+export type CountThesisTopicQuery = DR<"filter_application_deadline", DateInput>
+  & DR<"filter_created_at" | "filter_updated_at">
+  & {
+  "filter_id"?: number;
+  "filter_organization_id"?: number;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+  "filter_discipline"?: string;
+  "filter_discipline_contains"?: string;
+  "filter_location"?: string;
+  "filter_location_contains"?: string;
+  "filter_contact_email"?: string;
+  "filter_contact_email_contains"?: string;
+  "filter_summary"?: string;
+  "filter_summary_contains"?: string;
+};
+export type CountThesisTopicRequest = {
+  "query"?: CountThesisTopicQuery;
+} &
+  Req;
+
+export async function countThesisTopic(client: VsrClient, params: CountThesisTopicRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/thesis_topic/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
   });
 }
 

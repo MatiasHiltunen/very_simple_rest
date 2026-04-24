@@ -225,6 +225,16 @@ export async function createCollaborationRequest(client, params) {
   });
 }
 
+export async function countCollaborationRequest(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/collaboration_request/count",
+    query: params.query,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export async function getCollaborationRequest(client, params) {
   return client.request({
     method: "GET",
@@ -274,6 +284,15 @@ export async function createInterest(client, params) {
   });
 }
 
+export async function countInterest(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/interest/count",
+    query: params.query,
+    ...r(params),
+  });
+}
+
 export async function getInterest(client, params) {
   return client.request({
     method: "GET",
@@ -319,6 +338,15 @@ export async function createOrganization(client, params) {
     contentType: "application/json",
     ...r(params),
     requiresBearerAuth: true,
+  });
+}
+
+export async function countOrganization(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/organization/count",
+    query: params.query,
+    ...r(params),
   });
 }
 
@@ -395,6 +423,15 @@ export async function createThesisTopic(client, params) {
     contentType: "application/json",
     ...r(params),
     requiresBearerAuth: true,
+  });
+}
+
+export async function countThesisTopic(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/thesis_topic/count",
+    query: params.query,
+    ...r(params),
   });
 }
 

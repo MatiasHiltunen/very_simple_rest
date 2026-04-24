@@ -218,6 +218,8 @@ struct SecurityAccessDocument {
 struct RequestSecurityDocument {
     #[serde(default)]
     json_max_bytes: Option<usize>,
+    #[serde(default)]
+    max_filter_in_values: Option<usize>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -860,12 +862,31 @@ struct ManyToManyDocument {
     target_field: String,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct ListConfigDocument {
     #[serde(default)]
     default_limit: Option<u32>,
     #[serde(default)]
     max_limit: Option<u32>,
+    #[serde(default)]
+    filterable_in: Vec<String>,
+    #[serde(default = "default_count_endpoint")]
+    count_endpoint: bool,
+}
+
+impl Default for ListConfigDocument {
+    fn default() -> Self {
+        Self {
+            default_limit: None,
+            max_limit: None,
+            filterable_in: Vec::new(),
+            count_endpoint: true,
+        }
+    }
+}
+
+fn default_count_endpoint() -> bool {
+    true
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -2421,7 +2442,7 @@ fn build_resources_with_enums(
         validate_relations(&resource.fields, Span::call_site())?;
         validate_field_validations(&resource.fields, Span::call_site())?;
         validate_field_transforms(&resource.fields, Span::call_site())?;
-        validate_list_config(&resource.list, Span::call_site())?;
+        validate_list_config(resource, &resource.list, Span::call_site())?;
         validate_resource_indexes(resource, Span::call_site())?;
         validate_resource_audit(resource, &result)?;
     }
@@ -3659,6 +3680,8 @@ fn parse_list_config(document: ListConfigDocument) -> ListConfig {
     ListConfig {
         default_limit: document.default_limit,
         max_limit: document.max_limit,
+        filterable_in: document.filterable_in,
+        count_endpoint: document.count_endpoint,
     }
 }
 
@@ -3740,6 +3763,7 @@ fn parse_security_document(document: SecurityDocument, span: Span) -> syn::Resul
         .requests
         .map(|requests| RequestSecurity {
             json_max_bytes: requests.json_max_bytes,
+            max_filter_in_values: requests.max_filter_in_values,
         })
         .unwrap_or_default();
     let access = parse_security_access_document(document.access)?;
@@ -6735,6 +6759,7 @@ mod tests {
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
                 actions: Vec::new(),
+                audit: None,
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -6796,6 +6821,7 @@ mod tests {
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
                 actions: Vec::new(),
+                audit: None,
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -6918,6 +6944,7 @@ mod tests {
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
                 actions: Vec::new(),
+                audit: None,
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -7020,6 +7047,7 @@ mod tests {
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
                 actions: Vec::new(),
+                audit: None,
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -7116,6 +7144,7 @@ mod tests {
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
                 actions: Vec::new(),
+                audit: None,
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -8520,6 +8549,7 @@ resources: [
                 indexes: Vec::new(),
                 many_to_many: Vec::new(),
                 actions: Vec::new(),
+                audit: None,
                 fields: vec![
                     FieldDocument {
                         name: "id".to_owned(),
@@ -9231,7 +9261,7 @@ resources: [
                 timestamp: Millis
             }
             security: {
-                requests: { json_max_bytes: 128 }
+                requests: { json_max_bytes: 128, max_filter_in_values: 25 }
                 cors: {
                     origins: ["http://localhost:3000"]
                     origins_env: "CORS_ORIGINS"
@@ -9292,6 +9322,7 @@ resources: [
         assert_eq!(logging.default_filter, "debug,sqlx=warn");
         assert_eq!(logging.timestamp, LogTimestampPrecision::Millis);
         assert_eq!(security.requests.json_max_bytes, Some(128));
+        assert_eq!(security.requests.max_filter_in_values, Some(25));
         assert_eq!(
             security.cors.origins,
             vec!["http://localhost:3000".to_owned()]
@@ -10608,6 +10639,8 @@ resources: [
                     list: {
                         default_limit: 25
                         max_limit: 100
+                        filterable_in: ["title"]
+                        count_endpoint: false
                     }
                     fields: [
                         { name: "id", type: I64 }
@@ -10622,6 +10655,8 @@ resources: [
             build_resources(document.db, document.resources).expect("resources should build");
         assert_eq!(resources[0].list.default_limit, Some(25));
         assert_eq!(resources[0].list.max_limit, Some(100));
+        assert_eq!(resources[0].list.filterable_in, vec!["title"]);
+        assert!(!resources[0].list.count_endpoint);
     }
 
     #[test]

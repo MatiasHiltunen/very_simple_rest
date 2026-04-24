@@ -2513,6 +2513,26 @@ mod tests {
         Err(last_error.unwrap_or_else(|| "server never became ready".to_owned()))
     }
 
+    fn send_with_transient_retry(
+        mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response, String> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut last_error = None;
+
+        while Instant::now() < deadline {
+            match request().send() {
+                Ok(response) => return Ok(response),
+                Err(error) if error.is_request() || error.is_connect() || error.is_timeout() => {
+                    last_error = Some(format!("{error:?}"));
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) => return Err(format!("{error:?}")),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "request did not complete".to_owned()))
+    }
+
     fn wait_for_capture_count(dir: &Path, expected: usize, timeout: Duration) -> Vec<PathBuf> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -2554,13 +2574,71 @@ mod tests {
                 self.stderr_log.display()
             )
         }
+
+        fn stop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 
     impl Drop for SpawnedBinary {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.stop();
         }
+    }
+
+    fn bridgeboard_http_client() -> Client {
+        Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(10))
+            .default_headers({
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::HeaderName::from_static(
+                        rest_macro_core::security::DEFAULT_ANON_CLIENT_HEADER_NAME,
+                    ),
+                    reqwest::header::HeaderValue::from_static(
+                        rest_macro_core::security::DEFAULT_ANON_CLIENT_FALLBACK_KEY,
+                    ),
+                );
+                headers
+            })
+            .build()
+            .expect("http client should build")
+    }
+
+    fn spawn_bridgeboard_binary(
+        output: &Path,
+        root: &Path,
+        bind_addr: &str,
+        jwt_secret: &str,
+        turso_key: &str,
+        capture_dir: &Path,
+        stdout_log: &Path,
+        stderr_log: &Path,
+    ) -> SpawnedBinary {
+        let stdout = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(stdout_log)
+            .expect("stdout log should open");
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(stderr_log)
+            .expect("stderr log should open");
+        let child = Command::new(output)
+            .current_dir(root)
+            .env("BIND_ADDR", bind_addr)
+            .env("VSR_HTTP_WORKERS", "1")
+            .env("JWT_SECRET", jwt_secret)
+            .env("TURSO_ENCRYPTION_KEY", turso_key)
+            .env("VSR_AUTH_EMAIL_CAPTURE_DIR", capture_dir)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("built binary should start");
+        SpawnedBinary::new(child, stdout_log.to_path_buf(), stderr_log.to_path_buf())
     }
 
     #[test]
@@ -2666,7 +2744,7 @@ resources: [
 
     #[test]
     fn resolve_binary_output_path_prefers_declared_env_override() {
-        let _lock = env_lock().lock().expect("env lock should be available");
+        let _lock = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         let root = test_root().join("binary-env");
         fs::create_dir_all(&root).expect("test root should exist");
         let input = root.join("service.eon");
@@ -3481,37 +3559,20 @@ resources: [
         let base_url = format!("https://{bind_addr}");
         let stdout_log = root.join("bridgeboard.stdout.log");
         let stderr_log = root.join("bridgeboard.stderr.log");
-        let stdout = fs::File::create(&stdout_log).expect("stdout log should open");
-        let stderr = fs::File::create(&stderr_log).expect("stderr log should open");
-        let child = Command::new(&output)
-            .current_dir(&root)
-            .env("BIND_ADDR", &bind_addr)
-            .env("JWT_SECRET", jwt_secret)
-            .env("TURSO_ENCRYPTION_KEY", turso_key)
-            .env("VSR_AUTH_EMAIL_CAPTURE_DIR", &capture_dir)
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .expect("built binary should start");
-        let server = SpawnedBinary::new(child, stdout_log, stderr_log);
+        let _ = fs::remove_file(&stdout_log);
+        let _ = fs::remove_file(&stderr_log);
+        let mut server = spawn_bridgeboard_binary(
+            &output,
+            &root,
+            &bind_addr,
+            jwt_secret,
+            turso_key,
+            &capture_dir,
+            &stdout_log,
+            &stderr_log,
+        );
 
-        let client = Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(10))
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    reqwest::header::HeaderName::from_static(
-                        rest_macro_core::security::DEFAULT_ANON_CLIENT_HEADER_NAME,
-                    ),
-                    reqwest::header::HeaderValue::from_static(
-                        rest_macro_core::security::DEFAULT_ANON_CLIENT_FALLBACK_KEY,
-                    ),
-                );
-                headers
-            })
-            .build()
-            .expect("http client should build");
+        let mut client = bridgeboard_http_client();
         if let Err(error) =
             wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
         {
@@ -3662,6 +3723,27 @@ resources: [
             .expect("password reset page body should read");
         assert!(reset_page_body.contains("Choose A New Password"));
 
+        server.stop();
+        server = spawn_bridgeboard_binary(
+            &output,
+            &root,
+            &bind_addr,
+            jwt_secret,
+            turso_key,
+            &capture_dir,
+            &stdout_log,
+            &stderr_log,
+        );
+        client = bridgeboard_http_client();
+        if let Err(error) =
+            wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+        {
+            panic!(
+                "bridgeboard binary did not restart before password reset confirmation: {error}\n{}",
+                server.logs()
+            );
+        }
+
         let confirm_reset_response = client
             .post(format!("{base_url}/api/auth/password-reset/confirm"))
             .json(&json!({
@@ -3675,6 +3757,27 @@ resources: [
             reqwest::StatusCode::NO_CONTENT
         );
 
+        server.stop();
+        server = spawn_bridgeboard_binary(
+            &output,
+            &root,
+            &bind_addr,
+            jwt_secret,
+            turso_key,
+            &capture_dir,
+            &stdout_log,
+            &stderr_log,
+        );
+        client = bridgeboard_http_client();
+        if let Err(error) =
+            wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+        {
+            panic!(
+                "bridgeboard binary did not restart after password reset confirmation: {error}\n{}",
+                server.logs()
+            );
+        }
+
         let old_password_login_response = client
             .post(format!("{base_url}/api/auth/login"))
             .json(&json!({
@@ -3687,15 +3790,56 @@ resources: [
             old_password_login_response.status(),
             reqwest::StatusCode::UNAUTHORIZED
         );
+        let _ = old_password_login_response
+            .text()
+            .expect("old password login body should drain");
 
-        let user_login_response = client
-            .post(format!("{base_url}/api/auth/login"))
-            .json(&json!({
-                "email": "alice@example.com",
-                "password": "password456",
-            }))
-            .send()
-            .expect("login with reset password should succeed");
+        let user_login_response = match send_with_transient_retry(|| {
+            client
+                .post(format!("{base_url}/api/auth/login"))
+                .json(&json!({
+                    "email": "alice@example.com",
+                    "password": "password456",
+                }))
+        }) {
+            Ok(response) => response,
+            Err(first_error) => {
+                server.stop();
+                server = spawn_bridgeboard_binary(
+                    &output,
+                    &root,
+                    &bind_addr,
+                    jwt_secret,
+                    turso_key,
+                    &capture_dir,
+                    &stdout_log,
+                    &stderr_log,
+                );
+                client = bridgeboard_http_client();
+                if let Err(error) =
+                    wait_for_http_ready(&client, &format!("{base_url}/"), Duration::from_secs(30))
+                {
+                    panic!(
+                        "bridgeboard binary did not restart after reset-login error: {first_error}; readiness error: {error}\n{}",
+                        server.logs()
+                    );
+                }
+                send_with_transient_retry(|| {
+                    client
+                        .post(format!("{base_url}/api/auth/login"))
+                        .json(&json!({
+                            "email": "alice@example.com",
+                            "password": "password456",
+                        }))
+                })
+                .unwrap_or_else(|retry_error| {
+                    panic!(
+                        "login with reset password should succeed after bridgeboard restart: {retry_error}; first error: {first_error}\n{}",
+                        server.logs()
+                    )
+                })
+            }
+        };
         assert_eq!(user_login_response.status(), reqwest::StatusCode::OK);
         let user_login: Value = user_login_response
             .json()

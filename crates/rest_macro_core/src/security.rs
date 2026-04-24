@@ -21,10 +21,12 @@ use crate::{
 pub const DEFAULT_ANON_CLIENT_HEADER_NAME: &str = "x-vsr-anon-key";
 pub const DEFAULT_ANON_CLIENT_KEY_ENV: &str = "VSR_ANON_KEY";
 pub const DEFAULT_ANON_CLIENT_FALLBACK_KEY: &str = "vsr-default-anon-client-key";
+pub const DEFAULT_MAX_FILTER_IN_VALUES: usize = 100;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RequestSecurity {
     pub json_max_bytes: Option<usize>,
+    pub max_filter_in_values: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

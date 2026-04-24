@@ -1,0 +1,71 @@
+resources: [
+    {
+        name: "Post"
+        table: "post"
+        api_name: "posts"
+        roles: {
+            update: "editor"
+            delete: "editor"
+        }
+        audit: {
+            resource: "AuditEvent"
+            update: true
+            delete: true
+            actions: ["publish", "purge"]
+        }
+        actions: [
+            {
+                name: "publish"
+                path: "go-live"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        status: " Published "
+                        slug: " Launch   Post! "
+                    }
+                }
+            }
+            {
+                name: "rename"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        title: { input: "newTitle" }
+                        slug: { input: "newSlug" }
+                        status: { input: "newStatus" }
+                    }
+                }
+            }
+            {
+                name: "purge"
+                behavior: {
+                    kind: "DeleteResource"
+                }
+            }
+        ]
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String, garde: { length: { min: 5, mode: Chars } } }
+            { name: "slug", type: String, transforms: [Slugify] }
+            { name: "status", type: String, transforms: [Trim, Lowercase] }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        table: "audit_event"
+        api_name: "audit-events"
+        roles: {
+            read: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "event_kind", type: String }
+            { name: "resource_name", type: String }
+            { name: "record_id", type: I64 }
+            { name: "actor_user_id", type: I64, nullable: true }
+            { name: "actor_roles_json", type: String }
+            { name: "payload_json", type: String }
+            { name: "created_at", type: String }
+        ]
+    }
+]

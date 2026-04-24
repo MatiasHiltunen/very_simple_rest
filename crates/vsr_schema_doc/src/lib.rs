@@ -735,7 +735,10 @@ pub struct MixinDocument {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, TS)]
 pub struct ResourceApiDocument {
-    #[serde(default, deserialize_with = "deserialize_api_field_projection_documents")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_api_field_projection_documents"
+    )]
     pub fields: Vec<ApiFieldProjectionDocument>,
     #[serde(default)]
     pub default_context: Option<String>,
@@ -1552,7 +1555,10 @@ fn normalize_resource_input_document(
         roles: input.roles,
         policies: input.policies,
         list: input.list,
-        api: input.api.map(normalize_resource_api_input_document).transpose()?,
+        api: input
+            .api
+            .map(normalize_resource_api_input_document)
+            .transpose()?,
         use_mixins: input.use_mixins,
         indexes: input.indexes,
         many_to_many: input.many_to_many,

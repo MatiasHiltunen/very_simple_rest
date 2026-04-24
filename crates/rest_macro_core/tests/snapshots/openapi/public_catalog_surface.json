@@ -11,7 +11,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "minimum": 1,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -570,7 +570,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "minimum": 1,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -770,7 +770,7 @@
         },
         "limit": {
           "format": "int64",
-          "minimum": 1,
+          "minimum": 0,
           "nullable": true,
           "type": "integer"
         },
@@ -845,7 +845,7 @@
         },
         "limit": {
           "format": "int64",
-          "minimum": 1,
+          "minimum": 0,
           "nullable": true,
           "type": "integer"
         },
