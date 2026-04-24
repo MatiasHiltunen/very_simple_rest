@@ -1,0 +1,16 @@
+{
+  "name": "very-simple-rest-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "generate:vsr-schema": "cargo run -p vsr_schema_doc --bin export_ts_bindings",
+    "check:vsr-schema": "npm run generate:vsr-schema && git diff --exit-code -- packages/vsr/src/generated",
+    "check:vsr-types": "tsc -p packages/vsr/tsconfig.json",
+    "check:vsr-package": "npm run check --workspace @matiashiltunen/vsr && npm run check:vsr-types"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

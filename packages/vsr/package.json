@@ -1,0 +1,37 @@
+{
+  "name": "@matiashiltunen/vsr",
+  "version": "0.1.10",
+  "description": "TypeScript-first wrapper for very_simple_rest",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatiasHiltunen/very_simple_rest.git",
+    "directory": "packages/vsr"
+  },
+  "type": "module",
+  "bin": {
+    "vsr": "./bin/vsr.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js",
+      "require": "./src/index.cjs"
+    }
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18.18"
+  },
+  "dependencies": {
+    "tsx": "^4.20.6"
+  },
+  "scripts": {
+    "check": "node ./bin/vsr.mjs --help && node --test ./test/config.test.mjs",
+    "postinstall": "node ./scripts/postinstall.mjs"
+  }
+}

@@ -12,7 +12,7 @@ readme = "../../README.md"
 
 [features]
 default = []
-codegen = ["dep:eon", "dep:heck", "dep:proc-macro2", "dep:quote", "dep:syn"]
+codegen = ["dep:eon", "dep:heck", "dep:proc-macro2", "dep:quote", "dep:syn", "dep:vsr_schema_doc"]
 sqlite = ["sqlx/sqlite"]
 turso-local = ["dep:turso", "sqlite"]
 postgres = ["sqlx/postgres"]
@@ -55,3 +55,4 @@ reqwest.workspace = true
 lettre.workspace = true
 sha2.workspace = true
 hex.workspace = true
+vsr_schema_doc = { workspace = true, optional = true }

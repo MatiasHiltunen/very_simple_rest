@@ -11,6 +11,7 @@ pub mod init;
 pub mod migrate;
 pub mod openapi;
 pub(crate) mod schema;
+pub use schema::render_schema_document;
 pub mod secrets;
 pub mod serve;
 pub mod serve_manager;
