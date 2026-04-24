@@ -29,11 +29,32 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Root npm Workspace
+        run: npm ci
+
       - name: Verify root CLI default
         run: cargo run -- --help
+
+      - name: Verify Rust-To-TypeScript Schema Bindings
+        run: npm run check:vsr-schema
+
+      - name: Verify npm Package Wrapper And Types
+        run: npm run check:vsr-package
+
+      - name: Pack npm package
+        run: |
+          mkdir -p target/npm-pack
+          npm pack --workspace @matiashiltunen/vsr --pack-destination target/npm-pack
 
       - name: Test CLI crate
         run: cargo test -p vsra -- --skip build_server_binary_bridgeboard_supports_clean_room_e2e
@@ -62,8 +83,19 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install Root npm Workspace
+        run: npm ci
 
       - name: Verify tag matches CLI version
         env:
@@ -79,10 +111,17 @@ jobs:
               subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
           )
           cli = next(pkg for pkg in metadata["packages"] if pkg["name"] == "vsra")
+          npm_pkg = json.loads(open("packages/vsr/package.json", "r", encoding="utf-8").read())
           expected = f"vsra-v{cli['version']}"
           actual = os.environ["RELEASE_TAG"]
           if actual != expected:
               print(f"tag mismatch: expected {expected}, got {actual}", file=sys.stderr)
+              sys.exit(1)
+          if npm_pkg["version"] != cli["version"]:
+              print(
+                  f"npm version mismatch: expected {cli['version']}, got {npm_pkg['version']}",
+                  file=sys.stderr,
+              )
               sys.exit(1)
           print(f"publishing {cli['name']} {cli['version']} from {actual}")
           PY
@@ -152,4 +191,23 @@ jobs:
             echo "vsra ${version} already published"
           else
             cargo publish -p vsra --locked
+          fi
+
+      - name: Publish npm package if needed
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is not configured; skipping npm publish"
+            exit 0
+          fi
+
+          version="$(node -p "require('./packages/vsr/package.json').version")"
+
+          if npm view "@matiashiltunen/vsr@${version}" version >/dev/null 2>&1; then
+            echo "@matiashiltunen/vsr ${version} already published"
+          else
+            npm publish --workspace @matiashiltunen/vsr --access public
           fi

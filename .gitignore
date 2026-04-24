@@ -16,6 +16,8 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+node_modules/
+packages/vsr/.native/
 
 # macOS files
 .DS_Store
