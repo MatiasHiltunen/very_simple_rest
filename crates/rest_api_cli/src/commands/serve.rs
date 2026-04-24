@@ -24,7 +24,7 @@ use rest_macro_core::database::{
     DatabaseConfig, DatabaseEngine, prepare_database_engine, resolve_database_config,
     resolve_database_url, service_base_dir_from_config_path,
 };
-use rest_macro_core::db::{DbPool, Query, query, query_scalar};
+use rest_macro_core::db::{DbExecutor, DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
 use rest_macro_core::storage::{
@@ -34,7 +34,7 @@ use rest_macro_core::storage::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sqlx::Row;
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
@@ -561,14 +561,46 @@ struct DynamicResource {
     create_fields: Vec<CreateFieldRule>,
     update_field_names: Vec<String>,
     actions: Vec<DynamicResourceAction>,
+    audit: Option<DynamicAuditConfig>,
+    is_audit_sink: bool,
     read_requires_auth: bool,
     hybrid: Option<HybridResourceConfig>,
     nested_relations: Vec<NestedRoute>,
     many_to_many_routes: Vec<ManyToManyRoute>,
 }
 
+#[derive(Clone)]
+struct DynamicAuditConfig {
+    sink_table_name: String,
+    create: bool,
+    update: bool,
+    delete: bool,
+    actions: Option<compiler::ResourceAuditActionSelection>,
+}
+
 impl DynamicResource {
     fn from_spec(spec: ResourceSpec, service: &ServiceSpec) -> anyhow::Result<Self> {
+        let audit = spec
+            .audit
+            .as_ref()
+            .map(|config| -> anyhow::Result<DynamicAuditConfig> {
+                let sink = service
+                    .resources
+                    .iter()
+                    .find(|candidate| {
+                        candidate.struct_ident == config.resource
+                            || candidate.table_name == config.resource
+                    })
+                    .ok_or_else(|| anyhow!("audit sink `{}` was not found", config.resource))?;
+                Ok(DynamicAuditConfig {
+                    sink_table_name: sink.table_name.clone(),
+                    create: config.create,
+                    update: config.update,
+                    delete: config.delete,
+                    actions: config.actions.clone(),
+                })
+            })
+            .transpose()?;
         let id_api_name = spec
             .find_field(spec.id_field.as_str())
             .map(|field| field.api_name().to_owned())
@@ -660,6 +692,7 @@ impl DynamicResource {
                     })
             })
             .collect();
+        let is_audit_sink = compiler::is_audit_sink_resource(&spec, &service.resources);
 
         Ok(Self {
             read_requires_auth: compiler::read_requires_auth(&spec),
@@ -683,6 +716,8 @@ impl DynamicResource {
             create_fields,
             update_field_names,
             actions,
+            audit,
+            is_audit_sink,
             hybrid,
             nested_relations,
             many_to_many_routes,
@@ -753,6 +788,38 @@ impl DynamicResource {
             AuthorizationAction::Update => self.roles.update.as_deref(),
             AuthorizationAction::Delete => self.roles.delete.as_deref(),
         }
+    }
+}
+
+impl DynamicAuditConfig {
+    fn create_event_kind(&self) -> Option<&'static str> {
+        self.create.then_some("create")
+    }
+
+    fn update_event_kind(&self, action_name: Option<&str>) -> Option<String> {
+        if let Some(action_name) = action_name
+            && self
+                .actions
+                .as_ref()
+                .is_some_and(|selection| selection.audits_action(action_name))
+        {
+            return Some(format!("action:{action_name}"));
+        }
+
+        self.update.then(|| "update".to_owned())
+    }
+
+    fn delete_event_kind(&self, action_name: Option<&str>) -> Option<String> {
+        if let Some(action_name) = action_name
+            && self
+                .actions
+                .as_ref()
+                .is_some_and(|selection| selection.audits_action(action_name))
+        {
+            return Some(format!("action:{action_name}"));
+        }
+
+        self.delete.then(|| "delete".to_owned())
     }
 }
 
@@ -899,6 +966,7 @@ struct ManyToManyRoute {
 
 #[derive(Clone)]
 struct DynamicResourceAction {
+    name: String,
     path: String,
     behavior: DynamicResourceActionBehavior,
 }
@@ -914,6 +982,7 @@ enum DynamicResourceActionBehavior {
 impl DynamicResourceAction {
     fn from_spec(spec: &compiler::ResourceActionSpec) -> anyhow::Result<Self> {
         Ok(Self {
+            name: spec.name.clone(),
             path: spec.path.clone(),
             behavior: match &spec.behavior {
                 compiler::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
@@ -1102,24 +1171,24 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
     let item_path = format!("/{}/{{id}}", resource.api_name);
 
     let list_resource = resource.clone();
-    let create_resource = resource.clone();
-    let collection = web::resource(collection_path)
-        .route(if resource.read_requires_auth {
-            web::get().to(
-                move |req: HttpRequest, user: UserContext, state: web::Data<NativeServeState>| {
-                    let resource = list_resource.clone();
-                    async move { list_handler(req, Some(user), state, resource, None).await }
-                },
-            )
-        } else {
-            web::get().to(
-                move |req: HttpRequest, state: web::Data<NativeServeState>| {
-                    let resource = list_resource.clone();
-                    async move { list_handler(req, None, state, resource, None).await }
-                },
-            )
-        })
-        .route(web::post().to(
+    let mut collection = web::resource(collection_path).route(if resource.read_requires_auth {
+        web::get().to(
+            move |req: HttpRequest, user: UserContext, state: web::Data<NativeServeState>| {
+                let resource = list_resource.clone();
+                async move { list_handler(req, Some(user), state, resource, None).await }
+            },
+        )
+    } else {
+        web::get().to(
+            move |req: HttpRequest, state: web::Data<NativeServeState>| {
+                let resource = list_resource.clone();
+                async move { list_handler(req, None, state, resource, None).await }
+            },
+        )
+    });
+    if !resource.is_audit_sink {
+        let create_resource = resource.clone();
+        collection = collection.route(web::post().to(
             move |req: HttpRequest,
                   item: web::Json<Map<String, Value>>,
                   user: UserContext,
@@ -1128,14 +1197,12 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
                 async move { create_handler(req, item.into_inner(), user, state, resource).await }
             },
         ));
+    }
     cfg.service(collection);
 
     let get_resource = resource.clone();
-    let update_resource = resource.clone();
-    let delete_resource = resource.clone();
-    let item = web::resource(item_path)
-        .route(if resource.read_requires_auth {
-            web::get().to(
+    let mut item = web::resource(item_path).route(if resource.read_requires_auth {
+        web::get().to(
                 move |path: web::Path<i64>,
                       req: HttpRequest,
                       user: UserContext,
@@ -1146,17 +1213,18 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
                     }
                 },
             )
-        } else {
-            web::get().to(
-                move |path: web::Path<i64>,
-                      req: HttpRequest,
-                      state: web::Data<NativeServeState>| {
-                    let resource = get_resource.clone();
-                    async move { get_handler(path.into_inner(), req, None, state, resource).await }
-                },
-            )
-        })
-        .route(web::put().to(
+    } else {
+        web::get().to(
+            move |path: web::Path<i64>, req: HttpRequest, state: web::Data<NativeServeState>| {
+                let resource = get_resource.clone();
+                async move { get_handler(path.into_inner(), req, None, state, resource).await }
+            },
+        )
+    });
+    if !resource.is_audit_sink {
+        let update_resource = resource.clone();
+        let delete_resource = resource.clone();
+        item = item.route(web::put().to(
             move |path: web::Path<i64>,
                   item: web::Json<Map<String, Value>>,
                   user: UserContext,
@@ -1167,13 +1235,14 @@ fn register_resource(cfg: &mut web::ServiceConfig, resource: Arc<DynamicResource
                         .await
                 }
             },
-        ))
-        .route(web::delete().to(
+        ));
+        item = item.route(web::delete().to(
             move |path: web::Path<i64>, user: UserContext, state: web::Data<NativeServeState>| {
                 let resource = delete_resource.clone();
                 async move { delete_handler(path.into_inner(), user, state, resource).await }
             },
         ));
+    }
     cfg.service(item);
 
     for action in &resource.actions {
@@ -3974,6 +4043,17 @@ async fn fetch_unfiltered_by_id(
     state: &NativeServeState,
     id: i64,
 ) -> Result<Option<Value>, HttpResponse> {
+    fetch_unfiltered_by_id_with_executor(resource, &state.pool, id).await
+}
+
+async fn fetch_unfiltered_by_id_with_executor<E>(
+    resource: &DynamicResource,
+    executor: &E,
+    id: i64,
+) -> Result<Option<Value>, HttpResponse>
+where
+    E: DbExecutor + ?Sized,
+{
     let sql = format!(
         "SELECT * FROM {} WHERE {} = {}",
         resource.table_name,
@@ -3982,12 +4062,77 @@ async fn fetch_unfiltered_by_id(
     );
     let row = query(&sql)
         .bind(id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(executor)
         .await
         .map_err(|error| errors::internal_error(error.to_string()))?;
     row.map(|row| row_to_json(resource, &row))
         .transpose()
         .map_err(|error| errors::internal_error(error.to_string()))
+}
+
+fn audit_actor_user_id(user: &UserContext) -> Option<i64> {
+    (user.id != 0).then_some(user.id)
+}
+
+fn audit_payload_json(
+    before: Option<&Value>,
+    after: Option<&Value>,
+) -> Result<String, HttpResponse> {
+    serde_json::to_string(&match (before, after) {
+        (Some(before), Some(after)) => json!({
+            "before": before,
+            "after": after,
+        }),
+        (Some(before), None) => json!({
+            "before": before,
+        }),
+        (None, Some(after)) => json!({
+            "after": after,
+        }),
+        (None, None) => json!({}),
+    })
+    .map_err(|error| errors::internal_error(error.to_string()))
+}
+
+async fn insert_audit_event<E>(
+    resource: &DynamicResource,
+    executor: &E,
+    user: &UserContext,
+    event_kind: &str,
+    record_id: i64,
+    before: Option<&Value>,
+    after: Option<&Value>,
+) -> Result<(), HttpResponse>
+where
+    E: DbExecutor + ?Sized,
+{
+    let Some(audit) = resource.audit.as_ref() else {
+        return Ok(());
+    };
+    let payload_json = audit_payload_json(before, after)?;
+    let actor_roles_json = serde_json::to_string(&user.roles)
+        .map_err(|error| errors::internal_error(error.to_string()))?;
+    let sql = format!(
+        "INSERT INTO {} (event_kind, resource_name, record_id, actor_user_id, actor_roles_json, payload_json) VALUES ({}, {}, {}, {}, {}, {})",
+        audit.sink_table_name,
+        placeholder(resource.db, 1),
+        placeholder(resource.db, 2),
+        placeholder(resource.db, 3),
+        placeholder(resource.db, 4),
+        placeholder(resource.db, 5),
+        placeholder(resource.db, 6),
+    );
+    query(&sql)
+        .bind(event_kind)
+        .bind(resource.resource_name.as_str())
+        .bind(record_id)
+        .bind(audit_actor_user_id(user))
+        .bind(actor_roles_json)
+        .bind(payload_json)
+        .execute(executor)
+        .await
+        .map_err(|error| errors::internal_error(error.to_string()))?;
+    Ok(())
 }
 
 async fn fetch_readable_by_id(
@@ -4240,7 +4385,113 @@ async fn create_handler(
         Err(response) => return response,
     }
 
-    let created_id = if insert_fields.is_empty() {
+    let created_id = if let Some(event_kind) = resource
+        .audit
+        .as_ref()
+        .and_then(DynamicAuditConfig::create_event_kind)
+    {
+        let tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => return errors::internal_error(error.to_string()),
+        };
+        let created_id = if insert_fields.is_empty() {
+            if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
+                let sql = format!(
+                    "INSERT INTO {} DEFAULT VALUES RETURNING {}",
+                    resource.table_name, resource.id_field
+                );
+                match query_scalar::<sqlx::Any, i64>(&sql).fetch_one(&tx).await {
+                    Ok(id) => Some(id),
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return errors::internal_error(error.to_string());
+                    }
+                }
+            } else {
+                let sql = format!("INSERT INTO {} DEFAULT VALUES", resource.table_name);
+                match query(&sql).execute(&tx).await {
+                    Ok(result) => result.last_insert_rowid(),
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return errors::internal_error(error.to_string());
+                    }
+                }
+            }
+        } else {
+            let placeholders = (1..=insert_fields.len())
+                .map(|index| placeholder(resource.db, index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let field_sql = insert_fields.join(", ");
+            if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+                    resource.table_name, field_sql, placeholders, resource.id_field
+                );
+                let mut insert_query = query_scalar::<sqlx::Any, i64>(&sql);
+                for value in &insert_values {
+                    insert_query = bind_scalar_query(insert_query, value);
+                }
+                match insert_query.fetch_one(&tx).await {
+                    Ok(id) => Some(id),
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return errors::internal_error(error.to_string());
+                    }
+                }
+            } else {
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    resource.table_name, field_sql, placeholders
+                );
+                let mut insert_query = query(&sql);
+                for value in &insert_values {
+                    insert_query = bind_query(insert_query, value);
+                }
+                match insert_query.execute(&tx).await {
+                    Ok(result) => result.last_insert_rowid(),
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return errors::internal_error(error.to_string());
+                    }
+                }
+            }
+        };
+
+        let Some(created_id) = created_id else {
+            let _ = tx.rollback().await;
+            return errors::internal_error("created row id was not returned");
+        };
+        let after = match fetch_unfiltered_by_id_with_executor(&resource, &tx, created_id).await {
+            Ok(Some(after)) => after,
+            Ok(None) => {
+                let _ = tx.rollback().await;
+                return errors::internal_error("created row could not be reloaded for audit");
+            }
+            Err(response) => {
+                let _ = tx.rollback().await;
+                return response;
+            }
+        };
+        if let Err(response) = insert_audit_event(
+            &resource,
+            &tx,
+            &user,
+            event_kind,
+            created_id,
+            None,
+            Some(&after),
+        )
+        .await
+        {
+            let _ = tx.rollback().await;
+            return response;
+        }
+        if let Err(error) = tx.commit().await {
+            return errors::internal_error(error.to_string());
+        }
+        Some(created_id)
+    } else if insert_fields.is_empty() {
         if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
             let sql = format!(
                 "INSERT INTO {} DEFAULT VALUES RETURNING {}",
@@ -4377,6 +4628,21 @@ async fn update_handler(
             value,
         });
     }
+    if let Some(event_kind) = resource
+        .audit
+        .as_ref()
+        .and_then(|audit| audit.update_event_kind(None))
+    {
+        return audited_execute_update_assignments(
+            id,
+            &user,
+            &state,
+            &resource,
+            assignments,
+            event_kind,
+        )
+        .await;
+    }
     execute_update_assignments(id, &user, &state, &resource, assignments).await
 }
 
@@ -4401,9 +4667,31 @@ async fn action_handler(
                 Ok(assignments) => assignments,
                 Err(response) => return response,
             };
+            if let Some(event_kind) = resource
+                .audit
+                .as_ref()
+                .and_then(|audit| audit.update_event_kind(Some(action.name.as_str())))
+            {
+                return audited_execute_update_assignments(
+                    id,
+                    &user,
+                    &state,
+                    &resource,
+                    assignments,
+                    event_kind,
+                )
+                .await;
+            }
             execute_update_assignments(id, &user, &state, &resource, assignments).await
         }
         DynamicResourceActionBehavior::DeleteResource => {
+            if let Some(event_kind) = resource
+                .audit
+                .as_ref()
+                .and_then(|audit| audit.delete_event_kind(Some(action.name.as_str())))
+            {
+                return audited_delete_handler(id, user, state, resource, event_kind).await;
+            }
             delete_handler(id, user, state, resource).await
         }
     }
@@ -4438,6 +4726,238 @@ fn action_update_assignments(
     }
 
     Ok(assignments)
+}
+
+async fn audited_execute_update_assignments(
+    id: i64,
+    user: &UserContext,
+    state: &NativeServeState,
+    resource: &DynamicResource,
+    assignments: Vec<UpdateAssignment>,
+    event_kind: String,
+) -> HttpResponse {
+    if assignments.is_empty() {
+        return errors::bad_request("no_updatable_fields", "No updatable fields configured");
+    }
+
+    let mut assignment_sql = Vec::new();
+    let mut write_binds = Vec::new();
+    for assignment in &assignments {
+        assignment_sql.push(format!(
+            "{} = {}",
+            assignment.field_name,
+            placeholder(resource.db, write_binds.len() + 1)
+        ));
+        write_binds.push(assignment.value.clone());
+    }
+    for field in &resource.fields {
+        if field.generated == GeneratedValue::UpdatedAt {
+            assignment_sql.push(format!(
+                "{} = {}",
+                field.name,
+                generated_temporal_expression(resource.db, field)
+            ));
+        }
+    }
+
+    let assignment_sql_joined = assignment_sql.join(", ");
+    let policy = resource.policies.update.as_ref();
+    let mut sql = format!(
+        "UPDATE {} SET {} WHERE {} = {}",
+        resource.table_name,
+        assignment_sql_joined,
+        resource.id_field,
+        placeholder(resource.db, write_binds.len() + 1),
+    );
+    let mut binds = write_binds.clone();
+    if let Some(policy) = policy
+        && !(resource.policies.admin_bypass && is_admin(user))
+    {
+        match build_row_policy_plan(resource, state.dynamic_service.as_ref(), policy, user)
+            .map_err(|error| errors::internal_error(error.to_string()))
+        {
+            Ok(PlanOutcome::Resolved(plan)) => {
+                sql.push_str(" AND ");
+                sql.push_str(
+                    render_condition_with_placeholders(
+                        plan.condition.as_str(),
+                        resource.db,
+                        write_binds.len() + 2,
+                    )
+                    .as_str(),
+                );
+                binds.push(BoundValue::Integer(id));
+                binds.extend(plan.binds);
+            }
+            Ok(PlanOutcome::Indeterminate) => {
+                return audited_update_hybrid_fallback(
+                    id,
+                    user,
+                    state,
+                    resource,
+                    assignment_sql_joined,
+                    write_binds,
+                    event_kind,
+                )
+                .await;
+            }
+            Err(response) => return response,
+        }
+    } else {
+        binds.push(BoundValue::Integer(id));
+    }
+
+    let tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return errors::internal_error(error.to_string()),
+    };
+    let before = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
+        Ok(item) => item,
+        Err(response) => {
+            let _ = tx.rollback().await;
+            return response;
+        }
+    };
+    let mut update_query = query(&sql);
+    for bind in &binds {
+        update_query = bind_query(update_query, bind);
+    }
+    match update_query.execute(&tx).await {
+        Ok(result) if result.rows_affected() == 0 => {
+            let _ = tx.rollback().await;
+            audited_update_hybrid_fallback(
+                id,
+                user,
+                state,
+                resource,
+                assignment_sql_joined,
+                write_binds,
+                event_kind,
+            )
+            .await
+        }
+        Ok(_) => {
+            let after = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
+                Ok(Some(item)) => item,
+                Ok(None) => {
+                    let _ = tx.rollback().await;
+                    return errors::internal_error("updated row could not be reloaded for audit");
+                }
+                Err(response) => {
+                    let _ = tx.rollback().await;
+                    return response;
+                }
+            };
+            if let Err(response) = insert_audit_event(
+                resource,
+                &tx,
+                user,
+                event_kind.as_str(),
+                id,
+                before.as_ref(),
+                Some(&after),
+            )
+            .await
+            {
+                let _ = tx.rollback().await;
+                return response;
+            }
+            if let Err(error) = tx.commit().await {
+                return errors::internal_error(error.to_string());
+            }
+            HttpResponse::Ok().finish()
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            errors::internal_error(error.to_string())
+        }
+    }
+}
+
+async fn audited_update_hybrid_fallback(
+    id: i64,
+    user: &UserContext,
+    state: &NativeServeState,
+    resource: &DynamicResource,
+    assignment_sql: String,
+    assignment_binds: Vec<BoundValue>,
+    event_kind: String,
+) -> HttpResponse {
+    match fetch_hybrid_authorized_by_id(resource, state, user, id, AuthorizationAction::Update)
+        .await
+    {
+        Ok(Some(_)) => {
+            let tx = match state.pool.begin().await {
+                Ok(tx) => tx,
+                Err(error) => return errors::internal_error(error.to_string()),
+            };
+            let before = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
+                Ok(item) => item,
+                Err(response) => {
+                    let _ = tx.rollback().await;
+                    return response;
+                }
+            };
+            let sql = format!(
+                "UPDATE {} SET {} WHERE {} = {}",
+                resource.table_name,
+                assignment_sql,
+                resource.id_field,
+                placeholder(resource.db, assignment_binds.len() + 1),
+            );
+            let mut update_query = query(&sql);
+            for bind in &assignment_binds {
+                update_query = bind_query(update_query, bind);
+            }
+            update_query = update_query.bind(id);
+            match update_query.execute(&tx).await {
+                Ok(result) if result.rows_affected() == 0 => {
+                    let _ = tx.rollback().await;
+                    errors::not_found("Not found")
+                }
+                Ok(_) => {
+                    let after = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await
+                    {
+                        Ok(Some(item)) => item,
+                        Ok(None) => {
+                            let _ = tx.rollback().await;
+                            return errors::internal_error(
+                                "updated row could not be reloaded for audit",
+                            );
+                        }
+                        Err(response) => {
+                            let _ = tx.rollback().await;
+                            return response;
+                        }
+                    };
+                    if let Err(response) = insert_audit_event(
+                        resource,
+                        &tx,
+                        user,
+                        event_kind.as_str(),
+                        id,
+                        before.as_ref(),
+                        Some(&after),
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return response;
+                    }
+                    if let Err(error) = tx.commit().await {
+                        return errors::internal_error(error.to_string());
+                    }
+                    HttpResponse::Ok().finish()
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    errors::internal_error(error.to_string())
+                }
+            }
+        }
+        Ok(None) => errors::not_found("Not found"),
+        Err(response) => response,
+    }
 }
 
 async fn execute_update_assignments(
@@ -4573,6 +5093,226 @@ async fn update_hybrid_fallback(
     }
 }
 
+async fn audited_delete_handler(
+    id: i64,
+    user: UserContext,
+    state: web::Data<NativeServeState>,
+    resource: Arc<DynamicResource>,
+    event_kind: String,
+) -> HttpResponse {
+    if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Delete))
+    {
+        return response;
+    }
+    if resource.policies.delete.is_none() || (resource.policies.admin_bypass && is_admin(&user)) {
+        let tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => return errors::internal_error(error.to_string()),
+        };
+        let before = match fetch_unfiltered_by_id_with_executor(&resource, &tx, id).await {
+            Ok(Some(item)) => item,
+            Ok(None) => {
+                let _ = tx.rollback().await;
+                return errors::not_found("Not found");
+            }
+            Err(response) => {
+                let _ = tx.rollback().await;
+                return response;
+            }
+        };
+        let sql = format!(
+            "DELETE FROM {} WHERE {} = {}",
+            resource.table_name,
+            resource.id_field,
+            placeholder(resource.db, 1),
+        );
+        match query(&sql).bind(id).execute(&tx).await {
+            Ok(result) if result.rows_affected() == 0 => {
+                let _ = tx.rollback().await;
+                errors::not_found("Not found")
+            }
+            Ok(_) => {
+                if let Err(response) = insert_audit_event(
+                    &resource,
+                    &tx,
+                    &user,
+                    event_kind.as_str(),
+                    id,
+                    Some(&before),
+                    None,
+                )
+                .await
+                {
+                    let _ = tx.rollback().await;
+                    return response;
+                }
+                if let Err(error) = tx.commit().await {
+                    return errors::internal_error(error.to_string());
+                }
+                HttpResponse::Ok().finish()
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                errors::internal_error(error.to_string())
+            }
+        }
+    } else {
+        match build_row_policy_plan(
+            &resource,
+            state.dynamic_service.as_ref(),
+            resource
+                .policies
+                .delete
+                .as_ref()
+                .expect("delete policy checked"),
+            &user,
+        )
+        .map_err(|error| errors::internal_error(error.to_string()))
+        {
+            Ok(PlanOutcome::Resolved(plan)) => {
+                let tx = match state.pool.begin().await {
+                    Ok(tx) => tx,
+                    Err(error) => return errors::internal_error(error.to_string()),
+                };
+                let before = match fetch_unfiltered_by_id_with_executor(&resource, &tx, id).await {
+                    Ok(item) => item,
+                    Err(response) => {
+                        let _ = tx.rollback().await;
+                        return response;
+                    }
+                };
+                let sql = format!(
+                    "DELETE FROM {} WHERE {} = {} AND {}",
+                    resource.table_name,
+                    resource.id_field,
+                    placeholder(resource.db, 1),
+                    render_condition_with_placeholders(plan.condition.as_str(), resource.db, 2),
+                );
+                let mut delete_query = query(&sql).bind(id);
+                for bind in &plan.binds {
+                    delete_query = bind_query(delete_query, bind);
+                }
+                match delete_query.execute(&tx).await {
+                    Ok(result) if result.rows_affected() == 0 => {
+                        let _ = tx.rollback().await;
+                        audited_delete_hybrid_fallback(
+                            id,
+                            &user,
+                            state.get_ref(),
+                            &resource,
+                            event_kind,
+                        )
+                        .await
+                    }
+                    Ok(_) => {
+                        let Some(before) = before else {
+                            let _ = tx.rollback().await;
+                            return errors::internal_error(
+                                "deleted row could not be reloaded for audit",
+                            );
+                        };
+                        if let Err(response) = insert_audit_event(
+                            &resource,
+                            &tx,
+                            &user,
+                            event_kind.as_str(),
+                            id,
+                            Some(&before),
+                            None,
+                        )
+                        .await
+                        {
+                            let _ = tx.rollback().await;
+                            return response;
+                        }
+                        if let Err(error) = tx.commit().await {
+                            return errors::internal_error(error.to_string());
+                        }
+                        HttpResponse::Ok().finish()
+                    }
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        errors::internal_error(error.to_string())
+                    }
+                }
+            }
+            Ok(PlanOutcome::Indeterminate) => {
+                audited_delete_hybrid_fallback(id, &user, state.get_ref(), &resource, event_kind)
+                    .await
+            }
+            Err(response) => response,
+        }
+    }
+}
+
+async fn audited_delete_hybrid_fallback(
+    id: i64,
+    user: &UserContext,
+    state: &NativeServeState,
+    resource: &DynamicResource,
+    event_kind: String,
+) -> HttpResponse {
+    match fetch_hybrid_authorized_by_id(resource, state, user, id, AuthorizationAction::Delete)
+        .await
+    {
+        Ok(Some(_)) => {
+            let tx = match state.pool.begin().await {
+                Ok(tx) => tx,
+                Err(error) => return errors::internal_error(error.to_string()),
+            };
+            let before = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
+                Ok(Some(item)) => item,
+                Ok(None) => {
+                    let _ = tx.rollback().await;
+                    return errors::not_found("Not found");
+                }
+                Err(response) => {
+                    let _ = tx.rollback().await;
+                    return response;
+                }
+            };
+            let sql = format!(
+                "DELETE FROM {} WHERE {} = {}",
+                resource.table_name,
+                resource.id_field,
+                placeholder(resource.db, 1)
+            );
+            match query(&sql).bind(id).execute(&tx).await {
+                Ok(result) if result.rows_affected() == 0 => {
+                    let _ = tx.rollback().await;
+                    errors::not_found("Not found")
+                }
+                Ok(_) => {
+                    if let Err(response) = insert_audit_event(
+                        resource,
+                        &tx,
+                        user,
+                        event_kind.as_str(),
+                        id,
+                        Some(&before),
+                        None,
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return response;
+                    }
+                    if let Err(error) = tx.commit().await {
+                        return errors::internal_error(error.to_string());
+                    }
+                    HttpResponse::Ok().finish()
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    errors::internal_error(error.to_string())
+                }
+            }
+        }
+        Ok(None) => errors::not_found("Not found"),
+        Err(response) => response,
+    }
+}
+
 async fn delete_handler(
     id: i64,
     user: UserContext,
@@ -4582,6 +5322,13 @@ async fn delete_handler(
     if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Delete))
     {
         return response;
+    }
+    if let Some(event_kind) = resource
+        .audit
+        .as_ref()
+        .and_then(|audit| audit.delete_event_kind(None))
+    {
+        return audited_delete_handler(id, user, state, resource, event_kind).await;
     }
     if resource.policies.delete.is_none() || (resource.policies.admin_bypass && is_admin(&user)) {
         let sql = format!(
@@ -4834,6 +5581,106 @@ mod tests {
         .execute(pool)
         .await
         .expect("interest seed data should insert");
+    }
+
+    #[actix_web::test]
+    async fn native_serve_writes_audit_events_and_keeps_sink_read_only() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+        }
+        let (dynamic_service, state) = build_test_state("audit_events_api.eon", false).await;
+
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+        )
+        .await;
+        let user_token = issue_token(7, &["user"]);
+        let admin_token = issue_token(1, &["admin"]);
+
+        let create_request = test::TestRequest::post()
+            .uri("/api/posts")
+            .insert_header(("Authorization", format!("Bearer {}", user_token.as_str())))
+            .set_json(json!({
+                "title": "First title"
+            }))
+            .to_request();
+        let create_response = test::call_service(&app, create_request).await;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let update_request = test::TestRequest::put()
+            .uri("/api/posts/1")
+            .insert_header(("Authorization", format!("Bearer {}", user_token.as_str())))
+            .set_json(json!({
+                "title": "Updated title"
+            }))
+            .to_request();
+        let update_response = test::call_service(&app, update_request).await;
+        assert_eq!(update_response.status(), StatusCode::OK);
+
+        let delete_request = test::TestRequest::delete()
+            .uri("/api/posts/1")
+            .insert_header(("Authorization", format!("Bearer {}", user_token.as_str())))
+            .to_request();
+        let delete_response = test::call_service(&app, delete_request).await;
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        let audit_rows = query(
+            "SELECT event_kind, resource_name, actor_user_id, payload_json FROM audit_event ORDER BY id",
+        )
+        .fetch_all(&state.pool)
+        .await
+        .expect("audit rows should query");
+        let event_kinds = audit_rows
+            .iter()
+            .map(|row| {
+                row.try_get::<String, _>("event_kind")
+                    .expect("event kind should decode")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(event_kinds, vec!["create", "update", "delete"]);
+        assert!(audit_rows.iter().all(|row| {
+            row.try_get::<String, _>("resource_name")
+                .map(|value| value == "Post")
+                .unwrap_or(false)
+        }));
+        assert!(audit_rows.iter().all(|row| {
+            row.try_get::<i64, _>("actor_user_id")
+                .map(|value| value == 7)
+                .unwrap_or(false)
+        }));
+
+        let update_payload: Value = serde_json::from_str(
+            &audit_rows[1]
+                .try_get::<String, _>("payload_json")
+                .expect("update payload should decode"),
+        )
+        .expect("update payload should parse");
+        assert_eq!(update_payload["before"]["title"], "First title");
+        assert_eq!(update_payload["after"]["title"], "Updated title");
+
+        let create_sink_request = test::TestRequest::post()
+            .uri("/api/audit-events")
+            .insert_header(("Authorization", format!("Bearer {}", admin_token.as_str())))
+            .set_json(json!({
+                "event_kind": "manual"
+            }))
+            .to_request();
+        let create_sink_response = test::call_service(&app, create_sink_request).await;
+        assert_eq!(
+            create_sink_response.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+
+        let list_sink_request = test::TestRequest::get()
+            .uri("/api/audit-events")
+            .insert_header(("Authorization", format!("Bearer {}", admin_token.as_str())))
+            .to_request();
+        let list_sink_response = test::call_service(&app, list_sink_request).await;
+        assert_eq!(list_sink_response.status(), StatusCode::OK);
+        let list_sink_body: Value = test::read_body_json(list_sink_response).await;
+        assert_eq!(list_sink_body["count"], 3);
     }
 
     #[actix_web::test]

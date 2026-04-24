@@ -7,8 +7,8 @@ use crate::{auth::AuthClaimType, security::DEFAULT_ANON_CLIENT_HEADER_NAME};
 
 use super::model::{
     ComputedFieldSpec, FieldSpec, GeneratedValue, PolicyValueSource, ResourceActionMethod,
-    ResourceActionTarget, ResourceSpec, ServiceSpec, is_list_field, is_optional_type,
-    is_typed_object_field, list_item_type, object_fields, read_requires_auth,
+    ResourceActionTarget, ResourceSpec, ServiceSpec, is_audit_sink_resource, is_list_field,
+    is_optional_type, is_typed_object_field, list_item_type, object_fields, read_requires_auth,
     structured_scalar_kind, supports_contains_filters, supports_exact_filters, supports_field_sort,
     supports_range_filters,
 };
@@ -82,6 +82,7 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
     }
 
     for resource in &service.resources {
+        let is_audit_sink = is_audit_sink_resource(resource, &service.resources);
         let name = resource_name(resource);
         schemas.insert(name.clone(), response_object_schema(resource));
         schemas.insert(format!("{name}Create"), create_payload_schema(resource));
@@ -96,11 +97,11 @@ fn render_service_openapi_value(service: &ServiceSpec, options: &OpenApiSpecOpti
 
         paths.insert(
             format!("/{}", resource.api_name()),
-            collection_path_item(resource),
+            collection_path_item(resource, is_audit_sink),
         );
         paths.insert(
             format!("/{}/{{id}}", resource.api_name()),
-            item_path_item(resource),
+            item_path_item(resource, is_audit_sink),
         );
         for action in &resource.actions {
             if action.target != ResourceActionTarget::Item
@@ -264,7 +265,7 @@ fn storage_upload_path_item(upload: &crate::storage::StorageUploadEndpoint) -> V
     })
 }
 
-fn collection_path_item(resource: &ResourceSpec) -> Value {
+fn collection_path_item(resource: &ResourceSpec, is_audit_sink: bool) -> Value {
     let mut get = json!({
         "tags": [resource_name(resource)],
         "summary": format!("List {}", resource_name(resource)),
@@ -275,25 +276,28 @@ fn collection_path_item(resource: &ResourceSpec) -> Value {
     if read_requires_auth(resource) {
         get["security"] = bearer_security();
     }
-    let mut post = json!({
-        "tags": [resource_name(resource)],
-        "summary": format!("Create {}", resource_name(resource)),
-        "operationId": format!("create{}", resource_name(resource)),
-        "security": bearer_security(),
-        "requestBody": json_request_body(format!("{}Create", resource_name(resource))),
-        "responses": create_responses(),
+    let mut path = json!({
+        "get": get,
     });
-    if let Some(parameter) = response_context_parameter(resource) {
-        post["parameters"] = json!([parameter]);
+    if !is_audit_sink {
+        let mut post = json!({
+            "tags": [resource_name(resource)],
+            "summary": format!("Create {}", resource_name(resource)),
+            "operationId": format!("create{}", resource_name(resource)),
+            "security": bearer_security(),
+            "requestBody": json_request_body(format!("{}Create", resource_name(resource))),
+            "responses": create_responses(),
+        });
+        if let Some(parameter) = response_context_parameter(resource) {
+            post["parameters"] = json!([parameter]);
+        }
+        path["post"] = post;
     }
 
-    json!({
-        "get": get,
-        "post": post,
-    })
+    path
 }
 
-fn item_path_item(resource: &ResourceSpec) -> Value {
+fn item_path_item(resource: &ResourceSpec, is_audit_sink: bool) -> Value {
     let id_description = resource
         .find_field(resource.id_field.as_str())
         .map(|field| field.api_name())
@@ -314,9 +318,11 @@ fn item_path_item(resource: &ResourceSpec) -> Value {
         get["security"] = bearer_security();
     }
 
-    json!({
+    let mut path = json!({
         "get": get,
-        "put": {
+    });
+    if !is_audit_sink {
+        path["put"] = json!({
             "tags": [resource_name(resource)],
             "summary": format!("Update {}", resource_name(resource)),
             "operationId": format!("update{}", resource_name(resource)),
@@ -324,16 +330,18 @@ fn item_path_item(resource: &ResourceSpec) -> Value {
             "security": bearer_security(),
             "requestBody": json_request_body(format!("{}Update", resource_name(resource))),
             "responses": update_responses(),
-        },
-        "delete": {
+        });
+        path["delete"] = json!({
             "tags": [resource_name(resource)],
             "summary": format!("Delete {}", resource_name(resource)),
             "operationId": format!("delete{}", resource_name(resource)),
             "parameters": [id_parameter],
             "security": bearer_security(),
             "responses": delete_responses(),
-        },
-    })
+        });
+    }
+
+    path
 }
 
 fn item_action_path_item(

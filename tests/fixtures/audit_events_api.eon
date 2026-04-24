@@ -1,0 +1,38 @@
+resources: [
+    {
+        name: "Post"
+        api_name: "posts"
+        access: {
+            read: public
+        }
+        audit: {
+            resource: "AuditEvent"
+            create: true
+            update: true
+            delete: true
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+            { name: "created_at", type: String }
+            { name: "updated_at", type: String }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        api_name: "audit-events"
+        roles: {
+            read: "admin"
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "event_kind", type: String }
+            { name: "resource_name", type: String }
+            { name: "record_id", type: I64 }
+            { name: "actor_user_id", type: I64, nullable: true }
+            { name: "actor_roles_json", type: String }
+            { name: "payload_json", type: String }
+            { name: "created_at", type: String }
+        ]
+    }
+]

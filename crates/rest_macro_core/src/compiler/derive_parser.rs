@@ -207,6 +207,7 @@ pub fn parse_derive_input(input: DeriveInput) -> syn::Result<ResourceSpec> {
         indexes: Vec::new(),
         many_to_many: Vec::new(),
         actions: Vec::new(),
+        audit: None,
         computed_fields: Vec::new(),
         fields: parsed_fields,
         write_style: WriteModelStyle::ExistingStructWithDtos,

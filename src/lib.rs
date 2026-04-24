@@ -241,8 +241,8 @@ pub mod database {
 
 pub mod db {
     pub use rest_macro_core::db::{
-        DbPool, DbQueryResult, DbTransaction, IntoDbValue, connect, connect_with_config, query,
-        query_as, query_scalar,
+        DbExecutor, DbPool, DbQueryResult, DbTransaction, IntoDbValue, connect,
+        connect_with_config, query, query_as, query_scalar,
     };
 }
 
@@ -300,7 +300,7 @@ pub mod prelude {
     pub use env_logger::Env;
     pub use log::{debug, error, info, trace, warn};
     pub use rest_macro_core::db::{
-        DbPool, connect, connect_with_config, query, query_as, query_scalar,
+        DbExecutor, DbPool, connect, connect_with_config, query, query_as, query_scalar,
     };
     pub use serde::{Deserialize, Serialize};
     pub use sqlx::{AnyPool, FromRow};

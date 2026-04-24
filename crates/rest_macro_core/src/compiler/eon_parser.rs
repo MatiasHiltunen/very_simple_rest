@@ -26,18 +26,19 @@ use super::model::{
     PolicyLiteralValue, PolicyValueSource, RangeValidation, ReferentialAction, ReleaseBuildConfig,
     ResourceAccess, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
     ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec, ResourceActionTarget,
-    ResourceActionValueSpec, ResourceReadAccess, ResourceSpec, ResponseContextSpec,
-    RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec, StaticCacheProfile, StaticMode,
-    StaticMountSpec, TsClientAutomationConfig, TsClientConfig, WriteModelStyle,
-    apply_service_read_access_defaults, default_resource_module_ident, infer_generated_value,
-    infer_sql_type, is_json_array_type, is_json_object_type, is_json_type, is_list_field,
-    is_optional_type, is_typed_object_field, sanitize_module_ident, sanitize_struct_ident,
-    structured_scalar_kind, supports_declared_index, validate_authorization_contract,
-    validate_build_config, validate_clients_config, validate_field_transforms,
-    validate_field_validations, validate_list_config, validate_logging_config,
-    validate_policy_claim_sources, validate_relations, validate_resource_access,
-    validate_row_policies, validate_runtime_config, validate_security_config,
-    validate_sql_identifier, validate_tls_config,
+    ResourceActionValueSpec, ResourceAuditActionSelection, ResourceAuditConfig, ResourceReadAccess,
+    ResourceSpec, ResponseContextSpec, RoleRequirements, RowPolicies, RowPolicyKind, ServiceSpec,
+    StaticCacheProfile, StaticMode, StaticMountSpec, TsClientAutomationConfig, TsClientConfig,
+    WriteModelStyle, apply_service_read_access_defaults, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, is_json_array_type, is_json_object_type, is_json_type,
+    is_list_field, is_optional_type, is_typed_object_field, sanitize_module_ident,
+    sanitize_struct_ident, structured_scalar_kind, supports_declared_index,
+    validate_authorization_contract, validate_build_config, validate_clients_config,
+    validate_field_transforms, validate_field_validations, validate_list_config,
+    validate_logging_config, validate_policy_claim_sources, validate_relations,
+    validate_resource_access, validate_resource_audit, validate_row_policies,
+    validate_runtime_config, validate_security_config, validate_sql_identifier,
+    validate_tls_config,
 };
 use crate::{
     auth::{
@@ -760,6 +761,8 @@ struct ResourceDocument {
     many_to_many: Vec<ManyToManyDocument>,
     #[serde(default)]
     actions: Vec<ResourceActionDocument>,
+    #[serde(default)]
+    audit: Option<ResourceAuditDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
@@ -824,6 +827,27 @@ enum ResourceActionAssignmentValueDocument {
 #[serde(deny_unknown_fields)]
 struct ResourceActionInputValueDocument {
     input: String,
+}
+
+#[derive(Default, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceAuditDocument {
+    resource: String,
+    #[serde(default)]
+    create: bool,
+    #[serde(default)]
+    update: bool,
+    #[serde(default)]
+    delete: bool,
+    #[serde(default)]
+    actions: Option<ResourceAuditActionDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum ResourceAuditActionDocument {
+    Enabled(bool),
+    Named(Vec<String>),
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1167,6 +1191,8 @@ struct ResourceMapValueDocument {
     many_to_many: Vec<ManyToManyDocument>,
     #[serde(default)]
     actions: Vec<ResourceActionDocument>,
+    #[serde(default)]
+    audit: Option<ResourceAuditDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     fields: Vec<FieldDocument>,
 }
@@ -1366,6 +1392,7 @@ impl ResourceMapValueDocument {
             indexes: self.indexes,
             many_to_many: self.many_to_many,
             actions: self.actions,
+            audit: self.audit,
             fields: self.fields,
         })
     }
@@ -2336,6 +2363,7 @@ fn build_resources_with_enums(
             )
         })?;
         let access = parse_resource_access_document(resource.access)?;
+        let audit = parse_resource_audit_document(resource.audit)?;
         let (default_response_context, response_contexts) = build_response_contexts(
             fields.as_slice(),
             computed_fields.as_slice(),
@@ -2368,6 +2396,7 @@ fn build_resources_with_enums(
             indexes,
             many_to_many: Vec::new(),
             actions,
+            audit,
             computed_fields,
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
@@ -2394,6 +2423,7 @@ fn build_resources_with_enums(
         validate_field_transforms(&resource.fields, Span::call_site())?;
         validate_list_config(&resource.list, Span::call_site())?;
         validate_resource_indexes(resource, Span::call_site())?;
+        validate_resource_audit(resource, &result)?;
     }
 
     Ok(result)
@@ -3648,6 +3678,37 @@ fn parse_resource_access_document(document: ResourceAccessDocument) -> syn::Resu
     };
 
     Ok(ResourceAccess { read })
+}
+
+fn parse_resource_audit_document(
+    document: Option<ResourceAuditDocument>,
+) -> syn::Result<Option<ResourceAuditConfig>> {
+    let Some(document) = document else {
+        return Ok(None);
+    };
+
+    let actions = match document.actions {
+        Some(ResourceAuditActionDocument::Enabled(true)) => Some(ResourceAuditActionSelection::All),
+        Some(ResourceAuditActionDocument::Enabled(false)) | None => None,
+        Some(ResourceAuditActionDocument::Named(actions)) => {
+            Some(ResourceAuditActionSelection::Named(actions))
+        }
+    };
+
+    if document.resource.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`resources[].audit.resource` cannot be empty",
+        ));
+    }
+
+    Ok(Some(ResourceAuditConfig {
+        resource: document.resource,
+        create: document.create,
+        update: document.update,
+        delete: document.delete,
+        actions,
+    }))
 }
 
 fn parse_security_access_document(
@@ -7653,6 +7714,114 @@ resources: [
             error
                 .to_string()
                 .contains("requires through field `post_id` on `post_tag` to reference `post.id`")
+        );
+    }
+
+    #[test]
+    fn parses_resource_audit_config_from_eon() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        actions: [
+            {
+                name: "publish"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        status: "published"
+                    }
+                }
+            }
+        ]
+        audit: {
+            resource: "AuditEvent"
+            create: true
+            update: true
+            delete: true
+            actions: ["publish"]
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "status", type: String }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "event_kind", type: String }
+            { name: "resource_name", type: String }
+            { name: "record_id", type: I64 }
+            { name: "actor_user_id", type: I64, nullable: true }
+            { name: "actor_roles_json", type: String }
+            { name: "payload_json", type: String }
+            { name: "created_at", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let resources =
+            build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
+        let post = resources
+            .iter()
+            .find(|resource| resource.struct_ident == "Post")
+            .expect("post resource should exist");
+        let audit = post.audit.as_ref().expect("post audit should exist");
+
+        assert_eq!(audit.resource, "AuditEvent");
+        assert!(audit.create);
+        assert!(audit.update);
+        assert!(audit.delete);
+        assert_eq!(
+            audit.actions,
+            Some(ResourceAuditActionSelection::Named(vec![
+                "publish".to_owned()
+            ]))
+        );
+    }
+
+    #[test]
+    fn rejects_audit_sink_without_required_payload_field() {
+        let document = parse_document(
+            r#"
+resources: [
+    {
+        name: "Post"
+        audit: {
+            resource: "AuditEvent"
+            create: true
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "event_kind", type: String }
+            { name: "resource_name", type: String }
+            { name: "record_id", type: I64 }
+            { name: "actor_user_id", type: I64, nullable: true }
+            { name: "actor_roles_json", type: String }
+            { name: "created_at", type: String }
+        ]
+    }
+]
+"#,
+        );
+        let error = build_resources(DbBackend::Sqlite, document.resources)
+            .expect_err("missing audit payload field should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must declare field `payload_json`"),
+            "unexpected error: {error}"
         );
     }
 
