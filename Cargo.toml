@@ -2,6 +2,7 @@
 members = [ "crates/rest_api_cli",
     "crates/rest_macro",
     "crates/rest_macro_core",
+    "crates/vsr_schema_doc",
     "examples/demo"
 ]
 default-members = ["crates/rest_api_cli"]
@@ -29,6 +30,7 @@ uuid = { version = "1.22", features = ["v4", "serde"] }
 garde = { version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }
 rest_macro = { path = "crates/rest_macro", version = "0.1.11" }
 rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.11" }
+vsr_schema_doc = { path = "crates/vsr_schema_doc", version = "0.1.11" }
 log = "0.4"
 env_logger = "0.11"
 actix-cors = "0.7"

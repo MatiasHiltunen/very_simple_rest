@@ -58,6 +58,21 @@ enum Commands {
         /// Starter style; omit this to get an interactive prompt in a terminal
         #[arg(long, value_enum)]
         starter: Option<commands::init::StarterKind>,
+
+        /// Starter config format
+        #[arg(long, value_enum, default_value_t = commands::init::ProjectFormat::Eon)]
+        format: commands::init::ProjectFormat,
+    },
+
+    #[command(name = "render-schema", hide = true)]
+    RenderSchema {
+        /// Input JSON file; reads stdin when omitted
+        #[arg(short, long, value_name = "FILE")]
+        input: Option<PathBuf>,
+
+        /// Output `.eon` file; writes stdout when omitted
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 
     /// Initialize the API with admin user
@@ -1254,6 +1269,10 @@ enum AuthzHybridSourceArg {
 #[cfg(not(test))]
 async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
+    if let Commands::RenderSchema { input, output } = &cli.command {
+        commands::render_schema_document(input.as_deref(), output.as_deref())?;
+        return Ok(());
+    }
     let config_path = resolve_config_path(cli.config.as_deref())?;
     let skip_cwd_dotenv = matches!(
         &cli.command,
@@ -1289,6 +1308,7 @@ async fn run_cli() -> Result<()> {
             output_dir,
             repository,
             starter,
+            format,
         } => {
             println!("{}", "Initializing new project...".green().bold());
             commands::init::create_project(
@@ -1301,8 +1321,11 @@ async fn run_cli() -> Result<()> {
                 output_dir.clone().unwrap_or_else(|| ".".to_string()),
                 repository.clone(),
                 *starter,
+                *format,
             )?;
         }
+
+        Commands::RenderSchema { .. } => unreachable!("render-schema handled before command setup"),
 
         Commands::Setup {
             non_interactive,
@@ -2882,6 +2905,26 @@ mod tests {
     #[test]
     fn init_command_accepts_starter_flag() {
         assert!(Cli::try_parse_from(["vsr", "init", "demo", "--starter", "minimal"]).is_ok());
+    }
+
+    #[test]
+    fn init_command_accepts_typescript_format() {
+        assert!(Cli::try_parse_from(["vsr", "init", "demo", "--format", "ts"]).is_ok());
+    }
+
+    #[test]
+    fn render_schema_command_accepts_optional_io_paths() {
+        assert!(
+            Cli::try_parse_from([
+                "vsr",
+                "render-schema",
+                "--input",
+                "service.json",
+                "--output",
+                "api.eon",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

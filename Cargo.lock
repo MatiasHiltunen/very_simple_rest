@@ -4438,6 +4438,7 @@ dependencies = [
  "turso",
  "url",
  "uuid",
+ "vsr_schema_doc",
 ]
 
 [[package]]
@@ -5736,6 +5737,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts-rs"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "ts-rs-macros",
+]
+
+[[package]]
+name = "ts-rs-macros"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d90eea51bc7988ef9e674bf80a85ba6804739e535e9cab48e4bb34a8b652aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "termcolor",
+]
+
+[[package]]
 name = "turso"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6126,6 +6150,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
+name = "vsr_schema_doc"
+version = "0.1.11"
+dependencies = [
+ "eon",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
 name = "vsra"
 version = "0.1.11"
 dependencies = [
@@ -6167,6 +6201,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "vsr_schema_doc",
  "windows-sys 0.61.2",
 ]
 

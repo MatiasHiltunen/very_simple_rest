@@ -1,0 +1,16 @@
+[package]
+name = "vsr_schema_doc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Shared schema document model for VSR EON and TypeScript bindings"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+eon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }

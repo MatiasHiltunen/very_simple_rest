@@ -7,6 +7,8 @@ and render machine-scannable docs.
 
 The current center of gravity is the `vsr` CLI and `.eon` services. The derive-based library
 surface still exists, but the maintained docs and examples now prioritize the contract-first flow.
+Typed `vsr.config.ts/js` files are also supported through the npm wrapper, which materializes a
+canonical `api.eon` before delegating to the native CLI.
 
 ## Install
 
@@ -25,8 +27,18 @@ cargo build --release
 ./target/release/vsr --help
 ```
 
-## Quickstart
+### npm Package
 
+Install the TypeScript-first wrapper from npm:
+
+```bash
+npm install --save-dev @matiashiltunen/vsr typescript
+```
+
+The npm package exports generated schema types and a `defineService(...)` helper, loads
+`vsr.config.ts/js`, renders a managed `api.eon`, and then delegates to the native `vsr` binary.
+
+## Quickstart
 
 Use the generated starter:
 
@@ -38,6 +50,17 @@ cd my-api
 cp .env.example .env
 vsr migrate generate --input api.eon --output migrations/0001_init.sql
 vsr serve api.eon
+```
+
+TypeScript-first starter:
+
+```bash
+npx vsr init my-api
+cd my-api
+npm install
+cp .env.example .env
+npx vsr migrate generate --output migrations/0001_init.sql
+npx vsr serve
 ```
 
 That gives you:

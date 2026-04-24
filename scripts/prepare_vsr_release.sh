@@ -68,14 +68,33 @@ sed -i \
   -e "/^\\[workspace.package\\]/,/^\\[/ s/^version = \".*\"$/version = \"$version\"/" \
   -e "s/^rest_macro = { path = \"crates\\/rest_macro\", version = \".*\" }$/rest_macro = { path = \"crates\\/rest_macro\", version = \"$version\" }/" \
   -e "s/^rest_macro_core = { path = \"crates\\/rest_macro_core\", version = \".*\" }$/rest_macro_core = { path = \"crates\\/rest_macro_core\", version = \"$version\" }/" \
+  -e "s/^vsr_schema_doc = { path = \"crates\\/vsr_schema_doc\", version = \".*\" }$/vsr_schema_doc = { path = \"crates\\/vsr_schema_doc\", version = \"$version\" }/" \
   Cargo.toml
 
+python - "$version" <<'PY'
+import json
+import pathlib
+import sys
+
+version = sys.argv[1]
+for path in [
+    pathlib.Path("packages/vsr/package.json"),
+]:
+    document = json.loads(path.read_text())
+    document["version"] = version
+    path.write_text(json.dumps(document, indent=2) + "\n")
+PY
+
 cargo update --workspace
+npm install --package-lock-only --ignore-scripts
+npm run generate:vsr-schema
 
 cargo package -p rest_macro_core --features codegen,turso-local --locked --allow-dirty
 cargo check -p vsra --locked
+mkdir -p target/npm-pack
+npm pack --workspace @matiashiltunen/vsr --pack-destination target/npm-pack
 
-git add Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock package-lock.json packages/vsr/package.json packages/vsr/src/generated
 git commit -m "Release vsra $version"
 git tag -a "$tag" -m "Release vsra $version"
 

@@ -1414,6 +1414,11 @@ fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth
     } else {
         ""
     };
+    let public_auth_html_config = if include_builtin_auth {
+        "            .configure(|cfg| very_simple_rest::core::auth::register_builtin_auth_html_pages(cfg, api_security.auth.clone()))\n"
+    } else {
+        ""
+    };
     let auth_startup_check = if include_builtin_auth {
         "    very_simple_rest::core::auth::ensure_jwt_secret_configured_with_settings(&api_security.auth)\n        .map_err(|error| std::io::Error::other(format!(\"auth configuration error: {error}\")))?;\n"
     } else {
@@ -1570,7 +1575,7 @@ async fn main() -> std::io::Result<()> {{
             .wrap(very_simple_rest::core::security::security_headers_middleware(&api_security))
             .route("/openapi.json", web::get().to(openapi_spec))
             .route("/docs", web::get().to(swagger_ui))
-{public_auth_config}            .service(
+{public_auth_config}{public_auth_html_config}            .service(
                 scope("/api")
                     .wrap(anon_client_middleware.clone())
 {auth_config}                    .configure(|cfg| generated::{module_name}::configure(cfg, server_pool.clone()))
