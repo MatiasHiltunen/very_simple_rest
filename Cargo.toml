@@ -1,14 +1,45 @@
 [workspace]
-members = [ "crates/rest_api_cli",
+members = [
+    # ── New layered architecture (target state) ───────────────────────────
+    "crates/vsr-core",          # Foundational traits, errors, secret/db/clock
+
+    # ── Existing crates (being migrated incrementally) ────────────────────
+    "crates/rest_api_cli",
     "crates/rest_macro",
     "crates/rest_macro_core",
     "crates/vsr_schema_doc",
-    "examples/demo"
+    "examples/demo",
 ]
 default-members = ["crates/rest_api_cli"]
 resolver = "2"
 
+# ── Workspace-wide lint configuration ─────────────────────────────────────────
+# All crates inherit these unless they override in their own [lints] table.
+# New crates must not weaken these without a documented justification.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Suppress pedantic lints that produce noise without benefit across the workspace.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Enforce correctness lints at error level.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
 [workspace.dependencies]
+# ── New VSR crates ──────────────────────────────────────────────────────
+vsr-core = { path = "crates/vsr-core" }
+
+# ── Existing dependencies ───────────────────────────────────────────────
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-native-tls", "any", "derive", "chrono", "json", "uuid", "rust_decimal"] }
