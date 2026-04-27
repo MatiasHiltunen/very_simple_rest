@@ -79,6 +79,8 @@ mod tests {
     use crate::auth::{AuthClaimType, AuthDbBackend};
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]
     use crate::db::DbPool;
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    use chrono::{SecondsFormat, Utc};
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     #[cfg(feature = "turso-local")]
@@ -1335,21 +1337,11 @@ mod tests {
             (Utc::now() - chrono::Duration::days(2)).to_rfc3339_opts(SecondsFormat::Micros, false);
         let expired_at =
             (Utc::now() - chrono::Duration::days(1)).to_rfc3339_opts(SecondsFormat::Micros, false);
-        query(&format!(
+        pool.execute_batch(&format!(
             "INSERT INTO {AUTHORIZATION_RUNTIME_ASSIGNMENT_TABLE} \
              (id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES ('runtime.assignment.expired', 7, 1, '{created_at}', '{expired_at}', 'template', 'FamilyMember', 'Family', '42')"
         ))
-        .bind("runtime.assignment.expired")
-        .bind(7_i64)
-        .bind(1_i64)
-        .bind(created_at)
-        .bind(expired_at)
-        .bind("template")
-        .bind("FamilyMember")
-        .bind("Family")
-        .bind("42")
-        .execute(&pool)
         .await
         .expect("expired assignment should insert directly");
 

@@ -1,3 +1,11 @@
+// Unconditional: pure config and data types used by both the compiler and the runtime.
+// No heavy dependencies (no object_store, no actix-files, no multipart) in this section.
+use crate::static_files::StaticCacheProfile;
+
+// ── Gated imports ────────────────────────────────────────────────────────────
+// All items below this point require the `storage-local` feature.
+
+#[cfg(feature = "storage-local")]
 use std::{
     collections::{BTreeMap, HashMap},
     fmt, fs,
@@ -6,21 +14,33 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "storage-local")]
 use actix_files::NamedFile;
+#[cfg(feature = "storage-local")]
 use actix_multipart::Multipart;
+#[cfg(feature = "storage-local")]
 use actix_web::{
     HttpRequest, HttpResponse,
     http::{StatusCode, header},
     web,
 };
+#[cfg(feature = "storage-local")]
 use chrono::{DateTime, Utc};
+#[cfg(feature = "storage-local")]
 use futures_util::StreamExt;
+#[cfg(feature = "storage-local")]
 use object_store::{ObjectStoreExt, local::LocalFileSystem, path::Path as ObjectPath};
+#[cfg(feature = "storage-local")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "storage-local")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "storage-local")]
 use uuid::Uuid;
 
-use crate::{auth::UserContext, errors, runtime::RuntimeConfig, static_files::StaticCacheProfile};
+#[cfg(feature = "storage-local")]
+use crate::{auth::UserContext, errors, runtime::RuntimeConfig};
+
+// ── Pure config types (unconditional) ────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageBackendKind {
@@ -84,6 +104,9 @@ impl StorageConfig {
     }
 }
 
+// ── Runtime types (storage-local) ────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct StorageUploadResponse {
     pub backend: String,
@@ -96,6 +119,7 @@ pub struct StorageUploadResponse {
     pub size_bytes: usize,
 }
 
+#[cfg(feature = "storage-local")]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 struct StoredObjectMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,6 +130,7 @@ struct StoredObjectMetadata {
     etag: String,
 }
 
+#[cfg(feature = "storage-local")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StorageObjectInfo {
     content_type: Option<String>,
@@ -115,39 +140,49 @@ pub(crate) struct StorageObjectInfo {
     last_modified: DateTime<Utc>,
 }
 
+#[cfg(feature = "storage-local")]
 #[derive(Debug)]
 pub struct StorageError(String);
 
+#[cfg(feature = "storage-local")]
 impl StorageError {
     fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
 
+#[cfg(feature = "storage-local")]
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
+#[cfg(feature = "storage-local")]
 impl std::error::Error for StorageError {}
 
+#[cfg(feature = "storage-local")]
 #[derive(Clone, Default)]
 pub struct StorageRegistry {
     backends: Arc<HashMap<String, StorageBackendHandle>>,
 }
 
+#[cfg(feature = "storage-local")]
 #[derive(Clone)]
 enum StorageBackendHandle {
     Local(LocalStorageBackend),
 }
 
+#[cfg(feature = "storage-local")]
 #[derive(Clone)]
 struct LocalStorageBackend {
     root_dir: PathBuf,
     store: Arc<LocalFileSystem>,
 }
 
+// ── StorageRegistry impl ──────────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 impl StorageRegistry {
     pub fn from_config(config: &StorageConfig) -> Result<Self, StorageError> {
         let mut backends = HashMap::with_capacity(config.backends.len());
@@ -299,6 +334,9 @@ impl StorageRegistry {
     }
 }
 
+// ── StorageBackendHandle impl ─────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 impl StorageBackendHandle {
     async fn put_bytes(
         &self,
@@ -359,6 +397,9 @@ impl StorageBackendHandle {
     }
 }
 
+// ── LocalStorageBackend impl ──────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 impl LocalStorageBackend {
     fn put_bytes_with_metadata(
         &self,
@@ -636,6 +677,9 @@ impl LocalStorageBackend {
     }
 }
 
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 fn build_storage_object_info(
     filesystem_path: &Path,
     content_type: Option<String>,
@@ -671,12 +715,16 @@ fn build_storage_object_info(
     })
 }
 
+#[cfg(feature = "storage-local")]
 fn quoted_sha256(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
     format!("\"{}\"", hex::encode(digest.finalize()))
 }
 
+// ── Public configure functions ────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 pub fn configure_public_mounts(
     cfg: &mut web::ServiceConfig,
     storage: &StorageRegistry,
@@ -685,6 +733,7 @@ pub fn configure_public_mounts(
     configure_public_mounts_with_runtime(cfg, storage, mounts, &RuntimeConfig::default());
 }
 
+#[cfg(feature = "storage-local")]
 pub fn configure_public_mounts_with_runtime(
     cfg: &mut web::ServiceConfig,
     storage: &StorageRegistry,
@@ -699,6 +748,7 @@ pub fn configure_public_mounts_with_runtime(
     }
 }
 
+#[cfg(feature = "storage-local")]
 pub fn configure_upload_endpoints(
     cfg: &mut web::ServiceConfig,
     storage: &StorageRegistry,
@@ -714,6 +764,7 @@ pub fn configure_upload_endpoints(
     );
 }
 
+#[cfg(feature = "storage-local")]
 pub fn configure_upload_endpoints_with_runtime(
     cfg: &mut web::ServiceConfig,
     storage: &StorageRegistry,
@@ -726,6 +777,7 @@ pub fn configure_upload_endpoints_with_runtime(
     }
 }
 
+#[cfg(feature = "storage-local")]
 pub fn configure_s3_compat(
     cfg: &mut web::ServiceConfig,
     storage: &StorageRegistry,
@@ -734,6 +786,7 @@ pub fn configure_s3_compat(
     configure_s3_compat_with_runtime(cfg, storage, s3_compat, &RuntimeConfig::default());
 }
 
+#[cfg(feature = "storage-local")]
 pub fn configure_s3_compat_with_runtime(
     cfg: &mut web::ServiceConfig,
     storage: &StorageRegistry,
@@ -815,6 +868,9 @@ pub fn configure_s3_compat_with_runtime(
     );
 }
 
+// ── Route registration helpers ────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 fn register_public_mount(
     cfg: &mut web::ServiceConfig,
     storage: StorageRegistry,
@@ -873,6 +929,7 @@ fn register_public_mount(
     );
 }
 
+#[cfg(feature = "storage-local")]
 fn register_upload_endpoint(
     cfg: &mut web::ServiceConfig,
     storage: StorageRegistry,
@@ -897,6 +954,9 @@ fn register_upload_endpoint(
     );
 }
 
+// ── Request handlers ──────────────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
 async fn handle_upload(
     user: Option<UserContext>,
     mut multipart: Multipart,
@@ -1000,11 +1060,13 @@ async fn handle_upload(
     }))
 }
 
+#[cfg(feature = "storage-local")]
 async fn handle_s3_bucket_request(
     req: HttpRequest,
     storage: StorageRegistry,
     s3_compat: StorageS3CompatConfig,
 ) -> actix_web::Result<HttpResponse> {
+    use std::collections::HashMap;
     let bucket_name = req.match_info().get("bucket").unwrap_or_default();
     let bucket = match lookup_s3_bucket(&s3_compat, bucket_name) {
         Some(bucket) => bucket,
@@ -1064,6 +1126,7 @@ async fn handle_s3_bucket_request(
         .body(body))
 }
 
+#[cfg(feature = "storage-local")]
 async fn handle_s3_bucket_head(
     req: HttpRequest,
     _storage: StorageRegistry,
@@ -1076,6 +1139,7 @@ async fn handle_s3_bucket_head(
     Ok(HttpResponse::Ok().finish())
 }
 
+#[cfg(feature = "storage-local")]
 async fn handle_s3_get_object(
     _req: HttpRequest,
     storage: StorageRegistry,
@@ -1101,6 +1165,7 @@ async fn handle_s3_get_object(
     Ok(s3_object_response(bytes, &info, false))
 }
 
+#[cfg(feature = "storage-local")]
 async fn handle_s3_head_object(
     _req: HttpRequest,
     storage: StorageRegistry,
@@ -1123,6 +1188,7 @@ async fn handle_s3_head_object(
     Ok(s3_object_response(Vec::new(), &info, true))
 }
 
+#[cfg(feature = "storage-local")]
 async fn handle_s3_put_object(
     req: HttpRequest,
     body: web::Bytes,
@@ -1158,6 +1224,7 @@ async fn handle_s3_put_object(
         .finish())
 }
 
+#[cfg(feature = "storage-local")]
 async fn handle_s3_delete_object(
     storage: StorageRegistry,
     s3_compat: StorageS3CompatConfig,
@@ -1175,6 +1242,7 @@ async fn handle_s3_delete_object(
     Ok(HttpResponse::NoContent().finish())
 }
 
+#[cfg(feature = "storage-local")]
 fn s3_object_response(bytes: Vec<u8>, info: &StorageObjectInfo, head_only: bool) -> HttpResponse {
     let mut builder = HttpResponse::Ok();
     builder.insert_header((header::ETAG, info.etag.clone()));
@@ -1192,6 +1260,7 @@ fn s3_object_response(bytes: Vec<u8>, info: &StorageObjectInfo, head_only: bool)
     }
 }
 
+#[cfg(feature = "storage-local")]
 async fn serve_public_request(
     req: HttpRequest,
     storage: StorageRegistry,
@@ -1230,6 +1299,7 @@ async fn serve_public_request(
     Ok(response)
 }
 
+#[cfg(feature = "storage-local")]
 fn sanitize_requested_path(value: &str) -> actix_web::Result<PathBuf> {
     let trimmed = value.trim_matches('/');
     let path = if trimmed.is_empty() {
@@ -1259,6 +1329,7 @@ fn sanitize_requested_path(value: &str) -> actix_web::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(feature = "storage-local")]
 fn resolve_object_path(prefix: &str, relative_path: &Path) -> actix_web::Result<ObjectPath> {
     let mut segments = Vec::new();
     if !prefix.is_empty() {
@@ -1270,10 +1341,12 @@ fn resolve_object_path(prefix: &str, relative_path: &Path) -> actix_web::Result<
         .map_err(|error| actix_web::error::ErrorNotFound(format!("invalid storage path: {error}")))
 }
 
+#[cfg(feature = "storage-local")]
 fn parse_object_path(value: &str) -> Result<ObjectPath, object_store::path::Error> {
     ObjectPath::parse(value)
 }
 
+#[cfg(feature = "storage-local")]
 fn authorize_upload(
     user: Option<UserContext>,
     upload: &StorageUploadEndpoint,
@@ -1300,6 +1373,7 @@ fn authorize_upload(
     ))
 }
 
+#[cfg(feature = "storage-local")]
 fn build_upload_object_key(upload: &StorageUploadEndpoint, file_name: &str) -> String {
     let object_name = format!(
         "{}-{}",
@@ -1313,6 +1387,7 @@ fn build_upload_object_key(upload: &StorageUploadEndpoint, file_name: &str) -> S
     }
 }
 
+#[cfg(feature = "storage-local")]
 fn sanitize_file_name(value: &str) -> String {
     let raw = Path::new(value)
         .file_name()
@@ -1342,6 +1417,7 @@ fn sanitize_file_name(value: &str) -> String {
     }
 }
 
+#[cfg(feature = "storage-local")]
 fn lookup_s3_bucket<'a>(
     config: &'a StorageS3CompatConfig,
     name: &str,
@@ -1349,6 +1425,7 @@ fn lookup_s3_bucket<'a>(
     config.buckets.iter().find(|bucket| bucket.name == name)
 }
 
+#[cfg(feature = "storage-local")]
 fn s3_object_key(bucket: &StorageS3CompatBucket, tail: &str) -> actix_web::Result<String> {
     let relative_path = sanitize_requested_path(tail)?;
     if relative_path.as_os_str().is_empty() {
@@ -1364,6 +1441,7 @@ fn s3_object_key(bucket: &StorageS3CompatBucket, tail: &str) -> actix_web::Resul
     ))
 }
 
+#[cfg(feature = "storage-local")]
 fn bucket_prefixed_key(bucket: &StorageS3CompatBucket, key: &str) -> String {
     let key = key.trim_matches('/');
     if bucket.key_prefix.is_empty() {
@@ -1375,6 +1453,7 @@ fn bucket_prefixed_key(bucket: &StorageS3CompatBucket, key: &str) -> String {
     }
 }
 
+#[cfg(feature = "storage-local")]
 fn strip_bucket_prefix(bucket: &StorageS3CompatBucket, key: &str) -> String {
     if bucket.key_prefix.is_empty() {
         key.to_owned()
@@ -1388,6 +1467,7 @@ fn strip_bucket_prefix(bucket: &StorageS3CompatBucket, key: &str) -> String {
     }
 }
 
+#[cfg(feature = "storage-local")]
 fn extract_s3_user_metadata(headers: &header::HeaderMap) -> BTreeMap<String, String> {
     headers
         .iter()
@@ -1404,6 +1484,7 @@ fn extract_s3_user_metadata(headers: &header::HeaderMap) -> BTreeMap<String, Str
         .collect::<BTreeMap<_, _>>()
 }
 
+#[cfg(feature = "storage-local")]
 fn render_list_objects_v2_xml(
     bucket_name: &str,
     prefix: &str,
@@ -1454,6 +1535,7 @@ fn render_list_objects_v2_xml(
     body
 }
 
+#[cfg(feature = "storage-local")]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -1463,6 +1545,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+#[cfg(feature = "storage-local")]
 fn public_url_for_object(
     mounts: &[StoragePublicMount],
     object_key: &str,
@@ -1475,6 +1558,7 @@ fn public_url_for_object(
         .max_by_key(|candidate| candidate.len())
 }
 
+#[cfg(feature = "storage-local")]
 fn public_url_for_mount(mount: &StoragePublicMount, object_key: &str) -> Option<String> {
     let suffix = if mount.key_prefix.is_empty() {
         object_key
@@ -1495,6 +1579,7 @@ fn public_url_for_mount(mount: &StoragePublicMount, object_key: &str) -> Option<
     })
 }
 
+#[cfg(feature = "storage-local")]
 fn apply_cache_header(headers: &mut header::HeaderMap, cache: StaticCacheProfile) {
     let value = match cache {
         StaticCacheProfile::NoStore => "no-store",
@@ -1507,7 +1592,9 @@ fn apply_cache_header(headers: &mut header::HeaderMap, cache: StaticCacheProfile
     );
 }
 
-#[cfg(test)]
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "storage-local"))]
 mod tests {
     use std::{
         fs,

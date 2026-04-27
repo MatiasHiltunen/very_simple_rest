@@ -35,7 +35,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "2.0"
 dotenvy.workspace = true
-rest_macro_core = { workspace = true, features = ["codegen"] }
+rest_macro_core = { workspace = true, features = ["codegen", "auth-email", "storage-local"] }
 vsr_schema_doc.workspace = true
 bcrypt.workspace = true
 serde.workspace = true

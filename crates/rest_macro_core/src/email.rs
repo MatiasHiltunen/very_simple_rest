@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "auth-email")]
 use lettre::message::{Mailbox, Message, header::ContentType};
+#[cfg(feature = "auth-email")]
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+#[cfg(feature = "auth-email")]
 use reqwest::Client;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::{AuthEmailProvider, AuthEmailSettings};
+#[cfg(feature = "auth-email")]
 use crate::secret::load_secret;
 
 pub const AUTH_EMAIL_CAPTURE_DIR_ENV: &str = "VSR_AUTH_EMAIL_CAPTURE_DIR";
@@ -28,7 +32,17 @@ pub async fn send_auth_email(
     if capture_outgoing_email(settings, message)? {
         return Ok(());
     }
+    send_via_provider(settings, message).await
+}
 
+/// Dispatches email delivery to the configured provider.
+///
+/// This implementation is compiled only when the `auth-email` feature is enabled.
+#[cfg(feature = "auth-email")]
+async fn send_via_provider(
+    settings: &AuthEmailSettings,
+    message: &AuthEmailMessage,
+) -> Result<(), String> {
     match &settings.provider {
         AuthEmailProvider::Resend {
             api_key,
@@ -50,6 +64,15 @@ pub async fn send_auth_email(
             send_via_smtp(settings, message, &connection_url).await
         }
     }
+}
+
+/// Stub used when the `auth-email` feature is disabled.
+#[cfg(not(feature = "auth-email"))]
+async fn send_via_provider(
+    _settings: &AuthEmailSettings,
+    _message: &AuthEmailMessage,
+) -> Result<(), String> {
+    Err("Email delivery requires the `auth-email` feature to be enabled".to_owned())
 }
 
 fn capture_outgoing_email(
@@ -98,6 +121,7 @@ fn capture_outgoing_email(
     Ok(true)
 }
 
+#[cfg(feature = "auth-email")]
 async fn send_via_resend(
     settings: &AuthEmailSettings,
     message: &AuthEmailMessage,
@@ -136,6 +160,7 @@ async fn send_via_resend(
     }
 }
 
+#[cfg(feature = "auth-email")]
 async fn send_via_smtp(
     settings: &AuthEmailSettings,
     message: &AuthEmailMessage,
@@ -152,6 +177,7 @@ async fn send_via_smtp(
     Ok(())
 }
 
+#[cfg(feature = "auth-email")]
 fn build_message(
     settings: &AuthEmailSettings,
     message: &AuthEmailMessage,
@@ -177,6 +203,7 @@ fn build_message(
         .map_err(|error| format!("failed to build email message: {error}"))
 }
 
+#[cfg(feature = "auth-email")]
 fn parse_mailbox(name: Option<&str>, email: &str) -> Result<Mailbox, String> {
     let address = email
         .parse()
