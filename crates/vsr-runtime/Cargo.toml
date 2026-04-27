@@ -71,3 +71,6 @@ optional = true
 [dependencies.tracing]
 version = "0.1"
 optional = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

@@ -16,6 +16,11 @@
 use std::future::Future;
 use vsr_core::error::VsrResult;
 
+// ── Concrete implementations ──────────────────────────────────────────────────
+
+#[cfg(feature = "auth-email")]
+pub mod smtp;
+
 // ─── Identity model ───────────────────────────────────────────────────────────
 
 /// The authenticated identity of a request principal.

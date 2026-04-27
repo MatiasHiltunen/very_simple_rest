@@ -18,6 +18,11 @@ use std::{future::Future, time::Duration};
 use bytes::Bytes;
 use vsr_core::error::VsrResult;
 
+// ── Concrete implementations ──────────────────────────────────────────────────
+
+#[cfg(feature = "storage-local")]
+pub mod local;
+
 // ─── StorageKey ───────────────────────────────────────────────────────────────
 
 /// A hierarchical key (path) into an object store.
