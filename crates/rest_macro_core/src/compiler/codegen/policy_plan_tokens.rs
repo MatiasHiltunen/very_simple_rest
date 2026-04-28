@@ -15,9 +15,9 @@ use quote::{format_ident, quote};
 use syn::Path;
 
 use super::super::model::{
-    FieldSpec, GeneratedValue, PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter,
-    PolicyFilter, PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue,
-    PolicyValueSource, ResourceSpec, WriteModelStyle,
+    FieldSpec, GeneratedValue, PolicyComparisonValue, PolicyExistsCondition,
+    PolicyFilterExpression, PolicyFilterOperator, PolicyLiteralValue,
+    PolicyValueSource, ResourceSpec,
     generated_temporal_kind_for_field, policy_field_claim_type,
 };
 use super::{

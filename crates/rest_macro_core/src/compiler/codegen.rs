@@ -6,8 +6,8 @@ use quote::{format_ident, quote};
 use syn::{Path, Type};
 
 use super::model::{
-    GeneratedValue, PolicyComparisonValue, PolicyFilterExpression, PolicyLiteralValue,
-    PolicyValueSource, ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode, WriteModelStyle,
+    GeneratedValue, PolicyFilterExpression, PolicyValueSource, ResourceSpec, ServiceSpec,
+    StaticCacheProfile, StaticMode, WriteModelStyle,
     default_service_database_url,
 };
 use crate::authorization::AuthorizationContract;

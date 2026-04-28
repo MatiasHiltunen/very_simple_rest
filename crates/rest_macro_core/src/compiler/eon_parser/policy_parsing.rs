@@ -5,8 +5,6 @@
 //! Entry point: [`parse_row_policies`].
 
 use proc_macro2::Span;
-use serde::de::{self, Deserializer, Error as _};
-use serde_json::Value as JsonValue;
 
 use super::super::model::{
     PolicyAssignment, PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter,
@@ -17,9 +15,9 @@ use super::super::model::{
 use super::documents::{
     CreatePoliciesDocument, CreatePoliciesGroupDocument, ExistsPolicyDocument,
     ExistsPolicyEntriesDocument, ExistsPolicyEntryDocument, ExistsPolicyGroupDocument,
-    ExistsPolicyRuleDocument, FilterPoliciesDocument, FilterPolicyGroupDocument,
-    LegacyRowPolicyDocument, PolicyComparisonValueDocument, PolicyEntryDocument,
-    PolicyRuleDocument, RowPoliciesDocument, ScopePoliciesDocument,
+    FilterPoliciesDocument, FilterPolicyGroupDocument,
+    PolicyComparisonValueDocument, PolicyEntryDocument,
+    RowPoliciesDocument, ScopePoliciesDocument,
 };
 
 pub(super) fn parse_row_policies(policies: RowPoliciesDocument) -> syn::Result<RowPolicies> {
