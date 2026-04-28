@@ -1,6 +1,13 @@
 //! HTTP server abstraction layer.
 //!
-//! The seam is split into three distinct contracts:
+//! # Implementations
+//!
+//! | Feature | Type | Notes |
+//! |---|---|---|
+//! | `http-actix` | [`actix_adapter::ActixHttpServer`] | Default; actix-web 4 |
+//! | `http-axum` | *(future)* | Decision: end of Phase 3 |
+//!
+//! # The seam is split into three distinct contracts:
 //!
 //! - [`RouteRegistry`] — receives generated resource routes and their
 //!   framework-agnostic [`Handler`]s. Framework adapters translate these into
@@ -14,6 +21,16 @@
 //! **No framework types cross this boundary.** No `actix_web::HttpRequest`,
 //! no `axum::Router`, no `tower::Layer` appears in the public API here.
 //! Those types are contained in adapter modules behind feature flags.
+
+// ── Concrete implementations ──────────────────────────────────────────────────
+
+#[cfg(feature = "http-actix")]
+pub mod actix_adapter;
+
+#[cfg(feature = "http-actix")]
+pub use actix_adapter::ActixHttpServer;
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 use std::{collections::HashMap, future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 

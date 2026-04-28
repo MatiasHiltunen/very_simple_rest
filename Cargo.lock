@@ -6239,6 +6239,7 @@ dependencies = [
  "object_store",
  "serde",
  "serde_json",
+ "tokio",
  "tower",
  "tracing",
  "vsr-core",

@@ -21,7 +21,7 @@ default = []
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
 # Enable the actix-web adapter (default runtime implementation).
-http-actix = ["dep:actix-web"]
+http-actix = ["dep:actix-web", "dep:tokio"]
 # Enable the axum adapter (decision window: end of Phase 3, see §15.2).
 http-axum = ["dep:axum", "dep:tower"]
 
@@ -44,6 +44,11 @@ sqlite     = ["vsr-core/sqlite"]
 postgres   = ["vsr-core/postgres"]
 mysql      = ["vsr-core/mysql"]
 turso-local = ["vsr-core/turso-local"]
+
+[dependencies.tokio]
+version = "1"
+features = ["rt"]
+optional = true
 
 [dependencies.actix-web]
 version = "4"
