@@ -14,7 +14,9 @@ use serde::de::{self, Deserializer, Error as _, MapAccess, Visitor};
 use serde_json::Value as JsonValue;
 
 use super::super::model::{DbBackend, GeneratedValue, RoleRequirements};
-use super::{default_admin_bypass, deserialize_create_policies_document};
+// These serde helpers are defined in policy_parsing (a sibling module) because
+// they were part of the original policy-parsing block in eon_parser.rs.
+use super::policy_parsing::{default_admin_bypass, deserialize_create_policies_document};
 
 #[derive(serde::Deserialize)]
 pub(super) struct ServiceDocument {
