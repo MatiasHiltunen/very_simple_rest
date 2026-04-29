@@ -7,17 +7,22 @@ use proc_macro2::Span;
 use syn::LitStr;
 
 use super::model::{
-    // Used in production code (load_service_document):
     ServiceSpec,
     apply_service_read_access_defaults, sanitize_module_ident, validate_authorization_contract,
     validate_build_config, validate_clients_config, validate_logging_config,
     validate_policy_claim_sources, validate_runtime_config, validate_security_config,
     validate_tls_config,
-    // Test-only (cargo check reports unused; cargo test needs them):
+};
+
+// Items only referenced from the test suite (tests.rs uses `use super::*`).
+// Wrapping in #[cfg(test)] keeps `cargo check` clean while keeping `cargo test` working.
+#[cfg(test)]
+use super::model::{
     BuildCacheCleanupStrategy, BuildConfig, BuildLtoMode, ClientsConfig,
     DbBackend, GeneratedValue, NumericBound, PolicyFilterExpression, PolicyValueSource,
     ResourceReadAccess, RoleRequirements, StaticCacheProfile, StaticMode,
 };
+#[cfg(test)]
 use crate::{
     auth::{
         AuthClaimMapping, AuthClaimType, AuthEmailProvider, AuthJwtAlgorithm,

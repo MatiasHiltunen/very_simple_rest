@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::auth::{AuthClaimType, UserContext};
+use crate::auth::AuthClaimType;
 use crate::db::DbPool;
 
 use super::db_ops::{new_runtime_assignment_event_id, new_runtime_assignment_id, runtime_assignment_timestamp_now};

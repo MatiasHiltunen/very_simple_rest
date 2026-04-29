@@ -188,6 +188,10 @@ pub struct SigningKey {
     /// The algorithm this key uses.
     pub algorithm: JwtAlgorithm,
     /// Raw key material (secret or private key PEM). Not `Clone` intentionally.
+    ///
+    /// Not yet consumed by any concrete `AuthProvider` impl; present for the
+    /// key-rotation feature that follows this seam layer.
+    #[allow(dead_code)]
     pub(crate) material: KeyMaterial,
 }
 
@@ -199,10 +203,18 @@ pub struct VerificationKey {
     /// Algorithm.
     pub algorithm: JwtAlgorithm,
     /// Public or symmetric verification material.
+    ///
+    /// Not yet consumed by any concrete `AuthProvider` impl; present for the
+    /// key-rotation feature that follows this seam layer.
+    #[allow(dead_code)]
     pub(crate) material: KeyMaterial,
 }
 
 /// Raw key material — opaque to code outside this module.
+///
+/// Variants are not yet constructed by any concrete `KeyProvider` impl; they
+/// exist so the seam type is complete before the first concrete implementor lands.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum KeyMaterial {
     /// HMAC symmetric secret bytes.
