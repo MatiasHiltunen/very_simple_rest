@@ -1,0 +1,42 @@
+[package]
+name = "vsr-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Foundational traits, error types, and primitive abstractions for the VSR workspace"
+license.workspace = true
+repository.workspace = true
+
+# vsr-core must stay lean. Every dependency here is paid by every crate that
+# depends on it — including emitted production servers. Add nothing without a
+# feature flag and a one-line rationale comment.
+[dependencies]
+
+[dev-dependencies]
+
+[features]
+default = []
+
+# Adds chrono-backed ISO-8601 formatting to `Clock` impls.
+chrono = ["dep:chrono"]
+
+# Enables tracing integration stubs (no-ops when disabled).
+tracing = ["dep:tracing"]
+
+# ── Database back-end stubs ───────────────────────────────────────────────────
+# These are empty today. Phase 3 adds concrete sqlx-backed `DbPool` impls
+# behind each flag. Defined here so vsr-runtime can re-export them without
+# depending on sqlx directly in its own Cargo.toml.
+sqlite     = []
+postgres   = []
+mysql      = []
+turso-local = ["sqlite"]
+
+[dependencies.chrono]
+version = "0.4"
+features = ["serde"]
+optional = true
+
+[dependencies.tracing]
+version = "0.1"
+optional = true
