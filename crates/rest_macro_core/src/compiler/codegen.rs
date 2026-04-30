@@ -433,6 +433,9 @@ use self::service_tokens::*;
 mod garde_tokens;
 use self::garde_tokens::*;
 
+mod typed_object_tokens;
+use self::typed_object_tokens::*;
+
 mod resource_struct_tokens;
 use self::resource_struct_tokens::*;
 
