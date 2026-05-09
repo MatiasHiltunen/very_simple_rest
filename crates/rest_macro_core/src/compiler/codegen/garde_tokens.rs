@@ -98,6 +98,51 @@ pub(super) fn garde_validation_helper_defs(resource: &ResourceSpec, runtime_crat
     ]
 }
 
+/// Generates garde validation code for action input structs, mapping the
+/// garde error path (which uses Rust positional identifiers like `field_2`)
+/// back to the user-facing API name (e.g. `"newTitle"`) before returning the
+/// error response.
+///
+/// This is needed because action input structs use `field_{index}` as Rust
+/// identifiers (derived from `BTreeMap` iteration order) with `#[serde(rename)]`
+/// for the actual API names, so the garde path and the API name diverge.
+pub(super) fn garde_validate_action_item_tokens(
+    field_map: &[(String, String)],
+    runtime_crate: &Path,
+) -> TokenStream {
+    let entries = field_map.iter().map(|(rust, api)| {
+        let r = Literal::string(rust.as_str());
+        let a = Literal::string(api.as_str());
+        quote!((#r, #a))
+    });
+
+    quote! {
+        if let Err(report) = #runtime_crate::garde::Validate::validate(&item) {
+            let __action_field_map: &[(&str, &str)] = &[#(#entries),*];
+            let (field_opt, message) = match report.iter().next() {
+                Some((path, error)) => {
+                    let rust_name = path.to_string();
+                    let api_name = __action_field_map
+                        .iter()
+                        .find(|(k, _)| *k == rust_name.as_str())
+                        .map(|(_, v)| (*v).to_owned())
+                        .unwrap_or_else(|| rust_name.clone());
+                    let msg = error.to_string();
+                    (
+                        Some(api_name.clone()),
+                        format!("Field `{}` {}", api_name, msg),
+                    )
+                }
+                None => (None, "Validation failed".to_owned()),
+            };
+            return match field_opt {
+                Some(f) => #runtime_crate::core::errors::validation_error(f, message),
+                None => #runtime_crate::core::errors::bad_request("validation_error", message),
+            };
+        }
+    }
+}
+
 // ─── Attribute token emitters ─────────────────────────────────────────────────
 
 pub(super) fn garde_field_attr_tokens(

@@ -405,6 +405,23 @@ pub(super) fn list_query_tokens(
 
         tokens
     });
+    // `filterable_in` produces `filter_{field}_in: Option<String>` fields
+    // with serde rename `filter_{api_name}__in` (double underscore, matching
+    // the comma-separated OpenAPI wire format).
+    let filterable_in_fields = resource.list.filterable_in.iter().map(|field_name| {
+        let field = resource
+            .fields
+            .iter()
+            .find(|f| f.name() == *field_name)
+            .unwrap_or_else(|| panic!("filterable_in field `{field_name}` must be validated"));
+        let api_name = field.api_name();
+        let field_ident = format_ident!("filter_{}_in", field.ident);
+        let rename = Literal::string(&format!("filter_{api_name}__in"));
+        quote! {
+            #[serde(rename = #rename)]
+            pub #field_ident: Option<String>,
+        }
+    });
     let sort_variants = sortable_fields.iter().map(|field| {
         let variant_ident = super::super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name = Literal::string(field.api_name());
@@ -446,6 +463,7 @@ pub(super) fn list_query_tokens(
             pub cursor: Option<String>,
             pub context: Option<String>,
             #(#filter_fields)*
+            #(#filterable_in_fields)*
         }
 
         #[derive(Debug, Clone, #runtime_crate::serde::Deserialize)]

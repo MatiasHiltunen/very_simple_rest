@@ -829,6 +829,7 @@ pub(super) fn storage_tokens(service: &ServiceSpec, runtime_crate: &Path) -> Tok
 pub(super) fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> TokenStream {
     let security = &service.security;
     let json_max_bytes = option_usize_tokens(security.requests.json_max_bytes);
+    let max_filter_in_values = option_usize_tokens(security.requests.max_filter_in_values);
     let cors_origins = vec_string_tokens(&security.cors.origins);
     let cors_origins_env = option_string_tokens(security.cors.origins_env.as_deref());
     let cors_allow_methods = vec_string_tokens(&security.cors.allow_methods);
@@ -918,6 +919,7 @@ pub(super) fn security_tokens(service: &ServiceSpec, runtime_crate: &Path) -> To
         #runtime_crate::core::security::SecurityConfig {
             requests: #runtime_crate::core::security::RequestSecurity {
                 json_max_bytes: #json_max_bytes,
+                max_filter_in_values: #max_filter_in_values,
             },
             cors: #runtime_crate::core::security::CorsSecurity {
                 origins: #cors_origins,

@@ -21,8 +21,7 @@ use super::super::model::{
 use super::{
     bind_field_value_tokens,
     garde_field_attr_tokens,
-    garde_validate_item_tokens,
-    garde_validation_error_helper,
+    garde_validate_action_item_tokens,
     HybridResourceEnforcement,
     normalization_tokens,
     policy_plan_ident,
@@ -153,11 +152,19 @@ pub(super) fn resource_action_handler_tokens(
                     )
                 })
                 .collect::<Vec<_>>();
-            let garde_error_helper = garde_validation_error_helper(resource);
             let action_garde_validation = if action.input_fields.is_empty() {
                 quote! {}
             } else {
-                garde_validate_item_tokens(&garde_error_helper, runtime_crate)
+                // Build a (rust_ident, api_name) map so the error response
+                // uses the API name (e.g. "newTitle") rather than the Rust
+                // positional identifier (e.g. "field_2") that garde reports.
+                let field_map: Vec<(String, String)> = action
+                    .input_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, input)| (format!("field_{index}"), input.name.clone()))
+                    .collect();
+                garde_validate_action_item_tokens(&field_map, runtime_crate)
             };
             let action_uses_input_assignments = match &action.behavior {
                 ResourceActionBehaviorSpec::UpdateFields { assignments } => {

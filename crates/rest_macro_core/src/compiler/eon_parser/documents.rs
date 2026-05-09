@@ -155,6 +155,8 @@ pub(super) struct SecurityAccessDocument {
 pub(super) struct RequestSecurityDocument {
     #[serde(default)]
     pub(super) json_max_bytes: Option<usize>,
+    #[serde(default)]
+    pub(super) max_filter_in_values: Option<usize>,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -774,12 +776,31 @@ pub(super) struct ManyToManyDocument {
     pub(super) target_field: String,
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub(super) struct ListConfigDocument {
     #[serde(default)]
     pub(super) default_limit: Option<u32>,
     #[serde(default)]
     pub(super) max_limit: Option<u32>,
+    #[serde(default)]
+    pub(super) filterable_in: Vec<String>,
+    #[serde(default = "default_count_endpoint")]
+    pub(super) count_endpoint: bool,
+}
+
+impl Default for ListConfigDocument {
+    fn default() -> Self {
+        Self {
+            default_limit: None,
+            max_limit: None,
+            filterable_in: Vec::new(),
+            count_endpoint: true,
+        }
+    }
+}
+
+fn default_count_endpoint() -> bool {
+    true
 }
 
 #[derive(Default, serde::Deserialize)]

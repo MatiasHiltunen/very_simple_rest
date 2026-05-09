@@ -140,6 +140,12 @@ fn load_service_document(path: &Path, span: Span) -> syn::Result<LoadedService> 
         ));
     }
     apply_service_read_access_defaults(&mut resources, &security);
+    // Propagate per-service security limits into each resource's list config
+    // so the codegen can embed them as constants without needing a ServiceSpec reference.
+    let max_filter_in_values = security.requests.max_filter_in_values;
+    for resource in &mut resources {
+        resource.list.max_filter_in_values = max_filter_in_values;
+    }
     validate_storage_upload_routes(&storage, &resources)?;
     validate_policy_claim_sources(&resources, &security, span)?;
     validate_authorization_contract(&authorization, &resources, span)?;

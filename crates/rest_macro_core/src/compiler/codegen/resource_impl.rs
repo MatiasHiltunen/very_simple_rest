@@ -1887,6 +1887,114 @@ pub(super) fn resource_impl_tokens(
     let resource_action_handlers = resource.actions.iter().map(|action| {
         resource_action_handler_tokens(resource, action, hybrid, &query_bind_matches, runtime_crate)
     });
+    let count_handler = if resource.list.count_endpoint {
+        if read_requires_auth {
+            if hybrid.map(|config| config.collection_read).unwrap_or(false) {
+                quote! {
+                    async fn count(
+                        query: web::Query<#list_query_ty>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>,
+                        runtime: web::Data<#runtime_crate::core::authorization::AuthorizationRuntime>,
+                    ) -> impl Responder {
+                        #read_check
+                        let query = query.into_inner();
+                        let plan = match Self::build_list_plan_with_hybrid_read(
+                            &query,
+                            &user,
+                            runtime.get_ref(),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(parts) => parts,
+                            Err(response) => return response,
+                        };
+                        let mut count_query =
+                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                        for bind in &plan.filter_binds {
+                            count_query = match bind.clone() {
+                                #(#count_bind_matches)*
+                            };
+                        }
+                        match count_query.fetch_one(db.get_ref()).await {
+                            Ok(total) => HttpResponse::Ok().json(
+                                #runtime_crate::serde_json::json!({"count": total})
+                            ),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    async fn count(
+                        query: web::Query<#list_query_ty>,
+                        user: #runtime_crate::core::auth::UserContext,
+                        db: web::Data<DbPool>,
+                    ) -> impl Responder {
+                        #read_check
+                        let query = query.into_inner();
+                        let plan = match Self::build_list_plan(&query, &user, None) {
+                            Ok(parts) => parts,
+                            Err(response) => return response,
+                        };
+                        let mut count_query =
+                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                        for bind in &plan.filter_binds {
+                            count_query = match bind.clone() {
+                                #(#count_bind_matches)*
+                            };
+                        }
+                        match count_query.fetch_one(db.get_ref()).await {
+                            Ok(total) => HttpResponse::Ok().json(
+                                #runtime_crate::serde_json::json!({"count": total})
+                            ),
+                            Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                        }
+                    }
+                }
+            }
+        } else {
+            quote! {
+                async fn count(
+                    query: web::Query<#list_query_ty>,
+                    db: web::Data<DbPool>,
+                ) -> impl Responder {
+                    let query = query.into_inner();
+                    let user = Self::anonymous_user_context();
+                    let plan = match Self::build_list_plan(&query, &user, None) {
+                        Ok(parts) => parts,
+                        Err(response) => return response,
+                    };
+                    let mut count_query =
+                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
+                    for bind in &plan.filter_binds {
+                        count_query = match bind.clone() {
+                            #(#count_bind_matches)*
+                        };
+                    }
+                    match count_query.fetch_one(db.get_ref()).await {
+                        Ok(total) => HttpResponse::Ok().json(
+                            #runtime_crate::serde_json::json!({"count": total})
+                        ),
+                        Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
+                    }
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+    let count_route_registration = if resource.list.count_endpoint {
+        quote! {
+            cfg.service(
+                web::resource(format!("/{}/count", #resource_api_name))
+                    .route(web::get().to(Self::count))
+            );
+        }
+    } else {
+        quote!()
+    };
     let get_all_handler = if read_requires_auth {
         if hybrid.map(|config| config.collection_read).unwrap_or(false) {
             quote! {
@@ -2110,8 +2218,11 @@ pub(super) fn resource_impl_tokens(
                     web::resource(format!("/{}", #resource_api_name))
                         .route(web::get().to(Self::get_all))
                         .route(web::post().to(Self::create))
-                )
-                .service(
+                );
+                // Register `/count` before `/{id}` so the literal segment wins
+                // over the parameterized route regardless of router priority rules.
+                #count_route_registration
+                cfg.service(
                     web::resource(format!("/{}/{{id}}", #resource_api_name))
                         .route(web::get().to(Self::get_one))
                         .route(web::put().to(Self::update))
@@ -2361,24 +2472,8 @@ pub(super) fn resource_impl_tokens(
                 #is_admin_binding
                 let requested_limit = query.limit.or(#default_limit_tokens);
                 let effective_limit = match (requested_limit, #max_limit_tokens) {
-                    (Some(limit), Some(max_limit)) => {
-                        if limit == 0 {
-                            return Err(#runtime_crate::core::errors::bad_request(
-                                "invalid_pagination",
-                                "`limit` must be greater than 0",
-                            ));
-                        }
-                        Some(limit.min(max_limit))
-                    }
-                    (Some(limit), None) => {
-                        if limit == 0 {
-                            return Err(#runtime_crate::core::errors::bad_request(
-                                "invalid_pagination",
-                                "`limit` must be greater than 0",
-                            ));
-                        }
-                        Some(limit)
-                    }
+                    (Some(limit), Some(max_limit)) => Some(limit.min(max_limit)),
+                    (Some(limit), None) => Some(limit),
                     (None, _) => None,
                 };
                 let offset = query.offset.unwrap_or(0);
@@ -2586,6 +2681,8 @@ pub(super) fn resource_impl_tokens(
                 let count = items.len();
                 if !plan.cursor_mode {
                     has_more = match plan.limit {
+                        // limit=0 is a count-only request; suppress pagination links.
+                        Some(0) => false,
                         Some(_) => (plan.offset as i64) + (count as i64) < total,
                         None => false,
                     };
@@ -2618,6 +2715,8 @@ pub(super) fn resource_impl_tokens(
             }
 
             #get_all_handler
+
+            #count_handler
 
             #get_one_handler
 

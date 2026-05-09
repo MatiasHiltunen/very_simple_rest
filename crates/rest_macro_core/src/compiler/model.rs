@@ -725,6 +725,9 @@ pub struct ListConfig {
     pub max_limit: Option<u32>,
     pub filterable_in: Vec<String>,
     pub count_endpoint: bool,
+    /// Maximum number of values allowed in any `filter_field__in` query parameter.
+    /// Propagated from `security.requests.max_filter_in_values` at service load time.
+    pub max_filter_in_values: Option<usize>,
 }
 
 impl Default for ListConfig {
@@ -734,6 +737,7 @@ impl Default for ListConfig {
             max_limit: None,
             filterable_in: Vec::new(),
             count_endpoint: true,
+            max_filter_in_values: None,
         }
     }
 }

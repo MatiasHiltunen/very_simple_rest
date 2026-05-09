@@ -297,7 +297,7 @@ pub(super) fn list_filter_field_ty(field: &FieldSpec, runtime_crate: &Path) -> T
 
 pub(super) fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate: &Path) -> Vec<TokenStream> {
     let bind_ident = list_bind_ident(resource);
-    resource
+    let mut tokens: Vec<TokenStream> = resource
         .fields
         .iter()
         .map(|field| {
@@ -457,7 +457,140 @@ pub(super) fn list_query_condition_tokens(resource: &ResourceSpec, runtime_crate
                 #contains_filter_tokens
             }
         })
-        .collect()
+        .collect();
+
+    // Generate WHERE field IN (...) conditions for `filterable_in` fields.
+    // The query parameter `filter_{name}__in` is a comma-separated string;
+    // each value is parsed to the field's bind type at request time.
+    for field_name in &resource.list.filterable_in {
+        let field = resource
+            .fields
+            .iter()
+            .find(|f| f.name() == *field_name)
+            .unwrap_or_else(|| panic!("filterable_in field `{field_name}` must be validated"));
+        let db_field_name = Literal::string(&field.name());
+        let field_ident = format_ident!("filter_{}_in", field.ident);
+        let kind = list_bind_kind_for_field(field);
+
+        // Build per-element parse + push tokens based on the field's bind type.
+        let parse_and_collect = match kind {
+            ListBindKind::Integer => quote! {
+                let values: Vec<i64> = values_str
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.trim().parse::<i64>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| #runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ))?;
+            },
+            ListBindKind::Real => quote! {
+                let values: Vec<f64> = values_str
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.trim().parse::<f64>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| #runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ))?;
+            },
+            ListBindKind::Boolean => quote! {
+                let values: Vec<bool> = values_str
+                    .split(',')
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| match s.trim() {
+                        "true" => Ok(true),
+                        "false" => Ok(false),
+                        _ => Err(()),
+                    })
+                    .collect::<Result<Vec<_>, ()>>()
+                    .map_err(|()| #runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Query parameters are invalid",
+                    ))?;
+            },
+            ListBindKind::Text => {
+                // For enum fields, validate each value against allowed variants.
+                let enum_check = if let Some(enum_values) = field.enum_values() {
+                    let enum_lits = enum_values
+                        .iter()
+                        .map(|v| Literal::string(v.as_str()))
+                        .collect::<Vec<_>>();
+                    quote! {
+                        for v in &values {
+                            if ![#(#enum_lits),*].contains(&v.as_str()) {
+                                return Err(#runtime_crate::core::errors::bad_request(
+                                    "invalid_query",
+                                    "Query parameters are invalid",
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
+                quote! {
+                    let values: Vec<String> = values_str
+                        .split(',')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().to_owned())
+                        .collect();
+                    #enum_check
+                }
+            }
+        };
+
+        // Push bind values to filter_binds using the correct variant.
+        let push_binds = match kind {
+            ListBindKind::Integer => quote! {
+                for value in &values { filter_binds.push(#bind_ident::Integer(*value)); }
+            },
+            ListBindKind::Real => quote! {
+                for value in &values { filter_binds.push(#bind_ident::Real(*value)); }
+            },
+            ListBindKind::Boolean => quote! {
+                for value in &values { filter_binds.push(#bind_ident::Boolean(*value)); }
+            },
+            ListBindKind::Text => quote! {
+                for value in values { filter_binds.push(#bind_ident::Text(value)); }
+            },
+        };
+
+        // Emit a compile-time constant for the per-service value cap (if configured).
+        let max_check = if let Some(max) = resource.list.max_filter_in_values {
+            let max_lit = Literal::usize_unsuffixed(max);
+            quote! {
+                if values.len() > #max_lit {
+                    return Err(#runtime_crate::core::errors::bad_request(
+                        "invalid_query",
+                        "Too many filter values",
+                    ));
+                }
+            }
+        } else {
+            quote! {}
+        };
+
+        tokens.push(quote! {
+            if let Some(values_str) = &query.#field_ident {
+                let start = filter_binds.len() + 1;
+                #parse_and_collect
+                #max_check
+                if !values.is_empty() {
+                    let placeholders = (0..values.len())
+                        .map(|i| Self::list_placeholder(start + i))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    conditions.push(format!("{} IN ({})", #db_field_name, placeholders));
+                    #push_binds
+                }
+            }
+        });
+    }
+
+    tokens
 }
 
 pub(super) fn list_bind_match_tokens(

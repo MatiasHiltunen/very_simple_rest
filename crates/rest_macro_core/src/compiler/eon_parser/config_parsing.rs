@@ -64,8 +64,10 @@ pub(super) fn parse_list_config(document: ListConfigDocument) -> ListConfig {
     ListConfig {
         default_limit: document.default_limit,
         max_limit: document.max_limit,
-        filterable_in: Vec::new(),
-        count_endpoint: true,
+        filterable_in: document.filterable_in,
+        count_endpoint: document.count_endpoint,
+        // Propagated from security.requests.max_filter_in_values by the service loader.
+        max_filter_in_values: None,
     }
 }
 
@@ -116,7 +118,7 @@ pub(super) fn parse_security_document(document: SecurityDocument, span: Span) ->
         .requests
         .map(|requests| RequestSecurity {
             json_max_bytes: requests.json_max_bytes,
-            max_filter_in_values: None,
+            max_filter_in_values: requests.max_filter_in_values,
         })
         .unwrap_or_default();
     let access = parse_security_access_document(document.access)?;
