@@ -32,7 +32,27 @@ const mappedResource: VsrResourceMapValue = {
 const service: VsrService = defineService({
   module: "demo_api",
   resources: {
-    Post: mappedResource
+    Post: mappedResource,
+    TestData: {
+      fields: {
+        id: { type: "I64", id: true },
+        name: { type: "String" },
+        age: { type: "I64" },
+      },
+      access: {
+        read: "user"
+      },
+      api: {
+        fields: {
+          name: "name",
+          age: "age"
+        }
+      },
+      indexes: {
+        fields: ["id"]
+      },
+
+    }
   }
 });
 

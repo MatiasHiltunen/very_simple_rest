@@ -281,6 +281,16 @@ export async function createCalendarEvent(client, params) {
   });
 }
 
+export async function countCalendarEvent(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/calendar_event/count",
+    query: params.query,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export async function getCalendarEvent(client, params) {
   return client.request({
     method: "GET",
@@ -331,6 +341,16 @@ export async function createCarePlan(client, params) {
   });
 }
 
+export async function countCarePlan(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/care_plan/count",
+    query: params.query,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export async function getCarePlan(client, params) {
   return client.request({
     method: "GET",
@@ -376,6 +396,16 @@ export async function createChildProfile(client, params) {
     path: "/child_profile",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export async function countChildProfile(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/child_profile/count",
+    query: params.query,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -446,6 +476,16 @@ export async function createFamily(client, params) {
     path: "/family",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export async function countFamily(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/family/count",
+    query: params.query,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -571,6 +611,16 @@ export async function createFamilyDelegate(client, params) {
   });
 }
 
+export async function countFamilyDelegate(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/family_delegate/count",
+    query: params.query,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export async function getFamilyDelegate(client, params) {
   return client.request({
     method: "GET",
@@ -616,6 +666,16 @@ export async function createFamilyMember(client, params) {
     path: "/family_member",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export async function countFamilyMember(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/family_member/count",
+    query: params.query,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -671,6 +731,16 @@ export async function createGuardianNote(client, params) {
   });
 }
 
+export async function countGuardianNote(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/guardian_note/count",
+    query: params.query,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export async function getGuardianNote(client, params) {
   return client.request({
     method: "GET",
@@ -716,6 +786,16 @@ export async function createHousehold(client, params) {
     path: "/household",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export async function countHousehold(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/household/count",
+    query: params.query,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -801,6 +881,16 @@ export async function createHouseholdAnnouncement(client, params) {
   });
 }
 
+export async function countHouseholdAnnouncement(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/household_announcement/count",
+    query: params.query,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export async function getHouseholdAnnouncement(client, params) {
   return client.request({
     method: "GET",
@@ -846,6 +936,16 @@ export async function createShoppingItem(client, params) {
     path: "/shopping_item",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export async function countShoppingItem(client, params = {}) {
+  return client.request({
+    method: "GET",
+    path: "/shopping_item/count",
+    query: params.query,
     ...r(params),
     requiresBearerAuth: true,
   });

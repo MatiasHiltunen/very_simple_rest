@@ -456,6 +456,30 @@ export async function createCalendarEvent(client: VsrClient, params: CreateCalen
   });
 }
 
+export type CountCalendarEventQuery = DR<"filter_starts_at" | "filter_ends_at">
+  & {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_household_id"?: number;
+  "filter_created_by_user_id"?: number;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+};
+export type CountCalendarEventRequest = {
+  "query"?: CountCalendarEventQuery;
+} &
+  Req;
+
+export async function countCalendarEvent(client: VsrClient, params: CountCalendarEventRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/calendar_event/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export type GetCalendarEventRequest = {
   "path": {
   "id": number;
@@ -547,6 +571,32 @@ export async function createCarePlan(client: VsrClient, params: CreateCarePlanRe
     path: "/care_plan",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export type CountCarePlanQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_child_profile_id"?: number;
+  "filter_author_user_id"?: number;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+  "filter_support_visible"?: boolean;
+  "filter_notes"?: string;
+  "filter_notes_contains"?: string;
+};
+export type CountCarePlanRequest = {
+  "query"?: CountCarePlanQuery;
+} &
+  Req;
+
+export async function countCarePlan(client: VsrClient, params: CountCarePlanRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/care_plan/count",
+    query: params.query as QueryParams | undefined,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -645,6 +695,34 @@ export async function createChildProfile(client: VsrClient, params: CreateChildP
     path: "/child_profile",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export type CountChildProfileQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_household_id"?: number;
+  "filter_created_by_user_id"?: number;
+  "filter_primary_guardian_user_id"?: number;
+  "filter_display_name"?: string;
+  "filter_display_name_contains"?: string;
+  "filter_school"?: string;
+  "filter_school_contains"?: string;
+  "filter_pickup_code"?: string;
+  "filter_pickup_code_contains"?: string;
+};
+export type CountChildProfileRequest = {
+  "query"?: CountChildProfileQuery;
+} &
+  Req;
+
+export async function countChildProfile(client: VsrClient, params: CountChildProfileRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/child_profile/count",
+    query: params.query as QueryParams | undefined,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -803,6 +881,31 @@ export async function createFamily(client: VsrClient, params: CreateFamilyReques
     path: "/family",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export type CountFamilyQuery = {
+  "filter_id"?: number;
+  "filter_owner_user_id"?: number;
+  "filter_slug"?: string;
+  "filter_slug_contains"?: string;
+  "filter_name"?: string;
+  "filter_name_contains"?: string;
+  "filter_timezone"?: string;
+  "filter_timezone_contains"?: string;
+};
+export type CountFamilyRequest = {
+  "query"?: CountFamilyQuery;
+} &
+  Req;
+
+export async function countFamily(client: VsrClient, params: CountFamilyRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/family/count",
+    query: params.query as QueryParams | undefined,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -1121,6 +1224,29 @@ export async function createFamilyDelegate(client: VsrClient, params: CreateFami
   });
 }
 
+export type CountFamilyDelegateQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_primary_user_id"?: number;
+  "filter_delegate_user_id"?: number;
+  "filter_label"?: string;
+  "filter_label_contains"?: string;
+};
+export type CountFamilyDelegateRequest = {
+  "query"?: CountFamilyDelegateQuery;
+} &
+  Req;
+
+export async function countFamilyDelegate(client: VsrClient, params: CountFamilyDelegateRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/family_delegate/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export type GetFamilyDelegateRequest = {
   "path": {
   "id": number;
@@ -1212,6 +1338,32 @@ export async function createFamilyMember(client: VsrClient, params: CreateFamily
     path: "/family_member",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export type CountFamilyMemberQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_user_id"?: number;
+  "filter_created_by_user_id"?: number;
+  "filter_role_label"?: string;
+  "filter_role_label_contains"?: string;
+  "filter_display_name"?: string;
+  "filter_display_name_contains"?: string;
+  "filter_is_child"?: boolean;
+};
+export type CountFamilyMemberRequest = {
+  "query"?: CountFamilyMemberQuery;
+} &
+  Req;
+
+export async function countFamilyMember(client: VsrClient, params: CountFamilyMemberRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/family_member/count",
+    query: params.query as QueryParams | undefined,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -1312,6 +1464,31 @@ export async function createGuardianNote(client: VsrClient, params: CreateGuardi
   });
 }
 
+export type CountGuardianNoteQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_child_profile_id"?: number;
+  "filter_author_user_id"?: number;
+  "filter_category"?: string;
+  "filter_category_contains"?: string;
+  "filter_body"?: string;
+  "filter_body_contains"?: string;
+};
+export type CountGuardianNoteRequest = {
+  "query"?: CountGuardianNoteQuery;
+} &
+  Req;
+
+export async function countGuardianNote(client: VsrClient, params: CountGuardianNoteRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/guardian_note/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export type GetGuardianNoteRequest = {
   "path": {
   "id": number;
@@ -1403,6 +1580,32 @@ export async function createHousehold(client: VsrClient, params: CreateHousehold
     path: "/household",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export type CountHouseholdQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_created_by_user_id"?: number;
+  "filter_slug"?: string;
+  "filter_slug_contains"?: string;
+  "filter_label"?: string;
+  "filter_label_contains"?: string;
+  "filter_timezone"?: string;
+  "filter_timezone_contains"?: string;
+};
+export type CountHouseholdRequest = {
+  "query"?: CountHouseholdQuery;
+} &
+  Req;
+
+export async function countHousehold(client: VsrClient, params: CountHouseholdRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/household/count",
+    query: params.query as QueryParams | undefined,
     ...r(params),
     requiresBearerAuth: true,
   });
@@ -1598,6 +1801,32 @@ export async function createHouseholdAnnouncement(client: VsrClient, params: Cre
   });
 }
 
+export type CountHouseholdAnnouncementQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_author_user_id"?: number;
+  "filter_household_slug"?: string;
+  "filter_household_slug_contains"?: string;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+  "filter_body"?: string;
+  "filter_body_contains"?: string;
+};
+export type CountHouseholdAnnouncementRequest = {
+  "query"?: CountHouseholdAnnouncementQuery;
+} &
+  Req;
+
+export async function countHouseholdAnnouncement(client: VsrClient, params: CountHouseholdAnnouncementRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/household_announcement/count",
+    query: params.query as QueryParams | undefined,
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
 export type GetHouseholdAnnouncementRequest = {
   "path": {
   "id": number;
@@ -1687,6 +1916,30 @@ export async function createShoppingItem(client: VsrClient, params: CreateShoppi
     path: "/shopping_item",
     body: params.body,
     contentType: "application/json",
+    ...r(params),
+    requiresBearerAuth: true,
+  });
+}
+
+export type CountShoppingItemQuery = {
+  "filter_id"?: number;
+  "filter_family_id"?: number;
+  "filter_household_id"?: number;
+  "filter_created_by_user_id"?: number;
+  "filter_title"?: string;
+  "filter_title_contains"?: string;
+  "filter_completed"?: boolean;
+};
+export type CountShoppingItemRequest = {
+  "query"?: CountShoppingItemQuery;
+} &
+  Req;
+
+export async function countShoppingItem(client: VsrClient, params: CountShoppingItemRequest = {}): Promise<Schemas.CountResponse> {
+  return client.request<Schemas.CountResponse>({
+    method: "GET",
+    path: "/shopping_item/count",
+    query: params.query as QueryParams | undefined,
     ...r(params),
     requiresBearerAuth: true,
   });

@@ -363,6 +363,10 @@ export type ChildProfileUpdate = {
   "school": string;
 };
 
+export type CountResponse = {
+  "count": number;
+};
+
 export type Family = {
   "id"?: (number) | null;
   "name": string;
