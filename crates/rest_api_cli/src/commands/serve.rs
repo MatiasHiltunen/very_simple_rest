@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env::VarError;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
+use actix_web::dev::Service;
 use actix_web::middleware::Logger;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Scope, web};
 use anyhow::{Context, anyhow, bail};
@@ -40,6 +42,7 @@ use sqlx::Row;
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use uuid::Uuid;
+use vsr_core::{HttpRequestTelemetry, record_http_request};
 
 use super::serve_manager::{self, ServeInstanceContext};
 
@@ -177,6 +180,24 @@ pub async fn serve_service(
                 .app_data(web::Data::new(dynamic_service.clone()))
                 .app_data(web::Data::new(state.clone()))
                 .wrap(Logger::default())
+                .wrap_fn(|req, srv| {
+                    let method = req.method().as_str().to_owned();
+                    let route = req.path().to_owned();
+                    let started_at = Instant::now();
+                    let fut = srv.call(req);
+                    async move {
+                        let response = fut.await?;
+                        let status = response.status().as_u16();
+                        let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                        record_http_request(&HttpRequestTelemetry::new(
+                            method.as_str(),
+                            route.as_str(),
+                            status,
+                            latency_ms,
+                        ));
+                        Ok(response)
+                    }
+                })
                 .wrap(rest_macro_core::runtime::compression_middleware(
                     &api_runtime,
                 ))
