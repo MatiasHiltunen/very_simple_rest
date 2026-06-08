@@ -161,7 +161,7 @@ jobs:
         run: ./scripts/client_self_test_examples.sh --mode live
 
       - name: Verify Generated Projects Are Warning Clean
-        run: cargo test -p vsra warning_clean -- --ignored --nocapture
+        run: cargo test -p vsra warning_clean -- --ignored --nocapture --test-threads=1
 
       - name: Verify Representative Generated Projects Are Clippy Clean
-        run: cargo test -p vsra clippy_clean -- --ignored --nocapture
+        run: cargo test -p vsra clippy_clean -- --ignored --nocapture --test-threads=1

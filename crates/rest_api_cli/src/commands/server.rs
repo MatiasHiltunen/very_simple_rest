@@ -2156,6 +2156,11 @@ mod tests {
             .join(Uuid::new_v4().to_string())
     }
 
+    fn generated_project_cargo_target_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/server_tests/generated-project-target")
+    }
+
     fn read_to_string(path: &Path) -> String {
         fs::read_to_string(path).expect("generated file should be readable")
     }
@@ -2393,7 +2398,7 @@ mod tests {
 
         run_generated_project_cargo_check(
             &project_dir,
-            &root.join("target").join(package_name),
+            &generated_project_cargo_target_dir(),
             Some("-D warnings"),
         );
     }
@@ -2411,7 +2416,7 @@ mod tests {
 
         run_generated_project_cargo_clippy(
             &project_dir,
-            &root.join("target").join(package_name),
+            &generated_project_cargo_target_dir(),
             Some("-D warnings"),
         );
     }
