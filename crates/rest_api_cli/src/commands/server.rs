@@ -1425,6 +1425,11 @@ fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth
         ""
     };
     let bind_addr_default = default_bind_addr(service);
+    let bundle_dir_setup = if service.tls.is_enabled() {
+        "    let bundle_dir = current_exe\n        .as_ref()\n        .and_then(|path| {\n            let parent = path.parent()?;\n            let mut bundle_name = path.file_name()?.to_os_string();\n            bundle_name.push(\".bundle\");\n            Some(parent.join(bundle_name))\n        })\n        .filter(|dir| dir.is_dir());\n"
+    } else {
+        ""
+    };
     let tls_setup = if service.tls.is_enabled() {
         format!(
             "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| current_exe.as_ref().and_then(|path| path.parent().map(|dir| dir.to_path_buf())))\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = generated::{module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
@@ -1498,15 +1503,7 @@ async fn main() -> std::io::Result<()> {{
     let api_runtime = generated::{module_name}::runtime();
     let api_security = generated::{module_name}::security();
 {auth_startup_check}    let current_exe = env::current_exe().ok();
-    let bundle_dir = current_exe
-        .as_ref()
-        .and_then(|path| {{
-            let parent = path.parent()?;
-            let mut bundle_name = path.file_name()?.to_os_string();
-            bundle_name.push(".bundle");
-            Some(parent.join(bundle_name))
-        }})
-        .filter(|dir| dir.is_dir());
+{bundle_dir_setup}
     let database_base_dir = current_exe
         .as_ref()
         .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
@@ -2031,6 +2028,9 @@ fn runtime_feature_list(service: &ServiceSpec, backend: DbBackend) -> String {
     let mut features = vec![format!("\"{}\"", backend_feature_name(backend))];
     if matches!(service.database.engine, DatabaseEngine::TursoLocal(_)) {
         features.push("\"turso-local\"".to_owned());
+    }
+    if !service.storage.is_empty() {
+        features.push("\"storage-local\"".to_owned());
     }
     features.join(", ")
 }
