@@ -128,6 +128,7 @@ sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
 postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
 mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
 turso-local = ["sqlite", "rest_macro_core/turso-local"]
+storage-local = ["rest_macro_core/storage-local"]
 
 [dev-dependencies]
 jsonwebtoken.workspace = true
