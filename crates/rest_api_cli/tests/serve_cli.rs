@@ -395,6 +395,26 @@ fn vsr_serve_starts_native_runtime_from_eon() {
         panic!("vsr serve never became ready: {error}\n{}", server.logs());
     }
 
+    let health_response = client
+        .get(format!("{base_url}/healthz"))
+        .send()
+        .expect("health endpoint should load");
+    assert_eq!(health_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        health_response.text().expect("health body should read"),
+        r#"{"status":"ok"}"#
+    );
+
+    let ready_response = client
+        .get(format!("{base_url}/readyz"))
+        .send()
+        .expect("ready endpoint should load");
+    assert_eq!(ready_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        ready_response.text().expect("ready body should read"),
+        r#"{"status":"ready"}"#
+    );
+
     let root_response = client
         .get(format!("{base_url}/"))
         .send()

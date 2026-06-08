@@ -66,6 +66,18 @@ const PARENT_WATCH_ENV: &str = "VSR_WATCH_PARENT_PROCESS";
 #[cfg(windows)]
 const PROCESS_SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
 
+async fn healthz() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(r#"{"status":"ok"}"#)
+}
+
+async fn readyz() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(r#"{"status":"ready"}"#)
+}
+
 pub async fn serve_service(
     input: &Path,
     database_url: &str,
@@ -172,6 +184,8 @@ pub async fn serve_service(
                 .wrap(rest_macro_core::security::security_headers_middleware(
                     &api_security,
                 ))
+                .route("/healthz", web::get().to(healthz))
+                .route("/readyz", web::get().to(readyz))
                 .route(
                     "/openapi.json",
                     web::get().to(move || {
