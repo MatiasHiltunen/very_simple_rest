@@ -2865,6 +2865,7 @@ fn run_runtime_probe_checks(
             operation.method == "GET"
                 && !operation.requires_bearer_auth
                 && operation.request_body.is_none()
+                && !is_app_root_builtin_auth_ui_operation(operation)
                 && !operation.path_params.iter().any(|param| param.required)
                 && !operation.query_params.iter().any(|param| param.required)
                 && !operation.header_params.iter().any(|param| param.required)
@@ -2951,6 +2952,13 @@ fn run_runtime_probe_checks(
         });
     }
     Ok(rendered)
+}
+
+fn is_app_root_builtin_auth_ui_operation(operation: &ClientOperation) -> bool {
+    matches!(
+        operation.operation_id.as_str(),
+        "openBuiltinAccountPortal" | "openBuiltinAdminDashboard"
+    )
 }
 
 fn summarize_client_self_test_checks(checks: &[ClientSelfTestCheck]) -> ClientSelfTestSummary {
