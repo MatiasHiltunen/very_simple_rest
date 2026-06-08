@@ -691,6 +691,7 @@ async fn detect_backend(pool: &DbPool) -> Result<DbBackend> {
                 )))
             }
         }
+        #[cfg(feature = "turso-local")]
         DbPool::TursoLocal(_) => Ok(DbBackend::Sqlite),
     }
 }

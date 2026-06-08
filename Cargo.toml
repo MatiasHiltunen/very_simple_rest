@@ -59,7 +59,7 @@ eon = "0.2.0"
 heck = "0.5"
 dotenvy = "0.15.7"
 rand = "0.10.0"
-uuid = { version = "1.22", features = ["v4", "serde"] }
+uuid = { version = "1.22", features = ["v4", "v5", "serde"] }
 garde = { version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }
 rest_macro = { path = "crates/rest_macro", version = "0.1.11" }
 rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.11" }
@@ -130,6 +130,7 @@ sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
 postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
 mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
 turso-local = ["sqlite", "rest_macro_core/turso-local"]
+auth-email = ["rest_macro_core/auth-email"]
 storage-local = ["rest_macro_core/storage-local"]
 
 [dev-dependencies]

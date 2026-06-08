@@ -2029,10 +2029,48 @@ fn runtime_feature_list(service: &ServiceSpec, backend: DbBackend) -> String {
     if matches!(service.database.engine, DatabaseEngine::TursoLocal(_)) {
         features.push("\"turso-local\"".to_owned());
     }
+    if service.security.auth.email.is_some() {
+        features.push("\"auth-email\"".to_owned());
+    }
     if !service.storage.is_empty() {
         features.push("\"storage-local\"".to_owned());
     }
     features.join(", ")
+}
+
+#[cfg(test)]
+mod runtime_feature_list_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn load_fixture_service(name: &str) -> ServiceSpec {
+        compiler::load_service_from_path(&fixture_path(name))
+            .expect("fixture service should load")
+    }
+
+    #[test]
+    fn generated_cargo_features_include_auth_email_when_configured() {
+        let service = load_fixture_service("auth_management_api.eon");
+        let cargo_toml = render_cargo_toml("auth-email-server", &service, DbBackend::Sqlite)
+            .expect("Cargo.toml should render");
+
+        assert!(cargo_toml.contains("\"auth-email\""));
+    }
+
+    #[test]
+    fn generated_cargo_features_include_storage_local_when_configured() {
+        let service = load_fixture_service("storage_upload_api.eon");
+        let cargo_toml = render_cargo_toml("storage-server", &service, DbBackend::Sqlite)
+            .expect("Cargo.toml should render");
+
+        assert!(cargo_toml.contains("\"storage-local\""));
+    }
 }
 
 pub(crate) fn resolve_generated_package_name(

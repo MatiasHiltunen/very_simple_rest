@@ -18,7 +18,9 @@ use aws_sdk_s3::{
 };
 use chrono::Utc;
 use colored::Colorize;
+#[cfg(feature = "backup-remote")]
 use futures_util::StreamExt as _;
+#[cfg(feature = "backup-remote")]
 use object_store::{
     ObjectStoreExt, ObjectStoreScheme, WriteMultipart, parse_url_opts,
     path::Path as ObjectStorePath,
@@ -36,6 +38,7 @@ use rest_macro_core::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row as _;
+#[cfg(feature = "backup-remote")]
 use tokio::{
     fs::File as TokioFile,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -142,6 +145,7 @@ struct VerifyRestoreResult {
     healthy: bool,
 }
 
+#[cfg(feature = "backup-remote")]
 #[derive(Clone, Debug, serde::Serialize)]
 struct RemoteArtifactTransferResult {
     remote_uri: String,
@@ -151,12 +155,14 @@ struct RemoteArtifactTransferResult {
     files: Vec<String>,
 }
 
+#[cfg(feature = "backup-remote")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BackupRemoteScheme {
     File,
     S3,
 }
 
+#[cfg(feature = "backup-remote")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BackupRemoteLocation {
     url: Url,
@@ -164,13 +170,14 @@ struct BackupRemoteLocation {
     prefix: ObjectStorePath,
 }
 
-#[cfg(feature = "aws-sdk-s3-backup")]
+#[cfg(all(feature = "backup-remote", feature = "aws-sdk-s3-backup"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct S3RemoteLocation {
     bucket: String,
     prefix: String,
 }
 
+#[cfg(feature = "backup-remote")]
 #[derive(Clone, Copy, Debug, Default)]
 struct RemoteTransferOptions<'a> {
     endpoint_url: Option<&'a str>,
@@ -287,6 +294,7 @@ pub async fn run_backup_verify_restore(
     write_rendered_output(rendered, output, force, "verify-restore report")
 }
 
+#[cfg(feature = "backup-remote")]
 pub async fn run_backup_push(
     artifact: &Path,
     remote: &str,
@@ -309,6 +317,19 @@ pub async fn run_backup_push(
     Ok(())
 }
 
+#[cfg(not(feature = "backup-remote"))]
+pub async fn run_backup_push(
+    _artifact: &Path,
+    _remote: &str,
+    _endpoint_url: Option<&str>,
+    _region: Option<&str>,
+    _path_style: bool,
+    _format: OutputFormat,
+) -> Result<()> {
+    bail!("backup remote transfer support requires the `backup-remote` feature")
+}
+
+#[cfg(feature = "backup-remote")]
 pub async fn run_backup_pull(
     remote: &str,
     output: &Path,
@@ -331,6 +352,19 @@ pub async fn run_backup_pull(
     .await?;
     print_rendered_transfer_result(&result, format);
     Ok(())
+}
+
+#[cfg(not(feature = "backup-remote"))]
+pub async fn run_backup_pull(
+    _remote: &str,
+    _output: &Path,
+    _endpoint_url: Option<&str>,
+    _region: Option<&str>,
+    _path_style: bool,
+    _force: bool,
+    _format: OutputFormat,
+) -> Result<()> {
+    bail!("backup remote transfer support requires the `backup-remote` feature")
 }
 
 pub async fn run_backup_doctor(
@@ -643,6 +677,7 @@ async fn verify_logical_dump_artifact_from_manifest(
     }
 }
 
+#[cfg(feature = "backup-remote")]
 async fn push_snapshot_artifact(
     artifact: &Path,
     remote: &str,
@@ -673,6 +708,7 @@ async fn push_snapshot_artifact(
     }
 }
 
+#[cfg(feature = "backup-remote")]
 async fn push_snapshot_artifact_with_object_store(
     artifact: &Path,
     remote: &str,
@@ -704,6 +740,7 @@ async fn push_snapshot_artifact_with_object_store(
     })
 }
 
+#[cfg(feature = "backup-remote")]
 async fn pull_snapshot_artifact(
     remote: &str,
     output: &Path,
@@ -742,6 +779,7 @@ async fn pull_snapshot_artifact(
     }
 }
 
+#[cfg(feature = "backup-remote")]
 async fn pull_snapshot_artifact_with_object_store(
     remote: &str,
     output: &Path,
@@ -804,6 +842,7 @@ async fn pull_snapshot_artifact_with_object_store(
     })
 }
 
+#[cfg(feature = "backup-remote")]
 fn parse_backup_remote_location(remote: &str) -> Result<BackupRemoteLocation> {
     let trimmed = remote.trim();
     let url = Url::parse(trimmed)
@@ -830,6 +869,7 @@ fn parse_backup_remote_location(remote: &str) -> Result<BackupRemoteLocation> {
     })
 }
 
+#[cfg(feature = "backup-remote")]
 fn build_object_store_remote(
     remote: &BackupRemoteLocation,
     options: RemoteTransferOptions<'_>,
@@ -838,6 +878,7 @@ fn build_object_store_remote(
     parse_url_opts(&remote.url, option_pairs).map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
+#[cfg(feature = "backup-remote")]
 fn build_object_store_option_pairs(
     remote: &BackupRemoteLocation,
     options: RemoteTransferOptions<'_>,
@@ -867,12 +908,14 @@ fn build_object_store_option_pairs(
     option_pairs
 }
 
+#[cfg(feature = "backup-remote")]
 fn join_remote_object_path(base_path: &ObjectStorePath, relative_path: &str) -> ObjectStorePath {
     let mut object_path = base_path.clone();
     object_path.extend(relative_path.split('/'));
     object_path
 }
 
+#[cfg(feature = "backup-remote")]
 fn relative_path_from_remote_path(
     prefix: &ObjectStorePath,
     location: &ObjectStorePath,
@@ -896,6 +939,7 @@ fn relative_path_from_remote_path(
     Ok(relative_parts.join("/"))
 }
 
+#[cfg(feature = "backup-remote")]
 async fn upload_file_to_object_store(
     store: &dyn object_store::ObjectStore,
     location: &ObjectStorePath,
@@ -942,6 +986,7 @@ async fn upload_file_to_object_store(
     Ok(())
 }
 
+#[cfg(feature = "backup-remote")]
 async fn download_file_from_object_store(
     store: &dyn object_store::ObjectStore,
     location: &ObjectStorePath,
@@ -1169,6 +1214,7 @@ fn parse_s3_remote_location(remote: &str) -> Result<S3RemoteLocation> {
     })
 }
 
+#[cfg(feature = "backup-remote")]
 fn collect_artifact_files(artifact_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
     let mut files = Vec::new();
     collect_artifact_files_recursive(artifact_dir, artifact_dir, &mut files)?;
@@ -1176,6 +1222,7 @@ fn collect_artifact_files(artifact_dir: &Path) -> Result<Vec<(PathBuf, String)>>
     Ok(files)
 }
 
+#[cfg(feature = "backup-remote")]
 fn collect_artifact_files_recursive(
     root: &Path,
     current: &Path,
@@ -2697,6 +2744,7 @@ fn render_text_verify_restore(result: &VerifyRestoreResult) -> String {
     output
 }
 
+#[cfg(feature = "backup-remote")]
 fn print_rendered_transfer_result(result: &RemoteArtifactTransferResult, format: OutputFormat) {
     let rendered = match format {
         OutputFormat::Text => render_text_transfer_result(result),
@@ -2709,6 +2757,7 @@ fn print_rendered_transfer_result(result: &RemoteArtifactTransferResult, format:
     }
 }
 
+#[cfg(feature = "backup-remote")]
 fn render_text_transfer_result(result: &RemoteArtifactTransferResult) -> String {
     let mut output = String::new();
     output.push_str(&format!("Remote URI: {}\n", result.remote_uri));

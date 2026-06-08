@@ -13,12 +13,15 @@ default-run = "vsr"
 build = "build.rs"
 
 [features]
-default = ["sqlite", "turso-local", "postgres"]
+default = ["sqlite", "turso-local", "postgres", "auth-email", "storage-local", "backup-remote"]
 sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
 postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
 mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
 turso-local = ["sqlite", "rest_macro_core/turso-local"]
-aws-sdk-s3-backup = ["dep:aws-config", "dep:aws-sdk-s3"]
+auth-email = ["rest_macro_core/auth-email"]
+storage-local = ["rest_macro_core/storage-local", "dep:object_store"]
+backup-remote = ["dep:object_store"]
+aws-sdk-s3-backup = ["backup-remote", "dep:aws-config", "dep:aws-sdk-s3"]
 s3-backup = ["aws-sdk-s3-backup"]
 
 [dependencies]
@@ -35,7 +38,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "2.0"
 dotenvy.workspace = true
-rest_macro_core = { workspace = true, features = ["codegen", "auth-email", "storage-local"] }
+rest_macro_core = { workspace = true, features = ["codegen"] }
 vsr-core = { workspace = true, features = ["telemetry"] }
 vsr_schema_doc.workspace = true
 bcrypt.workspace = true
@@ -53,7 +56,7 @@ brotli = "7.0.0"
 flate2 = "1.1.0"
 sha2.workspace = true
 futures-util = "0.3"
-object_store = { workspace = true, features = ["aws", "fs"] }
+object_store = { workspace = true, features = ["aws", "fs"], optional = true }
 aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "default-https-client", "rt-tokio"], optional = true }
 aws-sdk-s3 = { version = "1.131", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 log.workspace = true

@@ -1242,6 +1242,7 @@ async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
                 bail!("unsupported live database backend `{backend_name}`")
             }
         }
+        #[cfg(feature = "turso-local")]
         DbPool::TursoLocal(_) => Ok(AuthDbBackend::Sqlite),
     }
 }

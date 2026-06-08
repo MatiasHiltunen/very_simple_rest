@@ -30,6 +30,7 @@ use rest_macro_core::db::{DbExecutor, DbPool, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::security::DEFAULT_MAX_FILTER_IN_VALUES;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
+#[cfg(feature = "storage-local")]
 use rest_macro_core::storage::{
     StoragePublicMount, StorageRegistry, StorageS3CompatConfig, StorageUploadEndpoint,
     configure_public_mounts_with_runtime, configure_s3_compat_with_runtime,
@@ -169,8 +170,11 @@ pub async fn serve_service(
             let api_runtime = dynamic_service.runtime.clone();
             let api_security = dynamic_service.security.clone();
             let static_mounts = dynamic_service.static_mounts.clone();
+            #[cfg(feature = "storage-local")]
             let storage_registry = dynamic_service.storage_registry.clone();
+            #[cfg(feature = "storage-local")]
             let storage_public_mounts = dynamic_service.storage_public_mounts.clone();
+            #[cfg(feature = "storage-local")]
             let storage_s3_compat = dynamic_service.storage_s3_compat.clone();
             let docs_html = dynamic_service.docs_html.clone();
             let openapi_json = dynamic_service.openapi_json.clone();
@@ -246,6 +250,8 @@ pub async fn serve_service(
                         .wrap(anon_client_middleware.clone()),
                 )
                 .configure(move |cfg| {
+                    #[cfg(feature = "storage-local")]
+                    {
                     configure_public_mounts_with_runtime(
                         cfg,
                         storage_registry.as_ref(),
@@ -258,6 +264,7 @@ pub async fn serve_service(
                         storage_s3_compat.as_ref().as_ref(),
                         &api_runtime,
                     );
+                    }
                     configure_static_mounts_with_runtime(
                         cfg,
                         static_mounts.as_slice(),
@@ -525,9 +532,13 @@ struct DynamicService {
     docs_html: Arc<String>,
     include_builtin_auth: bool,
     static_mounts: Arc<Vec<StaticMount>>,
+    #[cfg(feature = "storage-local")]
     storage_registry: Arc<StorageRegistry>,
+    #[cfg(feature = "storage-local")]
     storage_public_mounts: Arc<Vec<StoragePublicMount>>,
+    #[cfg(feature = "storage-local")]
     storage_uploads: Arc<Vec<StorageUploadEndpoint>>,
+    #[cfg(feature = "storage-local")]
     storage_s3_compat: Arc<Option<StorageS3CompatConfig>>,
 }
 
@@ -547,12 +558,22 @@ impl DynamicService {
             .map(Arc::new)
             .collect();
         let static_mounts = Arc::new(convert_static_mounts(service.static_mounts.as_slice()));
+        #[cfg(not(feature = "storage-local"))]
+        if !service.storage.is_empty() {
+            bail!(
+                "this service uses `storage`, but the vsr binary was built without the `storage-local` feature"
+            );
+        }
+        #[cfg(feature = "storage-local")]
         let storage_registry = Arc::new(
             StorageRegistry::from_config(&service.storage)
                 .map_err(|error| anyhow!("storage configuration error: {error}"))?,
         );
+        #[cfg(feature = "storage-local")]
         let storage_public_mounts = Arc::new(service.storage.public_mounts.clone());
+        #[cfg(feature = "storage-local")]
         let storage_uploads = Arc::new(service.storage.uploads.clone());
+        #[cfg(feature = "storage-local")]
         let storage_s3_compat = Arc::new(service.storage.s3_compat.clone());
 
         Ok(Self {
@@ -567,9 +588,13 @@ impl DynamicService {
             docs_html: Arc::new(swagger_ui_html().to_owned()),
             include_builtin_auth,
             static_mounts,
+            #[cfg(feature = "storage-local")]
             storage_registry,
+            #[cfg(feature = "storage-local")]
             storage_public_mounts,
+            #[cfg(feature = "storage-local")]
             storage_uploads,
+            #[cfg(feature = "storage-local")]
             storage_s3_compat,
         })
     }
@@ -1172,13 +1197,17 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
     let security = dynamic_service.security.clone();
     let pool = state.pool.clone();
     let authorization_runtime = state.authorization_runtime.clone();
+    #[cfg(feature = "storage-local")]
     let storage_registry = dynamic_service.storage_registry.clone();
+    #[cfg(feature = "storage-local")]
     let storage_public_mounts = dynamic_service.storage_public_mounts.clone();
+    #[cfg(feature = "storage-local")]
     let storage_uploads = dynamic_service.storage_uploads.clone();
     scope = scope.configure(move |cfg| {
         rest_macro_core::security::configure_scope_security(cfg, &security);
         cfg.app_data(web::Data::new(state.clone()));
         cfg.app_data(web::Data::new(authorization_runtime.clone()));
+        #[cfg(feature = "storage-local")]
         configure_upload_endpoints_with_runtime(
             cfg,
             storage_registry.as_ref(),
