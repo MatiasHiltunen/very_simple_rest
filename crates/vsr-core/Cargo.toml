@@ -23,6 +23,12 @@ chrono = ["dep:chrono"]
 # Enables tracing integration stubs (no-ops when disabled).
 tracing = ["dep:tracing"]
 
+# Enables metrics emission stubs (no-ops when disabled).
+metrics = ["dep:metrics"]
+
+# Enables all telemetry integrations.
+telemetry = ["tracing", "metrics"]
+
 # ── Database back-end stubs ───────────────────────────────────────────────────
 # These are empty today. Phase 3 adds concrete sqlx-backed `DbPool` impls
 # behind each flag. Defined here so vsr-runtime can re-export them without
@@ -38,5 +44,9 @@ features = ["serde"]
 optional = true
 
 [dependencies.tracing]
-version = "0.1"
+workspace = true
+optional = true
+
+[dependencies.metrics]
+workspace = true
 optional = true

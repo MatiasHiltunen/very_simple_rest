@@ -66,6 +66,8 @@ rest_macro_core = { path = "crates/rest_macro_core", version = "0.1.11" }
 vsr_schema_doc = { path = "crates/vsr_schema_doc", version = "0.1.11" }
 log = "0.4"
 env_logger = "0.11"
+tracing = "0.1"
+metrics = "0.24"
 actix-cors = "0.7"
 actix-files = "0.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

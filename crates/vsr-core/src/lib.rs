@@ -40,7 +40,9 @@ pub mod db;
 pub mod error;
 pub mod secret;
 pub mod testing;
+pub mod telemetry;
 
 // Convenience re-exports of the most commonly imported items.
 pub use error::{Diagnostic, ErrorCode, Severity, Span, VsrError, VsrResult};
 pub use secret::SecretRef;
+pub use telemetry::{HttpRequestTelemetry, record_http_request};
