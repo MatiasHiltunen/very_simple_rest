@@ -48,9 +48,9 @@ const service: VsrService = defineService({
           age: "age"
         }
       },
-      indexes: {
+      indexes: [{
         fields: ["id"]
-      },
+      }],
 
     }
   }
