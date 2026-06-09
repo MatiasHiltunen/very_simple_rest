@@ -1,3 +1,5 @@
+// Architecture migration note: `auth` and `authorization` are public
+// compatibility facades. Keep these module paths stable while internals move.
 pub mod auth;
 pub mod authorization;
 pub mod database;

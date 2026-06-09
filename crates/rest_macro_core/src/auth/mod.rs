@@ -1,3 +1,9 @@
+//! Compatibility facade for the public `rest_macro_core::auth` API.
+//!
+//! Phase 2 may move implementation details between narrower submodules, but
+//! public re-exports in this file are intentionally preserved for downstream
+//! callers during the architecture migration.
+
 mod settings;
 mod migrations;
 mod jwt;

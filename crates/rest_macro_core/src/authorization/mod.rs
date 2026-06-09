@@ -1,3 +1,9 @@
+//! Compatibility facade for the public `rest_macro_core::authorization` API.
+//!
+//! Phase 2 may move implementation details into roadmap-aligned modules such
+//! as model, eval, rbac, hybrid, and assignments, but public re-exports in this
+//! file are intentionally preserved during the architecture migration.
+
 mod db_ops;
 mod engine;
 mod handlers;
