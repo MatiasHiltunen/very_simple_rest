@@ -693,6 +693,11 @@ async fn detect_backend(pool: &DbPool) -> Result<DbBackend> {
         }
         #[cfg(feature = "turso-local")]
         DbPool::TursoLocal(_) => Ok(DbBackend::Sqlite),
+        #[cfg(not(feature = "turso-local"))]
+        #[allow(unreachable_patterns)]
+        _ => Err(Error::Config(
+            "Turso Local admin setup requires the `turso-local` feature".to_owned(),
+        )),
     }
 }
 

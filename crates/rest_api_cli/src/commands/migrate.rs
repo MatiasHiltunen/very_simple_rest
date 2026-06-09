@@ -1244,6 +1244,9 @@ async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
         }
         #[cfg(feature = "turso-local")]
         DbPool::TursoLocal(_) => Ok(AuthDbBackend::Sqlite),
+        #[cfg(not(feature = "turso-local"))]
+        #[allow(unreachable_patterns)]
+        _ => bail!("Turso Local migrations require the `turso-local` feature"),
     }
 }
 
