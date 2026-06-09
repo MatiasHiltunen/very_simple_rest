@@ -18,6 +18,7 @@ Cargo.lock
 *.swo
 node_modules/
 packages/vsr/.native/
+.worktrees/
 
 # macOS files
 .DS_Store
