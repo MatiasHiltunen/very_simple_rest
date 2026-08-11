@@ -1,4 +1,4 @@
-﻿//! Parser integration tests.
+//! Parser integration tests.
 //!
 //! Extracted from the inline #[cfg(test)] mod tests { ... } block in
 //! eon_parser.rs to keep the parent module focused on API surface only.
@@ -13,11 +13,11 @@ use super::*;
 
 // Model types used in test assertions but not imported at the parent module level.
 use super::super::model::{
-    IndexSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec,
-    ResourceActionMethod, ResourceActionTarget, ResourceActionValueSpec,
+    IndexSpec, ResourceActionBehaviorSpec, ResourceActionInputFieldSpec, ResourceActionMethod,
+    ResourceActionTarget, ResourceActionValueSpec, ResourceAuditActionSelection,
 };
-use serde_json::Value as JsonValue;
 use quote::ToTokens;
+use serde_json::Value as JsonValue;
 
 fn parse_document(source: &str) -> ServiceDocument {
     eon::from_str::<ServiceDocument>(source).expect("eon should parse")
@@ -85,9 +85,8 @@ fn rejects_turso_local_for_non_sqlite_dialect() {
 
 #[test]
 fn defaults_sqlite_services_to_turso_local_engine() {
-    let database =
-        parse_database_document(DbBackend::Sqlite, None, "blog_api", Span::call_site())
-            .expect("sqlite service should default to turso local");
+    let database = parse_database_document(DbBackend::Sqlite, None, "blog_api", Span::call_site())
+        .expect("sqlite service should default to turso local");
     assert_eq!(
         database.engine,
         DatabaseEngine::TursoLocal(TursoLocalConfig {
@@ -285,9 +284,9 @@ fn rejects_turso_local_replication_contract() {
     .expect_err("turso local replication should fail");
 
     assert!(
-        error
-            .to_string()
-            .contains("database.resilience.replication is not supported for `database.engine = TursoLocal`"),
+        error.to_string().contains(
+            "database.resilience.replication is not supported for `database.engine = TursoLocal`"
+        ),
         "unexpected error: {error}"
     );
 }
@@ -310,6 +309,7 @@ fn parses_datetime_scalar_as_typed_datetime_field() {
             indexes: Vec::new(),
             many_to_many: Vec::new(),
             actions: Vec::new(),
+            audit: None,
             fields: vec![
                 FieldDocument {
                     name: "id".to_owned(),
@@ -371,6 +371,7 @@ fn parses_portable_scalar_types_as_typed_fields() {
             indexes: Vec::new(),
             many_to_many: Vec::new(),
             actions: Vec::new(),
+            audit: None,
             fields: vec![
                 FieldDocument {
                     name: "id".to_owned(),
@@ -493,6 +494,7 @@ fn parses_json_scalar_types_as_typed_fields() {
             indexes: Vec::new(),
             many_to_many: Vec::new(),
             actions: Vec::new(),
+            audit: None,
             fields: vec![
                 FieldDocument {
                     name: "id".to_owned(),
@@ -595,6 +597,7 @@ fn parses_list_fields_with_scalar_item_types() {
             indexes: Vec::new(),
             many_to_many: Vec::new(),
             actions: Vec::new(),
+            audit: None,
             fields: vec![
                 FieldDocument {
                     name: "id".to_owned(),
@@ -691,6 +694,7 @@ fn parses_typed_object_fields_with_nested_shapes() {
             indexes: Vec::new(),
             many_to_many: Vec::new(),
             actions: Vec::new(),
+            audit: None,
             fields: vec![
                 FieldDocument {
                     name: "id".to_owned(),
@@ -820,8 +824,8 @@ fn parses_typed_object_fields_with_nested_shapes() {
         .expect("settings field should exist");
     let title_fields =
         super::super::model::object_fields(title).expect("title should define object fields");
-    let settings_fields = super::super::model::object_fields(settings)
-        .expect("settings should define object fields");
+    let settings_fields =
+        super::super::model::object_fields(settings).expect("settings should define object fields");
 
     assert_eq!(title.sql_type, "TEXT");
     assert!(super::super::model::is_typed_object_field(title));
@@ -935,8 +939,8 @@ resources: [
     let workflow = resource
         .find_field("workflow")
         .expect("workflow field should exist");
-    let workflow_fields = super::super::model::object_fields(workflow)
-        .expect("workflow should define object fields");
+    let workflow_fields =
+        super::super::model::object_fields(workflow).expect("workflow should define object fields");
 
     assert_eq!(enums[0].name, "PostStatus");
     assert_eq!(enums[0].values, vec!["draft", "published", "archived"]);
@@ -1289,6 +1293,154 @@ resources: [
         error
             .to_string()
             .contains("requires through field `post_id` on `post_tag` to reference `post.id`")
+    );
+}
+
+#[test]
+fn parses_resource_audit_config_from_eon() {
+    let document = parse_document(
+        r#"
+resources: [
+    {
+        name: "Post"
+        actions: [
+            {
+                name: "publish"
+                behavior: {
+                    kind: "UpdateFields"
+                    set: {
+                        status: "published"
+                    }
+                }
+            }
+        ]
+        audit: {
+            resource: "AuditEvent"
+            create: true
+            update: true
+            delete: true
+            actions: ["publish"]
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "status", type: String }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "event_kind", type: String }
+            { name: "resource_name", type: String }
+            { name: "record_id", type: I64 }
+            { name: "actor_user_id", type: I64, nullable: true }
+            { name: "actor_roles_json", type: String }
+            { name: "payload_json", type: String }
+            { name: "created_at", type: String }
+        ]
+    }
+]
+"#,
+    );
+    let resources =
+        build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
+    let post = resources
+        .iter()
+        .find(|resource| resource.struct_ident == "Post")
+        .expect("post resource should exist");
+    let audit = post.audit.as_ref().expect("post audit should exist");
+
+    assert_eq!(audit.resource, "AuditEvent");
+    assert!(audit.create);
+    assert!(audit.update);
+    assert!(audit.delete);
+    assert_eq!(
+        audit.actions,
+        Some(ResourceAuditActionSelection::Named(vec![
+            "publish".to_owned()
+        ]))
+    );
+}
+
+#[test]
+fn parses_resource_audit_config_from_map_style_eon() {
+    let document = parse_document(
+        r#"
+resources: {
+    Post: {
+        audit: {
+            resource: "AuditEvent"
+            create: true
+        }
+        fields: {
+            id: { type: I64, id: true }
+            title: String
+        }
+    }
+    AuditEvent: {
+        fields: {
+            id: { type: I64, id: true }
+            event_kind: String
+            resource_name: String
+            record_id: I64
+            actor_user_id: { type: I64, nullable: true }
+            actor_roles_json: String
+            payload_json: String
+            created_at: String
+        }
+    }
+}
+"#,
+    );
+    let resources =
+        build_resources(DbBackend::Sqlite, document.resources).expect("resources should build");
+    let post = resources
+        .iter()
+        .find(|resource| resource.struct_ident == "Post")
+        .expect("post resource should exist");
+
+    assert!(post.audit.as_ref().is_some_and(|audit| audit.create));
+}
+
+#[test]
+fn rejects_audit_sink_without_required_payload_field() {
+    let document = parse_document(
+        r#"
+resources: [
+    {
+        name: "Post"
+        audit: {
+            resource: "AuditEvent"
+            create: true
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title", type: String }
+        ]
+    }
+    {
+        name: "AuditEvent"
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "event_kind", type: String }
+            { name: "resource_name", type: String }
+            { name: "record_id", type: I64 }
+            { name: "actor_user_id", type: I64, nullable: true }
+            { name: "actor_roles_json", type: String }
+            { name: "created_at", type: String }
+        ]
+    }
+]
+"#,
+    );
+    let error = build_resources(DbBackend::Sqlite, document.resources)
+        .expect_err("missing audit payload field should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must declare field `payload_json`"),
+        "unexpected error: {error}"
     );
 }
 
@@ -1987,6 +2139,7 @@ fn rejects_invalid_table_identifier_from_eon() {
             indexes: Vec::new(),
             many_to_many: Vec::new(),
             actions: Vec::new(),
+            audit: None,
             fields: vec![
                 FieldDocument {
                     name: "id".to_owned(),
@@ -3278,8 +3431,8 @@ fn parses_authorization_contract_from_eon() {
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -3324,8 +3477,8 @@ fn rejects_authorization_permission_for_unknown_resource() {
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     let error = validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -3366,8 +3519,8 @@ fn parses_authorization_management_api_from_eon() {
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     assert!(authorization.management_api.enabled);
     assert_eq!(authorization.management_api.mount, "/ops/authz");
 }
@@ -3416,8 +3569,8 @@ fn parses_authorization_hybrid_enforcement_from_eon() {
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -3522,8 +3675,8 @@ fn parses_explicit_authorization_hybrid_scope_sources_from_eon() {
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -3577,8 +3730,8 @@ fn rejects_authorization_hybrid_enforcement_create_without_claim_controlled_scop
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     let error = validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -3634,8 +3787,8 @@ fn accepts_authorization_hybrid_enforcement_create_for_claim_controlled_scope_fi
         "#,
     );
 
-    let authorization = parse_authorization_document(document.authorization)
-        .expect("authorization should parse");
+    let authorization =
+        parse_authorization_document(document.authorization).expect("authorization should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     validate_authorization_contract(&authorization, &resources, Span::call_site())
@@ -4436,8 +4589,7 @@ fn parses_static_mounts_from_eon() {
     let root = temp_root("eon_static_mounts");
     fs::create_dir_all(root.join("public/assets")).expect("asset dir should exist");
     fs::write(root.join("public/index.html"), "<html>ok</html>").expect("index should exist");
-    fs::write(root.join("public/assets/app.js"), "console.log('ok');")
-        .expect("asset should exist");
+    fs::write(root.join("public/assets/app.js"), "console.log('ok');").expect("asset should exist");
 
     let document = parse_document(
         r#"
@@ -4469,8 +4621,7 @@ fn parses_static_mounts_from_eon() {
         "#,
     );
 
-    let mounts =
-        build_static_mounts(&root, document.static_config).expect("mounts should parse");
+    let mounts = build_static_mounts(&root, document.static_config).expect("mounts should parse");
     assert_eq!(mounts.len(), 2);
     assert_eq!(mounts[0].mount_path, "/assets");
     assert_eq!(mounts[0].source_dir, "public/assets");
@@ -4591,8 +4742,7 @@ fn parses_storage_backends_and_public_mounts_from_eon() {
         "#,
     );
 
-    let storage =
-        parse_storage_document(&root, document.storage).expect("storage should parse");
+    let storage = parse_storage_document(&root, document.storage).expect("storage should parse");
     assert_eq!(storage.backends.len(), 1);
     assert_eq!(storage.backends[0].name, "uploads");
     assert_eq!(storage.backends[0].kind, StorageBackendKind::Local);
@@ -4686,8 +4836,7 @@ fn rejects_storage_mounts_that_conflict_with_static_mounts() {
 
     let static_mounts =
         build_static_mounts(&root, document.static_config).expect("static mounts should parse");
-    let storage =
-        parse_storage_document(&root, document.storage).expect("storage should parse");
+    let storage = parse_storage_document(&root, document.storage).expect("storage should parse");
     let error = validate_distinct_public_mounts(static_mounts.as_slice(), &storage)
         .expect_err("conflicting mount paths should fail");
     assert!(
@@ -4737,8 +4886,7 @@ fn parses_storage_uploads_from_eon() {
         "#,
     );
 
-    let storage =
-        parse_storage_document(&root, document.storage).expect("storage should parse");
+    let storage = parse_storage_document(&root, document.storage).expect("storage should parse");
     assert_eq!(storage.uploads.len(), 1);
     assert_eq!(storage.uploads[0].name, "asset_upload");
     assert_eq!(storage.uploads[0].path, "uploads");
@@ -4784,8 +4932,7 @@ fn rejects_storage_upload_paths_that_conflict_with_resource_routes() {
         "#,
     );
 
-    let storage =
-        parse_storage_document(&root, document.storage).expect("storage should parse");
+    let storage = parse_storage_document(&root, document.storage).expect("storage should parse");
     let resources =
         build_resources(document.db, document.resources).expect("resources should build");
     let error = validate_storage_upload_routes(&storage, &resources)
@@ -4836,8 +4983,7 @@ fn parses_storage_s3_compat_mounts_from_eon() {
         "#,
     );
 
-    let storage =
-        parse_storage_document(&root, document.storage).expect("storage should parse");
+    let storage = parse_storage_document(&root, document.storage).expect("storage should parse");
     let s3_compat = storage
         .s3_compat
         .expect("s3 compat config should be present");
@@ -4895,8 +5041,7 @@ fn rejects_storage_s3_compat_mounts_that_conflict_with_static_mounts() {
 
     let static_mounts =
         build_static_mounts(&root, document.static_config).expect("static mounts should parse");
-    let storage =
-        parse_storage_document(&root, document.storage).expect("storage should parse");
+    let storage = parse_storage_document(&root, document.storage).expect("storage should parse");
     let error = validate_distinct_public_mounts(static_mounts.as_slice(), &storage)
         .expect_err("conflicting s3 compat mount should fail");
     assert!(

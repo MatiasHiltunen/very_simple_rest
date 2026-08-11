@@ -1,4 +1,4 @@
-﻿//! Resource building: converts parsed EON documents into `ResourceSpec`,
+//! Resource building: converts parsed EON documents into `ResourceSpec`,
 //! `EnumSpec`, `IndexSpec`, and related model types used by the code
 //! generator.
 //!
@@ -19,27 +19,31 @@ use super::super::model::{
     DbBackend, EnumSpec, FieldSpec, FieldTransform, GeneratedValue, IndexSpec, LengthMode,
     NumericBound, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
     ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec, ResourceActionTarget,
-    ResourceActionValueSpec, ResourceSpec, ResponseContextSpec, RowPolicies,
-    WriteModelStyle,
-    default_resource_module_ident, infer_generated_value, infer_sql_type,
-    is_json_array_type, is_json_object_type, is_json_type, is_list_field,
-    is_optional_type, is_typed_object_field, sanitize_struct_ident,
+    ResourceActionValueSpec, ResourceAuditActionSelection, ResourceAuditConfig, ResourceSpec,
+    ResponseContextSpec, RowPolicies, WriteModelStyle, default_resource_module_ident,
+    infer_generated_value, infer_sql_type, is_json_array_type, is_json_object_type, is_json_type,
+    is_list_field, is_optional_type, is_typed_object_field, sanitize_struct_ident,
     structured_scalar_kind, supports_declared_index, validate_field_transforms,
     validate_field_validations, validate_list_config, validate_relations, validate_resource_access,
-    validate_row_policies, validate_sql_identifier,
+    validate_resource_audit, validate_row_policies, validate_sql_identifier,
 };
 use super::documents::{
-    ApiFieldProjectionDocument, EnumDocument, FieldDocument, FieldTypeDocument,
-    IndexDocument, ManyToManyDocument, MixinDocument, ScalarType,
-    ResourceActionAssignmentValueDocument, ResourceActionBehaviorDocument,
-    ResourceActionDocument, ResourceDocument, ResponseContextDocument,
+    ApiFieldProjectionDocument, EnumDocument, FieldDocument, FieldTypeDocument, IndexDocument,
+    ManyToManyDocument, MixinDocument, ResourceActionAssignmentValueDocument,
+    ResourceActionBehaviorDocument, ResourceActionDocument, ResourceAuditActionDocument,
+    ResourceAuditDocument, ResourceDocument, ResponseContextDocument, ScalarType,
 };
 use super::{
+    parse_field_transforms_document,
     // Functions from sibling submodules, re-exported into parent namespace
     // via `use self::field_parsing::*` etc. in eon_parser.rs.
-    parse_field_type, parse_field_transforms_document, parse_field_validation_document,
-    parse_list_config, parse_relation_document,
-    parse_resource_access_document, parse_row_policies, reject_legacy_field_validation,
+    parse_field_type,
+    parse_field_validation_document,
+    parse_list_config,
+    parse_relation_document,
+    parse_resource_access_document,
+    parse_row_policies,
+    reject_legacy_field_validation,
     validate_api_name,
 };
 pub(super) fn build_enums(documents: Vec<EnumDocument>) -> syn::Result<Vec<EnumSpec>> {
@@ -89,7 +93,9 @@ pub(super) fn build_enums(documents: Vec<EnumDocument>) -> syn::Result<Vec<EnumS
     Ok(enums)
 }
 
-pub(super) fn build_mixins(documents: Vec<MixinDocument>) -> syn::Result<HashMap<String, MixinDocument>> {
+pub(super) fn build_mixins(
+    documents: Vec<MixinDocument>,
+) -> syn::Result<HashMap<String, MixinDocument>> {
     let mut seen_names = HashSet::new();
     let mut mixins = HashMap::with_capacity(documents.len());
 
@@ -466,6 +472,7 @@ pub(super) fn build_resources_with_enums(
             )
         })?;
         let access = parse_resource_access_document(resource.access)?;
+        let audit = parse_resource_audit_document(resource.audit)?;
         let (default_response_context, response_contexts) = build_response_contexts(
             fields.as_slice(),
             computed_fields.as_slice(),
@@ -501,7 +508,7 @@ pub(super) fn build_resources_with_enums(
             computed_fields,
             fields,
             write_style: WriteModelStyle::GeneratedStructWithDtos,
-            audit: None,
+            audit,
         });
     }
 
@@ -525,9 +532,41 @@ pub(super) fn build_resources_with_enums(
         validate_field_transforms(&resource.fields, Span::call_site())?;
         validate_list_config(resource, &resource.list, Span::call_site())?;
         validate_resource_indexes(resource, Span::call_site())?;
+        validate_resource_audit(resource, &result)?;
     }
 
     Ok(result)
+}
+
+fn parse_resource_audit_document(
+    document: Option<ResourceAuditDocument>,
+) -> syn::Result<Option<ResourceAuditConfig>> {
+    let Some(document) = document else {
+        return Ok(None);
+    };
+
+    let actions = match document.actions {
+        Some(ResourceAuditActionDocument::Enabled(true)) => Some(ResourceAuditActionSelection::All),
+        Some(ResourceAuditActionDocument::Enabled(false)) | None => None,
+        Some(ResourceAuditActionDocument::Named(actions)) => {
+            Some(ResourceAuditActionSelection::Named(actions))
+        }
+    };
+
+    if document.resource.trim().is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`resources[].audit.resource` cannot be empty",
+        ));
+    }
+
+    Ok(Some(ResourceAuditConfig {
+        resource: document.resource,
+        create: document.create,
+        update: document.update,
+        delete: document.delete,
+        actions,
+    }))
 }
 
 pub(super) fn resolve_many_to_many_specs(
@@ -1031,10 +1070,12 @@ pub(super) fn normalize_structured_scalar_action_text(
             .map_err(|error| format!("invalid date-time `{value}`: {error}"))?
             .with_timezone(&Utc)
             .to_rfc3339_opts(SecondsFormat::Micros, false),
-        super::super::model::StructuredScalarKind::Date => NaiveDate::parse_from_str(value, "%Y-%m-%d")
-            .map_err(|error| format!("invalid date `{value}`: {error}"))?
-            .format("%Y-%m-%d")
-            .to_string(),
+        super::super::model::StructuredScalarKind::Date => {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map_err(|error| format!("invalid date `{value}`: {error}"))?
+                .format("%Y-%m-%d")
+                .to_string()
+        }
         super::super::model::StructuredScalarKind::Time => value
             .parse::<NaiveTime>()
             .map_err(|error| format!("invalid time `{value}`: {error}"))?
@@ -1755,4 +1796,3 @@ pub(super) fn build_object_fields(
 
     Ok(result)
 }
-

@@ -186,7 +186,9 @@ pub async fn serve_service(
                 .wrap(Logger::default())
                 .wrap_fn(|req, srv| {
                     let method = req.method().as_str().to_owned();
-                    let route = req.path().to_owned();
+                    let route = req
+                        .match_pattern()
+                        .unwrap_or_else(|| "<unmatched>".to_owned());
                     let started_at = Instant::now();
                     let fut = srv.call(req);
                     async move {

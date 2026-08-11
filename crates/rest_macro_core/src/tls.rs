@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rustls::pki_types::pem::{Error as PemError, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -61,7 +62,18 @@ pub fn load_rustls_server_config(
     let certs = load_certificates(&resolved.cert_path)?;
     let key = load_private_key(&resolved.key_path)?;
 
-    rustls::ServerConfig::builder()
+    let builder = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("failed to configure TLS protocol versions: {error}"),
+        )
+    })?;
+
+    builder
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|error| {

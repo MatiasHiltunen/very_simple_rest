@@ -1,4 +1,4 @@
-﻿//! Deserialization document types for the `.eon` config format.
+//! Deserialization document types for the `.eon` config format.
 //!
 //! `*Document` structs are intermediate serde-deserialisable types that map 1:1
 //! to the raw YAML/JSON structure of `.eon` files. They are converted into the
@@ -700,6 +700,8 @@ pub(super) struct ResourceDocument {
     pub(super) many_to_many: Vec<ManyToManyDocument>,
     #[serde(default)]
     pub(super) actions: Vec<ResourceActionDocument>,
+    #[serde(default)]
+    pub(super) audit: Option<ResourceAuditDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     pub(super) fields: Vec<FieldDocument>,
 }
@@ -764,6 +766,27 @@ pub(super) enum ResourceActionAssignmentValueDocument {
 #[serde(deny_unknown_fields)]
 pub(super) struct ResourceActionInputValueDocument {
     pub(super) input: String,
+}
+
+#[derive(Default, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ResourceAuditDocument {
+    pub(super) resource: String,
+    #[serde(default)]
+    pub(super) create: bool,
+    #[serde(default)]
+    pub(super) update: bool,
+    #[serde(default)]
+    pub(super) delete: bool,
+    #[serde(default)]
+    pub(super) actions: Option<ResourceAuditActionDocument>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub(super) enum ResourceAuditActionDocument {
+    Enabled(bool),
+    Named(Vec<String>),
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1126,6 +1149,8 @@ pub(super) struct ResourceMapValueDocument {
     pub(super) many_to_many: Vec<ManyToManyDocument>,
     #[serde(default)]
     pub(super) actions: Vec<ResourceActionDocument>,
+    #[serde(default)]
+    pub(super) audit: Option<ResourceAuditDocument>,
     #[serde(deserialize_with = "deserialize_field_documents")]
     pub(super) fields: Vec<FieldDocument>,
 }
@@ -1250,14 +1275,18 @@ pub(super) struct EnumConfigDocument {
     pub(super) values: Vec<String>,
 }
 
-pub(super) fn deserialize_enum_documents<'de, D>(deserializer: D) -> Result<Vec<EnumDocument>, D::Error>
+pub(super) fn deserialize_enum_documents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<EnumDocument>, D::Error>
 where
     D: Deserializer<'de>,
 {
     deserializer.deserialize_any(EnumDocumentsVisitor)
 }
 
-pub(super) fn deserialize_mixin_documents<'de, D>(deserializer: D) -> Result<Vec<MixinDocument>, D::Error>
+pub(super) fn deserialize_mixin_documents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<MixinDocument>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1273,7 +1302,9 @@ where
     deserializer.deserialize_any(ResourceDocumentsVisitor)
 }
 
-pub(super) fn deserialize_field_documents<'de, D>(deserializer: D) -> Result<Vec<FieldDocument>, D::Error>
+pub(super) fn deserialize_field_documents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<FieldDocument>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1325,6 +1356,7 @@ impl ResourceMapValueDocument {
             indexes: self.indexes,
             many_to_many: self.many_to_many,
             actions: self.actions,
+            audit: self.audit,
             fields: self.fields,
         })
     }

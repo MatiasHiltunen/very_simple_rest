@@ -56,33 +56,31 @@ pub use validation::{
     BuildArtifactPathConfig, BuildArtifactsConfig, BuildCacheArtifactConfig,
     BuildCacheCleanupStrategy, BuildConfig, BuildLtoMode, ClientValueConfig, ClientsConfig,
     FieldTransform, FieldValidation, LengthMode, LengthValidation, ListConfig, NumericBound,
-    RangeValidation, ReleaseBuildConfig, TsClientAutomationConfig, TsClientConfig,
-    WriteModelStyle,
+    RangeValidation, ReleaseBuildConfig, TsClientAutomationConfig, TsClientConfig, WriteModelStyle,
 };
 
 pub use specs::{
     ComputedFieldPart, ComputedFieldSpec, EnumSpec, FieldSpec, IndexSpec, ManyToManySpec,
     ReferentialAction, RelationSpec, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
-    ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec,
-    ResourceActionTarget, ResourceActionValueSpec, ResourceAuditActionSelection,
-    ResourceAuditConfig, ResourceSpec, ResponseContextSpec, ServiceSpec, StaticCacheProfile,
-    StaticMode, StaticMountSpec, default_resource_module_ident, infer_generated_value,
-    sanitize_module_ident, sanitize_struct_ident, validate_sql_identifier,
+    ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec, ResourceActionTarget,
+    ResourceActionValueSpec, ResourceAuditActionSelection, ResourceAuditConfig, ResourceSpec,
+    ResponseContextSpec, ServiceSpec, StaticCacheProfile, StaticMode, StaticMountSpec,
+    default_resource_module_ident, infer_generated_value, sanitize_module_ident,
+    sanitize_struct_ident, validate_sql_identifier,
 };
 
 pub use helpers::{
     apply_service_read_access_defaults, base_type, default_service_database_url,
     generated_temporal_kind_for_field, infer_sql_type, is_bool_type, is_date_type,
-    is_datetime_type, is_decimal_type, is_enum_field, is_integer_sql_type,
-    is_json_array_type, is_json_object_type, is_json_type, is_list_field, is_optional_type,
-    is_structured_scalar_type, is_time_type, is_typed_object_field, is_uuid_type,
-    list_item_type, object_fields, policy_field_claim_type, read_requires_auth,
-    structured_scalar_kind, supports_contains_filters, supports_declared_index,
-    supports_exact_filters, supports_field_sort, supports_field_transforms,
-    supports_range_filters, supports_sort, temporal_scalar_kind,
+    is_datetime_type, is_decimal_type, is_enum_field, is_integer_sql_type, is_json_array_type,
+    is_json_object_type, is_json_type, is_list_field, is_optional_type, is_structured_scalar_type,
+    is_time_type, is_typed_object_field, is_uuid_type, list_item_type, object_fields,
+    policy_field_claim_type, read_requires_auth, structured_scalar_kind, supports_contains_filters,
+    supports_declared_index, supports_exact_filters, supports_field_sort,
+    supports_field_transforms, supports_range_filters, supports_sort, temporal_scalar_kind,
 };
 
-pub use audit::is_audit_sink_resource;
+pub use audit::{is_audit_sink_resource, validate_resource_audit};
 
 pub use validators::{
     validate_authorization_contract, validate_build_config, validate_clients_config,

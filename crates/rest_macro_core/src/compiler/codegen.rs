@@ -1,11 +1,9 @@
-﻿use proc_macro2::{Literal, TokenStream};
+use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 use syn::Path;
 
 use super::model::{
-    ResourceSpec, ServiceSpec,
-    StaticCacheProfile, StaticMode,
-    default_service_database_url,
+    ResourceSpec, ServiceSpec, StaticCacheProfile, StaticMode, default_service_database_url,
 };
 use crate::authorization::AuthorizationContract;
 
@@ -424,11 +422,8 @@ pub fn expand_service_module(
     })
 }
 
-
 mod service_tokens;
 use self::service_tokens::*;
-
-
 
 mod garde_tokens;
 use self::garde_tokens::*;
@@ -439,9 +434,11 @@ use self::typed_object_tokens::*;
 mod resource_struct_tokens;
 use self::resource_struct_tokens::*;
 
-
 mod resource_impl;
 use self::resource_impl::*;
+
+mod audit_tokens;
+use self::audit_tokens::*;
 
 mod resource_action_tokens;
 use self::resource_action_tokens::*;
