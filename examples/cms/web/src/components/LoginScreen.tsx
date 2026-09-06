@@ -10,7 +10,7 @@ import {
   Typography,
 } from '@mui/material';
 import Button from '@mui/material/Button';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { readLastEmail } from '../lib/api';
 import type { DraftState } from '../lib/draft';
 import { resolveLocalPreviewHref } from '../lib/preview';
@@ -90,12 +90,14 @@ export function LoginScreen({
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
+  const [previousInitialError, setPreviousInitialError] = useState(initialError);
   const studioPath = studioBasePath().replace(/\/$/, '') || '/';
   const docsPath = resolveDocsPath();
 
-  useEffect(() => {
+  if (previousInitialError !== initialError) {
+    setPreviousInitialError(initialError);
     setError(initialError);
-  }, [initialError]);
+  }
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -157,7 +159,9 @@ export function LoginScreen({
             <Stack spacing={1}>
               <Typography variant="overline">Studio access</Typography>
               <Typography variant="h3">Sign in</Typography>
-              <Typography color="text.secondary">
+              <Typography sx={{
+                color: "text.secondary"
+              }}>
                 Use a built-in auth account from the CMS backend. The studio remembers the last email
                 on this device for faster local iteration.
               </Typography>
@@ -175,24 +179,26 @@ export function LoginScreen({
             />
             <TextField
               autoComplete="current-password"
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      edge="end"
-                      onClick={() => setShowPassword((current) => !current)}
-                    >
-                      {showPassword ? <VisibilityOffRounded /> : <VisibilityRounded />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              }}
               label="Password"
               onChange={(event) => setPassword(event.target.value)}
               required
               type={showPassword ? 'text' : 'password'}
               value={password}
+              slotProps={{
+                input: {
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        edge="end"
+                        onClick={() => setShowPassword((current) => !current)}
+                      >
+                        {showPassword ? <VisibilityOffRounded /> : <VisibilityRounded />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }
+              }}
             />
 
             <Button disabled={submitting} size="large" type="submit" variant="contained">

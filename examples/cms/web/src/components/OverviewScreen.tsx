@@ -126,7 +126,11 @@ export function OverviewScreen({
           <Box className="studio-sectionHeader">
             <Typography variant="overline">Workspace command</Typography>
             <Typography variant="h2">Monitor the content graph behind the studio.</Typography>
-            <Typography color="text.secondary" maxWidth={840}>
+            <Typography
+              sx={{
+                color: "text.secondary",
+                maxWidth: 840
+              }}>
               The frontend now reflects the real API surface in <code>openapi.json</code>:
               workspace-scoped entries, assets, topics, menus, profiles, and publishing actions.
             </Typography>
@@ -142,7 +146,9 @@ export function OverviewScreen({
               <Box className="studio-panelTight" key={label} sx={{ p: 2 }}>
                 <Typography className="studio-overline">{label}</Typography>
                 <Typography className="metric-value">{value}</Typography>
-                <Typography color="text.secondary" variant="body2">
+                <Typography variant="body2" sx={{
+                  color: "text.secondary"
+                }}>
                   {description}
                 </Typography>
               </Box>
@@ -153,14 +159,20 @@ export function OverviewScreen({
 
       {needsWorkspaceBootstrap ? (
         <Paper className="studio-panel" sx={{ p: { xs: 2.5, md: 3 } }}>
-          <Stack direction={{ xs: 'column', lg: 'row' }} justifyContent="space-between" spacing={2.5}>
+          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2.5} sx={{
+            justifyContent: "space-between"
+          }}>
             <Stack spacing={1}>
               <Typography variant="h5">Workspace bootstrap</Typography>
-              <Typography color="text.secondary">
+              <Typography sx={{
+                color: "text.secondary"
+              }}>
                 The API is workspace-scoped. Without a <code>workspace_id</code> claim and a matching
                 workspace row, most content routes will stay empty.
               </Typography>
-              <Typography color="text.secondary" variant="body2">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 {workspaceRows.length > 0
                   ? `An existing workspace is available. The bootstrap flow will assign this account to "${String(
                       workspaceRows[0]?.name ?? workspaceRows[0]?.slug ?? 'workspace',
@@ -186,7 +198,9 @@ export function OverviewScreen({
                     : 'Create workspace and refresh session'}
               </Button>
               {!canBootstrapWorkspace ? (
-                <Typography color="text.secondary" variant="body2">
+                <Typography variant="body2" sx={{
+                  color: "text.secondary"
+                }}>
                   Only admin accounts can bootstrap workspace claims from the studio.
                 </Typography>
               ) : null}
@@ -205,7 +219,9 @@ export function OverviewScreen({
           <Stack spacing={2}>
             <Box className="studio-sectionHeader">
               <Typography variant="h5">Current workspace</Typography>
-              <Typography color="text.secondary">
+              <Typography sx={{
+                color: "text.secondary"
+              }}>
                 Identity, routing, and readiness for the active publishing scope.
               </Typography>
             </Box>
@@ -214,8 +230,12 @@ export function OverviewScreen({
               <Box className="studio-dataList">
                 <Box className="studio-dataRow">
                   <Box>
-                    <Typography fontWeight={700}>{String(workspace.name ?? 'Workspace')}</Typography>
-                    <Typography color="text.secondary" variant="body2">
+                    <Typography sx={{
+                      fontWeight: 700
+                    }}>{String(workspace.name ?? 'Workspace')}</Typography>
+                    <Typography variant="body2" sx={{
+                      color: "text.secondary"
+                    }}>
                       /{String(workspace.slug ?? 'workspace')}
                     </Typography>
                   </Box>
@@ -223,8 +243,12 @@ export function OverviewScreen({
                 </Box>
                 <Box className="studio-dataRow">
                   <Box>
-                    <Typography fontWeight={700}>Local preview</Typography>
-                    <Typography color="text.secondary" variant="body2">
+                    <Typography sx={{
+                      fontWeight: 700
+                    }}>Local preview</Typography>
+                    <Typography variant="body2" sx={{
+                      color: "text.secondary"
+                    }}>
                       {localPreviewHref ?? 'Workspace slug required'}
                     </Typography>
                   </Box>
@@ -243,8 +267,12 @@ export function OverviewScreen({
                 </Box>
                 <Box className="studio-dataRow">
                   <Box>
-                    <Typography fontWeight={700}>Published origin</Typography>
-                    <Typography color="text.secondary" variant="body2">
+                    <Typography sx={{
+                      fontWeight: 700
+                    }}>Published origin</Typography>
+                    <Typography variant="body2" sx={{
+                      color: "text.secondary"
+                    }}>
                       {publishedSiteHref ?? 'Not configured'}
                     </Typography>
                   </Box>
@@ -263,8 +291,12 @@ export function OverviewScreen({
                 </Box>
                 <Box className="studio-dataRow">
                   <Box>
-                    <Typography fontWeight={700}>Account scope</Typography>
-                    <Typography color="text.secondary" variant="body2">
+                    <Typography sx={{
+                      fontWeight: 700
+                    }}>Account scope</Typography>
+                    <Typography variant="body2" sx={{
+                      color: "text.secondary"
+                    }}>
                       {account.email ?? `User #${account.id}`}
                     </Typography>
                   </Box>
@@ -284,7 +316,9 @@ export function OverviewScreen({
           <Stack spacing={2}>
             <Box className="studio-sectionHeader">
               <Typography variant="h5">API surface</Typography>
-              <Typography color="text.secondary">
+              <Typography sx={{
+                color: "text.secondary"
+              }}>
                 Resource routes currently exposed by the local OpenAPI document.
               </Typography>
             </Box>
@@ -296,7 +330,9 @@ export function OverviewScreen({
                 return (
                   <Box className="api-item" key={resource.key}>
                     <Box>
-                      <Typography fontWeight={700}>{resource.label}</Typography>
+                      <Typography sx={{
+                        fontWeight: 700
+                      }}>{resource.label}</Typography>
                       <Typography className="api-itemPath">
                         {operations
                           .slice(0, 3)

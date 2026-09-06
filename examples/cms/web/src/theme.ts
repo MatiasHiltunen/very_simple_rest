@@ -138,9 +138,9 @@ export const studioTheme = createTheme({
           borderRadius: 999,
           paddingInline: 14,
           minHeight: 38,
-        },
-        containedPrimary: {
-          boxShadow: `0 14px 32px ${alpha(primary, 0.22)}`,
+          '&.MuiButton-contained.MuiButton-colorPrimary': {
+            boxShadow: `0 14px 32px ${alpha(primary, 0.22)}`,
+          },
         },
       },
     },

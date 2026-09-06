@@ -32,8 +32,7 @@ use super::policies::{
 };
 use super::scalars::{DbBackend, GeneratedValue, ResourceReadAccess};
 use super::specs::{
-    FieldSpec, ReferentialAction, ResourceSpec, is_valid_sql_identifier,
-    validate_sql_identifier,
+    FieldSpec, ReferentialAction, ResourceSpec, is_valid_sql_identifier, validate_sql_identifier,
 };
 use super::validation::{
     BuildConfig, ClientsConfig, FieldValidation, LengthMode, ListConfig, NumericBound,
@@ -1646,7 +1645,10 @@ fn legacy_auth_claim_name_supported(claim_name: &str) -> bool {
 }
 
 fn is_reserved_auth_claim_name(claim_name: &str) -> bool {
-    matches!(claim_name, "sub" | "roles" | "iss" | "aud" | "exp" | "id")
+    matches!(
+        claim_name,
+        "sub" | "roles" | "iss" | "aud" | "exp" | "id" | "_vsr_auth_state"
+    )
 }
 
 fn auth_claim_type_label(ty: AuthClaimType) -> &'static str {

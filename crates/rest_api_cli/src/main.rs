@@ -486,6 +486,11 @@ enum MigrationCommand {
         #[arg(short, long, value_name = "DIR", default_value = "migrations")]
         dir: PathBuf,
     },
+    /// Trust the checksum of an already applied legacy migration after manually verifying it
+    Baseline {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1511,6 +1516,10 @@ async fn run_cli() -> Result<()> {
             MigrationCommand::Apply { dir } => {
                 println!("{}", "Applying migrations...".green().bold());
                 commands::migrate::apply_migrations(&database_url, config_path.as_deref(), dir)
+                    .await?;
+            }
+            MigrationCommand::Baseline { file } => {
+                commands::migrate::baseline_migration(&database_url, config_path.as_deref(), file)
                     .await?;
             }
         },
@@ -2681,6 +2690,8 @@ fn autodiscover_config_path(dir: &std::path::Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{
         Cli, ServeBootstrapNeed, autodiscover_config_path, detect_serve_bootstrap_need,

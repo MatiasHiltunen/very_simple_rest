@@ -1894,7 +1894,7 @@ fn compute_file_sha256(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn load_snapshot_manifest(artifact: &Path) -> Result<(PathBuf, PathBuf, SnapshotManifest)> {
@@ -2838,6 +2838,8 @@ fn read_routing_name(mode: DatabaseReadRoutingMode) -> &'static str {
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use std::{
         fs,

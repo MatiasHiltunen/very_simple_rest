@@ -8,12 +8,11 @@ use crate::db::{DbPool, query, query_scalar};
 
 use super::admin::ManagedClaimUpdateValue;
 use super::helpers::{
-    hash_auth_token, optional_text_column, row_has_column,
-    generate_ephemeral_secret,
+    generate_ephemeral_secret, hash_auth_token, optional_text_column, row_has_column,
 };
 use super::migrations::{AuthDbBackend, auth_user_table_ident};
 use super::settings::{AuthClaimType, AuthSettings};
-use super::user::{AccountInfo, AuthenticatedUser, AuthTokenPurpose, StoredAuthToken};
+use super::user::{AccountInfo, AuthTokenPurpose, AuthenticatedUser, StoredAuthToken};
 
 pub(crate) fn authenticated_user_from_row_with_settings(
     row: &AnyRow,
@@ -353,16 +352,16 @@ pub(crate) async fn mark_auth_token_used<E>(
     db: &E,
     token_id: i64,
     used_at: &str,
-) -> Result<(), sqlx::Error>
+) -> Result<bool, sqlx::Error>
 where
     E: crate::db::DbExecutor + ?Sized,
 {
-    query("UPDATE auth_user_token SET used_at = ? WHERE id = ?")
+    let result = query("UPDATE auth_user_token SET used_at = ? WHERE id = ? AND used_at IS NULL")
         .bind(used_at)
         .bind(token_id)
         .execute(db)
         .await?;
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn delete_auth_tokens_for_user_purpose<E>(
@@ -381,10 +380,7 @@ where
     Ok(())
 }
 
-pub(crate) async fn delete_auth_token_by_id<E>(
-    db: &E,
-    token_id: i64,
-) -> Result<(), sqlx::Error>
+pub(crate) async fn delete_auth_token_by_id<E>(db: &E, token_id: i64) -> Result<(), sqlx::Error>
 where
     E: crate::db::DbExecutor + ?Sized,
 {

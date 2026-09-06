@@ -29,7 +29,7 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "storage-local")]
 use futures_util::StreamExt;
 #[cfg(feature = "storage-local")]
-use object_store::{ObjectStoreExt, local::LocalFileSystem, path::Path as ObjectPath};
+use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
 #[cfg(feature = "storage-local")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "storage-local")]
@@ -162,6 +162,13 @@ impl fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 #[cfg(feature = "storage-local")]
+impl From<std::io::Error> for StorageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+#[cfg(feature = "storage-local")]
 #[derive(Clone, Default)]
 pub struct StorageRegistry {
     backends: Arc<HashMap<String, StorageBackendHandle>>,
@@ -197,6 +204,8 @@ impl StorageRegistry {
                             root_dir.display()
                         ))
                     })?;
+                    let root_dir = fs::canonicalize(root_dir)?;
+                    vsr_runtime::storage::transaction::LocalTransaction::lock(&root_dir)?;
                     let store = LocalFileSystem::new_with_prefix(&root_dir).map_err(|error| {
                         StorageError::new(format!(
                             "failed to initialize local storage backend `{}` at `{}`: {error}",
@@ -255,17 +264,17 @@ impl StorageRegistry {
             .await
     }
 
-    pub(crate) fn read_bytes(
+    pub(crate) fn read_object(
         &self,
         backend_name: &str,
         object_key: &str,
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<(Vec<u8>, StorageObjectInfo), StorageError> {
         let location = parse_object_path(object_key)
             .map_err(|error| StorageError::new(format!("invalid storage object key: {error}")))?;
         let backend = self.backends.get(backend_name).ok_or_else(|| {
             StorageError::new(format!("unknown storage backend `{backend_name}`"))
         })?;
-        backend.read_bytes(&location)
+        backend.read_object(&location)
     }
 
     pub(crate) fn object_info(
@@ -314,15 +323,17 @@ impl StorageRegistry {
             StorageError::new(format!("unknown storage backend `{backend_name}`"))
         })?;
         match backend {
-            StorageBackendHandle::Local(backend) => backend
-                .store
-                .path_to_filesystem(object_path)
-                .map_err(|error| {
+            StorageBackendHandle::Local(backend) => {
+                let tx = backend.transaction()?;
+                let path = backend.store.path_to_filesystem(object_path).map_err(|error| {
                     StorageError::new(format!(
                         "failed to resolve object path `{}` for backend `{backend_name}`: {error}",
                         object_path
                     ))
-                }),
+                })?;
+                tx.validate(&path, false)?;
+                Ok(path)
+            }
         }
     }
 
@@ -345,15 +356,7 @@ impl StorageBackendHandle {
     ) -> Result<(), StorageError> {
         match self {
             StorageBackendHandle::Local(backend) => backend
-                .store
-                .put(object_path, bytes.into())
-                .await
-                .map_err(|error| {
-                    StorageError::new(format!(
-                        "failed to write object `{object_path}` into local storage backend `{}`: {error}",
-                        backend.root_dir.display()
-                    ))
-                })
+                .put_bytes_with_metadata(object_path, bytes, None, BTreeMap::new())
                 .map(|_| ()),
         }
     }
@@ -372,9 +375,12 @@ impl StorageBackendHandle {
         }
     }
 
-    fn read_bytes(&self, object_path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
+    fn read_object(
+        &self,
+        object_path: &ObjectPath,
+    ) -> Result<(Vec<u8>, StorageObjectInfo), StorageError> {
         match self {
-            StorageBackendHandle::Local(backend) => backend.read_bytes(object_path),
+            StorageBackendHandle::Local(backend) => backend.read_object(object_path),
         }
     }
 
@@ -401,6 +407,14 @@ impl StorageBackendHandle {
 
 #[cfg(feature = "storage-local")]
 impl LocalStorageBackend {
+    fn transaction(
+        &self,
+    ) -> Result<vsr_runtime::storage::transaction::LocalTransaction, StorageError> {
+        Ok(vsr_runtime::storage::transaction::LocalTransaction::lock(
+            &self.root_dir,
+        )?)
+    }
+
     fn put_bytes_with_metadata(
         &self,
         object_path: &ObjectPath,
@@ -408,49 +422,74 @@ impl LocalStorageBackend {
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
     ) -> Result<StorageObjectInfo, StorageError> {
+        let tx = self.transaction()?;
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
             .map_err(|error| {
                 StorageError::new(format!("failed to resolve local object path: {error}"))
             })?;
-        if let Some(parent) = filesystem_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                StorageError::new(format!(
-                    "failed to create local storage parent `{}`: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        fs::write(&filesystem_path, &bytes).map_err(|error| {
-            StorageError::new(format!(
-                "failed to write local storage object `{}`: {error}",
-                filesystem_path.display()
-            ))
-        })?;
-
-        let info =
-            build_storage_object_info(&filesystem_path, content_type, user_metadata, Some(&bytes))?;
-        self.write_metadata(object_path, &info)?;
+        let info = StorageObjectInfo {
+            content_type,
+            user_metadata,
+            size_bytes: bytes.len(),
+            etag: quoted_sha256(&bytes),
+            last_modified: Utc::now(),
+        };
+        let metadata = StoredObjectMetadata {
+            content_type: info.content_type.clone(),
+            user_metadata: info.user_metadata.clone(),
+            size_bytes: info.size_bytes,
+            etag: info.etag.clone(),
+        };
+        let payload =
+            serde_json::to_vec(&metadata).map_err(|e| StorageError::new(e.to_string()))?;
+        tx.put(
+            &filesystem_path,
+            &self.metadata_path(object_path)?,
+            &bytes,
+            &payload,
+        )?;
         Ok(info)
     }
 
-    fn read_bytes(&self, object_path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
+    fn read_object(
+        &self,
+        object_path: &ObjectPath,
+    ) -> Result<(Vec<u8>, StorageObjectInfo), StorageError> {
+        let tx = self.transaction()?;
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
             .map_err(|error| {
                 StorageError::new(format!("failed to resolve local object path: {error}"))
             })?;
-        fs::read(&filesystem_path).map_err(|error| {
+        tx.validate(&filesystem_path, false)?;
+        tx.validate(&self.metadata_path(object_path)?, false)?;
+        let bytes = fs::read(&filesystem_path).map_err(|error| {
             StorageError::new(format!(
                 "failed to read local storage object `{}`: {error}",
                 filesystem_path.display()
             ))
-        })
+        })?;
+        Ok((bytes, self.object_info_unlocked(object_path)?))
     }
 
     fn object_info(&self, object_path: &ObjectPath) -> Result<StorageObjectInfo, StorageError> {
+        let tx = self.transaction()?;
+        let path = self
+            .store
+            .path_to_filesystem(object_path)
+            .map_err(|e| StorageError::new(e.to_string()))?;
+        tx.validate(&path, false)?;
+        tx.validate(&self.metadata_path(object_path)?, false)?;
+        self.object_info_unlocked(object_path)
+    }
+
+    fn object_info_unlocked(
+        &self,
+        object_path: &ObjectPath,
+    ) -> Result<StorageObjectInfo, StorageError> {
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
@@ -478,39 +517,25 @@ impl LocalStorageBackend {
     }
 
     fn delete_object(&self, object_path: &ObjectPath) -> Result<bool, StorageError> {
+        let tx = self.transaction()?;
         let filesystem_path = self
             .store
             .path_to_filesystem(object_path)
             .map_err(|error| {
                 StorageError::new(format!("failed to resolve local object path: {error}"))
             })?;
-        let deleted = match fs::remove_file(&filesystem_path) {
-            Ok(()) => true,
-            Err(error) if error.kind() == ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(StorageError::new(format!(
-                    "failed to delete local storage object `{}`: {error}",
-                    filesystem_path.display()
-                )));
-            }
-        };
+        tx.validate(&filesystem_path, false)?;
+        let deleted = filesystem_path.exists();
         let metadata_path = self.metadata_path(object_path)?;
-        match fs::remove_file(&metadata_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(StorageError::new(format!(
-                    "failed to delete local storage metadata `{}`: {error}",
-                    metadata_path.display()
-                )));
-            }
-        }
+        tx.delete(&filesystem_path, &metadata_path)?;
         Ok(deleted)
     }
 
     fn list_objects(&self, prefix: &str) -> Result<Vec<(String, StorageObjectInfo)>, StorageError> {
+        let tx = self.transaction()?;
         let mut objects = Vec::new();
         self.walk_objects(
+            &tx,
             self.root_dir.as_path(),
             PathBuf::new(),
             prefix.trim_matches('/'),
@@ -522,6 +547,7 @@ impl LocalStorageBackend {
 
     fn walk_objects(
         &self,
+        tx: &vsr_runtime::storage::transaction::LocalTransaction,
         current_dir: &Path,
         relative_dir: PathBuf,
         prefix: &str,
@@ -557,7 +583,7 @@ impl LocalStorageBackend {
             })?;
             let next_relative = relative_dir.join(&file_name);
             if file_type.is_dir() {
-                self.walk_objects(entry.path().as_path(), next_relative, prefix, objects)?;
+                self.walk_objects(tx, entry.path().as_path(), next_relative, prefix, objects)?;
                 continue;
             }
             if !file_type.is_file() {
@@ -574,41 +600,11 @@ impl LocalStorageBackend {
             let object_path = parse_object_path(&key).map_err(|error| {
                 StorageError::new(format!("invalid local storage key `{key}`: {error}"))
             })?;
-            objects.push((key, self.object_info(&object_path)?));
+            tx.validate(&self.metadata_path(&object_path)?, false)?;
+            objects.push((key, self.object_info_unlocked(&object_path)?));
         }
 
         Ok(())
-    }
-
-    fn write_metadata(
-        &self,
-        object_path: &ObjectPath,
-        info: &StorageObjectInfo,
-    ) -> Result<(), StorageError> {
-        let metadata_path = self.metadata_path(object_path)?;
-        if let Some(parent) = metadata_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                StorageError::new(format!(
-                    "failed to create local metadata dir `{}`: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        let payload = StoredObjectMetadata {
-            content_type: info.content_type.clone(),
-            user_metadata: info.user_metadata.clone(),
-            size_bytes: info.size_bytes,
-            etag: info.etag.clone(),
-        };
-        let bytes = serde_json::to_vec(&payload).map_err(|error| {
-            StorageError::new(format!("failed to serialize object metadata: {error}"))
-        })?;
-        fs::write(&metadata_path, bytes).map_err(|error| {
-            StorageError::new(format!(
-                "failed to write local storage metadata `{}`: {error}",
-                metadata_path.display()
-            ))
-        })
     }
 
     fn read_metadata(
@@ -1152,16 +1148,13 @@ async fn handle_s3_get_object(
         None => return Ok(HttpResponse::NotFound().finish()),
     };
     let object_key = s3_object_key(bucket, tail.as_str())?;
-    let bytes = match storage.read_bytes(bucket.backend.as_str(), object_key.as_str()) {
-        Ok(bytes) => bytes,
+    let (bytes, info) = match storage.read_object(bucket.backend.as_str(), object_key.as_str()) {
+        Ok(object) => object,
         Err(error) if error.to_string().contains("No such file") => {
             return Ok(HttpResponse::NotFound().finish());
         }
         Err(error) => return Err(actix_web::error::ErrorInternalServerError(error)),
     };
-    let info = storage
-        .object_info(bucket.backend.as_str(), object_key.as_str())
-        .map_err(actix_web::error::ErrorInternalServerError)?;
     Ok(s3_object_response(bytes, &info, false))
 }
 
@@ -1293,7 +1286,7 @@ async fn serve_public_request(
         return Ok(HttpResponse::NotFound().finish());
     }
 
-    let named_file = NamedFile::open_async(&filesystem_path).await?;
+    let named_file = NamedFile::open(&filesystem_path)?;
     let mut response = named_file.into_response(&req);
     apply_cache_header(response.headers_mut(), mount.cache);
     Ok(response)
@@ -1342,8 +1335,12 @@ fn resolve_object_path(prefix: &str, relative_path: &Path) -> actix_web::Result<
 }
 
 #[cfg(feature = "storage-local")]
-fn parse_object_path(value: &str) -> Result<ObjectPath, object_store::path::Error> {
-    ObjectPath::parse(value)
+fn parse_object_path(value: &str) -> Result<ObjectPath, StorageError> {
+    vsr_runtime::storage::StorageKey::new(value).map_err(|e| StorageError::new(e.to_string()))?;
+    if value.is_empty() {
+        return Err(StorageError::new("empty object key"));
+    }
+    ObjectPath::parse(value).map_err(|e| StorageError::new(e.to_string()))
 }
 
 #[cfg(feature = "storage-local")]
@@ -1596,6 +1593,59 @@ fn apply_cache_header(headers: &mut header::HeaderMap, cache: StaticCacheProfile
 
 #[cfg(all(test, feature = "storage-local"))]
 mod tests {
+    #[actix_web::test]
+    async fn journaled_legacy_storage_keeps_metadata_and_listing_consistent() {
+        use super::*;
+        let root = temp_root("legacy_journal");
+        let config = StorageConfig {
+            backends: vec![StorageBackendConfig {
+                name: "local".into(),
+                kind: StorageBackendKind::Local,
+                root_dir: root.display().to_string(),
+                resolved_root_dir: root.display().to_string(),
+            }],
+            public_mounts: vec![],
+            uploads: vec![],
+            s3_compat: None,
+        };
+        let registry = StorageRegistry::from_config(&config).unwrap();
+        registry
+            .put_bytes("local", "docs/item", b"old".to_vec())
+            .await
+            .unwrap();
+        let metadata = BTreeMap::from([("revision".into(), "new".into())]);
+        registry
+            .put_bytes_with_metadata(
+                "local",
+                "docs/item",
+                b"new content".to_vec(),
+                Some("text/plain".into()),
+                metadata.clone(),
+            )
+            .await
+            .unwrap();
+        let (bytes, info) = registry.read_object("local", "docs/item").unwrap();
+        assert_eq!(bytes, b"new content");
+        assert_eq!(info.size_bytes, bytes.len());
+        assert_eq!(info.etag, quoted_sha256(&bytes));
+        assert_eq!(info.user_metadata, metadata);
+        assert_eq!(fs::read(root.join("docs/item")).unwrap(), bytes);
+        let objects = registry.list_objects("local", "docs/").unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].0, "docs/item");
+        assert_eq!(objects[0].1.etag, info.etag);
+        assert!(
+            registry
+                .put_bytes("local", ".vsr-meta/.vsr-transaction/lock", b"bad".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(registry.delete_object("local", "docs/item").unwrap());
+        assert!(!registry.delete_object("local", "docs/item").unwrap());
+        assert!(registry.list_objects("local", "").unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     use std::{
         fs,
         path::PathBuf,
@@ -1732,7 +1782,7 @@ mod tests {
             StorageRegistry::from_config(&storage).expect("storage registry should initialize");
         assert_eq!(
             registry.local_root_dir("uploads"),
-            Some(backend_root.as_path())
+            Some(fs::canonicalize(&backend_root).unwrap().as_path())
         );
         assert!(backend_root.is_dir(), "backend root dir should be created");
 

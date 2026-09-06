@@ -378,16 +378,29 @@ fn request_has_valid_anon_client_key(
 }
 
 pub fn request_client_ip(req: &HttpRequest, security: &SecurityConfig) -> Option<IpAddr> {
-    let peer_ip = req.peer_addr().map(|addr| addr.ip());
+    let peer_ip = req.peer_addr()?.ip();
     let trusted_proxies = resolved_trusted_proxies(&security.trusted_proxies);
 
-    if let Some(peer_ip) = peer_ip
-        && !trusted_proxies.contains(&peer_ip)
-    {
+    if !trusted_proxies.contains(&peer_ip) {
         return Some(peer_ip);
     }
 
-    forwarded_client_ip(req).or(peer_ip)
+    let forwarded = forwarded_chain(req, "forwarded");
+    let xff = forwarded_chain(req, "x-forwarded-for");
+    let chain = match (forwarded, xff) {
+        (Ok(Some(a)), Ok(Some(b))) if a == b => a,
+        (Ok(Some(a)), Ok(None)) | (Ok(None), Ok(Some(a))) => a,
+        _ => return Some(peer_ip),
+    };
+    // Only the trusted suffix is authoritative; the client controls everything to its left.
+    let mut client = peer_ip;
+    for hop in chain.into_iter().rev() {
+        if !trusted_proxies.contains(&client) {
+            break;
+        }
+        client = hop;
+    }
+    Some(client)
 }
 
 fn resolved_cors_origins(cors: &CorsSecurity) -> Vec<String> {
@@ -442,43 +455,47 @@ fn resolved_trusted_proxies(config: &TrustedProxySecurity) -> Vec<IpAddr> {
     proxies
 }
 
-fn forwarded_client_ip(req: &HttpRequest) -> Option<IpAddr> {
-    forwarded_header_ip(req).or_else(|| x_forwarded_for_ip(req))
-}
-
-fn forwarded_header_ip(req: &HttpRequest) -> Option<IpAddr> {
-    let header = req.headers().get("forwarded")?;
-    let header = header.to_str().ok()?;
-
-    for entry in header.split(',') {
-        for part in entry.split(';') {
-            let part = part.trim();
-            let Some(value) = part.strip_prefix("for=") else {
-                continue;
+fn forwarded_chain(req: &HttpRequest, name: &str) -> Result<Option<Vec<IpAddr>>, ()> {
+    let mut chain = Vec::new();
+    for header in req.headers().get_all(name) {
+        for entry in header.to_str().map_err(|_| ())?.split(',') {
+            let value = if name == "forwarded" {
+                let mut address = None;
+                for part in entry.split(';') {
+                    let (key, value) = part.trim().split_once('=').ok_or(())?;
+                    if key.eq_ignore_ascii_case("for") {
+                        if address.replace(value).is_some() {
+                            return Err(());
+                        }
+                    }
+                }
+                address.ok_or(())?
+            } else {
+                entry
             };
-            if let Some(ip) = parse_forwarded_ip(value) {
-                return Some(ip);
-            }
+            chain.push(parse_forwarded_ip(value).ok_or(())?);
         }
     }
-
-    None
-}
-
-fn x_forwarded_for_ip(req: &HttpRequest) -> Option<IpAddr> {
-    let header = req.headers().get("x-forwarded-for")?;
-    let header = header.to_str().ok()?;
-    header.split(',').find_map(parse_forwarded_ip)
+    Ok((!chain.is_empty()).then_some(chain))
 }
 
 fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
-    let value = value.trim().trim_matches('"');
+    let value = value.trim();
+    let value = if let Some(quoted) = value.strip_prefix('"') {
+        quoted.strip_suffix('"')?
+    } else {
+        value
+    };
     if value.is_empty() || value.eq_ignore_ascii_case("unknown") || value.starts_with('_') {
         return None;
     }
 
     if let Some(ipv6) = value.strip_prefix('[') {
         let end = ipv6.find(']')?;
+        let suffix = &ipv6[end + 1..];
+        if !suffix.is_empty() {
+            suffix.strip_prefix(':')?.parse::<u16>().ok()?;
+        }
         return IpAddr::from_str(&ipv6[..end]).ok();
     }
 
@@ -497,6 +514,66 @@ fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
 
 #[cfg(test)]
 mod tests {
+    #[actix_web::test]
+    async fn proxy_identity_uses_only_the_trusted_suffix() {
+        use super::*;
+        use actix_web::test::TestRequest;
+        let mut security = SecurityConfig::default();
+        security.trusted_proxies.proxies = vec!["127.0.0.1".into(), "::1".into()];
+        let peer = "127.0.0.1:8000".parse().unwrap();
+        let client: IpAddr = "192.0.2.1".parse().unwrap();
+        for (name, value) in [
+            ("x-forwarded-for", "203.0.113.9, 192.0.2.1, ::1"),
+            (
+                "forwarded",
+                "for=203.0.113.9, For=192.0.2.1;proto=https, for=\"[::1]:443\"",
+            ),
+        ] {
+            let req = TestRequest::default()
+                .peer_addr(peer)
+                .insert_header((name, value))
+                .to_http_request();
+            assert_eq!(request_client_ip(&req, &security), Some(client));
+        }
+        let req = TestRequest::default()
+            .peer_addr(peer)
+            .append_header(("x-forwarded-for", "203.0.113.9, 192.0.2.1"))
+            .append_header(("x-forwarded-for", "::1"))
+            .to_http_request();
+        assert_eq!(request_client_ip(&req, &security), Some(client));
+        for value in [
+            "unknown, 192.0.2.1",
+            "192.0.2.1,",
+            "[::1]garbage",
+            "\"192.0.2.1",
+            "[::1]:oops",
+        ] {
+            let req = TestRequest::default()
+                .peer_addr(peer)
+                .insert_header(("x-forwarded-for", value))
+                .to_http_request();
+            assert_eq!(request_client_ip(&req, &security), Some(peer.ip()));
+        }
+        let req = TestRequest::default()
+            .peer_addr(peer)
+            .insert_header(("forwarded", "for=203.0.113.9"))
+            .insert_header(("x-forwarded-for", "192.0.2.1"))
+            .to_http_request();
+        assert_eq!(request_client_ip(&req, &security), Some(peer.ip()));
+        let req = TestRequest::default()
+            .insert_header(("x-forwarded-for", "192.0.2.1"))
+            .to_http_request();
+        assert_eq!(request_client_ip(&req, &security), None);
+        let req = TestRequest::default()
+            .peer_addr("198.51.100.1:1".parse().unwrap())
+            .insert_header(("x-forwarded-for", "192.0.2.1"))
+            .to_http_request();
+        assert_eq!(
+            request_client_ip(&req, &security),
+            Some("198.51.100.1".parse().unwrap())
+        );
+    }
+
     use super::{CorsSecurity, DEFAULT_ANON_CLIENT_HEADER_NAME, SecurityConfig, cors_middleware};
     use actix_web::{
         App, HttpResponse,

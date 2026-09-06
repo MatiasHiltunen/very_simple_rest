@@ -181,6 +181,7 @@ pub async fn serve_service(
             let include_builtin_auth = dynamic_service.include_builtin_auth;
 
             App::new()
+                .app_data(web::Data::new(state.pool.clone()))
                 .app_data(web::Data::new(dynamic_service.clone()))
                 .app_data(web::Data::new(state.clone()))
                 .wrap(Logger::default())
@@ -254,18 +255,18 @@ pub async fn serve_service(
                 .configure(move |cfg| {
                     #[cfg(feature = "storage-local")]
                     {
-                    configure_public_mounts_with_runtime(
-                        cfg,
-                        storage_registry.as_ref(),
-                        storage_public_mounts.as_slice(),
-                        &api_runtime,
-                    );
-                    configure_s3_compat_with_runtime(
-                        cfg,
-                        storage_registry.as_ref(),
-                        storage_s3_compat.as_ref().as_ref(),
-                        &api_runtime,
-                    );
+                        configure_public_mounts_with_runtime(
+                            cfg,
+                            storage_registry.as_ref(),
+                            storage_public_mounts.as_slice(),
+                            &api_runtime,
+                        );
+                        configure_s3_compat_with_runtime(
+                            cfg,
+                            storage_registry.as_ref(),
+                            storage_s3_compat.as_ref().as_ref(),
+                            &api_runtime,
+                        );
                     }
                     configure_static_mounts_with_runtime(
                         cfg,
@@ -430,6 +431,8 @@ fn parent_watch_enabled(managed_context: Option<&ServeInstanceContext>) -> bool 
 }
 
 #[cfg(windows)]
+// Win32 snapshot/handle API requires FFI; handles are closed on each exit path.
+#[allow(unsafe_code)]
 fn current_parent_pid() -> std::io::Result<Option<u32>> {
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -464,6 +467,8 @@ fn current_parent_pid() -> std::io::Result<Option<u32>> {
 }
 
 #[cfg(windows)]
+// Win32 wait API requires FFI; the owned process handle is closed after waiting.
+#[allow(unsafe_code)]
 fn wait_for_parent_exit(parent_pid: u32) -> std::io::Result<()> {
     unsafe {
         let handle = OpenProcess(PROCESS_SYNCHRONIZE_RIGHT, 0, parent_pid);
@@ -5599,6 +5604,8 @@ async fn delete_hybrid_fallback(
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{
         BoundValue, DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,

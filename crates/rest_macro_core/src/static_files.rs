@@ -247,10 +247,10 @@ async fn named_file_response(
     runtime: &RuntimeConfig,
 ) -> actix_web::Result<HttpResponse> {
     let selected = select_static_response_file(req, original_path, runtime);
-    let mut file = NamedFile::open_async(&selected.served_path).await?;
+    let mut file = NamedFile::open(&selected.served_path)?;
 
     if let Some(encoding) = selected.encoding {
-        let original_file = NamedFile::open_async(original_path).await?;
+        let original_file = NamedFile::open(original_path)?;
         file = file
             .set_content_type(original_file.content_type().clone())
             .set_content_disposition(original_file.content_disposition().clone())

@@ -6,8 +6,8 @@ use crate::errors;
 use super::handlers::{
     account, account_portal_page, admin_dashboard_page, change_password, confirm_password_reset,
     create_managed_user, delete_managed_user, list_managed_users, login_with_request, logout,
-    managed_user, me, password_reset_page, register_with_request, resend_account_verification,
-    resend_managed_user_verification, resend_verification, request_password_reset,
+    managed_user, me, password_reset_page, register_with_request, request_password_reset,
+    resend_account_verification, resend_managed_user_verification, resend_verification,
     update_managed_user, verify_email_page, verify_email_token,
 };
 use super::jwt::jwks;
@@ -53,7 +53,10 @@ pub fn auth_routes_with_settings(
 /// configured absolute paths. These pages are meant to be loaded directly by a
 /// browser, so they must be mounted OUTSIDE any scope guarded by the anonymous
 /// client middleware. Safe to call at the `App::configure` level.
+/// Mount `web::Data<DbPool>` at the same level so protected HTML pages can
+/// validate the account state associated with the token.
 pub fn register_builtin_auth_html_pages(cfg: &mut web::ServiceConfig, settings: AuthSettings) {
+    cfg.app_data(super::user::BuiltinAuth);
     let portal = settings.portal.clone();
     let admin_dashboard = settings.admin_dashboard.clone();
     cfg.app_data(web::Data::new(settings));
@@ -76,6 +79,7 @@ pub fn auth_api_routes_with_settings(
     let limiter = web::Data::new(AuthRateLimiter::default());
     errors::configure_extractor_errors(cfg);
     cfg.app_data(db.clone());
+    cfg.app_data(super::user::BuiltinAuth);
     cfg.app_data(settings.clone());
     cfg.app_data(limiter);
 

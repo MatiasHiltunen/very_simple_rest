@@ -36,9 +36,17 @@ function isKnownStudioPath(pathname: string): boolean {
 
 function LoadingScreen() {
   return (
-    <Stack sx={{ minHeight: '100vh' }} alignItems="center" justifyContent="center" spacing={2}>
+    <Stack
+      spacing={2}
+      sx={{
+        alignItems: "center",
+        justifyContent: "center",
+        minHeight: '100vh'
+      }}>
       <CircularProgress />
-      <Typography color="text.secondary">Connecting to the studio…</Typography>
+      <Typography sx={{
+        color: "text.secondary"
+      }}>Connecting to the studio…</Typography>
     </Stack>
   );
 }

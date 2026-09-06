@@ -179,8 +179,9 @@ pub enum ResponseBody {
 /// Takes a [`RequestContext`] and returns a [`ResponseEnvelope`].
 /// Generated resource handlers and built-in auth/authz handlers are all of
 /// this type. The framework adapter wraps them in actix/axum extractors.
-pub type Handler =
-    Arc<dyn Fn(RequestContext) -> Pin<Box<dyn Future<Output = ResponseEnvelope> + Send>> + Send + Sync>;
+pub type Handler = Arc<
+    dyn Fn(RequestContext) -> Pin<Box<dyn Future<Output = ResponseEnvelope> + Send>> + Send + Sync,
+>;
 
 /// Convenience macro-free constructor for [`Handler`].
 pub fn make_handler<F, Fut>(f: F) -> Handler
@@ -212,6 +213,9 @@ pub trait RouteRegistry: Send + 'static {
 /// Configuration passed to [`HttpServer::serve`].
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// Shared dependency readiness. Starts false; the application marks it ready
+    /// only after checking required resources, and clears it when they fail.
+    pub readiness: Readiness,
     /// Listening address.
     pub addr: SocketAddr,
     /// Optional TLS configuration (cert + key paths or PEM bytes).
@@ -226,11 +230,27 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            readiness: Readiness::default(),
             addr: "0.0.0.0:8080".parse().unwrap(),
             tls: None,
             workers: None,
             max_body_bytes: 4 * 1024 * 1024,
         }
+    }
+}
+
+/// Application-controlled dependency readiness, shared with the server probes.
+#[derive(Debug, Clone, Default)]
+pub struct Readiness(Arc<std::sync::atomic::AtomicBool>);
+
+impl Readiness {
+    /// Change readiness after checking required application dependencies.
+    pub fn set_ready(&self, ready: bool) {
+        self.0.store(ready, std::sync::atomic::Ordering::Release);
+    }
+    /// Whether the application currently reports that dependencies are ready.
+    pub fn is_ready(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -251,8 +271,7 @@ pub struct TlsConfig {
 ///
 /// # Contract
 ///
-/// - `serve` blocks until the server shuts down (via OS signal or
-///   [`Self::Handle`]).
+/// - `serve` returns a running server handle after binding the listener.
 /// - The implementation MUST serve `/healthz` (liveness) and `/readyz`
 ///   (readiness) regardless of what the registry contains.
 /// - Graceful shutdown drains in-flight requests before returning.
@@ -260,7 +279,7 @@ pub trait HttpServer: Send + Sync + 'static {
     /// An opaque handle that can be used to trigger a graceful shutdown.
     type Handle: Send + 'static;
 
-    /// Start serving. Blocks until shutdown.
+    /// Bind and start serving, returning a handle for graceful shutdown.
     ///
     /// `registry` supplies all application routes; the implementation adds
     /// its own health endpoints on top.
@@ -368,4 +387,3 @@ impl Default for SecurityHeadersConfig {
         }
     }
 }
-

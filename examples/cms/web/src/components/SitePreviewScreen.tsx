@@ -38,6 +38,8 @@ function previewPathFromSplat(splat: string | undefined): string {
   return trimmed ? `/${trimmed}` : '/';
 }
 
+const EMPTY_ROWS: ResourceRow[] = [];
+
 export function SitePreviewScreen() {
   const { workspaceSlug, '*': previewSplat } = useParams();
   const [searchParams] = useSearchParams();
@@ -74,7 +76,7 @@ export function SitePreviewScreen() {
       ? resolvedWorkspace.name.trim()
       : 'Workspace preview';
   const publishedSiteHref = resolvePublishedSiteHref(resolvedWorkspace, '/');
-  const entryRows = entriesQuery.data?.items ?? [];
+  const entryRows = entriesQuery.data?.items ?? EMPTY_ROWS;
   const entrySlug = previewPath === '/' ? null : previewPath.slice(1);
   const savedEntry =
     entrySlug != null
@@ -126,9 +128,13 @@ export function SitePreviewScreen() {
   if (workspacesQuery.isLoading || (!snapshotMatchesRoute && entriesQuery.isLoading)) {
     return (
       <Box className="site-preview-loading">
-        <Stack alignItems="center" spacing={2.5}>
+        <Stack spacing={2.5} sx={{
+          alignItems: "center"
+        }}>
           <CircularProgress />
-          <Typography color="text.secondary">Preparing the local site preview…</Typography>
+          <Typography sx={{
+            color: "text.secondary"
+          }}>Preparing the local site preview…</Typography>
         </Stack>
       </Box>
     );
@@ -141,7 +147,11 @@ export function SitePreviewScreen() {
           <Stack spacing={1}>
             <Typography variant="overline">Local site preview</Typography>
             <Typography variant="h3">Workspace not available</Typography>
-            <Typography color="text.secondary" maxWidth={720}>
+            <Typography
+              sx={{
+                color: "text.secondary",
+                maxWidth: 720
+              }}>
               The requested workspace slug is not visible to the current session, so the CMS cannot
               render a site preview from this route.
             </Typography>
@@ -169,7 +179,11 @@ export function SitePreviewScreen() {
           <Stack spacing={1}>
             <Typography variant="overline">Local site preview</Typography>
             <Typography variant="h3">Preview unavailable</Typography>
-            <Typography color="text.secondary" maxWidth={720}>
+            <Typography
+              sx={{
+                color: "text.secondary",
+                maxWidth: 720
+              }}>
               The CMS could not load one or more API resources required for the local site preview.
             </Typography>
           </Stack>
@@ -203,7 +217,11 @@ export function SitePreviewScreen() {
         <Stack spacing={1}>
           <Typography variant="overline">Local site preview</Typography>
           <Typography variant="h3">{workspaceName}</Typography>
-          <Typography color="text.secondary" maxWidth={760}>
+          <Typography
+            sx={{
+              color: "text.secondary",
+              maxWidth: 760
+            }}>
             This route previews the workspace locally from the same CMS app, so editors can open
             entry paths without inventing a fake published origin.
           </Typography>
@@ -236,17 +254,23 @@ export function SitePreviewScreen() {
       <Box className="site-preview-meta">
         <Box>
           <Typography className="studio-overline">Workspace slug</Typography>
-          <Typography fontWeight={700}>/{workspaceSlug}</Typography>
+          <Typography sx={{
+            fontWeight: 700
+          }}>/{workspaceSlug}</Typography>
         </Box>
         <Box>
           <Typography className="studio-overline">Preview route</Typography>
-          <Typography color="text.secondary">
+          <Typography sx={{
+            color: "text.secondary"
+          }}>
             {resolveLocalPreviewHref(workspaceSlug, previewPath)}
           </Typography>
         </Box>
         <Box>
           <Typography className="studio-overline">Published origin</Typography>
-          <Typography color="text.secondary">
+          <Typography sx={{
+            color: "text.secondary"
+          }}>
             {publishedSiteHref ?? 'Not configured'}
           </Typography>
         </Box>
@@ -279,7 +303,9 @@ export function SitePreviewScreen() {
         <Box className="site-preview-storyGrid">
           <Box className="site-preview-storyLead">
             <Typography variant="h4">Workspace index</Typography>
-            <Typography color="text.secondary">
+            <Typography sx={{
+              color: "text.secondary"
+            }}>
               Use these entry paths to inspect the current site locally. Published entries are
               prioritized first, and the studio falls back to saved drafts when nothing has been
               published yet.
@@ -298,7 +324,9 @@ export function SitePreviewScreen() {
                       <Typography variant="h5">
                         {String(entry.title ?? 'Untitled entry')}
                       </Typography>
-                      <Typography color="text.secondary" variant="body2">
+                      <Typography variant="body2" sx={{
+                        color: "text.secondary"
+                      }}>
                         {String(
                           entry.summary ??
                             entry.permalink ??
@@ -307,11 +335,15 @@ export function SitePreviewScreen() {
                       </Typography>
                     </Stack>
 
-                    <Stack direction="row" flexWrap="wrap" spacing={1} useFlexGap>
+                    <Stack direction="row" spacing={1} useFlexGap sx={{
+                      flexWrap: "wrap"
+                    }}>
                       <Typography className="studio-overline">
                         {String(entry.status ?? 'draft')}
                       </Typography>
-                      <Typography color="text.secondary" variant="body2">
+                      <Typography variant="body2" sx={{
+                        color: "text.secondary"
+                      }}>
                         {formatFriendlyDate(entry.published_at)}
                       </Typography>
                     </Stack>
@@ -326,7 +358,12 @@ export function SitePreviewScreen() {
                         Open local path
                       </Button>
                       {heroEntryHref && heroEntryHref === entryHref ? (
-                        <Typography color="text.secondary" sx={{ alignSelf: 'center' }} variant="body2">
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            color: "text.secondary",
+                            alignSelf: 'center'
+                          }}>
                           Featured above
                         </Typography>
                       ) : null}

@@ -17,6 +17,10 @@ pub fn expand_resource_impl(
     let impl_body = resource_impl_tokens(resource, resources, authorization, runtime_crate);
 
     Ok(quote! {
+        #[allow(
+            clippy::result_large_err,
+            reason = "Generated Actix helpers return complete HTTP responses without another error-box allocation"
+        )]
         mod #impl_module_ident {
             use super::*;
             #impl_body

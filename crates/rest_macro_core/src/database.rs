@@ -278,6 +278,8 @@ pub async fn open_turso_local_database(_engine: &TursoLocalConfig) -> Result<()>
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{
         DatabaseBackupConfig, DatabaseBackupMode, DatabaseBackupTarget, DatabaseConfig,

@@ -4,7 +4,8 @@
 //! Metadata (content-type, tags) is persisted in JSON sidecar files under
 //! a `.vsr-meta/` subdirectory that mirrors the object tree.
 //!
-//! No extra dependencies are required — this module uses `std::fs` only.
+//! Publication uses a shared OS lock and durable redo journal so API readers
+//! observe complete object/metadata pairs after an interrupted write.
 
 use std::{
     collections::HashMap,
@@ -18,6 +19,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use vsr_core::error::{VsrError, VsrResult};
 
+use super::transaction::LocalTransaction;
 use super::{ObjectStorage, StorageKey, StorageMetadata, StorageObject};
 
 // ── Sidecar metadata ──────────────────────────────────────────────────────────
@@ -268,16 +270,9 @@ impl LocalFsStorage {
         }
     }
 
-    fn write_meta(&self, key: &StorageKey, meta: &PersistedMeta) -> VsrResult<()> {
-        let path = self.meta_path(key)?;
-        self.ensure_safe_parent(&path, "metadata")?;
-        self.existing_regular_file(&path, "metadata")?;
-        let bytes = serde_json::to_vec(meta).map_err(|e| {
-            VsrError::Other(format!("failed to serialize metadata for `{key}`: {e}").into())
-        })?;
-        fs::write(&path, bytes).map_err(|e| {
-            VsrError::Other(format!("failed to write metadata for `{key}`: {e}").into())
-        })
+    fn transaction(&self) -> VsrResult<LocalTransaction> {
+        LocalTransaction::lock(&self.root)
+            .map_err(|e| VsrError::Other(format!("storage transaction failed: {e}").into()))
     }
 
     fn stat_to_metadata(
@@ -301,6 +296,7 @@ impl LocalFsStorage {
 
 impl ObjectStorage for LocalFsStorage {
     async fn get(&self, key: &StorageKey) -> VsrResult<Option<StorageObject>> {
+        let _tx = self.transaction()?;
         let path = self.object_path(key)?;
         if !self.existing_regular_file(&path, "object")? {
             return Ok(None);
@@ -325,6 +321,7 @@ impl ObjectStorage for LocalFsStorage {
     }
 
     async fn put(&self, key: &StorageKey, data: Bytes, metadata: StorageMetadata) -> VsrResult<()> {
+        let tx = self.transaction()?;
         let path = self.object_path(key)?;
         let meta_path = self.meta_path(key)?;
 
@@ -333,39 +330,27 @@ impl ObjectStorage for LocalFsStorage {
         self.existing_regular_file(&path, "object")?;
         self.existing_regular_file(&meta_path, "metadata")?;
 
-        fs::write(&path, &data).map_err(|e| {
-            VsrError::Other(format!("storage write failed for `{key}`: {e}").into())
-        })?;
-        self.write_meta(
-            key,
-            &PersistedMeta {
-                content_type: metadata.content_type,
-                tags: metadata.tags,
-            },
-        )
+        let meta = serde_json::to_vec(&PersistedMeta {
+            content_type: metadata.content_type,
+            tags: metadata.tags,
+        })
+        .map_err(|e| VsrError::Other(format!("metadata serialization failed: {e}").into()))?;
+        tx.put(&path, &meta_path, &data, &meta).map_err(|e| {
+            VsrError::Other(format!("storage publication failed for `{key}`: {e}").into())
+        })
     }
 
     async fn delete(&self, key: &StorageKey) -> VsrResult<()> {
+        let tx = self.transaction()?;
         let path = self.object_path(key)?;
         let meta_path = self.meta_path(key)?;
-        let object_exists = self.existing_regular_file(&path, "object")?;
-        let metadata_exists = self.existing_regular_file(&meta_path, "metadata")?;
-
-        if object_exists {
-            fs::remove_file(&path).map_err(|e| {
-                VsrError::Other(format!("storage delete failed for `{key}`: {e}").into())
-            })?;
-        }
-        if metadata_exists {
-            fs::remove_file(&meta_path).map_err(|e| {
-                VsrError::Other(format!("failed to delete metadata for `{key}`: {e}").into())
-            })?;
-        }
-
-        Ok(())
+        tx.delete(&path, &meta_path).map_err(|e| {
+            VsrError::Other(format!("storage deletion failed for `{key}`: {e}").into())
+        })
     }
 
     async fn list(&self, prefix: &StorageKey) -> VsrResult<Vec<StorageKey>> {
+        let _tx = self.transaction()?;
         prefix.validate()?;
         let mut keys = Vec::new();
         collect_object_keys(&self.root, &self.root, prefix.as_str(), &mut keys)?;

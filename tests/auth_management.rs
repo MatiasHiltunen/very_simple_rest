@@ -1,3 +1,5 @@
+// Legacy environment and subprocess fixtures; production code still denies unsafe.
+#![allow(unsafe_code)]
 #![allow(clippy::await_holding_lock)]
 
 use std::{
@@ -176,6 +178,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
         .public_base_url = Some("https://app.example".to_owned());
     let app = test::init_service(
         App::new()
+            .app_data(actix_web::web::Data::new(pool.clone()))
             .configure(|cfg| {
                 auth::register_builtin_auth_html_pages(cfg, security.auth.clone());
             })

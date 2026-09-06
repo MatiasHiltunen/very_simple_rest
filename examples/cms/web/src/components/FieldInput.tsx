@@ -37,7 +37,9 @@ type JsonValueKind = 'text' | 'number' | 'boolean' | 'json' | 'null';
 
 function RelationOptionLabel({ option }: { option: RelationOption }) {
   return (
-    <Stack direction="row" spacing={1.5} alignItems="center">
+    <Stack direction="row" spacing={1.5} sx={{
+      alignItems: "center"
+    }}>
       {option.previewUrl ? (
         <Avatar
           alt={option.label}
@@ -47,8 +49,12 @@ function RelationOptionLabel({ option }: { option: RelationOption }) {
         />
       ) : null}
       <Stack spacing={0.25}>
-        <Typography fontWeight={700}>{option.label}</Typography>
-        <Typography color="text.secondary" variant="body2">
+        <Typography sx={{
+          fontWeight: 700
+        }}>{option.label}</Typography>
+        <Typography variant="body2" sx={{
+          color: "text.secondary"
+        }}>
           {option.description ? `${option.description} · #${option.id}` : `#${option.id}`}
         </Typography>
       </Stack>
@@ -93,8 +99,10 @@ export function FieldInput({
         onChange={(event) => handleChange(event.target.value)}
         required={field.required}
         select
-        SelectProps={{ native: true }}
         value={value}
+        slotProps={{
+          select: { native: true }
+        }}
       >
         {!field.required ? <option value="">Unset</option> : null}
         {(field.options ?? []).map((option) => (
@@ -271,7 +279,6 @@ export function FieldInput({
     <TextField
       error={Boolean(error)}
       helperText={error ?? field.helperText}
-      InputLabelProps={field.kind === 'datetime' ? { shrink: true } : undefined}
       label={field.label}
       onChange={(event) => handleChange(event.target.value)}
       required={field.required}
@@ -279,6 +286,9 @@ export function FieldInput({
         field.kind === 'number' ? 'number' : field.kind === 'datetime' ? 'datetime-local' : 'text'
       }
       value={value}
+      slotProps={{
+        inputLabel: field.kind === 'datetime' ? { shrink: true } : undefined
+      }}
     />
   );
 }
@@ -324,10 +334,14 @@ function JsonEditorHeader({
   rawOpen: boolean;
 }) {
   return (
-    <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+    <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{
+      justifyContent: "space-between"
+    }}>
       <Stack spacing={0.25}>
         <Typography variant="subtitle1">{label}</Typography>
-        <Typography color="text.secondary" variant="body2">
+        <Typography variant="body2" sx={{
+          color: "text.secondary"
+        }}>
           {description}
         </Typography>
       </Stack>
@@ -496,8 +510,10 @@ function JsonMapEditorField({
                   })
                 }
                 select
-                SelectProps={{ native: true }}
                 value={kind}
+                slotProps={{
+                  select: { native: true }
+                }}
               >
                 <option value="text">Text</option>
                 <option value="number">Number</option>
@@ -510,8 +526,10 @@ function JsonMapEditorField({
                   label="Value"
                   onChange={(event) => updateEntry(index, { value: event.target.value })}
                   select
-                  SelectProps={{ native: true }}
                   value={String(entryValue === true)}
+                  slotProps={{
+                    select: { native: true }
+                  }}
                 >
                   <option value="false">false</option>
                   <option value="true">true</option>
@@ -648,8 +666,10 @@ function JsonArrayEditorField({
                   })
                 }
                 select
-                SelectProps={{ native: true }}
                 value={kind}
+                slotProps={{
+                  select: { native: true }
+                }}
               >
                 <option value="text">Text</option>
                 <option value="number">Number</option>
@@ -662,8 +682,10 @@ function JsonArrayEditorField({
                   label="Value"
                   onChange={(event) => updateItem(index, { value: event.target.value })}
                   select
-                  SelectProps={{ native: true }}
                   value={String(item === true)}
+                  slotProps={{
+                    select: { native: true }
+                  }}
                 >
                   <option value="false">false</option>
                   <option value="true">true</option>
@@ -785,8 +807,10 @@ function SeoEditorField({
         label="Indexing mode"
         onChange={(event) => updateSeo({ index_mode: event.target.value })}
         select
-        SelectProps={{ native: true }}
         value={toStringValue(seo.index_mode) || 'index'}
+        slotProps={{
+          select: { native: true }
+        }}
       >
         <option value="index">index</option>
         <option value="noindex">noindex</option>
@@ -855,7 +879,9 @@ function EntrySettingsEditorField({
         onToggleRaw={() => setRawOpen((current) => !current)}
         rawOpen={rawOpen}
       />
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} flexWrap="wrap">
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{
+        flexWrap: "wrap"
+      }}>
         <FormControlLabel
           control={
             <Switch
@@ -888,8 +914,10 @@ function EntrySettingsEditorField({
         label="Hero variant"
         onChange={(event) => updateSettings({ hero_variant: event.target.value })}
         select
-        SelectProps={{ native: true }}
         value={toStringValue(settings.hero_variant) || 'standard'}
+        slotProps={{
+          select: { native: true }
+        }}
       >
         <option value="standard">standard</option>
         <option value="spotlight">spotlight</option>
@@ -974,19 +1002,23 @@ function FocalPointEditorField({
       >
         <TextField
           helperText="0 = left edge, 1 = right edge"
-          inputProps={{ max: 1, min: 0, step: 0.01 }}
           label="Horizontal focus"
           onChange={(event) => updatePoint({ x: Number(event.target.value) })}
           type="number"
           value={x}
+          slotProps={{
+            htmlInput: { max: 1, min: 0, step: 0.01 }
+          }}
         />
         <TextField
           helperText="0 = top edge, 1 = bottom edge"
-          inputProps={{ max: 1, min: 0, step: 0.01 }}
           label="Vertical focus"
           onChange={(event) => updatePoint({ y: Number(event.target.value) })}
           type="number"
           value={y}
+          slotProps={{
+            htmlInput: { max: 1, min: 0, step: 0.01 }
+          }}
         />
       </Box>
       {rawOpen
@@ -1060,8 +1092,10 @@ function ThemeSettingsEditorField({
           label="Palette"
           onChange={(event) => updateSettings({ palette: event.target.value })}
           select
-          SelectProps={{ native: true }}
           value={toStringValue(settings.palette) || 'linen'}
+          slotProps={{
+            select: { native: true }
+          }}
         >
           <option value="linen">linen</option>
           <option value="sand">sand</option>
@@ -1072,8 +1106,10 @@ function ThemeSettingsEditorField({
           label="Accent"
           onChange={(event) => updateSettings({ accent: event.target.value })}
           select
-          SelectProps={{ native: true }}
           value={toStringValue(settings.accent) || 'teal'}
+          slotProps={{
+            select: { native: true }
+          }}
         >
           <option value="teal">teal</option>
           <option value="rust">rust</option>
@@ -1084,8 +1120,10 @@ function ThemeSettingsEditorField({
           label="Logo mode"
           onChange={(event) => updateSettings({ logo_mode: event.target.value })}
           select
-          SelectProps={{ native: true }}
           value={toStringValue(settings.logo_mode) || 'wordmark'}
+          slotProps={{
+            select: { native: true }
+          }}
         >
           <option value="wordmark">wordmark</option>
           <option value="mark">mark</option>
@@ -1095,8 +1133,10 @@ function ThemeSettingsEditorField({
           label="Header layout"
           onChange={(event) => updateSettings({ header_layout: event.target.value })}
           select
-          SelectProps={{ native: true }}
           value={toStringValue(settings.header_layout) || 'split'}
+          slotProps={{
+            select: { native: true }
+          }}
         >
           <option value="split">split</option>
           <option value="stacked">stacked</option>
@@ -1163,7 +1203,9 @@ function EditorialSettingsEditorField({
         onToggleRaw={() => setRawOpen((current) => !current)}
         rawOpen={rawOpen}
       />
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} flexWrap="wrap">
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{
+        flexWrap: "wrap"
+      }}>
         <FormControlLabel
           control={
             <Switch
@@ -1194,8 +1236,10 @@ function EditorialSettingsEditorField({
           label="Preview mode"
           onChange={(event) => updateSettings({ preview_mode: event.target.value })}
           select
-          SelectProps={{ native: true }}
           value={toStringValue(settings.preview_mode) || 'live'}
+          slotProps={{
+            select: { native: true }
+          }}
         >
           <option value="live">live</option>
           <option value="draft_only">draft_only</option>
@@ -1273,10 +1317,14 @@ function BlockEditorField({
 
   return (
     <Stack spacing={1.5}>
-      <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{
+        justifyContent: "space-between"
+      }}>
         <Stack spacing={0.25}>
           <Typography variant="subtitle1">{field.label}</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {error ?? field.helperText ?? 'Compose the entry body as ordered content blocks.'}
           </Typography>
         </Stack>
@@ -1299,9 +1347,11 @@ function BlockEditorField({
                   onChange={(event) => replaceBlock(index, { ...block, type: event.target.value })}
                   required
                   select
-                  SelectProps={{ native: true }}
                   sx={{ minWidth: { md: 220 } }}
                   value={block.type}
+                  slotProps={{
+                    select: { native: true }
+                  }}
                 >
                   {blockTypes.map((option) => (
                     <option key={option} value={option}>
@@ -1331,8 +1381,10 @@ function BlockEditorField({
                   label="Tone"
                   onChange={(event) => replaceBlock(index, { ...block, tone: event.target.value })}
                   select
-                  SelectProps={{ native: true }}
                   value={block.tone}
+                  slotProps={{
+                    select: { native: true }
+                  }}
                 >
                   {blockTones.map((tone) => (
                     <option key={tone} value={tone}>
@@ -1369,7 +1421,9 @@ function BlockEditorField({
                 />
               ) : null}
 
-              <Stack direction="row" justifyContent="space-between" spacing={1}>
+              <Stack direction="row" spacing={1} sx={{
+                justifyContent: "space-between"
+              }}>
                 <Stack direction="row" spacing={1}>
                   <Button
                     disabled={index === 0}

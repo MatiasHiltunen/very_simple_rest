@@ -68,7 +68,13 @@ export function PagePreview({
     <Box className="preview-page" data-mode={mode}>
       <Box className="preview-siteHeader">
         <Stack spacing={0.5}>
-          <Typography fontWeight={800} letterSpacing="0.12em" textTransform="uppercase" variant="caption">
+          <Typography
+            variant="caption"
+            sx={{
+              fontWeight: 800,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase"
+            }}>
             {brand}
           </Typography>
           <Typography variant="body2">{previewPath}</Typography>
@@ -110,7 +116,9 @@ export function PagePreview({
           </Box>
           <Typography className="preview-title">{previewLabel}</Typography>
           <Typography className="preview-summary">{summary}</Typography>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          <Stack direction="row" spacing={1} useFlexGap sx={{
+            flexWrap: "wrap"
+          }}>
             <Chip
               label={(draft.status || 'draft').replaceAll('_', ' ')}
               size="small"
@@ -231,7 +239,9 @@ export function PagePreview({
           })
         ) : (
           <Box className="empty-state">
-            <Typography fontWeight={700}>No story blocks yet</Typography>
+            <Typography sx={{
+              fontWeight: 700
+            }}>No story blocks yet</Typography>
             <Typography variant="body2">
               Add paragraph, quote, image, or callout blocks to see the page take shape.
             </Typography>

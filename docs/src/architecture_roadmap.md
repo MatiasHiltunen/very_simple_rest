@@ -1757,6 +1757,6 @@ dependencies. New deps require:
 
 ### 23.4 Pinned Exceptions
 
-The current `vendor/sqlx-mysql` patch is one such pinned exception. Every
-such pin is documented in `docs/src/dependencies.md` with: what it pins,
-why, and the condition under which we unpin.
+The former `vendor/sqlx-mysql` patch was removed with the SQLx 0.9 upgrade.
+Current compatibility pins and outstanding advisories are documented in
+`docs/src/dependencies.md`, including the conditions for removing each pin.

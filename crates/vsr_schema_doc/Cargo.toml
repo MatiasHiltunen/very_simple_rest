@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "vsr_schema_doc"
 version.workspace = true

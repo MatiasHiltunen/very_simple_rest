@@ -1,3 +1,5 @@
+// Legacy environment and subprocess fixtures; production code still denies unsafe.
+#![allow(unsafe_code)]
 #![allow(clippy::await_holding_lock)]
 
 use std::sync::{Mutex, OnceLock};

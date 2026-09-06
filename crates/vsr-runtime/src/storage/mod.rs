@@ -296,3 +296,6 @@ pub trait ObjectStorage: Send + Sync + 'static {
         expires_in: Duration,
     ) -> impl Future<Output = VsrResult<Option<String>>> + Send;
 }
+#[cfg(feature = "storage-local")]
+#[doc(hidden)]
+pub mod transaction;

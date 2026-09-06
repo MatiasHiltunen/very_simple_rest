@@ -1,3 +1,6 @@
+// Legacy environment and subprocess fixtures; production code still denies unsafe.
+#![allow(unsafe_code)]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};

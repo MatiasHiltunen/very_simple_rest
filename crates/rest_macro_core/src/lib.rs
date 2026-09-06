@@ -1,3 +1,6 @@
+// Turso's connection futures require a deeper auto-trait evaluation stack.
+#![recursion_limit = "256"]
+
 pub mod auth;
 pub mod authorization;
 pub mod database;

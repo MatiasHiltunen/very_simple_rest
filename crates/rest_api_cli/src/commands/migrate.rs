@@ -8,7 +8,8 @@ use rest_macro_core::authorization::{
     authorization_runtime_migration_sql,
 };
 use rest_macro_core::compiler;
-use rest_macro_core::db::{DbPool, query, query_scalar};
+use rest_macro_core::db::{DbExecutor, DbPool, query, query_scalar};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -1201,10 +1202,24 @@ async fn ensure_migrations_table(pool: &DbPool, backend: AuthDbBackend) -> Resul
         .execute(pool)
         .await
         .context("failed to ensure migration metadata table exists")?;
+    query(&format!("CREATE TABLE IF NOT EXISTS _vsr_migration_integrity (name {name_column}, checksum VARCHAR(64) NOT NULL, dirty INTEGER NOT NULL)"))
+        .execute(pool).await?;
+    query("CREATE TABLE IF NOT EXISTS _vsr_migration_lock (id INTEGER PRIMARY KEY)")
+        .execute(pool)
+        .await?;
+    let insert_lock = match backend {
+        AuthDbBackend::Mysql => "INSERT IGNORE INTO _vsr_migration_lock (id) VALUES (1)",
+        _ => "INSERT INTO _vsr_migration_lock (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
+    };
+    query(insert_lock).execute(pool).await?;
     Ok(())
 }
 
-async fn migration_applied(pool: &DbPool, backend: AuthDbBackend, name: &str) -> Result<bool> {
+async fn migration_applied<E: DbExecutor + ?Sized>(
+    pool: &E,
+    backend: AuthDbBackend,
+    name: &str,
+) -> Result<bool> {
     let sql = format!(
         "SELECT COUNT(*) FROM {} WHERE name = {}",
         MIGRATIONS_TABLE,
@@ -1222,9 +1237,122 @@ async fn connect_pool(database_url: &str, config_path: Option<&Path>) -> Result<
     let pool = connect_database(database_url, config_path)
         .await
         .with_context(|| format!("failed to connect to database at {database_url}"))?;
-    let backend = detect_runtime_backend(&pool).await?;
-    ensure_migrations_table(&pool, backend).await?;
     Ok(pool)
+}
+
+// Session locks survive MySQL's implicit DDL commits. Never return a lock-owning
+// connection to the pool, including on cancellation or an error path.
+async fn migration_session_lock(
+    pool: &DbPool,
+    backend: AuthDbBackend,
+) -> Result<Option<sqlx::pool::PoolConnection<sqlx::Any>>> {
+    if backend == AuthDbBackend::Sqlite {
+        return Ok(None);
+    }
+    let DbPool::Sqlx { pool, .. } = pool else {
+        bail!("unsupported migration backend");
+    };
+    let mut connection = pool.acquire().await?;
+    connection.close_on_drop();
+    match backend {
+        AuthDbBackend::Postgres => {
+            sqlx::query("SET statement_timeout = '30s'")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("SELECT pg_advisory_lock(861947326)")
+                .execute(&mut *connection)
+                .await?;
+        }
+        AuthDbBackend::Mysql => {
+            let acquired: i64 = sqlx::query_scalar(
+                "SELECT GET_LOCK(CONCAT('vsr:', LEFT(SHA2(DATABASE(), 256), 60)), 30)",
+            )
+            .fetch_one(&mut *connection)
+            .await?;
+            if acquired != 1 {
+                bail!("timed out waiting for the database migration lock");
+            }
+        }
+        AuthDbBackend::Sqlite => {}
+    }
+    Ok(Some(connection))
+}
+
+async fn checked_migration_applied<E: DbExecutor + ?Sized>(
+    db: &E,
+    backend: AuthDbBackend,
+    name: &str,
+    checksum: &str,
+) -> Result<bool> {
+    if let Some(row) = query("SELECT checksum, dirty FROM _vsr_migration_integrity WHERE name = ?")
+        .bind(name)
+        .fetch_optional(db)
+        .await?
+    {
+        if row.try_get::<i64, _>("dirty")? != 0 {
+            bail!(
+                "migration {name} has an incomplete non-transactional attempt; inspect and repair the database before retrying (see docs/src/migrations.md)"
+            );
+        }
+        let recorded: String = row.try_get("checksum")?;
+        if recorded != checksum {
+            bail!(
+                "checksum mismatch for applied migration {name}; restore the original SQL and create a new migration"
+            );
+        }
+        if !migration_applied(db, backend, name).await? {
+            bail!("inconsistent migration metadata for {name}");
+        }
+        return Ok(true);
+    }
+    if migration_applied(db, backend, name).await? {
+        bail!(
+            "migration {name} predates checksum tracking; verify its SQL against the deployed schema, then use `vsr migrate baseline --file <original.sql>` to explicitly trust it"
+        );
+    }
+    Ok(false)
+}
+
+/// Explicitly establish a checksum for an already applied legacy migration.
+pub async fn baseline_migration(
+    database_url: &str,
+    config_path: Option<&Path>,
+    file: &Path,
+) -> Result<()> {
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("invalid migration filename")?;
+    let sql = fs::read_to_string(file)?;
+    let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
+    let pool = connect_pool(database_url, config_path).await?;
+    let backend = detect_runtime_backend(&pool).await?;
+    let _lock = migration_session_lock(&pool, backend).await?;
+    ensure_migrations_table(&pool, backend).await?;
+    let tx = pool.begin().await?;
+    query("UPDATE _vsr_migration_lock SET id = id WHERE id = 1")
+        .execute(&tx)
+        .await?;
+    if !migration_applied(&tx, backend, name).await? {
+        bail!("cannot baseline unapplied migration {name}");
+    }
+    let tracked = query("SELECT checksum FROM _vsr_migration_integrity WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&tx)
+        .await?;
+    if tracked.is_some() {
+        bail!("migration {name} already has integrity metadata; baseline cannot overwrite it");
+    }
+    query("INSERT INTO _vsr_migration_integrity (name, checksum, dirty) VALUES (?, ?, 0)")
+        .bind(name)
+        .bind(checksum)
+        .execute(&tx)
+        .await?;
+    tx.commit().await?;
+    println!(
+        "Recorded trusted baseline for {name}; historical SQL was not independently verified."
+    );
+    Ok(())
 }
 
 async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
@@ -1256,14 +1384,49 @@ async fn apply_named_migration(
     name: &str,
     sql: &str,
 ) -> Result<ApplyResult> {
-    if migration_applied(pool, backend, name).await? {
-        return Ok(ApplyResult::Skipped);
+    let _lock = migration_session_lock(pool, backend).await?;
+    ensure_migrations_table(pool, backend).await?;
+    let checksum = hex::encode(Sha256::digest(sql.as_bytes()));
+    if backend == AuthDbBackend::Mysql {
+        if checked_migration_applied(pool, backend, name, &checksum).await? {
+            return Ok(ApplyResult::Skipped);
+        }
+        query("INSERT INTO _vsr_migration_integrity (name, checksum, dirty) VALUES (?, ?, 1)")
+            .bind(name)
+            .bind(&checksum)
+            .execute(pool)
+            .await?;
+        pool.execute_batch(sql).await.with_context(|| {
+            format!(
+                "migration {name} failed; MySQL DDL may be partially applied and is marked dirty"
+            )
+        })?;
+        let tx = pool.begin().await?;
+        query("INSERT INTO _vsr_migrations (name) VALUES (?)")
+            .bind(name)
+            .execute(&tx)
+            .await?;
+        query("UPDATE _vsr_migration_integrity SET dirty = 0 WHERE name = ?")
+            .bind(name)
+            .execute(&tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(ApplyResult::Applied);
     }
 
     let tx = pool
         .begin()
         .await
         .context("failed to start migration transaction")?;
+    // First statement must be a write: SQLite obtains its writer lock before reading
+    // status, avoiding a stale read transaction racing another migrator.
+    query("UPDATE _vsr_migration_lock SET id = id WHERE id = 1")
+        .execute(&tx)
+        .await?;
+    if checked_migration_applied(&tx, backend, name, &checksum).await? {
+        tx.rollback().await?;
+        return Ok(ApplyResult::Skipped);
+    }
 
     tx.execute_batch(sql)
         .await
@@ -1279,6 +1442,11 @@ async fn apply_named_migration(
         .execute(&tx)
         .await
         .with_context(|| format!("failed to record migration {name}"))?;
+    query("INSERT INTO _vsr_migration_integrity (name, checksum, dirty) VALUES (?, ?, 0)")
+        .bind(name)
+        .bind(&checksum)
+        .execute(&tx)
+        .await?;
 
     tx.commit()
         .await
@@ -1301,7 +1469,147 @@ enum ApplyResult {
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
+    async fn check_integrity_and_concurrency(database_url: &str) {
+        use super::*;
+        let pool = connect_pool(database_url, None).await.unwrap();
+        let other = connect_pool(database_url, None).await.unwrap();
+        let backend = detect_runtime_backend(&pool).await.unwrap();
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let table = format!("probe_{suffix}");
+        let name = format!("probe_{suffix}.sql");
+        let sql = format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)");
+        let (a, b) = tokio::join!(
+            apply_named_migration(&pool, backend, &name, &sql),
+            apply_named_migration(&other, backend, &name, &sql)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(matches!(
+            (a, b),
+            (ApplyResult::Applied, ApplyResult::Skipped)
+                | (ApplyResult::Skipped, ApplyResult::Applied)
+        ));
+        let mismatch =
+            apply_named_migration(&pool, backend, &name, &(sql.clone() + "; -- changed")).await;
+        assert!(
+            mismatch
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("checksum mismatch")
+        );
+        query("UPDATE _vsr_migration_integrity SET dirty = 1 WHERE name = ?")
+            .bind(&name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dirty = apply_named_migration(&pool, backend, &name, &sql).await;
+        assert!(dirty.err().unwrap().to_string().contains("incomplete"));
+        query("DELETE FROM _vsr_migration_integrity WHERE name = ?")
+            .bind(&name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let legacy = apply_named_migration(&pool, backend, &name, &sql).await;
+        assert!(
+            legacy
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("predates checksum")
+        );
+        let directory = std::env::temp_dir().join(format!("vsr-baseline-{suffix}"));
+        fs::create_dir(&directory).unwrap();
+        let file = directory.join(&name);
+        fs::write(&file, &sql).unwrap();
+        baseline_migration(database_url, None, &file).await.unwrap();
+        assert!(matches!(
+            apply_named_migration(&pool, backend, &name, &sql)
+                .await
+                .unwrap(),
+            ApplyResult::Skipped
+        ));
+        assert!(baseline_migration(database_url, None, &file).await.is_err());
+        fs::remove_dir_all(directory).unwrap();
+        query(&format!("DROP TABLE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let broken_name = format!("broken_{suffix}.sql");
+        let create = format!("CREATE TABLE broken_{suffix} (id INTEGER)");
+        assert!(
+            apply_named_migration(
+                &pool,
+                backend,
+                &broken_name,
+                &format!("{create}; INSERT INTO nonexistent_{suffix} VALUES (1)")
+            )
+            .await
+            .is_err()
+        );
+        let retry = apply_named_migration(&pool, backend, &broken_name, &create).await;
+        if backend == AuthDbBackend::Mysql {
+            assert!(retry.err().unwrap().to_string().contains("incomplete"));
+        } else {
+            assert!(matches!(retry.unwrap(), ApplyResult::Applied));
+        }
+        query(&format!("DROP TABLE broken_{suffix}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrations_detect_drift_and_serialize_independent_runners() {
+        let path = std::env::temp_dir().join(format!("vsr-migrations-{}.db", uuid::Uuid::new_v4()));
+        check_integrity_and_concurrency(&format!("sqlite:{}?mode=rwc", path.display())).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated PostgreSQL/MySQL database in VSR_TEST_DATABASE_URL"]
+    async fn server_database_migration_integrity_and_concurrency() {
+        check_integrity_and_concurrency(
+            &std::env::var("VSR_TEST_DATABASE_URL").expect("provide an isolated test database"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_failed_migration_rolls_back_schema_and_tracking() {
+        use super::*;
+        let path = std::env::temp_dir().join(format!(
+            "vsr-migration-rollback-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let pool = connect_pool(&format!("sqlite:{}?mode=rwc", path.display()), None)
+            .await
+            .unwrap();
+        let backend = AuthDbBackend::Sqlite;
+        assert!(
+            apply_named_migration(
+                &pool,
+                backend,
+                "failed.sql",
+                "CREATE TABLE rolled_back (id INTEGER); INSERT INTO missing_table VALUES (1)"
+            )
+            .await
+            .is_err()
+        );
+        assert!(matches!(
+            apply_named_migration(
+                &pool,
+                backend,
+                "failed.sql",
+                "CREATE TABLE rolled_back (id INTEGER)"
+            )
+            .await
+            .unwrap(),
+            ApplyResult::Applied
+        ));
+    }
+
     use crate::commands::db::{connect_database, database_url_from_service_config};
     use rest_macro_core::auth::{AuthDbBackend, auth_management_migration_sql, auth_migration_sql};
     use rest_macro_core::authorization::{

@@ -21,7 +21,9 @@ export function ConfirmDialog({
     <Dialog maxWidth="xs" onClose={onClose} open={open} fullWidth>
       <DialogTitle>{title}</DialogTitle>
       <DialogContent>
-        <Typography color="text.secondary">{body}</Typography>
+        <Typography sx={{
+          color: "text.secondary"
+        }}>{body}</Typography>
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 3 }}>
         <Button onClick={onClose} variant="text">

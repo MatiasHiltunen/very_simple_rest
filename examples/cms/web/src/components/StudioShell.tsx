@@ -160,13 +160,21 @@ export function StudioShell({
       </Box>
 
       <Box className="studio-accountMeta">
-        <Stack direction="row" spacing={1.5} alignItems="center">
+        <Stack direction="row" spacing={1.5} sx={{
+          alignItems: "center"
+        }}>
           <Avatar sx={{ bgcolor: 'primary.main' }}>{initials(account.email)}</Avatar>
-          <Stack spacing={0.25} minWidth={0}>
-            <Typography fontWeight={700} noWrap>
+          <Stack spacing={0.25} sx={{
+            minWidth: 0
+          }}>
+            <Typography noWrap sx={{
+              fontWeight: 700
+            }}>
               {account.email ?? `User #${account.id}`}
             </Typography>
-            <Typography color="text.secondary" noWrap variant="body2">
+            <Typography noWrap variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               {account.roles.join(', ')}
             </Typography>
           </Stack>
@@ -206,9 +214,10 @@ export function StudioShell({
               className="studio-topbarLead"
               direction="row"
               spacing={1.5}
-              alignItems="center"
-              minWidth={0}
-            >
+              sx={{
+                alignItems: "center",
+                minWidth: 0
+              }}>
               {lgDown ? (
                 <IconButton onClick={() => setMobileOpen(true)}>
                   <MenuRounded />
@@ -223,7 +232,9 @@ export function StudioShell({
             </Stack>
 
             {!mdDown ? (
-              <Stack className="studio-topbarActions" direction="row" spacing={1} alignItems="center">
+              <Stack className="studio-topbarActions" direction="row" spacing={1} sx={{
+                alignItems: "center"
+              }}>
                 {typeof account.workspace_id === 'number' ? (
                   <Chip
                     color="primary"

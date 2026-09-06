@@ -1,15 +1,16 @@
-mod settings;
-mod migrations;
-mod jwt;
-mod user;
-mod helpers;
+mod admin;
 mod db_ops;
 mod email;
-mod tokens;
-mod admin;
-mod pages;
 pub mod handlers;
+mod helpers;
+mod jwt;
+mod migrations;
+mod pages;
+mod password;
 mod routing;
+mod settings;
+mod tokens;
+mod user;
 
 // Re-exports — settings
 pub use settings::{
@@ -44,15 +45,15 @@ pub use handlers::{
     account, account_portal_page, admin_dashboard_page, change_password, confirm_password_reset,
     create_managed_user, delete_managed_user, list_managed_users, login, login_with_request,
     logout, managed_user, me, password_reset_page, register, register_with_request,
-    resend_account_verification, resend_managed_user_verification, resend_verification,
-    request_password_reset, update_managed_user, verify_email_page, verify_email_token,
+    request_password_reset, resend_account_verification, resend_managed_user_verification,
+    resend_verification, update_managed_user, verify_email_page, verify_email_token,
 };
 
 // Re-exports — routing
 pub use routing::{
     auth_api_routes_with_settings, auth_routes, auth_routes_with_settings,
-    public_auth_discovery_routes, public_auth_discovery_routes_with_settings,
-    public_jwks_enabled, register_builtin_auth_html_pages,
+    public_auth_discovery_routes, public_auth_discovery_routes_with_settings, public_jwks_enabled,
+    register_builtin_auth_html_pages,
 };
 
 // Re-export jwks handler
@@ -60,23 +61,180 @@ pub use jwt::jwks;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
+    #[cfg(all(feature = "postgres", feature = "mysql"))]
+    #[actix_web::test]
+    #[ignore = "requires an empty PostgreSQL/MySQL database in VSR_TEST_DATABASE_URL"]
+    async fn server_database_auth_tokens_are_consumed_once() {
+        use super::db_ops::{create_auth_token, detect_auth_backend};
+        use super::tokens::{TokenActionOutcome, apply_password_reset_token};
+        use super::user::AuthTokenPurpose;
+        use crate::db::query;
+        let pool = crate::db::connect(
+            &std::env::var("VSR_TEST_DATABASE_URL")
+                .expect("provide an isolated empty test database"),
+        )
+        .await
+        .unwrap();
+        let backend = detect_auth_backend(&pool).await.unwrap();
+        pool.execute_batch(&super::auth_migration_sql(backend))
+            .await
+            .unwrap();
+        pool.execute_batch(&super::auth_management_migration_sql(backend))
+            .await
+            .unwrap();
+        query(&format!("INSERT INTO {} (email, password_hash, role) VALUES ('race@example.com', 'old', 'user')", super::auth_user_table_ident(backend))).execute(&pool).await.unwrap();
+        let raw = create_auth_token(&pool, 1, AuthTokenPurpose::PasswordReset, None, 300)
+            .await
+            .unwrap();
+        let results = futures_util::future::join_all(
+            (0..8).map(|_| apply_password_reset_token(&pool, &raw, "new")),
+        )
+        .await;
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Ok(TokenActionOutcome::Applied)))
+                .count(),
+            1
+        );
+        assert!(results.iter().all(|r| matches!(
+            r,
+            Ok(TokenActionOutcome::Applied | TokenActionOutcome::Invalid)
+        )));
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    #[actix_web::test]
+    async fn builtin_tokens_are_revoked_when_account_security_state_changes() {
+        let pool = connect_test_pool("revocation").await;
+        pool.execute_batch(&auth_migration_sql(AuthDbBackend::Sqlite))
+            .await
+            .unwrap();
+        pool.execute_batch(&auth_management_migration_sql(AuthDbBackend::Sqlite))
+            .await
+            .unwrap();
+        let secret = write_temp_secret_file("revocation_secret", "a-test-only-signing-secret");
+        let settings = AuthSettings {
+            jwt_secret: Some(SecretRef::File {
+                path: secret.clone(),
+            }),
+            claims: BTreeMap::from([(
+                "tenant_id".to_owned(),
+                AuthClaimMapping {
+                    column: "tenant_id".to_owned(),
+                    ty: AuthClaimType::I64,
+                },
+            )]),
+            ..AuthSettings::default()
+        };
+        query("ALTER TABLE user ADD COLUMN tenant_id INTEGER DEFAULT 7")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let password = bcrypt::hash("password123", 4).unwrap();
+        query("INSERT INTO user (email, password_hash, role, updated_at) VALUES (?, ?, 'admin', 'initial')")
+            .bind("admin@example.com").bind(password).execute(&pool).await.unwrap();
+        let app = init_service(App::new().configure(|cfg| {
+            super::auth_routes_with_settings(cfg, pool.clone(), settings.clone())
+        }))
+        .await;
+        for change in [
+            "UPDATE user SET role = 'user', updated_at = 'demoted'",
+            "UPDATE user SET role = 'admin', updated_at = 'restored'",
+            "UPDATE user SET tenant_id = 8, updated_at = 'claim_changed'",
+            "UPDATE user SET password_hash = 'replacement', updated_at = 'reset'",
+            "DELETE FROM user",
+        ] {
+            let user =
+                super::db_ops::load_authenticated_user_by_id_with_settings(&pool, 1, &settings)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let claims = Claims {
+                auth_state: Some(super::user::account_auth_state(&user)),
+                sub: user.id,
+                roles: vec![user.role],
+                iss: None,
+                aud: None,
+                exp: (Utc::now() + Duration::minutes(5)).timestamp() as usize,
+                extra: user.claims,
+            };
+            let (header, key) = super::jwt::configured_jwt_signer(&settings).unwrap();
+            let token = encode(&header, &claims, key.as_ref()).unwrap();
+            let request = || {
+                TestRequest::get()
+                    .uri("/auth/me")
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .to_request()
+            };
+            assert_eq!(call_service(&app, request()).await.status(), StatusCode::OK);
+            query(change).execute(&pool).await.unwrap();
+            assert_eq!(
+                call_service(&app, request()).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        std::fs::remove_file(secret).unwrap();
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    #[actix_web::test]
+    async fn reset_token_claim_is_single_use_and_rolls_back_with_transaction() {
+        use super::db_ops::{create_auth_token, load_pending_auth_token, mark_auth_token_used};
+        use super::user::AuthTokenPurpose;
+        let pool = connect_test_pool("token_claim").await;
+        pool.execute_batch(&auth_migration_sql(AuthDbBackend::Sqlite))
+            .await
+            .unwrap();
+        pool.execute_batch(&auth_management_migration_sql(AuthDbBackend::Sqlite))
+            .await
+            .unwrap();
+        query("INSERT INTO user (email, password_hash, role) VALUES ('test@example.com', 'old', 'user')").execute(&pool).await.unwrap();
+        let raw = create_auth_token(&pool, 1, AuthTokenPurpose::PasswordReset, None, 300)
+            .await
+            .unwrap();
+        let token = load_pending_auth_token(&pool, &raw, AuthTokenPurpose::PasswordReset)
+            .await
+            .unwrap()
+            .unwrap();
+        let tx = pool.begin().await.unwrap();
+        assert!(mark_auth_token_used(&tx, token.id, "now").await.unwrap());
+        assert!(!mark_auth_token_used(&tx, token.id, "later").await.unwrap());
+        tx.rollback().await.unwrap();
+        let (a, b) = futures_util::future::join(
+            super::tokens::apply_password_reset_token(&pool, &raw, "first"),
+            super::tokens::apply_password_reset_token(&pool, &raw, "second"),
+        )
+        .await;
+        let successes = [a, b]
+            .into_iter()
+            .filter(|r| matches!(r, Ok(super::tokens::TokenActionOutcome::Applied)))
+            .count();
+        assert_eq!(successes, 1);
+        assert!(matches!(
+            super::tokens::apply_password_reset_token(&pool, &raw, "third")
+                .await
+                .unwrap(),
+            super::tokens::TokenActionOutcome::Invalid
+        ));
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    use super::admin::ensure_admin_exists_with_settings_and_claim_prompt_mode;
+    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
+    use super::handlers::login_with_settings;
+    use super::helpers::build_public_auth_url;
+    use super::jwt::{Claims, configured_public_jwks, load_jwt_secret};
     use super::{
         AuthClaimMapping, AuthClaimType, AuthDbBackend, AuthEmailProvider, AuthEmailSettings,
         AuthJwtAlgorithm, AuthJwtSettings, AuthJwtVerificationKey, AuthSettings,
         auth_claim_migration_sql, auth_migration_sql,
     };
-    use super::helpers::build_public_auth_url;
-    use super::jwt::{Claims, configured_public_jwks, load_jwt_secret};
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]
-    use super::{
-        LoginInput, auth_management_migration_sql,
-        validate_auth_claim_mappings,
-    };
-    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
-    use super::admin::ensure_admin_exists_with_settings_and_claim_prompt_mode;
-    #[cfg(any(feature = "sqlite", feature = "turso-local"))]
-    use super::handlers::login_with_settings;
+    use super::{LoginInput, auth_management_migration_sql, validate_auth_claim_mappings};
     #[cfg(feature = "turso-local")]
     use crate::database::{DatabaseConfig, DatabaseEngine, TursoLocalConfig};
     #[cfg(all(not(feature = "turso-local"), feature = "sqlite"))]
@@ -316,6 +474,7 @@ mod tests {
         };
 
         let claims = Claims {
+            auth_state: None,
             sub: 42,
             roles: vec!["user".to_owned()],
             iss: None,
@@ -399,6 +558,7 @@ mod tests {
         };
 
         let claims = Claims {
+            auth_state: None,
             sub: 7,
             roles: vec!["admin".to_owned()],
             iss: None,
@@ -459,7 +619,13 @@ mod tests {
                 assert!(!params.x.is_empty());
                 let decoding_key =
                     DecodingKey::from_jwk(&jwks.keys[0]).expect("returned jwk should decode");
-                assert_eq!(decoding_key.as_bytes().len(), 32);
+                assert_eq!(
+                    decoding_key
+                        .try_get_as_bytes()
+                        .expect("raw Ed25519 key")
+                        .len(),
+                    32
+                );
             }
             other => panic!("expected Ed25519 octet key pair, got {other:?}"),
         }

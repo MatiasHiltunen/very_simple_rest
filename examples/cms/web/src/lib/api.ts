@@ -130,7 +130,7 @@ async function request<T>(path: string, init: RequestInit = {}, token = readAuth
   });
 
   if (!response.ok) {
-    let payload: ApiErrorPayload | null = null;
+    let payload: ApiErrorPayload | null;
     try {
       payload = (await response.json()) as ApiErrorPayload;
     } catch {

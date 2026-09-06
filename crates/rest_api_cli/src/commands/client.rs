@@ -3263,6 +3263,8 @@ console.log(JSON.stringify({{ checks }}, null, 2));
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;

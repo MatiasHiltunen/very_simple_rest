@@ -38,13 +38,17 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use actix_web::{App, HttpRequest, HttpResponse, web};
 use actix_web::HttpServer as ActixWebServer;
+use actix_web::{
+    App, HttpRequest, HttpResponse,
+    middleware::{Compress, Condition, DefaultHeaders},
+    web,
+};
 use bytes::Bytes;
 use vsr_core::error::{VsrError, VsrResult};
 
 use super::{
-    Handler, HttpMethod, HttpServer, MiddlewareConfig, RequestContext, ResponseBody,
+    Handler, HttpMethod, HttpServer, MiddlewareConfig, Readiness, RequestContext, ResponseBody,
     ResponseEnvelope, ServerConfig,
 };
 
@@ -55,6 +59,16 @@ use super::{
 /// Pass to [`ActixHttpServer::shutdown`] to trigger graceful drain.
 pub struct ActixServerHandle {
     inner: actix_web::dev::ServerHandle,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+    readiness: Readiness,
+    addresses: Vec<std::net::SocketAddr>,
+}
+
+impl ActixServerHandle {
+    /// Bound listener addresses, including the port assigned when binding port zero.
+    pub fn addresses(&self) -> &[std::net::SocketAddr] {
+        &self.addresses
+    }
 }
 
 impl std::fmt::Debug for ActixServerHandle {
@@ -78,19 +92,36 @@ impl HttpServer for ActixHttpServer {
 
     async fn serve(
         config: ServerConfig,
-        _middleware: MiddlewareConfig,
+        middleware: MiddlewareConfig,
         routes: Vec<(HttpMethod, String, Handler)>,
     ) -> VsrResult<ActixServerHandle> {
+        validate_configuration(&config, &middleware)?;
+        if routes
+            .iter()
+            .any(|(_, path, _)| matches!(path.as_str(), "/healthz" | "/readyz"))
+        {
+            return Err(VsrError::Other("health probe paths are reserved".into()));
+        }
+        let tls = config.tls.as_ref().map(load_tls).transpose()?;
         // Wrap in Arc so the factory closure (called once per worker) can clone
         // a cheap pointer each time without re-allocating the route list.
         let routes: Arc<Vec<(HttpMethod, String, Handler)>> = Arc::new(routes);
         let max_body = config.max_body_bytes;
+        let readiness = config.readiness.clone();
+        let app_readiness = readiness.clone();
 
         let server = ActixWebServer::new(move || {
             // Clone the Arc for this factory invocation.
             let routes = Arc::clone(&routes);
 
             App::new()
+                .app_data(web::Data::new(app_readiness.clone()))
+                .wrap(Condition::new(middleware.compression, Compress::default()))
+                .wrap(security_headers(&middleware))
+                .wrap(Condition::new(
+                    middleware.cors.is_some(),
+                    cors_middleware(&middleware),
+                ))
                 .app_data(web::JsonConfig::default().limit(max_body))
                 .app_data(web::PayloadConfig::default().limit(max_body))
                 .route("/healthz", web::get().to(healthz))
@@ -122,21 +153,38 @@ impl HttpServer for ActixHttpServer {
             None => server,
         };
 
-        let running = server
-            .bind(config.addr)
-            .map_err(|e| VsrError::Other(
-                format!("failed to bind {}: {e}", config.addr).into(),
-            ))?
-            .run();
+        let server = match tls {
+            Some(tls) => server.bind_rustls_0_23(config.addr, tls),
+            None => server.bind(config.addr),
+        }
+        .map_err(|e| VsrError::Other(format!("failed to bind {}: {e}", config.addr).into()))?;
+        let addresses = server.addrs();
+        let running = server.run();
 
         let handle = running.handle();
-        tokio::spawn(running);
+        let stopped_readiness = readiness.clone();
+        let task = tokio::spawn(async move {
+            let result = running.await;
+            stopped_readiness.set_ready(false);
+            result
+        });
 
-        Ok(ActixServerHandle { inner: handle })
+        Ok(ActixServerHandle {
+            inner: handle,
+            task,
+            readiness,
+            addresses,
+        })
     }
 
     async fn shutdown(handle: ActixServerHandle) -> VsrResult<()> {
+        handle.readiness.set_ready(false);
         handle.inner.stop(true).await;
+        handle
+            .task
+            .await
+            .map_err(|e| VsrError::Other(format!("server task failed: {e}").into()))?
+            .map_err(|e| VsrError::Other(format!("server failed: {e}").into()))?;
         Ok(())
     }
 }
@@ -144,15 +192,128 @@ impl HttpServer for ActixHttpServer {
 // ── Health probes ─────────────────────────────────────────────────────────────
 
 async fn healthz() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body("ok")
+    HttpResponse::Ok().content_type("text/plain").body("ok")
 }
 
-async fn readyz() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body("ok")
+async fn readyz(readiness: web::Data<Readiness>) -> HttpResponse {
+    if !readiness.is_ready() {
+        return HttpResponse::ServiceUnavailable().body("not ready");
+    }
+    HttpResponse::Ok().content_type("text/plain").body("ok")
+}
+
+fn validate_configuration(config: &ServerConfig, middleware: &MiddlewareConfig) -> VsrResult<()> {
+    let invalid = |message: &str| VsrError::Other(message.to_owned().into());
+    if config.workers == Some(0) {
+        return Err(invalid("HTTP worker count must be positive"));
+    }
+    if !middleware.trusted_proxies.is_empty() {
+        return Err(invalid(
+            "this adapter does not yet expose verified client IPs; trusted_proxies is unsupported",
+        ));
+    }
+    for (_, value) in header_values(middleware) {
+        actix_web::http::header::HeaderValue::from_str(&value)
+            .map_err(|_| invalid("invalid security header value"))?;
+    }
+    if !matches!(
+        middleware.security_headers.x_frame_options.as_str(),
+        "" | "DENY" | "SAMEORIGIN"
+    ) {
+        return Err(invalid(
+            "x_frame_options must be DENY, SAMEORIGIN, or empty",
+        ));
+    }
+    if let Some(cors) = &middleware.cors {
+        if cors.allow_credentials && cors.allowed_origins.is_none() {
+            return Err(invalid("credentialed CORS requires explicit origins"));
+        }
+        for origin in cors.allowed_origins.iter().flatten() {
+            let uri = origin
+                .parse::<actix_web::http::Uri>()
+                .map_err(|_| invalid("invalid CORS origin"))?;
+            if !matches!(uri.scheme_str(), Some("http" | "https"))
+                || uri.authority().is_none()
+                || uri.path_and_query().is_some_and(|p| p.as_str() != "/")
+            {
+                return Err(invalid(
+                    "CORS origins must be HTTP(S) origins without paths",
+                ));
+            }
+        }
+        for header in &cors.allowed_headers {
+            actix_web::http::header::HeaderName::try_from(header.as_str())
+                .map_err(|_| invalid("invalid CORS header name"))?;
+        }
+    }
+    Ok(())
+}
+
+fn header_values(middleware: &MiddlewareConfig) -> Vec<(&'static str, String)> {
+    let security = &middleware.security_headers;
+    let mut headers = vec![("x-content-type-options", "nosniff".into())];
+    for (name, value) in [
+        ("content-security-policy", &security.csp),
+        ("x-frame-options", &security.x_frame_options),
+        ("permissions-policy", &security.permissions_policy),
+    ] {
+        if !value.is_empty() {
+            headers.push((name, value.clone()));
+        }
+    }
+    if let Some(age) = security.hsts_max_age_secs {
+        headers.push(("strict-transport-security", format!("max-age={age}")));
+    }
+    headers
+}
+
+fn security_headers(config: &MiddlewareConfig) -> DefaultHeaders {
+    header_values(config)
+        .into_iter()
+        .fold(DefaultHeaders::new(), |headers, value| headers.add(value))
+}
+
+fn cors_middleware(config: &MiddlewareConfig) -> actix_cors::Cors {
+    let Some(config) = &config.cors else {
+        return actix_cors::Cors::default();
+    };
+    let mut cors = actix_cors::Cors::default().block_on_origin_mismatch(true);
+    if let Some(origins) = &config.allowed_origins {
+        for origin in origins {
+            cors = cors.allowed_origin(origin);
+        }
+    } else {
+        cors = cors.allow_any_origin();
+    }
+    let methods: Vec<String> = config
+        .allowed_methods
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    cors = cors
+        .allowed_methods(methods.iter().map(String::as_str))
+        .allowed_headers(config.allowed_headers.iter().map(String::as_str))
+        .max_age(config.max_age_secs as usize);
+    if config.allow_credentials {
+        cors = cors.supports_credentials();
+    }
+    cors
+}
+
+fn load_tls(config: &super::TlsConfig) -> VsrResult<rustls::ServerConfig> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    let load = || -> Result<_, Box<dyn std::error::Error>> {
+        let certificates =
+            CertificateDer::pem_file_iter(&config.cert_path)?.collect::<Result<Vec<_>, _>>()?;
+        let key = PrivateKeyDer::from_pem_file(&config.key_path)?;
+        Ok(rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)?)
+    };
+    load().map_err(|e| VsrError::Other(format!("invalid TLS configuration: {e}").into()))
 }
 
 // ── Request conversion ────────────────────────────────────────────────────────
@@ -169,18 +330,18 @@ fn build_request_context(req: HttpRequest, body: Bytes) -> RequestContext {
 
     let query_params = parse_query_string(req.query_string());
 
-    let headers: HashMap<String, Vec<String>> =
-        req.headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                let key = name.as_str().to_lowercase();
-                let val = value.to_str().ok()?.to_owned();
-                Some((key, val))
-            })
-            .fold(HashMap::new(), |mut map, (k, v)| {
-                map.entry(k).or_default().push(v);
-                map
-            });
+    let headers: HashMap<String, Vec<String>> = req
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            let key = name.as_str().to_lowercase();
+            let val = value.to_str().ok()?.to_owned();
+            Some((key, val))
+        })
+        .fold(HashMap::new(), |mut map, (k, v)| {
+            map.entry(k).or_default().push(v);
+            map
+        });
 
     let request_id = req
         .headers()
@@ -289,6 +450,222 @@ fn new_request_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn configured_tls_accepts_https_and_rejects_plain_http() {
+        use super::*;
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "vsr-adapter-tls-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).unwrap();
+        let config = ServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            workers: Some(1),
+            tls: Some(crate::http::TlsConfig {
+                cert_path,
+                key_path,
+            }),
+            ..Default::default()
+        };
+        let server = ActixHttpServer::serve(config, MiddlewareConfig::default(), vec![])
+            .await
+            .unwrap();
+        let port = server.addresses()[0].port();
+        let trusted = reqwest::Certificate::from_pem(cert.cert.pem().as_bytes()).unwrap();
+        let client = reqwest::Client::builder()
+            .add_root_certificate(trusted)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_eq!(
+            client
+                .get(format!("https://localhost:{port}/healthz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert!(
+            client
+                .get(format!("http://127.0.0.1:{port}/healthz"))
+                .send()
+                .await
+                .is_err()
+        );
+        ActixHttpServer::shutdown(server).await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn middleware_and_readiness_are_enforced_over_http() {
+        use super::*;
+        let config = ServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            workers: Some(1),
+            max_body_bytes: 64,
+            ..Default::default()
+        };
+        let readiness = config.readiness.clone();
+        let middleware = MiddlewareConfig {
+            cors: Some(crate::http::CorsConfig {
+                allowed_origins: Some(vec!["https://allowed.example".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let handler =
+            crate::http::make_handler(|_| async { ResponseEnvelope::json("x".repeat(8192)) });
+        let server = ActixHttpServer::serve(
+            config,
+            middleware,
+            vec![
+                (HttpMethod::Get, "/data".into(), handler.clone()),
+                (HttpMethod::Post, "/data".into(), handler),
+            ],
+        )
+        .await
+        .unwrap();
+        let base = format!("http://{}", server.addresses()[0]);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_eq!(
+            client
+                .get(format!("{base}/healthz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/readyz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
+        readiness.set_ready(true);
+        assert_eq!(
+            client
+                .get(format!("{base}/readyz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        let response = client
+            .get(format!("{base}/data"))
+            .header("origin", "https://allowed.example")
+            .header("accept-encoding", "gzip")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-encoding"], "gzip");
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "default-src 'self'"
+        );
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "https://allowed.example"
+        );
+        assert!(response.bytes().await.unwrap().len() < 8192);
+        assert_eq!(
+            client
+                .get(format!("{base}/data"))
+                .header("origin", "https://evil.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+        assert_eq!(
+            client
+                .post(format!("{base}/data"))
+                .body(vec![0; 65])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            413
+        );
+        readiness.set_ready(false);
+        assert_eq!(
+            client
+                .get(format!("{base}/readyz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
+        ActixHttpServer::shutdown(server).await.unwrap();
+        assert!(!readiness.is_ready());
+    }
+
+    #[tokio::test]
+    async fn invalid_or_unsupported_security_configuration_fails_before_bind() {
+        use super::*;
+        let mut config = ServerConfig::default();
+        config.workers = Some(0);
+        assert!(
+            ActixHttpServer::serve(config, MiddlewareConfig::default(), vec![])
+                .await
+                .is_err()
+        );
+        let middleware = MiddlewareConfig {
+            trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
+            ..Default::default()
+        };
+        assert!(
+            ActixHttpServer::serve(ServerConfig::default(), middleware, vec![])
+                .await
+                .is_err()
+        );
+        let config = ServerConfig {
+            tls: Some(crate::http::TlsConfig {
+                cert_path: "missing-cert.pem".into(),
+                key_path: "missing-key.pem".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            ActixHttpServer::serve(config, MiddlewareConfig::default(), vec![])
+                .await
+                .is_err()
+        );
+        let middleware = MiddlewareConfig {
+            cors: Some(crate::http::CorsConfig {
+                allow_credentials: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            ActixHttpServer::serve(ServerConfig::default(), middleware, vec![])
+                .await
+                .is_err()
+        );
+    }
+
     use super::*;
     use crate::http::{MiddlewareConfig, ResponseEnvelope, ServerConfig, make_handler};
 
@@ -405,13 +782,9 @@ mod tests {
             ..Default::default()
         };
 
-        let handle = ActixHttpServer::serve(
-            config,
-            MiddlewareConfig::default(),
-            vec![],
-        )
-        .await
-        .expect("empty route list should still bind");
+        let handle = ActixHttpServer::serve(config, MiddlewareConfig::default(), vec![])
+            .await
+            .expect("empty route list should still bind");
 
         ActixHttpServer::shutdown(handle)
             .await

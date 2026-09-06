@@ -328,7 +328,9 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
       <Paper className="studio-panel" sx={{ p: { xs: 2.5, md: 3 } }}>
         <Stack spacing={2}>
           <Typography variant="h5">Admin access required</Typography>
-          <Typography color="text.secondary">
+          <Typography sx={{
+            color: "text.secondary"
+          }}>
             Built-in user management uses the admin auth endpoints. Sign in with an admin role to create
             accounts, assign workspace claims, and resend verification emails.
           </Typography>
@@ -353,12 +355,14 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
       </Stack>
 
       <TextField
-        InputProps={{
-          startAdornment: <InputAdornment position="start">Search</InputAdornment>,
-        }}
         label="Search users"
         onChange={(event) => setSearch(event.target.value)}
         value={search}
+        slotProps={{
+          input: {
+            startAdornment: <InputAdornment position="start">Search</InputAdornment>,
+          }
+        }}
       />
 
       <Button onClick={openCreate} startIcon={<AddRounded />} variant="contained">
@@ -404,7 +408,9 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
         </Box>
       ) : (
         <Box className="empty-state">
-          <Typography fontWeight={700}>No built-in users yet</Typography>
+          <Typography sx={{
+            fontWeight: 700
+          }}>No built-in users yet</Typography>
           <Typography variant="body2">
             Create the first account here instead of leaving auth administration outside the studio.
           </Typography>
@@ -417,20 +423,28 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
     <Stack spacing={2.5}>
       <Box className="studio-sectionHeader">
         <Typography variant="h5">Account context</Typography>
-        <Typography color="text.secondary">
+        <Typography sx={{
+          color: "text.secondary"
+        }}>
           Verification state, workspace scope, and the admin endpoints behind this surface.
         </Typography>
       </Box>
 
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={1}>
-          <Typography fontWeight={700}>Current selection</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography sx={{
+            fontWeight: 700
+          }}>Current selection</Typography>
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {selectedUser
               ? `${selectedUser.email ?? `User #${selectedUser.id}`} · ${selectedUser.role ?? 'editor'}`
               : 'Create a new account, then assign a workspace scope before handing it off.'}
           </Typography>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          <Stack direction="row" spacing={1} useFlexGap sx={{
+            flexWrap: "wrap"
+          }}>
             <Chip
               color={draft.emailVerified ? 'success' : 'warning'}
               label={draft.emailVerified ? 'Verified' : 'Verification pending'}
@@ -448,14 +462,22 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
 
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={1}>
-          <Typography fontWeight={700}>Audit trail</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography sx={{
+            fontWeight: 700
+          }}>Audit trail</Typography>
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             Created: {selectedUser?.created_at ? formatFriendlyDate(selectedUser.created_at) : 'New draft'}
           </Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             Updated: {selectedUser?.updated_at ? formatFriendlyDate(selectedUser.updated_at) : 'Not saved yet'}
           </Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             Verified at: {selectedUser?.email_verified_at ? formatFriendlyDate(selectedUser.email_verified_at) : 'Not verified yet'}
           </Typography>
         </Stack>
@@ -463,15 +485,24 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
 
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={1.25}>
-          <Typography fontWeight={700}>API surface</Typography>
+          <Typography sx={{
+            fontWeight: 700
+          }}>API surface</Typography>
           <Box className="api-list">
             {operations.map((operation) => (
               <Box className="api-item" key={`${operation.method}:${operation.path}`}>
                 <Box>
-                  <Typography fontWeight={700}>{formatMethodLabel(operation.method)}</Typography>
+                  <Typography sx={{
+                    fontWeight: 700
+                  }}>{formatMethodLabel(operation.method)}</Typography>
                   <Typography className="api-itemPath">{operation.path}</Typography>
                 </Box>
-                <Typography color="text.secondary" textAlign="right" variant="body2">
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: "text.secondary",
+                    textAlign: "right"
+                  }}>
                   {operation.summary}
                 </Typography>
               </Box>
@@ -486,8 +517,12 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
     <Stack spacing={1.5}>
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={0.75}>
-          <Typography fontWeight={700}>{userTitle(selectedUser, draft)}</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography sx={{
+            fontWeight: 700
+          }}>{userTitle(selectedUser, draft)}</Typography>
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {selectedUser
               ? 'Use this sheet for lifecycle actions while the editor stays focused on fields.'
               : 'Save the account first to unlock verification and deletion actions.'}
@@ -544,7 +579,9 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
         }}
         sx={{ p: { xs: 2, md: 3 } }}
       >
-        <Stack direction={{ xs: 'column', lg: 'row' }} justifyContent="space-between" spacing={2}>
+        <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{
+          justifyContent: "space-between"
+        }}>
           <Stack spacing={0.75}>
             <Typography variant="overline">
               {selectedUser ? `User #${selectedUser.id}` : 'New built-in account'}
@@ -552,7 +589,9 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
             <Typography variant="h4">{userTitle(selectedUser, draft)}</Typography>
             <Box className="status-line">
               <span className="status-pulse" />
-              <Typography color="text.secondary" variant="body2">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 {dirty ? 'Unsaved account changes' : 'Account editor is in sync with the latest saved state'}
               </Typography>
             </Box>
@@ -623,7 +662,9 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
             <Stack spacing={2}>
               <Box className="studio-sectionHeader">
                 <Typography variant="h6">Identity</Typography>
-                <Typography color="text.secondary" variant="body2">
+                <Typography variant="body2" sx={{
+                  color: "text.secondary"
+                }}>
                   Create the account first, then keep role and workspace scope in sync here.
                 </Typography>
               </Box>
@@ -676,8 +717,10 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
                   label="Role"
                   onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}
                   select
-                  SelectProps={{ native: true }}
                   value={draft.role}
+                  slotProps={{
+                    select: { native: true }
+                  }}
                 >
                   {COMMON_ROLES.map((role) => (
                     <option key={role} value={role}>
@@ -693,8 +736,10 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
                     setDraft((current) => ({ ...current, workspaceId: event.target.value }))
                   }
                   select
-                  SelectProps={{ native: true }}
                   value={draft.workspaceId}
+                  slotProps={{
+                    select: { native: true }
+                  }}
                 >
                   <option value="">No workspace claim</option>
                   {workspaces.map((workspace) => (
@@ -711,12 +756,16 @@ export function UsersWorkspace({ account }: { account: AuthMeResponse }) {
             <Stack spacing={1.5}>
               <Box className="studio-sectionHeader">
                 <Typography variant="h6">Verification</Typography>
-                <Typography color="text.secondary" variant="body2">
+                <Typography variant="body2" sx={{
+                  color: "text.secondary"
+                }}>
                   Make email state explicit instead of forcing admins to infer it from raw auth data.
                 </Typography>
               </Box>
 
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} flexWrap="wrap">
+              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{
+                flexWrap: "wrap"
+              }}>
                 <FormControlLabel
                   control={
                     <Switch

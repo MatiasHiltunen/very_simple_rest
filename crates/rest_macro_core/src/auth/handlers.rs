@@ -1,27 +1,32 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, web};
+use super::password::{hash, verify};
 use actix_web::cookie::{Cookie, time::Duration as CookieDuration};
-use bcrypt::{hash, verify};
+use actix_web::{HttpRequest, HttpResponse, Responder, web};
 use chrono::{Duration, Utc};
 use jsonwebtoken::encode;
 
-use crate::{db::{DbPool, query}, errors};
+use crate::{
+    db::{DbPool, query},
+    errors,
+};
 
 use super::admin::resolve_managed_claim_updates;
 use super::db_ops::{
     account_info_from_user, delete_user_row, detect_auth_backend,
     initialize_user_management_timestamps, list_authenticated_users_with_settings,
     load_authenticated_user_by_email_with_settings,
-    load_authenticated_user_by_email_with_settings_for_backend,
-    load_authenticated_user_by_id, load_authenticated_user_by_id_with_settings,
-    mark_user_email_verified, update_managed_user_row, update_user_password, user_table_columns,
+    load_authenticated_user_by_email_with_settings_for_backend, load_authenticated_user_by_id,
+    load_authenticated_user_by_id_with_settings, mark_user_email_verified, update_managed_user_row,
+    update_user_password, user_table_columns,
 };
-use super::email::{configured_auth_email, send_password_reset_email_for_user, send_verification_email_for_user};
+use super::email::{
+    configured_auth_email, send_password_reset_email_for_user, send_verification_email_for_user,
+};
 use super::helpers::{
     auth_api_base_path_for_page, auth_settings_from_request, enforce_auth_rate_limit,
-    generate_ephemeral_secret, is_missing_auth_management_schema,
-    is_unique_violation, missing_auth_management_schema_response, normalize_auth_email,
-    normalize_auth_role, now_timestamp_string, same_site_from_settings,
-    scope_prefix_from_request, user_is_admin, user_roles, validate_auth_password, validate_cookie_csrf,
+    generate_ephemeral_secret, is_missing_auth_management_schema, is_unique_violation,
+    missing_auth_management_schema_response, normalize_auth_email, normalize_auth_role,
+    now_timestamp_string, same_site_from_settings, scope_prefix_from_request, user_is_admin,
+    user_roles, validate_auth_password, validate_cookie_csrf,
 };
 use super::jwt::{Claims, configured_jwt_signer};
 use super::migrations::auth_user_table_ident;
@@ -30,7 +35,9 @@ use super::pages::{
     render_password_reset_page,
 };
 use super::settings::{AuthSettings, SessionCookieSettings};
-use super::tokens::{TokenActionOutcome, apply_email_verification_token, apply_password_reset_token};
+use super::tokens::{
+    TokenActionOutcome, apply_email_verification_token, apply_password_reset_token,
+};
 use super::user::{
     AdminListQuery, AuthRateLimitScope, AuthTokenQuery, ChangePasswordInput,
     CreateManagedUserInput, LoginInput, PasswordResetConfirmInput, PasswordResetRequestInput,
@@ -58,9 +65,9 @@ pub(crate) async fn register_with_settings(
     if let Err(response) = validate_auth_password(&input.password) {
         return response;
     }
-    let password_hash = match hash(&input.password, 12) {
+    let password_hash = match hash(&input.password, 12).await {
         Ok(h) => h,
-        Err(_) => return errors::internal_error("Hashing error"),
+        Err(response) => return response,
     };
 
     let tx = match db.begin().await {
@@ -180,7 +187,10 @@ pub(crate) async fn login_with_settings(
         }
     };
 
-    if verify(&input.password, &user.password_hash).unwrap_or(false) {
+    if match verify(&input.password, &user.password_hash).await {
+        Ok(valid) => valid,
+        Err(response) => return response,
+    } {
         if settings.require_email_verification && user.email_verified_at.is_none() {
             if !user.has_auth_management_schema() {
                 return missing_auth_management_schema_response();
@@ -191,6 +201,7 @@ pub(crate) async fn login_with_settings(
             );
         }
         let claims = Claims {
+            auth_state: Some(super::user::account_auth_state(&user)),
             sub: user.id,
             roles: user_roles(&user.role),
             iss: settings.issuer.clone(),
@@ -338,13 +349,16 @@ pub async fn change_password(
         Err(_) => return errors::internal_error("Database error"),
     };
 
-    if !verify(&input.current_password, &account.password_hash).unwrap_or(false) {
+    if !match verify(&input.current_password, &account.password_hash).await {
+        Ok(valid) => valid,
+        Err(response) => return response,
+    } {
         return errors::unauthorized("invalid_credentials", "Current password is incorrect");
     }
 
-    let password_hash = match hash(&input.new_password, 12) {
+    let password_hash = match hash(&input.new_password, 12).await {
         Ok(hash) => hash,
-        Err(_) => return errors::internal_error("Hashing error"),
+        Err(response) => return response,
     };
     let now = now_timestamp_string();
 
@@ -586,9 +600,9 @@ pub async fn confirm_password_reset(
         return response;
     }
 
-    let password_hash = match hash(&input.new_password, 12) {
+    let password_hash = match hash(&input.new_password, 12).await {
         Ok(hash) => hash,
-        Err(_) => return errors::internal_error("Hashing error"),
+        Err(response) => return response,
     };
 
     match apply_password_reset_token(db.get_ref(), token, &password_hash).await {
@@ -655,9 +669,9 @@ pub async fn create_managed_user(
         return response;
     }
 
-    let password_hash = match hash(&input.password, 12) {
+    let password_hash = match hash(&input.password, 12).await {
         Ok(hash) => hash,
-        Err(_) => return errors::internal_error("Hashing error"),
+        Err(response) => return response,
     };
 
     let tx = match db.begin().await {

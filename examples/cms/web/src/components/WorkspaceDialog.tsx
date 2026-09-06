@@ -30,11 +30,14 @@ export function WorkspaceDialog({
       >
         <Stack
           direction="row"
-          alignItems="flex-start"
-          justifyContent="space-between"
           spacing={2}
-          sx={{ px: { xs: 2, sm: 3 }, pt: { xs: 2, sm: 3 }, pb: 1.5 }}
-        >
+          sx={{
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            px: { xs: 2, sm: 3 },
+            pt: { xs: 2, sm: 3 },
+            pb: 1.5
+          }}>
           <Box className="studio-sectionHeader">
             <Typography variant="overline">{label}</Typography>
             <Typography variant={compact ? 'h5' : 'h4'}>{title}</Typography>

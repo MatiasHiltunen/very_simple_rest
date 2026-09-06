@@ -1997,9 +1997,11 @@ mod tests {
         let pool = sqlx::AnyPool::connect(&database_url)
             .await
             .expect("database should connect");
-        pool.execute(authorization_runtime_migration_sql(AuthDbBackend::Sqlite).as_str())
-            .await
-            .expect("runtime assignment migration should apply");
+        pool.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(
+            authorization_runtime_migration_sql(AuthDbBackend::Sqlite),
+        )))
+        .await
+        .expect("runtime assignment migration should apply");
         sqlx::query(
             "INSERT INTO authz_scoped_assignment \
              (id, user_id, created_by_user_id, created_at, expires_at, target_kind, target_name, scope_name, scope_value) \
@@ -2064,9 +2066,11 @@ mod tests {
         let pool = sqlx::AnyPool::connect(&database_url)
             .await
             .expect("database should connect");
-        pool.execute(authorization_runtime_migration_sql(AuthDbBackend::Sqlite).as_str())
-            .await
-            .expect("runtime assignment migration should apply");
+        pool.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(
+            authorization_runtime_migration_sql(AuthDbBackend::Sqlite),
+        )))
+        .await
+        .expect("runtime assignment migration should apply");
         drop(pool);
 
         let initial_expires_at = chrono::Utc::now()

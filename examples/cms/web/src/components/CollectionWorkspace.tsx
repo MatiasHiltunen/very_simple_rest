@@ -1,4 +1,4 @@
-import { startTransition, useDeferredValue, useEffect, useRef, useState } from 'react';
+import { startTransition, useDeferredValue, useRef, useState } from 'react';
 import {
   AddRounded,
   CloudUploadRounded,
@@ -93,6 +93,7 @@ export function CollectionWorkspace({
   const [selectedRow, setSelectedRow] = useState<ResourceRow | null>(null);
   const [draft, setDraft] = useState<DraftState>(() => toDraft(config));
   const [baselineDraft, setBaselineDraft] = useState<DraftState>(() => toDraft(config));
+  const [relationSnapshot, setRelationSnapshot] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [assetImportSummary, setAssetImportSummary] = useState<string | null>(null);
   const [assetImportPending, setAssetImportPending] = useState(false);
@@ -170,40 +171,35 @@ export function CollectionWorkspace({
     })),
   });
 
-  useEffect(() => {
-    if (!selectedRow || typeof selectedRow.id !== 'number') {
-      return;
-    }
-
-    setDraft((current) => {
-      let changed = false;
-      const next = { ...current };
-
-      syncedRelationFields.forEach((field, index) => {
-        const items = relationSyncQueries[index]?.data?.items;
-        if (!items) {
-          return;
-        }
-
-        const selected = items
-          .filter((item) => Number(item[field.relationSync.sourceKey]) === Number(selectedRow.id))
-          .map((item) => String(item[field.relationSync.targetKey] ?? ''))
-          .filter(Boolean)
-          .join(',');
-
-        if ((current[field.key] ?? '') !== selected) {
-          next[field.key] = selected;
-          changed = true;
-        }
-      });
-
-      if (changed && !dirty) {
-        setBaselineDraft(next);
+  const relationSelections = Object.fromEntries(
+    syncedRelationFields.flatMap((field, index) => {
+      const items = relationSyncQueries[index]?.data?.items;
+      if (!items || typeof selectedRow?.id !== 'number') {
+        return [];
       }
-
-      return changed ? next : current;
-    });
-  }, [dirty, relationSyncQueries, selectedRow, syncedRelationFields]);
+      const selected = items
+        .filter((item) => Number(item[field.relationSync.sourceKey]) === selectedRow.id)
+        .map((item) => String(item[field.relationSync.targetKey] ?? ''))
+        .filter(Boolean)
+        .join(',');
+      return [[field.key, selected]];
+    }),
+  );
+  const nextRelationSnapshot = JSON.stringify([selectedRow?.id, relationSelections]);
+  if (relationSnapshot !== nextRelationSnapshot) {
+    setRelationSnapshot(nextRelationSnapshot);
+    const nextDraft = { ...draft };
+    const nextBaseline = { ...baselineDraft };
+    for (const [key, selected] of Object.entries(relationSelections)) {
+      // Refresh untouched fields only; background refetches must preserve local edits.
+      if (draft[key] === baselineDraft[key]) {
+        nextDraft[key] = selected;
+      }
+      nextBaseline[key] = selected;
+    }
+    setDraft(nextDraft);
+    setBaselineDraft(nextBaseline);
+  }
 
   const rows = resourceQuery.data?.items ?? EMPTY_ROWS;
   const filteredRows = rows.filter((row) => {
@@ -224,6 +220,7 @@ export function CollectionWorkspace({
     startTransition(() => {
       setActiveKey(String(row.id ?? 'new'));
       setSelectedRow(row);
+      setRelationSnapshot(null);
       setDraft(nextDraft);
       setBaselineDraft(nextDraft);
       setFieldErrors({});
@@ -247,6 +244,7 @@ export function CollectionWorkspace({
     startTransition(() => {
       setActiveKey('new');
       setSelectedRow(null);
+      setRelationSnapshot(null);
       setDraft(nextDraft);
       setBaselineDraft(nextDraft);
       setFieldErrors({});
@@ -462,12 +460,14 @@ export function CollectionWorkspace({
       ) : null}
 
       <TextField
-        InputProps={{
-          startAdornment: <InputAdornment position="start">Search</InputAdornment>,
-        }}
         label={`Search ${config.label.toLowerCase()}`}
         onChange={(event) => setSearch(event.target.value)}
         value={search}
+        slotProps={{
+          input: {
+            startAdornment: <InputAdornment position="start">Search</InputAdornment>,
+          }
+        }}
       />
 
       <Button onClick={openCreate} startIcon={<AddRounded />} variant="contained">
@@ -511,7 +511,9 @@ export function CollectionWorkspace({
         </Box>
       ) : (
         <Box className="empty-state">
-          <Typography fontWeight={700}>No {config.label.toLowerCase()} yet</Typography>
+          <Typography sx={{
+            fontWeight: 700
+          }}>No {config.label.toLowerCase()} yet</Typography>
           <Typography variant="body2">
             {typeof account.workspace_id !== 'number' && config.context !== 'admin'
               ? `Assign a workspace claim first, then create the first ${config.shortLabel.toLowerCase()} here.`
@@ -536,10 +538,14 @@ export function CollectionWorkspace({
     <Stack spacing={1.5}>
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={0.75}>
-          <Typography fontWeight={700}>
+          <Typography sx={{
+            fontWeight: 700
+          }}>
             {selectedRow ? config.itemTitle(selectedRow) : `New ${config.shortLabel.toLowerCase()}`}
           </Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {selectedRow
               ? 'Keep lifecycle actions here so the editor can stay focused on the form.'
               : 'Save this draft first to unlock destructive actions and richer context.'}
@@ -577,7 +583,10 @@ export function CollectionWorkspace({
         onSubmit={submitEditor}
         sx={{ p: { xs: 2, md: 3 } }}
       >
-        <Stack direction={{ xs: 'column', lg: 'row' }} justifyContent="space-between" spacing={2}>
+        <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{
+          justifyContent: "space-between",
+          alignItems: { xs: 'stretch', lg: 'center' }
+        }}>
           <Stack spacing={0.75}>
             <Typography variant="overline">
               {selectedRow ? `${config.shortLabel} #${String(selectedRow.id ?? '')}` : `New ${config.shortLabel}`}
@@ -587,7 +596,9 @@ export function CollectionWorkspace({
             </Typography>
             <Box className="status-line">
               <span className="status-pulse" />
-              <Typography color="text.secondary" variant="body2">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 {dirty ? 'Unsaved changes' : 'All changes saved to the current draft'}
               </Typography>
             </Box>
@@ -684,10 +695,16 @@ export function CollectionWorkspace({
             />
 
             <Paper className="studio-panelTight" sx={{ p: 2 }}>
-              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} sx={{
+                justifyContent: "space-between"
+              }}>
                 <Stack spacing={0.25}>
-                  <Typography fontWeight={700}>Asset intake</Typography>
-                  <Typography color="text.secondary" variant="body2">
+                  <Typography sx={{
+                    fontWeight: 700
+                  }}>Asset intake</Typography>
+                  <Typography variant="body2" sx={{
+                    color: "text.secondary"
+                  }}>
                     Upload through the local S3-compatible endpoint and let the record prefill from the stored object.
                   </Typography>
                 </Stack>
@@ -715,7 +732,9 @@ export function CollectionWorkspace({
               <Stack spacing={2}>
                 <Box className="studio-sectionHeader">
                   <Typography variant="h6">{section.title}</Typography>
-                  <Typography color="text.secondary" variant="body2">
+                  <Typography variant="body2" sx={{
+                    color: "text.secondary"
+                  }}>
                     {section.description}
                   </Typography>
                 </Box>
@@ -864,7 +883,9 @@ function CollectionInspector({
     <Stack spacing={2.5}>
       <Box className="studio-sectionHeader">
         <Typography variant="h5">Resource context</Typography>
-        <Typography color="text.secondary">
+        <Typography sx={{
+          color: "text.secondary"
+        }}>
           API operations and record-level context for the current editor.
         </Typography>
       </Box>
@@ -878,14 +899,22 @@ function CollectionInspector({
       {config.previewMode === 'workspace' ? (
         <Paper className="studio-panelTight" sx={{ p: 2 }}>
           <Stack spacing={1}>
-            <Typography fontWeight={700}>Workspace identity</Typography>
-            <Typography color="text.secondary" variant="body2">
+            <Typography sx={{
+              fontWeight: 700
+            }}>Workspace identity</Typography>
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Local preview: {localPreviewHref ?? 'Workspace slug required'}
             </Typography>
-            <Typography color="text.secondary" variant="body2">
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Slug: /{draft.slug || 'workspace'}
             </Typography>
-            <Typography color="text.secondary" variant="body2">
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Published base URL: {draft.public_base_url || 'Not configured'}
             </Typography>
             {localPreviewHref ? (
@@ -930,12 +959,18 @@ function CollectionInspector({
 
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={1}>
-          <Typography fontWeight={700}>Record summary</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography sx={{
+            fontWeight: 700
+          }}>Record summary</Typography>
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {selectedRow ? config.itemSubtitle(selectedRow) : `Drafting a new ${config.shortLabel.toLowerCase()}.`}
           </Typography>
           {selectedRow?.id ? (
-            <Typography color="text.secondary" variant="body2">
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Record id: #{String(selectedRow.id)}
             </Typography>
           ) : null}
@@ -943,15 +978,21 @@ function CollectionInspector({
       </Paper>
 
       <Stack spacing={1.25}>
-        <Typography fontWeight={700}>OpenAPI operations</Typography>
+        <Typography sx={{
+          fontWeight: 700
+        }}>OpenAPI operations</Typography>
         <Box className="api-list">
           {operations.map((operation) => (
             <Box className="api-item" key={`${operation.method}:${operation.path}`}>
               <Box>
-                <Typography fontWeight={700}>{formatMethodLabel(operation.method)}</Typography>
+                <Typography sx={{
+                  fontWeight: 700
+                }}>{formatMethodLabel(operation.method)}</Typography>
                 <Typography className="api-itemPath">{operation.path}</Typography>
               </Box>
-              <Typography color="text.secondary" variant="body2">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 {operation.summary}
               </Typography>
             </Box>

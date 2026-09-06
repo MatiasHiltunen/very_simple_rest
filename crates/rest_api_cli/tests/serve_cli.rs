@@ -1,3 +1,6 @@
+// Legacy environment and subprocess fixtures; production code still denies unsafe.
+#![allow(unsafe_code)]
+
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -163,6 +166,29 @@ fn issue_hs256_token(secret: &str, user_id: i64, roles: &[&str]) -> String {
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .expect("test token should encode")
+}
+
+fn login_fixture_user(client: &reqwest::blocking::Client, base_url: &str) -> String {
+    let response = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({"email": "fixture-user@example.com", "password": "fixture-password123"}))
+        .send()
+        .expect("fixture login should respond");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json::<Value>().unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn register_fixture_user(client: &reqwest::blocking::Client, base_url: &str) -> String {
+    let response = client
+        .post(format!("{base_url}/api/auth/register"))
+        .json(&json!({"email": "fixture-user@example.com", "password": "fixture-password123"}))
+        .send()
+        .expect("fixture registration should respond");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    login_fixture_user(client, base_url)
 }
 
 fn capture_files(dir: &Path) -> Vec<PathBuf> {
@@ -1785,6 +1811,8 @@ fn vsr_serve_supports_storage_uploads_and_public_mounts() {
     unsafe {
         std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
         std::env::set_var("JWT_SECRET", "serve-cli-storage-upload-secret");
+        std::env::set_var("ADMIN_EMAIL", "admin@example.com");
+        std::env::set_var("ADMIN_PASSWORD", "password123");
     }
 
     let root = test_root();
@@ -1847,7 +1875,7 @@ fn vsr_serve_supports_storage_uploads_and_public_mounts() {
         "#/components/schemas/StorageUploadResponse"
     );
 
-    let token = issue_hs256_token("serve-cli-storage-upload-secret", 1, &["user"]);
+    let token = register_fixture_user(&client, &base_url);
     let (content_type, payload) = multipart_upload_payload("notes.txt", b"hello upload");
     let upload_response = client
         .post(format!("{base_url}/api/uploads"))
@@ -1881,7 +1909,37 @@ fn vsr_serve_supports_storage_uploads_and_public_mounts() {
         .expect("uploaded public object should read");
     assert_eq!(public_body.as_ref(), b"hello upload");
 
-    let forbidden_token = issue_hs256_token("serve-cli-storage-upload-secret", 2, &["viewer"]);
+    let user: Value = client
+        .get(format!("{base_url}/api/auth/me"))
+        .bearer_auth(&token)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let admin: Value = client
+        .post(format!("{base_url}/api/auth/login"))
+        .json(&json!({"email": "admin@example.com", "password": "password123"}))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let demote = client
+        .patch(format!("{base_url}/api/auth/admin/users/{}", user["id"]))
+        .bearer_auth(admin["token"].as_str().unwrap())
+        .json(&json!({"role": "viewer"}))
+        .send()
+        .unwrap();
+    assert_eq!(demote.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        client
+            .get(format!("{base_url}/api/auth/me"))
+            .bearer_auth(&token)
+            .send()
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let forbidden_token = login_fixture_user(&client, &base_url);
     let (forbidden_content_type, forbidden_payload) = multipart_upload_payload("notes.txt", b"x");
     let forbidden_response = client
         .post(format!("{base_url}/api/uploads"))
@@ -2774,7 +2832,7 @@ fn vsr_serve_supports_enum_field_shapes_in_spawned_process() {
         .expect("invalid enum contains should respond");
     assert_eq!(contains_response.status(), reqwest::StatusCode::BAD_REQUEST);
 
-    let token = issue_hs256_token("serve-cli-enum-fields-secret", 1, &["user"]);
+    let token = register_fixture_user(&client, &base_url);
     let create_response = client
         .post(format!("{base_url}/api/posts"))
         .bearer_auth(&token)
@@ -2850,6 +2908,7 @@ fn vsr_serve_expands_mixin_fields_in_spawned_process() {
         .arg(&config)
         .env("BIND_ADDR", &bind_addr)
         .env("JWT_SECRET", "serve-cli-mixin-fields-secret")
+        .arg("--without-auth")
         .env("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))

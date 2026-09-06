@@ -486,6 +486,8 @@ pub fn default_env_path(config_path: Option<&Path>) -> Result<PathBuf> {
     absolutize_path(&relative)
 }
 
+// Legacy bootstrap boundary: callers must load environment before starting workers.
+#[allow(unsafe_code)]
 pub fn load_env_file(path: &Path) -> Result<()> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         Error::Config(format!(
@@ -766,6 +768,8 @@ fn merge_env_template_with_existing(
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{
         EnvTemplateMode, default_env_path, render_env_template, render_env_template_for_mode,

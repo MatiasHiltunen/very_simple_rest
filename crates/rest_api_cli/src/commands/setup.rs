@@ -651,6 +651,8 @@ fn print_setup_summary(report: &SetupBootstrapReport) {
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::run_setup;
     use crate::commands::db::database_url_from_service_config;

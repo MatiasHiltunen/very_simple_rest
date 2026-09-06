@@ -163,7 +163,7 @@ pub(super) fn validate_audit_sink_shape(
         ));
     }
 
-    for action in &sink.actions {
+    if let Some(action) = sink.actions.first() {
         return Err(syn::Error::new(
             Span::call_site(),
             format!(

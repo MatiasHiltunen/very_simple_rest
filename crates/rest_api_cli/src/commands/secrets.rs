@@ -1007,6 +1007,8 @@ fn write_output(rendered: String, output: Option<&Path>, force: bool, label: &st
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{InfisicalAuthMethod, OutputFormat, doctor_secrets, scaffold_infisical};
     use std::fs;

@@ -331,7 +331,9 @@ impl DbPool {
     pub async fn execute_batch(&self, sql: &str) -> Result<(), sqlx::Error> {
         match self {
             Self::Sqlx { pool, .. } => {
-                sqlx::raw_sql(sql).execute(pool).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(pool)
+                    .await?;
                 Ok(())
             }
             #[cfg(feature = "turso-local")]
@@ -453,7 +455,9 @@ impl DbTransaction {
                     sqlx::Error::Protocol("transaction already finished".to_owned())
                 })?;
                 let conn: &mut sqlx::AnyConnection = tx.as_mut();
-                sqlx::raw_sql(sql).execute(conn).await?;
+                sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                    .execute(conn)
+                    .await?;
                 Ok(())
             }
             #[cfg(feature = "turso-local")]
@@ -788,7 +792,7 @@ where
     E: sqlx::Executor<'static, Database = Any>,
 {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    let result = apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
+    let result = apply_sqlx_binds(sqlx::query(sqlx::AssertSqlSafe(sql)), backend, query.binds)
         .execute(executor)
         .await?;
     Ok(DbQueryResult {
@@ -806,7 +810,7 @@ where
     E: sqlx::Executor<'static, Database = Any>,
 {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
+    apply_sqlx_binds(sqlx::query(sqlx::AssertSqlSafe(sql)), backend, query.binds)
         .fetch_all(executor)
         .await
 }
@@ -817,7 +821,7 @@ async fn execute_sqlx_tx(
     query: BoundQuery<'_>,
 ) -> Result<DbQueryResult, sqlx::Error> {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    let result = apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
+    let result = apply_sqlx_binds(sqlx::query(sqlx::AssertSqlSafe(sql)), backend, query.binds)
         .execute(tx.as_mut())
         .await?;
     Ok(DbQueryResult {
@@ -832,7 +836,7 @@ async fn fetch_all_sqlx_tx(
     query: BoundQuery<'_>,
 ) -> Result<Vec<AnyRow>, sqlx::Error> {
     let sql = rewrite_sql_placeholders(query.sql, backend);
-    apply_sqlx_binds(sqlx::query(&sql), backend, query.binds)
+    apply_sqlx_binds(sqlx::query(sqlx::AssertSqlSafe(sql)), backend, query.binds)
         .fetch_all(tx.as_mut())
         .await
 }
@@ -893,10 +897,10 @@ fn rewrite_sql_placeholders(sql: &str, backend: SqlxBackend) -> String {
 }
 
 fn apply_sqlx_binds<'q>(
-    mut query: sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>>,
+    mut query: sqlx::query::Query<'q, Any, sqlx::any::AnyArguments>,
     backend: SqlxBackend,
     binds: Vec<DbValue>,
-) -> sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>> {
+) -> sqlx::query::Query<'q, Any, sqlx::any::AnyArguments> {
     for bind in binds {
         query = match normalize_sqlx_bind_value(bind, backend) {
             DbValue::Null => query.bind::<Option<String>>(None),
@@ -1208,7 +1212,7 @@ fn decl_type_kind(decl_type: Option<&str>) -> Option<AnyTypeInfoKind> {
 fn any_value_kind_from_turso_value(
     value: turso::Value,
     decl_kind: Option<AnyTypeInfoKind>,
-) -> AnyValueKind<'static> {
+) -> AnyValueKind {
     match value {
         turso::Value::Null => AnyValueKind::Null(decl_kind.unwrap_or(AnyTypeInfoKind::Null)),
         turso::Value::Integer(value) => match decl_kind {
@@ -1222,7 +1226,7 @@ fn any_value_kind_from_turso_value(
 }
 
 #[cfg(feature = "turso-local")]
-fn type_info_kind_for_value_kind(value: &AnyValueKind<'_>) -> AnyTypeInfoKind {
+fn type_info_kind_for_value_kind(value: &AnyValueKind) -> AnyTypeInfoKind {
     match value {
         AnyValueKind::Null(kind) => *kind,
         AnyValueKind::Bool(_) => AnyTypeInfoKind::Bool,
@@ -1426,6 +1430,8 @@ fn parse_turso_local_url(
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     #[cfg(feature = "sqlite")]
     use super::connect;

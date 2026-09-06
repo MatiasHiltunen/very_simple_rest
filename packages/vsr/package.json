@@ -28,7 +28,7 @@
     "node": ">=18.18"
   },
   "dependencies": {
-    "tsx": "^4.20.6"
+    "tsx": "4.21.0"
   },
   "scripts": {
     "check": "node ./bin/vsr.mjs --help && node --test ./test/config.test.mjs",

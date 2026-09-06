@@ -1333,7 +1333,7 @@ edition = "2024"
 {actix_web_dependency}
 dotenvy = "0.15.7"
 serde = {{ version = "1", features = ["derive"] }}
-garde = {{ version = "=0.22.1", features = ["derive", "full", "rust_decimal"] }}
+garde = {{ version = "=0.23.0", features = ["derive", "full", "rust_decimal"] }}
 {dependency}
 {release_profile}
 "#
@@ -1415,7 +1415,7 @@ fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth
         ""
     };
     let public_auth_html_config = if include_builtin_auth {
-        "            .configure(|cfg| very_simple_rest::core::auth::register_builtin_auth_html_pages(cfg, api_security.auth.clone()))\n"
+        "            .app_data(web::Data::new(server_pool.clone()))\n            .configure(|cfg| very_simple_rest::core::auth::register_builtin_auth_html_pages(cfg, api_security.auth.clone()))\n"
     } else {
         ""
     };
@@ -2050,8 +2050,7 @@ mod runtime_feature_list_tests {
     }
 
     fn load_fixture_service(name: &str) -> ServiceSpec {
-        compiler::load_service_from_path(&fixture_path(name))
-            .expect("fixture service should load")
+        compiler::load_service_from_path(&fixture_path(name)).expect("fixture service should load")
     }
 
     #[test]
@@ -2151,6 +2150,8 @@ fn binary_file_name(package_name: &str) -> String {
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{
         DEFAULT_BUILD_CACHE_DIR, binary_file_name, build_artifact_dir, build_server_binary,
@@ -2369,26 +2370,21 @@ mod tests {
         assert_text_snapshot(&snapshot_path(snapshot_name), &summary);
     }
 
-    fn run_generated_project_cargo_check(
-        project_dir: &Path,
-        target_dir: &Path,
-        rustflags: Option<&str>,
-    ) {
+    fn run_generated_project_rustc(project_dir: &Path, target_dir: &Path) {
         let mut command = Command::new("cargo");
-        command.arg("check");
+        // Deny warnings on generated code, not every path dependency. Workspace
+        // dependency lint debt is separately checked by the workspace Clippy job.
+        command.args(["rustc", "--", "-D", "warnings"]);
         command.current_dir(project_dir);
         command.env("CARGO_TARGET_DIR", target_dir);
-        if let Some(rustflags) = rustflags {
-            command.env("RUSTFLAGS", rustflags);
-        }
         let output = command
             .output()
-            .expect("generated cargo check should run successfully");
+            .expect("generated rustc should run successfully");
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             panic!(
-                "generated cargo check failed for {}\nstdout:\n{}\nstderr:\n{}",
+                "generated rustc failed for {}\nstdout:\n{}\nstderr:\n{}",
                 project_dir.display(),
                 stdout,
                 stderr
@@ -2396,18 +2392,11 @@ mod tests {
         }
     }
 
-    fn run_generated_project_cargo_clippy(
-        project_dir: &Path,
-        target_dir: &Path,
-        rustflags: Option<&str>,
-    ) {
+    fn run_generated_project_cargo_clippy(project_dir: &Path, target_dir: &Path) {
         let mut command = Command::new("cargo");
         command.args(["clippy", "--no-deps", "--", "-D", "warnings"]);
         command.current_dir(project_dir);
         command.env("CARGO_TARGET_DIR", target_dir);
-        if let Some(rustflags) = rustflags {
-            command.env("RUSTFLAGS", rustflags);
-        }
         let output = command
             .output()
             .expect("generated cargo clippy should run successfully");
@@ -2434,11 +2423,7 @@ mod tests {
         )
         .expect("generated server project should emit");
 
-        run_generated_project_cargo_check(
-            &project_dir,
-            &generated_project_cargo_target_dir(),
-            Some("-D warnings"),
-        );
+        run_generated_project_rustc(&project_dir, &generated_project_cargo_target_dir());
     }
 
     fn assert_generated_project_is_clippy_clean(input: &Path, package_name: &str, root: &Path) {
@@ -2452,11 +2437,7 @@ mod tests {
         )
         .expect("generated server project should emit");
 
-        run_generated_project_cargo_clippy(
-            &project_dir,
-            &generated_project_cargo_target_dir(),
-            Some("-D warnings"),
-        );
+        run_generated_project_cargo_clippy(&project_dir, &generated_project_cargo_target_dir());
     }
 
     fn env_lock() -> &'static Mutex<()> {

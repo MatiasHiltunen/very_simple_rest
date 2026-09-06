@@ -416,20 +416,24 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
       {rows.length === 0 ? <ScopeNotice account={account} label="Entries" /> : null}
 
       <TextField
-        InputProps={{
-          startAdornment: <InputAdornment position="start">Search</InputAdornment>,
-        }}
         label="Search entries"
         onChange={(event) => setSearch(event.target.value)}
         value={search}
+        slotProps={{
+          input: {
+            startAdornment: <InputAdornment position="start">Search</InputAdornment>,
+          }
+        }}
       />
 
       <TextField
         label="Status filter"
         onChange={(event) => setStatusFilter(event.target.value)}
         select
-        SelectProps={{ native: true }}
         value={statusFilter}
+        slotProps={{
+          select: { native: true }
+        }}
       >
         <option value="all">all statuses</option>
         {['draft', 'in_review', 'scheduled', 'published', 'archived'].map((status) => (
@@ -482,7 +486,9 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
         </Box>
       ) : (
         <Box className="empty-state">
-          <Typography fontWeight={700}>No entries in this view</Typography>
+          <Typography sx={{
+            fontWeight: 700
+          }}>No entries in this view</Typography>
           <Typography variant="body2">
             {typeof account.workspace_id !== 'number'
               ? 'Assign a workspace claim first, then create or review entries in that scope.'
@@ -495,10 +501,14 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
 
   const previewContent = (
     <Stack spacing={2}>
-      <Stack direction="row" justifyContent="space-between" spacing={1}>
+      <Stack direction="row" spacing={1} sx={{
+        justifyContent: "space-between"
+      }}>
         <Box className="studio-sectionHeader">
           <Typography variant="h5">Rendered page</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             Switch between desktop and mobile while editing the same draft.
           </Typography>
         </Box>
@@ -539,8 +549,12 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
     <Stack spacing={1.5}>
       <Paper className="studio-panelTight" sx={{ p: 2 }}>
         <Stack spacing={0.75}>
-          <Typography fontWeight={700}>{draft.title?.trim() || 'Untitled story'}</Typography>
-          <Typography color="text.secondary" variant="body2">
+          <Typography sx={{
+            fontWeight: 700
+          }}>{draft.title?.trim() || 'Untitled story'}</Typography>
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {selectedRow
               ? 'Publishing actions live here so the editor can stay focused on the story.'
               : 'Save the draft first to unlock review, publish, and archive actions.'}
@@ -595,7 +609,9 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
         onSubmit={submitEditor}
         sx={{ p: { xs: 2, md: 3 } }}
       >
-        <Stack direction={{ xs: 'column', lg: 'row' }} justifyContent="space-between" spacing={2}>
+        <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} sx={{
+          justifyContent: "space-between"
+        }}>
           <Stack spacing={0.75}>
             <Typography variant="overline">
               {selectedRow ? `${draft.status || 'draft'} entry` : 'New entry draft'}
@@ -605,7 +621,9 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
             </Typography>
             <Box className="status-line">
               <span className="status-pulse" />
-              <Typography color="text.secondary" variant="body2">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 {dirty ? 'Preview includes unsaved edits' : 'Preview matches the current saved draft'}
               </Typography>
             </Box>
@@ -675,7 +693,9 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
             </Button>
           </Box>
         ) : (
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} flexWrap="wrap">
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} sx={{
+            flexWrap: "wrap"
+          }}>
             {entryResource.actions?.map((action) => (
               <Button
                 color={action.tone ?? 'primary'}
@@ -700,7 +720,9 @@ export function EntryWorkspace({ account }: { account: AuthMeResponse }) {
               <Stack spacing={2}>
                 <Box className="studio-sectionHeader">
                   <Typography variant="h6">{section.title}</Typography>
-                  <Typography color="text.secondary" variant="body2">
+                  <Typography variant="body2" sx={{
+                    color: "text.secondary"
+                  }}>
                     {section.description}
                   </Typography>
                 </Box>

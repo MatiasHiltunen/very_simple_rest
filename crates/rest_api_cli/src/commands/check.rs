@@ -1143,6 +1143,8 @@ fn write_output(rendered: String, output: Option<&Path>, force: bool, label: &st
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use std::{
         fs,

@@ -255,6 +255,8 @@ pub fn load_secret_from_env_or_file(var_name: &str, label: &str) -> Result<Strin
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{
         SecretRef, describe_secret_source, has_secret_from_env_or_file,

@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "vsr-runtime"
 version.workspace = true
@@ -21,7 +24,7 @@ default = []
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
 # Enable the actix-web adapter (default runtime implementation).
-http-actix = ["dep:actix-web", "dep:tokio"]
+http-actix = ["dep:actix-web", "dep:tokio", "dep:actix-cors", "dep:rustls"]
 # Enable the axum adapter (decision window: end of Phase 3, see §15.2).
 http-axum = ["dep:axum", "dep:tower"]
 
@@ -52,6 +55,15 @@ optional = true
 
 [dependencies.actix-web]
 version = "4"
+features = ["rustls-0_23"]
+optional = true
+
+[dependencies.actix-cors]
+workspace = true
+optional = true
+
+[dependencies.rustls]
+workspace = true
 optional = true
 
 [dependencies.axum]
@@ -69,7 +81,7 @@ features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"]
 optional = true
 
 [dependencies.object_store]
-version = "0.13"
+version = "0.14.1"
 default-features = false
 optional = true
 
@@ -78,4 +90,6 @@ version = "0.1"
 optional = true
 
 [dev-dependencies]
+rcgen.workspace = true
+reqwest.workspace = true
 tokio = { version = "1", features = ["rt", "macros"] }

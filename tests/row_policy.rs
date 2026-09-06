@@ -1,3 +1,6 @@
+// Legacy environment and subprocess fixtures; production code still denies unsafe.
+#![allow(unsafe_code)]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use very_simple_rest::actix_web::{App, http::StatusCode, test};

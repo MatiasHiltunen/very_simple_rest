@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "vsra"
 version.workspace = true
@@ -16,7 +19,7 @@ build = "build.rs"
 default = ["sqlite", "turso-local", "postgres", "auth-email", "storage-local", "backup-remote"]
 sqlite = ["sqlx/sqlite", "rest_macro_core/sqlite"]
 postgres = ["sqlx/postgres", "rest_macro_core/postgres"]
-mysql = ["sqlx/mysql", "rest_macro_core/mysql"]
+mysql = ["sqlx/mysql", "sqlx/mysql-rsa", "rest_macro_core/mysql"]
 turso-local = ["sqlite", "rest_macro_core/turso-local"]
 auth-email = ["rest_macro_core/auth-email"]
 storage-local = ["rest_macro_core/storage-local", "dep:object_store"]
@@ -52,16 +55,17 @@ rand.workspace = true
 regex = "1.12.3"
 reqwest = { workspace = true, features = ["blocking"] }
 rcgen.workspace = true
-brotli = "7.0.0"
+brotli = "9.0.0"
 flate2 = "1.1.0"
 sha2.workspace = true
+hex.workspace = true
 futures-util = "0.3"
 object_store = { workspace = true, features = ["aws", "fs"], optional = true }
 aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "default-https-client", "rt-tokio"], optional = true }
 aws-sdk-s3 = { version = "1.131", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 log.workspace = true
 syn.workspace = true
-prettyplease = "0.2"
+prettyplease = "0.3.0"
 url = "2"
 garde.workspace = true
 

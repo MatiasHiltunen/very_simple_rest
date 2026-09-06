@@ -831,6 +831,8 @@ fn terminate_process(pid: u32, force: bool) -> anyhow::Result<()> {
     }
 }
 
+// Win32 process handles are obtained, checked, and closed within this function.
+#[cfg_attr(windows, allow(unsafe_code))]
 fn process_is_running(pid: u32) -> anyhow::Result<bool> {
     #[cfg(windows)]
     {
@@ -876,6 +878,8 @@ fn spawn_background_process(command: &mut Command) -> anyhow::Result<u32> {
 }
 
 #[cfg(windows)]
+// Uses the Win32 handle API to clear inheritance on existing standard handles.
+#[allow(unsafe_code)]
 fn clear_standard_handle_inheritance() -> anyhow::Result<()> {
     unsafe {
         for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
@@ -937,6 +941,8 @@ fn wait_for_process_exit(pid: u32, timeout: Duration) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+// Legacy environment fixtures; this exception is confined to tests.
+#[allow(unsafe_code)]
 mod tests {
     use super::{canonicalize_path_for_match, path_is_within, sqlite_path_from_database_url};
     use std::path::{Path, PathBuf};

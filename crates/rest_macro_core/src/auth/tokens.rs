@@ -33,8 +33,11 @@ pub(crate) async fn apply_email_verification_token(
     }
 
     let now = now_timestamp_string();
+    if !mark_auth_token_used(&tx, token.id, &now).await? {
+        tx.rollback().await?;
+        return Ok(TokenActionOutcome::Invalid);
+    }
     mark_user_email_verified(&tx, backend, token.user_id, &now).await?;
-    mark_auth_token_used(&tx, token.id, &now).await?;
     delete_auth_tokens_for_user_purpose(&tx, token.user_id, AuthTokenPurpose::EmailVerification)
         .await?;
     tx.commit().await?;
@@ -61,8 +64,11 @@ pub(crate) async fn apply_password_reset_token(
     }
 
     let now = now_timestamp_string();
+    if !mark_auth_token_used(&tx, token.id, &now).await? {
+        tx.rollback().await?;
+        return Ok(TokenActionOutcome::Invalid);
+    }
     update_user_password(&tx, backend, token.user_id, password_hash, &now).await?;
-    mark_auth_token_used(&tx, token.id, &now).await?;
     delete_auth_tokens_for_user_purpose(&tx, token.user_id, AuthTokenPurpose::PasswordReset)
         .await?;
     tx.commit().await?;

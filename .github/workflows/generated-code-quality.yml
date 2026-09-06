@@ -15,6 +15,52 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  database-concurrency:
+    name: Database Concurrency (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: postgres
+            url: postgres://vsr:vsr-test@127.0.0.1:5432/vsr_test
+          - backend: mysql
+            url: mysql://vsr:vsr-test@127.0.0.1:3306/vsr_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: vsr
+          POSTGRES_PASSWORD: vsr-test
+          POSTGRES_DB: vsr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vsr -d vsr_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: vsr-root-test
+          MYSQL_USER: vsr
+          MYSQL_PASSWORD: vsr-test
+          MYSQL_DATABASE: vsr_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pvsr-root-test"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      VSR_TEST_DATABASE_URL: ${{ matrix.url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Migration Serialization And Recovery
+        run: cargo test -p vsra --all-features server_database_migration_integrity_and_concurrency -- --ignored --nocapture
+      - name: Verify Concurrent Reset-Token Consumption
+        run: cargo test -p rest_macro_core --all-features server_database_auth_tokens_are_consumed_once -- --ignored --nocapture
+
   rust-feature-check:
     name: Rust Check (${{ matrix.os }}, ${{ matrix.feature_profile }})
     runs-on: ${{ matrix.os }}
@@ -81,6 +127,18 @@ jobs:
       - name: Install TypeScript Tooling For Generated Client Checks
         run: npm ci --prefix examples/cms/web
 
+      - name: Verify CMS Build And Lint
+        working-directory: examples/cms/web
+        run: |
+          npm run lint
+          npm run build
+
+      - name: Verify CMS Browser Compatibility
+        working-directory: examples/cms/web
+        run: |
+          npx playwright install --with-deps chromium
+          node scripts/smoke.mjs
+
       - name: Verify Rust-To-TypeScript Schema Bindings
         run: npm run check:vsr-schema
 
@@ -89,6 +147,9 @@ jobs:
 
       - name: Check Compiler Crate
         run: cargo check -p rest_macro_core
+
+      - name: Enforce Workspace Lint Policy
+        run: cargo clippy --workspace --all-features --all-targets
 
       - name: Verify Expanded Output Snapshots
         run: cargo test -p vsra expand_server_code_ -- --nocapture

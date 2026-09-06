@@ -8,14 +8,12 @@ use jsonwebtoken::jwk::{
     EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, OctetKeyPairParameters, OctetKeyPairType,
     PublicKeyUse,
 };
-use jsonwebtoken::{
-    DecodingKey, EncodingKey, Header, Validation, decode_header,
-};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode_header};
 
 use crate::secret::{SecretRef, load_secret};
 
-use super::settings::{AuthJwtAlgorithm, AuthJwtVerificationKey, AuthSettings};
 use super::helpers::auth_settings_from_request;
+use super::settings::{AuthJwtAlgorithm, AuthJwtVerificationKey, AuthSettings};
 
 pub(crate) fn load_jwt_key_material(secret: &SecretRef, label: &str) -> Result<Arc<[u8]>, String> {
     let _ = dotenv();
@@ -205,6 +203,9 @@ fn configured_public_jwk(
 ) -> Result<Jwk, String> {
     let decoding_key =
         load_jwt_decoding_key(algorithm, &verification_key.key, "JWT verification key")?;
+    let key_bytes = decoding_key
+        .try_get_as_bytes()
+        .map_err(|error| format!("failed to read JWT verification key: {error}"))?;
     let common = CommonParameters {
         public_key_use: Some(PublicKeyUse::Signature),
         key_algorithm: Some(jwk_key_algorithm(algorithm)),
@@ -214,7 +215,7 @@ fn configured_public_jwk(
 
     let algorithm = match algorithm {
         AuthJwtAlgorithm::Es256 => {
-            let (x, y) = extract_ec_public_coordinates(decoding_key.as_bytes(), 32, "ES256")?;
+            let (x, y) = extract_ec_public_coordinates(key_bytes, 32, "ES256")?;
             AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
                 key_type: EllipticCurveKeyType::EC,
                 curve: EllipticCurve::P256,
@@ -223,7 +224,7 @@ fn configured_public_jwk(
             })
         }
         AuthJwtAlgorithm::Es384 => {
-            let (x, y) = extract_ec_public_coordinates(decoding_key.as_bytes(), 48, "ES384")?;
+            let (x, y) = extract_ec_public_coordinates(key_bytes, 48, "ES384")?;
             AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
                 key_type: EllipticCurveKeyType::EC,
                 curve: EllipticCurve::P384,
@@ -234,7 +235,7 @@ fn configured_public_jwk(
         AuthJwtAlgorithm::EdDsa => AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
             key_type: OctetKeyPairType::OctetKeyPair,
             curve: EllipticCurve::Ed25519,
-            x: URL_SAFE_NO_PAD.encode(decoding_key.as_bytes()),
+            x: URL_SAFE_NO_PAD.encode(key_bytes),
         }),
         AuthJwtAlgorithm::Hs256 | AuthJwtAlgorithm::Hs384 | AuthJwtAlgorithm::Hs512 => {
             return Err(format!(
@@ -276,6 +277,12 @@ fn extract_ec_public_coordinates(
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Claims {
+    #[serde(
+        default,
+        rename = "_vsr_auth_state",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_state: Option<String>,
     pub sub: i64,
     pub roles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
