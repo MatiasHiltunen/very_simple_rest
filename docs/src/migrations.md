@@ -72,6 +72,14 @@ than queuing unlimited expensive work. Cancellation does not release a running
 job's permit. Running bcrypt jobs finish on runtime shutdown; they are not
 interruptible mid-hash.
 
+Applications using built-in verification or password-reset email must configure
+`security.auth.email.public_base_url` before upgrading. It must be a trusted
+HTTPS base URL (HTTP is allowed only for loopback development). Authentication
+links no longer derive their origin from `Host` or forwarding headers. Include
+the externally visible application prefix and check the resulting verification
+and reset links behind the deployed reverse proxy. Missing configuration fails
+closed instead of sending a request-controlled link.
+
 Trusted proxy chains are evaluated from the immediate peer right-to-left.
 Malformed chains, conflicting forwarding header families, or a missing peer
 never yield an attacker-supplied identity. Configure every trusted proxy and

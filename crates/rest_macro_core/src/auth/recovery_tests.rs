@@ -11,7 +11,7 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("recovery.db");
         let url = if driver == "sqlite" {
-            format!("sqlite://{}?mode=rwc", path.display())
+            crate::sqlite_test_support::database_url(&path)
         } else {
             format!("turso-local:{}", path.display())
         };

@@ -1,6 +1,10 @@
 // Turso's connection futures require a deeper auto-trait evaluation stack.
 #![recursion_limit = "256"]
 
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "../tests/support/sqlite.rs"]
+mod sqlite_test_support;
+
 pub mod auth;
 pub mod authorization;
 pub mod database;

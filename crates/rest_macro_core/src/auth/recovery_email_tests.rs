@@ -68,7 +68,7 @@ async fn issuance_replacement_rollback_and_consumption_on_local_drivers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("email.db");
         let url = if driver == "sqlite" {
-            format!("sqlite://{}?mode=rwc", path.display())
+            crate::sqlite_test_support::database_url(&path)
         } else {
             format!("turso-local:{}", path.display())
         };

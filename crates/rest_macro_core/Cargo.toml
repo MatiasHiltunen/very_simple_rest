@@ -65,6 +65,7 @@ hex.workspace = true
 vsr_schema_doc = { workspace = true, optional = true }
 
 [dev-dependencies]
+percent-encoding = "2"
 vsr-runtime = { workspace = true, features = ["http-actix", "http-axum"] }
 reqwest.workspace = true
 tempfile = "3"

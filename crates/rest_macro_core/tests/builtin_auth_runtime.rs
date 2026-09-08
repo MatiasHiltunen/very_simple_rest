@@ -1,6 +1,9 @@
 //! Real built-in login and SQL account state across native Actix and both adapters.
 #![cfg(feature = "sqlite")]
 
+#[path = "support/sqlite.rs"]
+mod sqlite_test_support;
+
 use actix_web::{App, HttpServer as NativeServer, web};
 use rest_macro_core::{
     auth::{
@@ -54,9 +57,8 @@ impl Fixture {
             )]),
             ..Default::default()
         };
-        let db = rest_macro_core::db::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            directory.path().join("accounts.sqlite").display()
+        let db = rest_macro_core::db::connect(&sqlite_test_support::database_url(
+            &directory.path().join("accounts.sqlite"),
         ))
         .await
         .unwrap();

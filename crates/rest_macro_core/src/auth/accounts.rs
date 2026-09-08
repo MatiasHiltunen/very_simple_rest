@@ -125,9 +125,8 @@ mod tests {
 
     async fn database(management: bool) -> (tempfile::TempDir, crate::db::DbPool) {
         let directory = tempfile::tempdir().unwrap();
-        let db = crate::db::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            directory.path().join("accounts.sqlite").display()
+        let db = crate::db::connect(&crate::sqlite_test_support::database_url(
+            &directory.path().join("accounts.sqlite"),
         ))
         .await
         .unwrap();

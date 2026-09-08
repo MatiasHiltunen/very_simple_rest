@@ -28,6 +28,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test Framework-Neutral Authentication
         run: cargo test -p vsr-runtime --no-default-features --features auth-builtin --lib --locked
+      - name: Test Portable SQLite Fixture Paths
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib sqlite_test_support --locked
       - name: Test Account Password Concurrency And Schema Compatibility
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::accounts::tests --locked
       - name: Test Recovery Transactions And Cancellation
