@@ -121,7 +121,7 @@ existing configured-key and SQL account adapters. The native/generated Actix
 `UserContext` extractor now delegates to exactly the same shared policy. Its
 serialized ID, roles and custom claims remain compatible, and account-state
 fingerprints remain byte-compatible with previously issued tokens. Password
-changes and account operations use the shared worker pool through facade helpers.
+changes and account operations use the shared worker pool and account service.
 
 Credential ambiguity is rejected consistently: repeated Authorization headers,
 duplicate session/CSRF cookies (including encoded aliases), duplicate CSRF headers
@@ -137,14 +137,50 @@ Cancelling a request does not release a running job's permit: started
 [`spawn_blocking` tasks cannot be aborted](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
 
 This is an incremental extraction, not a complete `BuiltinAuthProvider` or a CLI
-backend selector. Key loading/issuance, login and other account HTTP handlers,
-the SQL repository and row-policy integration remain in the legacy facade. The
+backend selector. Key loading/signing, account HTTP adapters, the SQL repository
+and row-policy integration remain in the legacy facade. The
 bridge therefore still links Actix even when a neutral route runs on Axum; the
 runtime-only policy and enterprise example retain their isolated dependency graphs.
 
 The extraction passed the 692-test workspace suite (16 ignored), including a
 real-login/SQLite comparison of native Actix and both adapters. The proof is
 recorded in `docs/reviews/2026-09-08-builtin-auth-migration-proof.md`.
+
+## Shared Account Operations
+
+`auth::accounts::AccountService` (feature `auth-builtin`) now owns login,
+account reads and password changes. It receives an `AccountRepository`, an
+`AccessTokenIssuer`, an `AccountPolicy` and an injectable clock. The service has
+no HTTP framework, SQL driver or configuration-parser dependency.
+
+Login normalizes email, verifies the password using the bounded pool, applies
+email-verification policy and supplies the signer with the existing state-bound
+JWT claims. TTLs must be positive; expiration arithmetic is checked. Login and
+current-password input are capped at bcrypt's 72-byte boundary. New passwords
+retain the existing minimum of eight characters and maximum of 72 bytes.
+
+Account reads return current public fields and mapped claims, without password
+hashes or session fingerprints. Protected operations must receive the user ID
+from successful request authentication, never from a request-body account ID.
+Password changes verify the current password and conditionally update the stored
+hash. The repository must match the account ID, old hash and management revision
+atomically. A concurrent change/deletion returns `409 account_changed`, not a
+successful overwrite. Base schemas and NULL revisions remain supported; a schema
+error during the update does not trigger a weaker fallback query.
+
+`rest_macro_core::auth::builtin_account_service(db, settings)` supplies the
+temporary configured-key and SQLx/Turso adapters. Existing public Actix login,
+account and password-change handler signatures remain unchanged and delegate to
+the service. Cookie issuance, CSRF presentation, JSON extraction and login rate
+limiting remain in their existing HTTP layer. A neutral consumer must supply
+these controls itself; the service is not a production route installer.
+
+This milestone does not migrate registration, verification/reset tokens, admin
+operations, email delivery or application authorization. Native/emitted servers
+still use Actix. The account service itself is framework-independent, but its
+temporary legacy infrastructure bridge still links Actix. Verification and
+remaining gates are recorded in
+`docs/reviews/2026-09-08-account-service-migration-proof.md`.
 
 ## Experimental API Changes
 

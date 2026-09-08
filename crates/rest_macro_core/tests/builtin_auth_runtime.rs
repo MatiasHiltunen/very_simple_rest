@@ -15,7 +15,7 @@ use vsr_runtime::{
     auth::request::require_authentication,
     http::{
         ActixHttpServer, AxumHttpServer, HttpMethod, HttpServer, MiddlewareConfig,
-        ResponseEnvelope, ServerConfig, ServerHandle, make_handler,
+        ResponseEnvelope, ServerConfig, make_handler,
     },
 };
 
@@ -25,6 +25,8 @@ struct Fixture {
     settings: AuthSettings,
     key: Vec<u8>,
 }
+
+static PASSWORD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl Fixture {
     async fn new() -> Self {
@@ -122,6 +124,288 @@ async fn start_neutral<B: HttpServer>(fixture: &Fixture) -> B::Handle {
     .unwrap()
 }
 
+// Deliberately test-only bearer route adapters. Production cookie presentation,
+// extraction and login rate limiting still live in the legacy HTTP facade.
+async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
+    let service = Arc::new(
+        auth::builtin_account_service(fixture.db.clone(), fixture.settings.clone()).unwrap(),
+    );
+    let authenticator = Arc::new(auth::builtin_request_authenticator(
+        fixture.db.clone(),
+        fixture.settings.clone(),
+    ));
+    let login_service = service.clone();
+    let login = make_handler(move |request| {
+        let service = login_service.clone();
+        async move {
+            let input: auth::LoginInput =
+                match serde_json::from_slice(request.body.as_deref().unwrap_or_default()) {
+                    Ok(input) => input,
+                    Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
+                };
+            match service.login(&input.email, &input.password).await {
+                Ok(token) => ResponseEnvelope::json(json!({"token": token})),
+                Err(error) => error.response(),
+            }
+        }
+    });
+    let account_service = service.clone();
+    let account = require_authentication(
+        authenticator.clone(),
+        make_handler(move |request| {
+            let service = account_service.clone();
+            async move {
+                let id = request.identity.unwrap().user_id.parse().unwrap();
+                match service.account(id).await {
+                    Ok(account) => ResponseEnvelope::json(account),
+                    Err(error) => error.response(),
+                }
+            }
+        }),
+    );
+    let password = require_authentication(
+        authenticator,
+        make_handler(move |request| {
+            let service = service.clone();
+            async move {
+                let id = request.identity.unwrap().user_id.parse().unwrap();
+                let input: auth::ChangePasswordInput =
+                    match serde_json::from_slice(request.body.as_deref().unwrap_or_default()) {
+                        Ok(input) => input,
+                        Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
+                    };
+                match service
+                    .change_password(id, &input.current_password, &input.new_password)
+                    .await
+                {
+                    Ok(()) => ResponseEnvelope::status(204),
+                    Err(error) => error.response(),
+                }
+            }
+        }),
+    );
+    B::serve(
+        ServerConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            shutdown_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        MiddlewareConfig::default(),
+        vec![
+            (HttpMethod::Post, "/auth/login".into(), login),
+            (HttpMethod::Get, "/auth/account".into(), account),
+            (HttpMethod::Post, "/auth/account/password".into(), password),
+        ],
+    )
+    .await
+    .unwrap()
+}
+
+async fn account_response(request: reqwest::RequestBuilder, status: u16) -> Value {
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status().as_u16(), status);
+    assert_eq!(response.headers().get_all("set-cookie").iter().count(), 0);
+    if status == 204 {
+        assert!(response.bytes().await.unwrap().is_empty());
+        Value::Null
+    } else {
+        response.json().await.unwrap()
+    }
+}
+
+#[actix_web::test]
+async fn account_operations_and_password_revocation_work_across_all_three_paths() {
+    let _guard = PASSWORD_TEST_LOCK.lock().await;
+    let mut fixture = Fixture::new().await;
+    fixture.settings.session_cookie = None;
+    let db = fixture.db.clone();
+    let settings = fixture.settings.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let native_base = format!("http://{}", listener.local_addr().unwrap());
+    let server = NativeServer::new(move || {
+        let db = db.clone();
+        let settings = settings.clone();
+        App::new().configure(move |cfg| {
+            auth::auth_routes_with_settings(cfg, db.clone(), settings.clone())
+        })
+    })
+    .workers(1)
+    .disable_signals()
+    .listen(listener)
+    .unwrap()
+    .run();
+    let native_handle = server.handle();
+    let native_task = actix_web::rt::spawn(server);
+    let actix = start_account_service::<ActixHttpServer>(&fixture).await;
+    let axum = start_account_service::<AxumHttpServer>(&fixture).await;
+    let bases = [
+        native_base,
+        format!("http://{}", actix.addresses()[0]),
+        format!("http://{}", axum.addresses()[0]),
+    ];
+    let client = client();
+    let mut password = "original-password".to_owned();
+    for (index, writer) in bases.iter().enumerate() {
+        let mut tokens = Vec::new();
+        for base in &bases {
+            let body = account_response(
+                client
+                    .post(format!("{base}/auth/login"))
+                    .json(&json!({"email":" OWNER@EXAMPLE.TEST ", "password":password})),
+                200,
+            )
+            .await;
+            tokens.push(body["token"].as_str().unwrap().to_owned());
+        }
+        // Tokens issued by every path must authenticate on every other path.
+        let mut expected_account = None;
+        for base in &bases {
+            assert_eq!(
+                account_response(client.get(format!("{base}/auth/account")), 401).await["code"],
+                "missing_token"
+            );
+            for token in &tokens {
+                let body = account_response(
+                    client
+                        .get(format!("{base}/auth/account"))
+                        .bearer_auth(token),
+                    200,
+                )
+                .await;
+                assert_eq!(body["id"], 1);
+                assert_eq!(body["tenant_id"], 7);
+                assert_eq!(body["roles"], json!(["admin"]));
+                assert!(body.get("password_hash").is_none());
+                assert!(body.get("_vsr_auth_state").is_none());
+                if let Some(expected) = &expected_account {
+                    assert_eq!(&body, expected);
+                } else {
+                    expected_account = Some(body);
+                }
+            }
+            let wrong = account_response(
+                client
+                    .post(format!("{base}/auth/login"))
+                    .json(&json!({"email":"owner@example.test", "password":"incorrect"})),
+                401,
+            )
+            .await;
+            assert_eq!(
+                wrong,
+                json!({"code":"invalid_credentials", "message":"Invalid credentials"})
+            );
+            let wrong = account_response(client.post(format!("{base}/auth/account/password")).bearer_auth(&tokens[0])
+                .json(&json!({"current_password":"incorrect", "new_password":"valid-new-password"})), 401).await;
+            assert_eq!(
+                wrong,
+                json!({"code":"invalid_credentials", "message":"Current password is incorrect"})
+            );
+            let invalid = account_response(
+                client
+                    .post(format!("{base}/auth/account/password"))
+                    .bearer_auth(&tokens[0])
+                    .json(&json!({"current_password":password, "new_password":"short"})),
+                400,
+            )
+            .await;
+            assert_eq!(invalid["code"], "validation_error");
+            assert_eq!(invalid["field"], "password");
+            let anonymous = account_response(
+                client.post(format!("{base}/auth/account/password")).json(
+                    &json!({"current_password":password, "new_password":"valid-new-password"}),
+                ),
+                401,
+            )
+            .await;
+            assert_eq!(anonymous["code"], "missing_token");
+        }
+        let next_password = format!("changed-password-{index}");
+        account_response(client.post(format!("{writer}/auth/account/password")).bearer_auth(&tokens[index])
+            .json(&json!({"current_password":password, "new_password":next_password, "user_id":999})), 204).await;
+        for base in &bases {
+            for token in &tokens {
+                assert_eq!(
+                    account_response(
+                        client
+                            .get(format!("{base}/auth/account"))
+                            .bearer_auth(token),
+                        401
+                    )
+                    .await["code"],
+                    "revoked_token"
+                );
+            }
+            assert_eq!(
+                account_response(
+                    client
+                        .post(format!("{base}/auth/login"))
+                        .json(&json!({"email":"owner@example.test", "password":password})),
+                    401
+                )
+                .await["code"],
+                "invalid_credentials"
+            );
+        }
+        password = next_password;
+    }
+    let body = account_response(
+        client
+            .post(format!("{}/auth/login", bases[2]))
+            .json(&json!({"email":"owner@example.test", "password":password})),
+        200,
+    )
+    .await;
+    let token = body["token"].as_str().unwrap();
+    query("DELETE FROM user WHERE id = 1")
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+    for base in &bases {
+        assert_eq!(
+            account_response(
+                client
+                    .get(format!("{base}/auth/account"))
+                    .bearer_auth(token),
+                401
+            )
+            .await["code"],
+            "revoked_token"
+        );
+    }
+    query("DROP TABLE user").execute(&fixture.db).await.unwrap();
+    for base in &bases {
+        assert_eq!(
+            account_response(
+                client
+                    .get(format!("{base}/auth/account"))
+                    .bearer_auth(token),
+                500
+            )
+            .await["code"],
+            "internal_error"
+        );
+        assert_eq!(
+            account_response(
+                client
+                    .post(format!("{base}/auth/login"))
+                    .json(&json!({"email":"owner@example.test", "password":password})),
+                500
+            )
+            .await["code"],
+            "internal_error"
+        );
+    }
+    AxumHttpServer::shutdown(axum).await.unwrap();
+    ActixHttpServer::shutdown(actix).await.unwrap();
+    native_handle.stop(true).await;
+    native_task.await.unwrap().unwrap();
+    match &fixture.db {
+        DbPool::Sqlx { pool, .. } => pool.close().await,
+        #[cfg(feature = "turso-local")]
+        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    }
+}
+
 async fn expect(request: reqwest::RequestBuilder, status: u16, code: Option<&str>) -> Value {
     let response = request.send().await.unwrap();
     assert_eq!(response.status().as_u16(), status);
@@ -149,6 +433,7 @@ async fn login(base: &str, password: &str) -> Value {
 
 #[actix_web::test]
 async fn native_and_neutral_builtin_authentication_have_identical_live_policy() {
+    let _guard = PASSWORD_TEST_LOCK.lock().await;
     let fixture = Fixture::new().await;
     let db = fixture.db.clone();
     let settings = fixture.settings.clone();

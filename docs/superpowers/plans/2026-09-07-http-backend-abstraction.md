@@ -1,6 +1,6 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: in progress; transport and built-in request-auth extraction milestones
+Status: in progress; transport, built-in request-auth and account-service milestones
 implemented on 2026-09-08. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
@@ -19,6 +19,10 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Extract built-in credential/CSRF/account-state policy and bounded password work.
 - [x] Delegate native/generated `UserContext` and password helpers to shared runtime code.
 - [x] Prove real built-in login/account revocation across native Actix and both adapters.
+- [x] Commit the request-auth extraction on local `v1` (`fa6c1e6e4`).
+- [x] Move login, account reads and password-change policy into the shared runtime.
+- [x] Make password changes conditional and prove concurrency/revocation behavior.
+- [x] Prove shared account operations over native Actix and both runtime transports.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -36,7 +40,7 @@ at build time and uses an example-local bearer verifier, live SQL grants and
 transactional audit boundary. This does not migrate legacy built-in auth.
 See its [local proof record](../../reviews/2026-09-08-enterprise-axum-proof.md).
 
-The next extraction moves built-in request policy, token claims and the existing
+The request-auth extraction moves built-in request policy, token claims and the existing
 account-state fingerprint into `vsr-runtime::auth` with `auth-builtin`. The legacy
 `UserContext` extractor is now a transport adapter over that policy, and password
 helpers delegate to the shared bounded Tokio worker pool. A narrow
@@ -46,9 +50,19 @@ handlers without pretending the complete `AuthProvider` lifecycle is implemented
 `rest_macro_core::auth::builtin_request_authenticator` temporarily supplies key
 configuration and the existing SQLx/Turso account repository. This bridge still
 links the legacy facade; only the runtime policy itself is framework-independent.
-Account endpoint handlers, issuance/key loading, row authorization, streaming and
-the native/generated bootstrap remain to be extracted. No CLI backend switch is
-added by this milestone. See [HTTP backend options](../../src/http_backends.md#built-in-request-authentication).
+Login, account-read and password-change business logic now lives in
+`vsr-runtime::auth::accounts::AccountService`, with injected repository, signer,
+policy and clock. Existing Actix endpoints delegate to it. Password changes use
+an atomic old-hash/revision condition, preventing stale concurrent writes.
+The SQLx/Turso and configured-signing adapters remain in the legacy facade via
+`builtin_account_service`; this is not an Actix-free production application yet.
+See the [account-service proof](../../reviews/2026-09-08-account-service-migration-proof.md).
+
+Next: extract the remaining account lifecycle (registration, one-use verification
+and reset tokens, admin changes and email delivery) while preserving transaction
+boundaries. Shared cookie/extraction/rate-limit routing, row authorization,
+streaming and native/generated bootstrap remain required. No CLI backend switch
+is added by these milestones. See [HTTP backend options](../../src/http_backends.md#shared-account-operations).
 
 ## Review Snapshot And Scope (2026-09-07)
 

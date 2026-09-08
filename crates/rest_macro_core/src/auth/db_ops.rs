@@ -34,18 +34,7 @@ pub(crate) fn authenticated_user_from_row_with_settings(
 }
 
 pub(crate) fn account_info_from_user(user: AuthenticatedUser) -> AccountInfo {
-    use super::helpers::user_roles;
-    AccountInfo {
-        id: user.id,
-        email: user.email,
-        role: user.role.clone(),
-        roles: user_roles(&user.role),
-        email_verified: user.email_verified_at.is_some(),
-        email_verified_at: user.email_verified_at,
-        created_at: user.created_at,
-        updated_at: user.updated_at,
-        claims: user.claims,
-    }
+    user.into()
 }
 
 pub(crate) fn collect_user_claims_with_settings(
@@ -228,20 +217,6 @@ pub(crate) async fn load_authenticated_user_by_id_with_settings(
 ) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
     let backend = detect_auth_backend(db).await?;
     load_authenticated_user_by_id_with_settings_for_backend(db, backend, user_id, settings).await
-}
-
-pub(crate) async fn load_authenticated_user_by_id(
-    db: &DbPool,
-    user_id: i64,
-) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
-    let backend = detect_auth_backend(db).await?;
-    load_authenticated_user_by_id_with_settings_for_backend(
-        db,
-        backend,
-        user_id,
-        &AuthSettings::default(),
-    )
-    .await
 }
 
 pub(crate) async fn list_authenticated_users_with_settings(
@@ -453,6 +428,46 @@ where
     .execute(db)
     .await?;
     Ok(())
+}
+
+pub(crate) async fn compare_and_set_user_password(
+    db: &DbPool,
+    backend: AuthDbBackend,
+    expected: &AuthenticatedUser,
+    password_hash: &str,
+    updated_at: &str,
+) -> Result<bool, sqlx::Error> {
+    // One conditional statement avoids a password-reset/change race on every
+    // supported driver. A dropped column is an error, not permission to retry
+    // with a weaker condition; base-schema compatibility is explicit.
+    let table = auth_user_table_ident(backend);
+    let result = if expected.has_updated_at_column {
+        let revision_predicate = if expected.updated_at.is_some() {
+            "updated_at = ?"
+        } else {
+            "updated_at IS NULL"
+        };
+        let sql = format!("UPDATE {table} SET password_hash = ?, updated_at = ? WHERE id = ? AND password_hash = ? AND {revision_predicate}");
+        let statement = query(&sql)
+            .bind(password_hash)
+            .bind(updated_at)
+            .bind(expected.id)
+            .bind(&expected.password_hash);
+        let statement = if let Some(revision) = &expected.updated_at {
+            statement.bind(revision)
+        } else {
+            statement
+        };
+        statement.execute(db).await?
+    } else {
+        query(&format!("UPDATE {table} SET password_hash = ? WHERE id = ? AND password_hash = ?"))
+            .bind(password_hash)
+            .bind(expected.id)
+            .bind(&expected.password_hash)
+            .execute(db)
+            .await?
+    };
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn delete_user_row<E>(

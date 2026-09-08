@@ -1,8 +1,6 @@
-use super::password::{hash, verify};
+use super::password::hash;
 use actix_web::cookie::{Cookie, time::Duration as CookieDuration};
 use actix_web::{HttpRequest, HttpResponse, Responder, web};
-use chrono::{Duration, Utc};
-use jsonwebtoken::encode;
 
 use crate::{
     db::{DbPool, query},
@@ -14,9 +12,9 @@ use super::db_ops::{
     account_info_from_user, delete_user_row, detect_auth_backend,
     initialize_user_management_timestamps, list_authenticated_users_with_settings,
     load_authenticated_user_by_email_with_settings,
-    load_authenticated_user_by_email_with_settings_for_backend, load_authenticated_user_by_id,
+    load_authenticated_user_by_email_with_settings_for_backend,
     load_authenticated_user_by_id_with_settings, mark_user_email_verified, update_managed_user_row,
-    update_user_password, user_table_columns,
+    user_table_columns,
 };
 use super::email::{
     configured_auth_email, send_password_reset_email_for_user, send_verification_email_for_user,
@@ -26,9 +24,8 @@ use super::helpers::{
     generate_ephemeral_secret, is_missing_auth_management_schema, is_unique_violation,
     missing_auth_management_schema_response, normalize_auth_email, normalize_auth_role,
     now_timestamp_string, same_site_from_settings, scope_prefix_from_request, user_is_admin,
-    user_roles, validate_auth_password, validate_cookie_csrf,
+    validate_auth_password, validate_cookie_csrf,
 };
-use super::jwt::{Claims, configured_jwt_signer};
 use super::migrations::auth_user_table_ident;
 use super::pages::{
     render_account_portal_page, render_admin_dashboard_page, render_message_page,
@@ -170,67 +167,21 @@ pub(crate) async fn login_with_settings(
     db: web::Data<DbPool>,
     settings: AuthSettings,
 ) -> HttpResponse {
-    let email = match normalize_auth_email(&input.email) {
-        Ok(email) => email,
-        Err(response) => return response,
+    let service = match super::accounts::builtin_account_service(
+        db.get_ref().clone(),
+        settings.clone(),
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::error_response(error),
     };
-    let user = match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings)
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => return errors::unauthorized("invalid_credentials", "Invalid credentials"),
-        Err(error) => {
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
+    match service.login(&input.email, &input.password).await {
+        Ok(token) => match &settings.session_cookie {
+            Some(cookies) => {
+                issue_cookie_login_response(&token, cookies, settings.access_token_ttl_seconds)
             }
-            return errors::internal_error("Database error");
-        }
-    };
-
-    if match verify(&input.password, &user.password_hash).await {
-        Ok(valid) => valid,
-        Err(response) => return response,
-    } {
-        if settings.require_email_verification && user.email_verified_at.is_none() {
-            if !user.has_auth_management_schema() {
-                return missing_auth_management_schema_response();
-            }
-            return errors::forbidden(
-                "email_not_verified",
-                "Email address must be verified before logging in",
-            );
-        }
-        let claims = Claims {
-            auth_state: Some(super::user::account_auth_state(&user)),
-            sub: user.id,
-            roles: user_roles(&user.role),
-            iss: settings.issuer.clone(),
-            aud: settings.audience.clone(),
-            exp: (Utc::now() + Duration::seconds(settings.access_token_ttl_seconds)).timestamp()
-                as usize,
-            extra: user.claims,
-        };
-        let (header, encoding_key) = match configured_jwt_signer(&settings) {
-            Ok(signer) => signer,
-            Err(message) => return errors::internal_error(message),
-        };
-
-        match encode(&header, &claims, encoding_key.as_ref()) {
-            Ok(token) => {
-                if let Some(cookie_settings) = &settings.session_cookie {
-                    issue_cookie_login_response(
-                        &token,
-                        cookie_settings,
-                        settings.access_token_ttl_seconds,
-                    )
-                } else {
-                    HttpResponse::Ok().json(serde_json::json!({ "token": token }))
-                }
-            }
-            Err(_) => errors::internal_error("Token generation failed"),
-        }
-    } else {
-        errors::unauthorized("invalid_credentials", "Invalid credentials")
+            None => HttpResponse::Ok().json(serde_json::json!({ "token": token })),
+        },
+        Err(error) => super::accounts::error_response(error),
     }
 }
 
@@ -322,11 +273,16 @@ pub async fn logout(req: HttpRequest) -> impl Responder {
 }
 
 pub async fn account(req: HttpRequest, user: UserContext, db: web::Data<DbPool>) -> impl Responder {
-    let settings = auth_settings_from_request(&req);
-    match load_authenticated_user_by_id_with_settings(db.get_ref(), user.id, &settings).await {
-        Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
-        Ok(None) => errors::unauthorized("invalid_token", "Authenticated user not found"),
-        Err(_) => errors::internal_error("Database error"),
+    let service = match super::accounts::builtin_account_service(
+        db.get_ref().clone(),
+        auth_settings_from_request(&req),
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::error_response(error),
+    };
+    match service.account(user.id).await {
+        Ok(account) => HttpResponse::Ok().json(account),
+        Err(error) => super::accounts::error_response(error),
     }
 }
 
@@ -335,50 +291,19 @@ pub async fn change_password(
     input: web::Json<ChangePasswordInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    let backend = match detect_auth_backend(db.get_ref()).await {
-        Ok(backend) => backend,
-        Err(_) => return errors::internal_error("Database error"),
+    let service = match super::accounts::builtin_account_service(
+        db.get_ref().clone(),
+        AuthSettings::default(),
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::error_response(error),
     };
-    if let Err(response) = validate_auth_password(&input.new_password) {
-        return response;
-    }
-
-    let account = match load_authenticated_user_by_id(db.get_ref(), user.id).await {
-        Ok(Some(account)) => account,
-        Ok(None) => return errors::unauthorized("invalid_token", "Authenticated user not found"),
-        Err(_) => return errors::internal_error("Database error"),
-    };
-
-    if !match verify(&input.current_password, &account.password_hash).await {
-        Ok(valid) => valid,
-        Err(response) => return response,
-    } {
-        return errors::unauthorized("invalid_credentials", "Current password is incorrect");
-    }
-
-    let password_hash = match hash(&input.new_password, 12).await {
-        Ok(hash) => hash,
-        Err(response) => return response,
-    };
-    let now = now_timestamp_string();
-
-    match update_user_password(db.get_ref(), backend, user.id, &password_hash, &now).await {
-        Ok(_) => HttpResponse::NoContent().finish(),
-        Err(error) if is_missing_auth_management_schema(&error) => {
-            match query(&format!(
-                "UPDATE {} SET password_hash = ? WHERE id = ?",
-                auth_user_table_ident(backend)
-            ))
-            .bind(password_hash)
-            .bind(user.id)
-            .execute(db.get_ref())
-            .await
-            {
-                Ok(_) => HttpResponse::NoContent().finish(),
-                Err(_) => errors::internal_error("Database error"),
-            }
-        }
-        Err(_) => errors::internal_error("Database error"),
+    match service
+        .change_password(user.id, &input.current_password, &input.new_password)
+        .await
+    {
+        Ok(()) => HttpResponse::NoContent().finish(),
+        Err(error) => super::accounts::error_response(error),
     }
 }
 

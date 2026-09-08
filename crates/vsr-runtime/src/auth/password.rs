@@ -47,6 +47,9 @@ pub async fn verify(password: &str, hash: &str) -> Result<bool, AuthFailure> {
 }
 
 #[cfg(test)]
+pub(super) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -81,6 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn hash_verify_and_errors() {
+        let _guard = TEST_LOCK.lock().await;
         let hash = hash("a-test-password", 4).await.unwrap();
         assert!(verify("a-test-password", &hash).await.unwrap());
         assert!(!verify("wrong-password", &hash).await.unwrap());

@@ -19,17 +19,7 @@ pub(crate) struct BuiltinAuth;
 // Include the salted password hash and management revision, never expose them in the JWT.
 // updated_at prevents a managed role/claim change from reviving a token when reverted.
 pub(crate) fn account_auth_state(user: &AuthenticatedUser) -> String {
-    vsr_runtime::auth::builtin::AccountState {
-        id: user.id,
-        email: &user.email,
-        password_hash: &user.password_hash,
-        role: &user.role,
-        claims: &user.claims,
-        email_verified_at: user.email_verified_at.as_deref(),
-        created_at: user.created_at.as_deref(),
-        updated_at: user.updated_at.as_deref(),
-    }
-    .fingerprint()
+    user.auth_state()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -170,44 +160,8 @@ pub struct UpdateManagedUserInput {
     pub claims: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccountInfo {
-    pub id: i64,
-    pub email: String,
-    pub role: String,
-    pub roles: Vec<String>,
-    pub email_verified: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub email_verified_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
-    #[serde(flatten)]
-    pub claims: BTreeMap<String, Value>,
-}
-
-pub(crate) struct AuthenticatedUser {
-    pub id: i64,
-    pub email: String,
-    pub password_hash: String,
-    pub role: String,
-    pub email_verified_at: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    pub has_email_verified_at_column: bool,
-    pub has_created_at_column: bool,
-    pub has_updated_at_column: bool,
-    pub claims: BTreeMap<String, Value>,
-}
-
-impl AuthenticatedUser {
-    pub fn has_auth_management_schema(&self) -> bool {
-        self.has_email_verified_at_column
-            && self.has_created_at_column
-            && self.has_updated_at_column
-    }
-}
+pub use vsr_runtime::auth::accounts::AccountInfo;
+pub(crate) use vsr_runtime::auth::accounts::Account as AuthenticatedUser;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AuthTokenPurpose {

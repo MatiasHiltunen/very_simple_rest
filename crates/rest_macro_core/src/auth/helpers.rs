@@ -24,46 +24,11 @@ pub(crate) fn service_unavailable(code: &'static str, message: impl Into<String>
 }
 
 pub(crate) fn normalize_auth_email(raw: &str) -> Result<String, HttpResponse> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Err(errors::validation_error(
-            "email",
-            "Email address cannot be empty",
-        ));
-    }
-    if normalized.contains(char::is_whitespace) {
-        return Err(errors::validation_error(
-            "email",
-            "Email address cannot contain whitespace",
-        ));
-    }
-    let mut parts = normalized.split('@');
-    let local = parts.next().unwrap_or_default();
-    let domain = parts.next().unwrap_or_default();
-    if local.is_empty() || domain.is_empty() || parts.next().is_some() || !domain.contains('.') {
-        return Err(errors::validation_error(
-            "email",
-            "Email address is not valid",
-        ));
-    }
-    Ok(normalized)
+    vsr_runtime::auth::accounts::normalize_email(raw).map_err(super::accounts::error_response)
 }
 
 pub(crate) fn validate_auth_password(password: &str) -> Result<(), HttpResponse> {
-    let len = password.chars().count();
-    if len < 8 {
-        return Err(errors::validation_error(
-            "password",
-            "Password must be at least 8 characters long",
-        ));
-    }
-    if password.len() > 72 {
-        return Err(errors::validation_error(
-            "password",
-            "Password must be at most 72 bytes long",
-        ));
-    }
-    Ok(())
+    vsr_runtime::auth::accounts::validate_password(password).map_err(super::accounts::error_response)
 }
 
 pub(crate) fn normalize_auth_role(
@@ -197,10 +162,6 @@ pub(crate) fn build_public_auth_url(
     }
 
     Ok(base_url.to_string())
-}
-
-pub(crate) fn user_roles(role: &str) -> Vec<String> {
-    vec![role.to_owned()]
 }
 
 pub(crate) fn user_is_admin(user: &UserContext) -> bool {

@@ -1,4 +1,5 @@
 mod admin;
+mod accounts;
 mod db_ops;
 mod email;
 pub mod handlers;
@@ -61,6 +62,7 @@ pub use routing::{
 pub use jwt::jwks;
 
 pub use runtime::builtin_request_authenticator;
+pub use accounts::builtin_account_service;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
