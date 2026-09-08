@@ -13,6 +13,7 @@ members = [
     "crates/rest_macro_core",
     "crates/vsr_schema_doc",
     "examples/demo",
+    "examples/enterprise_api",
 ]
 default-members = ["crates/rest_api_cli"]
 resolver = "2"

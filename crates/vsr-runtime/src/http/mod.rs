@@ -4,19 +4,20 @@
 //!
 //! | Feature | Type | Notes |
 //! |---|---|---|
-//! | `http-actix` | [`actix_adapter::ActixHttpServer`] | Default; actix-web 4 |
-//! | `http-axum` | *(future)* | Decision: end of Phase 3 |
+//! | `http-actix` | `ActixHttpServer` | Opt-in library transport; actix-web 4 |
+//! | `http-axum` | `AxumHttpServer` | Opt-in; same VSR route/handler contract |
 //!
-//! # The seam is split into three distinct contracts:
+//! # Three shared contracts
 //!
-//! - [`RouteRegistry`] — receives generated resource routes and their
-//!   framework-agnostic [`Handler`]s. Framework adapters translate these into
-//!   actix `Resource`s or axum `Router` entries.
+//! - [`RouteRegistry`] receives framework-agnostic [`Handler`] registrations.
+//!   Both adapters dispatch through the same validated [`RouteTable`]. Legacy
+//!   generated routes are not yet consumers of this contract.
 //! - [`HttpServer`] — owns binding, listener lifecycle, graceful shutdown,
 //!   TLS, and readiness. One implementation per HTTP framework.
-//! - [`MiddlewareAdapter`] — supplies configuration for framework-agnostic
-//!   middleware logic (CORS, security headers, compression, trusted proxies).
+//! - [`MiddlewareConfig`] supplies configuration for framework-agnostic
+//!   middleware logic (CORS, security headers and compression).
 //!   Framework adapters apply it via their native layer/middleware model.
+//!   Trusted proxies are rejected until verified forwarding is implemented.
 //!
 //! **No framework types cross this boundary.** No `actix_web::HttpRequest`,
 //! no `axum::Router`, no `tower::Layer` appears in the public API here.
@@ -29,6 +30,20 @@ pub mod actix_adapter;
 
 #[cfg(feature = "http-actix")]
 pub use actix_adapter::ActixHttpServer;
+
+#[cfg(feature = "http-axum")]
+pub mod axum_adapter;
+#[cfg(feature = "http-axum")]
+pub use axum_adapter::AxumHttpServer;
+
+mod headers;
+mod routes;
+#[cfg(any(feature = "http-actix", feature = "http-axum"))]
+mod transport;
+
+pub use crate::auth::AuthenticatedIdentity;
+pub use headers::HeaderFields;
+pub use routes::RouteTable;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -57,6 +72,8 @@ pub enum HttpMethod {
     Head,
     /// HTTP OPTIONS
     Options,
+    /// An extension method, preserved rather than being treated as GET.
+    Other(String),
 }
 
 impl std::fmt::Display for HttpMethod {
@@ -69,25 +86,10 @@ impl std::fmt::Display for HttpMethod {
             HttpMethod::Delete => "DELETE",
             HttpMethod::Head => "HEAD",
             HttpMethod::Options => "OPTIONS",
+            HttpMethod::Other(method) => method.as_str(),
         };
         f.write_str(s)
     }
-}
-
-/// The authenticated identity attached to a request, if any.
-///
-/// Populated by the auth layer before the handler runs. `None` means
-/// the request passed through without authentication (allowed on public routes).
-#[derive(Debug, Clone)]
-pub struct AuthenticatedIdentity {
-    /// Stable user ID (from the auth table or external provider).
-    pub user_id: String,
-    /// Roles attached to this identity at token-issue time.
-    pub roles: Vec<String>,
-    /// Additional JWT claims as raw JSON values.
-    pub claims: HashMap<String, serde_json::Value>,
-    /// Whether this identity carries admin privileges.
-    pub is_admin: bool,
 }
 
 /// Framework-agnostic representation of an incoming HTTP request.
@@ -98,19 +100,26 @@ pub struct AuthenticatedIdentity {
 pub struct RequestContext {
     /// HTTP method.
     pub method: HttpMethod,
-    /// Decoded request path (no query string).
+    /// Raw, percent-encoded request path without query. Never decode a whole
+    /// path before routing; only matched parameter values are decoded once.
     pub path: String,
+    /// Original query string, without the leading question mark.
+    pub raw_query: String,
+    /// Matched VSR route template, for bounded-cardinality telemetry.
+    pub matched_route: Option<String>,
+    /// Direct network peer. Forwarding headers never replace this value.
+    pub peer_addr: Option<SocketAddr>,
     /// Path parameters extracted by the router (e.g. `{id}` → `"42"`).
     pub path_params: HashMap<String, String>,
     /// Query parameters. Multiple values per key are preserved.
     pub query_params: HashMap<String, Vec<String>>,
-    /// Request headers, lower-cased names.
-    pub headers: HashMap<String, Vec<String>>,
-    /// Raw request body, if any.
+    /// Validated, case-insensitive headers, preserving repeats and raw bytes.
+    pub headers: HeaderFields,
+    /// Buffered body after supported content decompression, if nonempty.
     pub body: Option<Bytes>,
     /// Authenticated identity, if auth middleware ran and succeeded.
     pub identity: Option<AuthenticatedIdentity>,
-    /// Unique request ID injected by middleware.
+    /// Server-issued request ID, independent of caller-provided headers.
     pub request_id: String,
 }
 
@@ -122,28 +131,37 @@ pub struct RequestContext {
 pub struct ResponseEnvelope {
     /// HTTP status code.
     pub status: u16,
-    /// Response headers. Values are raw strings; the adapter handles encoding.
-    pub headers: HashMap<String, String>,
+    /// Validated response fields. Repeated fields such as Set-Cookie are appended.
+    pub headers: HeaderFields,
     /// Response body.
     pub body: ResponseBody,
 }
 
 impl ResponseEnvelope {
-    /// Convenience constructor for a JSON 200 response.
+    /// JSON response, or a stable 500 response if serialization fails.
     pub fn json(body: impl serde::Serialize) -> Self {
-        let bytes = serde_json::to_vec(&body).unwrap_or_default();
-        Self {
+        Self::try_json(body).unwrap_or_else(|_| Self::error(500, "JSON serialization failed"))
+    }
+
+    /// Serialize a JSON 200 response without discarding serialization errors.
+    pub fn try_json(body: impl serde::Serialize) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(&body)?;
+        let mut headers = HeaderFields::default();
+        headers
+            .append("content-type", b"application/json")
+            .expect("static header");
+        Ok(Self {
             status: 200,
-            headers: [("content-type".into(), "application/json".into())].into(),
+            headers,
             body: ResponseBody::Bytes(Bytes::from(bytes)),
-        }
+        })
     }
 
     /// Convenience constructor for a status-only response with no body.
     pub fn status(code: u16) -> Self {
         Self {
             status: code,
-            headers: HashMap::new(),
+            headers: HeaderFields::default(),
             body: ResponseBody::Empty,
         }
     }
@@ -151,12 +169,9 @@ impl ResponseEnvelope {
     /// Convenience constructor for a JSON error response.
     pub fn error(status: u16, message: &str) -> Self {
         let body = serde_json::json!({"error": message});
-        let bytes = serde_json::to_vec(&body).unwrap_or_default();
-        Self {
-            status,
-            headers: [("content-type".into(), "application/json".into())].into(),
-            body: ResponseBody::Bytes(Bytes::from(bytes)),
-        }
+        let mut response = Self::try_json(body).expect("JSON string values serialize");
+        response.status = status;
+        response
     }
 }
 
@@ -177,8 +192,8 @@ pub enum ResponseBody {
 /// A framework-agnostic handler function.
 ///
 /// Takes a [`RequestContext`] and returns a [`ResponseEnvelope`].
-/// Generated resource handlers and built-in auth/authz handlers are all of
-/// this type. The framework adapter wraps them in actix/axum extractors.
+/// Both adapters use this type. Legacy generated and built-in handlers are
+/// still being migrated; this alias does not imply that migration is complete.
 pub type Handler = Arc<
     dyn Fn(RequestContext) -> Pin<Box<dyn Future<Output = ResponseEnvelope> + Send>> + Send + Sync,
 >;
@@ -196,16 +211,15 @@ where
 
 /// Receives framework-agnostic route + handler pairs.
 ///
-/// Generated code calls this to register resource routes. Framework adapters
-/// implement it by translating each entry into their native routing model
-/// (actix `Resource`, axum `Router::route`, etc.).
+/// The shared RouteTable implements this contract and validates routes before
+/// either framework binds. Legacy code generation is not yet a consumer.
 pub trait RouteRegistry: Send + 'static {
     /// Register a handler for `method` at `path`.
     ///
     /// `path` uses the VSR path template syntax: `{param}` for required path
-    /// parameters. Adapters translate to their native syntax (`:param` for
-    /// axum, `{param}` for actix).
-    fn add_route(&mut self, method: HttpMethod, path: &str, handler: Handler);
+    /// parameters and `{*tail}` for a nonempty terminal catch-all. Regex and
+    /// partial-segment captures are not part of the portable VSR grammar.
+    fn add_route(&mut self, method: HttpMethod, path: &str, handler: Handler) -> VsrResult<()>;
 }
 
 // ─── HttpServer trait ─────────────────────────────────────────────────────────
@@ -218,10 +232,13 @@ pub struct ServerConfig {
     pub readiness: Readiness,
     /// Listening address.
     pub addr: SocketAddr,
-    /// Optional TLS configuration (cert + key paths or PEM bytes).
+    /// Optional TLS configuration (PEM certificate and key file paths).
     pub tls: Option<TlsConfig>,
-    /// Number of worker threads. `None` means use the framework default.
+    /// Actix worker threads. Axum uses the caller's Tokio runtime and rejects
+    /// an explicit worker count rather than silently ignoring it.
     pub workers: Option<usize>,
+    /// Maximum graceful drain duration, rounded up to whole seconds on Actix.
+    pub shutdown_timeout: std::time::Duration,
     /// Maximum body size in bytes accepted by the framework before the handler
     /// sees the request. Default: 4 MiB.
     pub max_body_bytes: usize,
@@ -234,6 +251,7 @@ impl Default for ServerConfig {
             addr: "0.0.0.0:8080".parse().unwrap(),
             tls: None,
             workers: None,
+            shutdown_timeout: std::time::Duration::from_secs(30),
             max_body_bytes: 4 * 1024 * 1024,
         }
     }
@@ -266,8 +284,9 @@ pub struct TlsConfig {
 /// Builds and runs an HTTP server from a config and a populated registry.
 ///
 /// Implementors:
-/// - `ActixHttpServer` — behind `http-actix` feature (default).
-/// - `AxumHttpServer` — behind `http-axum` feature (decision: end of Phase 3).
+/// - `ActixHttpServer` — behind the opt-in `http-actix` feature.
+/// - `AxumHttpServer` — behind the opt-in `http-axum` feature.
+/// Neither backend is enabled by default in this crate.
 ///
 /// # Contract
 ///
@@ -277,11 +296,11 @@ pub struct TlsConfig {
 /// - Graceful shutdown drains in-flight requests before returning.
 pub trait HttpServer: Send + Sync + 'static {
     /// An opaque handle that can be used to trigger a graceful shutdown.
-    type Handle: Send + 'static;
+    type Handle: ServerHandle;
 
     /// Bind and start serving, returning a handle for graceful shutdown.
     ///
-    /// `registry` supplies all application routes; the implementation adds
+    /// `routes` supplies all application routes; the implementation adds
     /// its own health endpoints on top.
     fn serve(
         config: ServerConfig,
@@ -293,12 +312,23 @@ pub trait HttpServer: Send + Sync + 'static {
     fn shutdown(handle: Self::Handle) -> impl Future<Output = VsrResult<()>> + Send;
 }
 
+/// Observable lifecycle shared by transport-specific running server handles.
+/// Dropping a handle requests immediate shutdown; use HttpServer::shutdown to drain.
+pub trait ServerHandle: Send + 'static {
+    /// Bound addresses, including OS-assigned ports.
+    fn addresses(&self) -> &[SocketAddr];
+    /// Whether the server task has exited (success or failure).
+    fn is_finished(&self) -> bool;
+    /// Observe completion without consuming the handle, including task failure
+    /// or cancellation. Call shutdown afterwards to collect the task result.
+    fn wait_for_exit(&self) -> impl Future<Output = ()> + Send;
+}
+
 // ─── Middleware configuration ─────────────────────────────────────────────────
 
 /// Framework-agnostic middleware configuration.
 ///
 /// Framework adapters apply this using their own middleware model.
-/// Changing a field here does not require touching any framework-specific code.
 #[derive(Debug, Clone)]
 pub struct MiddlewareConfig {
     /// Enable Brotli + gzip response compression.
@@ -307,7 +337,8 @@ pub struct MiddlewareConfig {
     pub cors: Option<CorsConfig>,
     /// Security header policy.
     pub security_headers: SecurityHeadersConfig,
-    /// Trusted reverse-proxy IP ranges (for `X-Forwarded-For` parsing).
+    /// Reserved for verified reverse-proxy forwarding. Both adapters currently
+    /// reject nonempty values instead of trusting raw forwarding headers.
     pub trusted_proxies: Vec<std::net::IpAddr>,
 }
 
@@ -325,8 +356,8 @@ impl Default for MiddlewareConfig {
 /// CORS policy for the middleware layer.
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
-    /// Allowed origins. `None` means `*` (not recommended for credentialed
-    /// requests).
+    /// Allowed origins. `None` reflects any request origin and is rejected
+    /// when credentialed CORS is enabled.
     pub allowed_origins: Option<Vec<String>>,
     /// Allowed HTTP methods.
     pub allowed_methods: Vec<HttpMethod>,

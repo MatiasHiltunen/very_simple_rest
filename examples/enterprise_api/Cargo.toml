@@ -1,0 +1,39 @@
+[package]
+name = "enterprise-api"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = ["axum"]
+axum = ["vsr-runtime/http-axum"]
+actix = ["vsr-runtime/http-actix"]
+
+[dependencies]
+vsr-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eon.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
+jsonwebtoken.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+rcgen.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+rest_macro_core = { workspace = true, features = ["codegen", "sqlite"] }
+serde.workspace = true
+serde_json.workspace = true
+eon.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile = "3"
+rest_macro_core = { workspace = true, features = ["codegen", "sqlite"] }
+syn.workspace = true

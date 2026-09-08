@@ -1,44 +1,8 @@
-//! Actix-web 4 implementation of [`HttpServer`].
-//!
-//! Each route in the registry is wrapped in an actix handler closure. The
-//! framework-agnostic [`RequestContext`] is assembled from the actix
-//! [`actix_web::HttpRequest`] and body bytes before the application handler
-//! runs. The returned [`ResponseEnvelope`] is converted back to an
-//! [`actix_web::HttpResponse`].
-//!
-//! Health probes `/healthz` (liveness) and `/readyz` (readiness) are mounted
-//! automatically regardless of the route registry contents.
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use vsr_runtime::http::{
-//!     ActixHttpServer, HttpMethod, HttpServer, MiddlewareConfig, ResponseEnvelope,
-//!     ServerConfig, make_handler,
-//! };
-//!
-//! # async fn example() -> vsr_core::error::VsrResult<()> {
-//! let routes = vec![(
-//!     HttpMethod::Get,
-//!     "/hello".to_string(),
-//!     make_handler(|_ctx| async { ResponseEnvelope::json("hello") }),
-//! )];
-//!
-//! let handle = ActixHttpServer::serve(
-//!     ServerConfig::default(),
-//!     MiddlewareConfig::default(),
-//!     routes,
-//! )
-//! .await?;
-//!
-//! ActixHttpServer::shutdown(handle).await?;
-//! # Ok(())
-//! # }
-//! ```
+//! Actix transport for the shared VSR route and handler contracts.
+//! Native CLI/generated applications retain their existing Actix wiring.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
-use actix_web::HttpServer as ActixWebServer;
 use actix_web::{
     App, HttpRequest, HttpResponse,
     middleware::{Compress, Condition, DefaultHeaders},
@@ -47,43 +11,73 @@ use actix_web::{
 use bytes::Bytes;
 use vsr_core::error::{VsrError, VsrResult};
 
+#[cfg(test)]
+use super::transport::{new_request_id, parse_query_string};
 use super::{
-    Handler, HttpMethod, HttpServer, MiddlewareConfig, Readiness, RequestContext, ResponseBody,
-    ResponseEnvelope, ServerConfig,
+    Handler, HeaderFields, HttpMethod, HttpServer, MiddlewareConfig, Readiness, ResponseBody,
+    ResponseEnvelope, RouteTable, ServerConfig, ServerHandle,
+    transport::{self, ReadinessGuard, header_values, load_tls, validate_configuration},
 };
 
-// ── Handle ────────────────────────────────────────────────────────────────────
-
-/// Opaque handle to a running [`ActixHttpServer`].
-///
-/// Pass to [`ActixHttpServer::shutdown`] to trigger graceful drain.
+/// Running Actix server. Explicit shutdown drains; dropping requests an immediate stop.
 pub struct ActixServerHandle {
     inner: actix_web::dev::ServerHandle,
-    task: tokio::task::JoinHandle<std::io::Result<()>>,
+    task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     readiness: Readiness,
-    addresses: Vec<std::net::SocketAddr>,
+    addresses: Vec<SocketAddr>,
+    completion: tokio::sync::watch::Receiver<bool>,
 }
 
 impl ActixServerHandle {
-    /// Bound listener addresses, including the port assigned when binding port zero.
-    pub fn addresses(&self) -> &[std::net::SocketAddr] {
+    /// Bound addresses, including any OS-assigned port.
+    pub fn addresses(&self) -> &[SocketAddr] {
         &self.addresses
+    }
+}
+
+impl ServerHandle for ActixServerHandle {
+    fn wait_for_exit(&self) -> impl std::future::Future<Output = ()> + Send {
+        let mut completion = self.completion.clone();
+        async move {
+            let _ = completion.wait_for(|finished| *finished).await;
+        }
+    }
+    fn addresses(&self) -> &[SocketAddr] {
+        &self.addresses
+    }
+    fn is_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
     }
 }
 
 impl std::fmt::Debug for ActixServerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ActixServerHandle").finish_non_exhaustive()
+        f.debug_struct("ActixServerHandle")
+            .field("addresses", &self.addresses)
+            .finish_non_exhaustive()
     }
 }
 
-// ── Server ────────────────────────────────────────────────────────────────────
+impl Drop for ActixServerHandle {
+    fn drop(&mut self) {
+        self.readiness.set_ready(false);
+        if let Some(task) = self.task.take() {
+            let stop = self.inner.stop(false);
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    stop.await;
+                    task.abort();
+                });
+            } else {
+                task.abort();
+            }
+        }
+    }
+}
 
-/// Actix-web 4 implementation of the [`HttpServer`] trait.
-///
-/// Wraps each registered [`Handler`] in an actix closure, builds an
-/// `actix_web::HttpServer`, binds it, and spawns it onto the current tokio
-/// runtime via [`tokio::spawn`]. Health endpoints are added automatically.
+/// Actix implementation of HttpServer. Framework-specific types stay in this module.
 #[derive(Debug)]
 pub struct ActixHttpServer;
 
@@ -94,65 +88,38 @@ impl HttpServer for ActixHttpServer {
         config: ServerConfig,
         middleware: MiddlewareConfig,
         routes: Vec<(HttpMethod, String, Handler)>,
-    ) -> VsrResult<ActixServerHandle> {
+    ) -> VsrResult<Self::Handle> {
         validate_configuration(&config, &middleware)?;
-        if routes
-            .iter()
-            .any(|(_, path, _)| matches!(path.as_str(), "/healthz" | "/readyz"))
-        {
-            return Err(VsrError::Other("health probe paths are reserved".into()));
-        }
+        let routes = Arc::new(RouteTable::from_routes(routes)?);
         let tls = config.tls.as_ref().map(load_tls).transpose()?;
-        // Wrap in Arc so the factory closure (called once per worker) can clone
-        // a cheap pointer each time without re-allocating the route list.
-        let routes: Arc<Vec<(HttpMethod, String, Handler)>> = Arc::new(routes);
         let max_body = config.max_body_bytes;
         let readiness = config.readiness.clone();
-        let app_readiness = readiness.clone();
-
-        let server = ActixWebServer::new(move || {
-            // Clone the Arc for this factory invocation.
-            let routes = Arc::clone(&routes);
-
+        let state = web::Data::new(State {
+            routes,
+            readiness: readiness.clone(),
+        });
+        let mut server = actix_web::HttpServer::new(move || {
             App::new()
-                .app_data(web::Data::new(app_readiness.clone()))
+                .app_data(state.clone())
+                .app_data(web::PayloadConfig::default().limit(max_body))
                 .wrap(Condition::new(middleware.compression, Compress::default()))
-                .wrap(security_headers(&middleware))
                 .wrap(Condition::new(
                     middleware.cors.is_some(),
                     cors_middleware(&middleware),
                 ))
-                .app_data(web::JsonConfig::default().limit(max_body))
-                .app_data(web::PayloadConfig::default().limit(max_body))
-                .route("/healthz", web::get().to(healthz))
-                .route("/readyz", web::get().to(readyz))
-                .configure(move |cfg| {
-                    for (method, path, handler) in routes.iter() {
-                        // Clone the Arc once per route so the closure is `Fn`
-                        // (not `FnOnce`) and can be invoked on every request.
-                        let handler = Arc::clone(handler);
-                        let route = method_to_actix_route(method);
-                        cfg.route(
-                            path.as_str(),
-                            route.to(move |req: HttpRequest, body: Bytes| {
-                                // Clone again so the closure remains `Fn`.
-                                let handler = Arc::clone(&handler);
-                                async move {
-                                    let ctx = build_request_context(req, body);
-                                    let response = handler(ctx).await;
-                                    envelope_to_response(response)
-                                }
-                            }),
-                        );
-                    }
-                })
-        });
-
-        let server = match config.workers {
-            Some(w) => server.workers(w),
-            None => server,
-        };
-
+                .wrap(security_headers(&middleware))
+                .default_service(web::to(dispatch))
+        })
+        .disable_signals()
+        .shutdown_timeout(
+            config
+                .shutdown_timeout
+                .as_secs()
+                .saturating_add(u64::from(config.shutdown_timeout.subsec_nanos() > 0)),
+        );
+        if let Some(workers) = config.workers {
+            server = server.workers(workers);
+        }
         let server = match tls {
             Some(tls) => server.bind_rustls_0_23(config.addr, tls),
             None => server.bind(config.addr),
@@ -160,111 +127,92 @@ impl HttpServer for ActixHttpServer {
         .map_err(|e| VsrError::Other(format!("failed to bind {}: {e}", config.addr).into()))?;
         let addresses = server.addrs();
         let running = server.run();
-
-        let handle = running.handle();
-        let stopped_readiness = readiness.clone();
+        let inner = running.handle();
+        let (completed, completion) = tokio::sync::watch::channel(false);
+        let guard = ReadinessGuard(readiness.clone(), completed);
         let task = tokio::spawn(async move {
-            let result = running.await;
-            stopped_readiness.set_ready(false);
-            result
+            let _guard = guard;
+            running.await
         });
-
         Ok(ActixServerHandle {
-            inner: handle,
-            task,
+            inner,
+            task: Some(task),
             readiness,
             addresses,
+            completion,
         })
     }
 
-    async fn shutdown(handle: ActixServerHandle) -> VsrResult<()> {
+    async fn shutdown(mut handle: Self::Handle) -> VsrResult<()> {
         handle.readiness.set_ready(false);
         handle.inner.stop(true).await;
         handle
             .task
+            .take()
+            .expect("running server task")
             .await
             .map_err(|e| VsrError::Other(format!("server task failed: {e}").into()))?
-            .map_err(|e| VsrError::Other(format!("server failed: {e}").into()))?;
-        Ok(())
+            .map_err(|e| VsrError::Other(format!("server failed: {e}").into()))
     }
 }
 
-// ── Health probes ─────────────────────────────────────────────────────────────
-
-async fn healthz() -> HttpResponse {
-    HttpResponse::Ok().content_type("text/plain").body("ok")
+struct State {
+    routes: Arc<RouteTable>,
+    readiness: Readiness,
 }
 
-async fn readyz(readiness: web::Data<Readiness>) -> HttpResponse {
-    if !readiness.is_ready() {
-        return HttpResponse::ServiceUnavailable().body("not ready");
-    }
-    HttpResponse::Ok().content_type("text/plain").body("ok")
-}
-
-fn validate_configuration(config: &ServerConfig, middleware: &MiddlewareConfig) -> VsrResult<()> {
-    let invalid = |message: &str| VsrError::Other(message.to_owned().into());
-    if config.workers == Some(0) {
-        return Err(invalid("HTTP worker count must be positive"));
-    }
-    if !middleware.trusted_proxies.is_empty() {
-        return Err(invalid(
-            "this adapter does not yet expose verified client IPs; trusted_proxies is unsupported",
-        ));
-    }
-    for (_, value) in header_values(middleware) {
-        actix_web::http::header::HeaderValue::from_str(&value)
-            .map_err(|_| invalid("invalid security header value"))?;
-    }
-    if !matches!(
-        middleware.security_headers.x_frame_options.as_str(),
-        "" | "DENY" | "SAMEORIGIN"
-    ) {
-        return Err(invalid(
-            "x_frame_options must be DENY, SAMEORIGIN, or empty",
-        ));
-    }
-    if let Some(cors) = &middleware.cors {
-        if cors.allow_credentials && cors.allowed_origins.is_none() {
-            return Err(invalid("credentialed CORS requires explicit origins"));
+async fn dispatch(
+    req: HttpRequest,
+    body: Result<Bytes, actix_web::Error>,
+    state: web::Data<State>,
+) -> HttpResponse {
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => {
+            return envelope_to_response(ResponseEnvelope::error(
+                error.as_response_error().status_code().as_u16(),
+                "Invalid request body",
+            ));
         }
-        for origin in cors.allowed_origins.iter().flatten() {
-            let uri = origin
-                .parse::<actix_web::http::Uri>()
-                .map_err(|_| invalid("invalid CORS origin"))?;
-            if !matches!(uri.scheme_str(), Some("http" | "https"))
-                || uri.authority().is_none()
-                || uri.path_and_query().is_some_and(|p| p.as_str() != "/")
-            {
-                return Err(invalid(
-                    "CORS origins must be HTTP(S) origins without paths",
-                ));
+    };
+    let mut headers = HeaderFields::default();
+    for (name, value) in req.headers() {
+        if headers.append(name.as_str(), value.as_bytes()).is_err() {
+            return envelope_to_response(ResponseEnvelope::error(400, "Invalid request headers"));
+        }
+    }
+    let context = transport::request_context(
+        req.method().as_str(),
+        req.uri().path(),
+        req.query_string(),
+        headers,
+        body,
+        req.peer_addr(),
+    );
+    let response = match context {
+        Ok(context) => transport::dispatch(&state.routes, &state.readiness, context).await,
+        Err(response) => response,
+    };
+    envelope_to_response(response)
+}
+
+fn envelope_to_response(envelope: ResponseEnvelope) -> HttpResponse {
+    let status = actix_web::http::StatusCode::from_u16(envelope.status)
+        .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let mut builder = HttpResponse::build(status);
+    for (name, value) in envelope.headers.iter() {
+        builder.append_header((name, value));
+    }
+    match envelope.body {
+        ResponseBody::Empty => builder.finish(),
+        ResponseBody::Bytes(bytes) => builder.body(bytes),
+        ResponseBody::Json(value) => {
+            if envelope.headers.get("content-type").is_none() {
+                builder.content_type("application/json");
             }
-        }
-        for header in &cors.allowed_headers {
-            actix_web::http::header::HeaderName::try_from(header.as_str())
-                .map_err(|_| invalid("invalid CORS header name"))?;
+            builder.json(value)
         }
     }
-    Ok(())
-}
-
-fn header_values(middleware: &MiddlewareConfig) -> Vec<(&'static str, String)> {
-    let security = &middleware.security_headers;
-    let mut headers = vec![("x-content-type-options", "nosniff".into())];
-    for (name, value) in [
-        ("content-security-policy", &security.csp),
-        ("x-frame-options", &security.x_frame_options),
-        ("permissions-policy", &security.permissions_policy),
-    ] {
-        if !value.is_empty() {
-            headers.push((name, value.clone()));
-        }
-    }
-    if let Some(age) = security.hsts_max_age_secs {
-        headers.push(("strict-transport-security", format!("max-age={age}")));
-    }
-    headers
 }
 
 fn security_headers(config: &MiddlewareConfig) -> DefaultHeaders {
@@ -285,7 +233,7 @@ fn cors_middleware(config: &MiddlewareConfig) -> actix_cors::Cors {
     } else {
         cors = cors.allow_any_origin();
     }
-    let methods: Vec<String> = config
+    let methods: Vec<_> = config
         .allowed_methods
         .iter()
         .map(ToString::to_string)
@@ -299,154 +247,6 @@ fn cors_middleware(config: &MiddlewareConfig) -> actix_cors::Cors {
     }
     cors
 }
-
-fn load_tls(config: &super::TlsConfig) -> VsrResult<rustls::ServerConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    let load = || -> Result<_, Box<dyn std::error::Error>> {
-        let certificates =
-            CertificateDer::pem_file_iter(&config.cert_path)?.collect::<Result<Vec<_>, _>>()?;
-        let key = PrivateKeyDer::from_pem_file(&config.key_path)?;
-        Ok(rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)?)
-    };
-    load().map_err(|e| VsrError::Other(format!("invalid TLS configuration: {e}").into()))
-}
-
-// ── Request conversion ────────────────────────────────────────────────────────
-
-fn build_request_context(req: HttpRequest, body: Bytes) -> RequestContext {
-    let method = actix_method_to_vsr(req.method());
-    let path = req.path().to_owned();
-
-    let path_params: HashMap<String, String> = req
-        .match_info()
-        .iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect();
-
-    let query_params = parse_query_string(req.query_string());
-
-    let headers: HashMap<String, Vec<String>> = req
-        .headers()
-        .iter()
-        .filter_map(|(name, value)| {
-            let key = name.as_str().to_lowercase();
-            let val = value.to_str().ok()?.to_owned();
-            Some((key, val))
-        })
-        .fold(HashMap::new(), |mut map, (k, v)| {
-            map.entry(k).or_default().push(v);
-            map
-        });
-
-    let request_id = req
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(new_request_id);
-
-    RequestContext {
-        method,
-        path,
-        path_params,
-        query_params,
-        headers,
-        body: if body.is_empty() { None } else { Some(body) },
-        identity: None,
-        request_id,
-    }
-}
-
-// ── Response conversion ───────────────────────────────────────────────────────
-
-fn envelope_to_response(envelope: ResponseEnvelope) -> HttpResponse {
-    let status = actix_web::http::StatusCode::from_u16(envelope.status)
-        .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-
-    let mut builder = HttpResponse::build(status);
-
-    for (name, value) in &envelope.headers {
-        builder.insert_header((name.as_str(), value.as_str()));
-    }
-
-    match envelope.body {
-        ResponseBody::Empty => builder.finish(),
-        ResponseBody::Bytes(bytes) => builder.body(bytes),
-        ResponseBody::Json(value) => {
-            let bytes = serde_json::to_vec(&value).unwrap_or_default();
-            builder.body(bytes)
-        }
-    }
-}
-
-// ── Method helpers ────────────────────────────────────────────────────────────
-
-fn method_to_actix_route(method: &HttpMethod) -> actix_web::Route {
-    match method {
-        HttpMethod::Get => web::get(),
-        HttpMethod::Post => web::post(),
-        HttpMethod::Put => web::put(),
-        HttpMethod::Patch => web::patch(),
-        HttpMethod::Delete => web::delete(),
-        HttpMethod::Head => web::head(),
-        HttpMethod::Options => web::method(actix_web::http::Method::OPTIONS),
-    }
-}
-
-fn actix_method_to_vsr(method: &actix_web::http::Method) -> HttpMethod {
-    match method.as_str() {
-        "GET" => HttpMethod::Get,
-        "POST" => HttpMethod::Post,
-        "PUT" => HttpMethod::Put,
-        "PATCH" => HttpMethod::Patch,
-        "DELETE" => HttpMethod::Delete,
-        "HEAD" => HttpMethod::Head,
-        "OPTIONS" => HttpMethod::Options,
-        _ => HttpMethod::Get,
-    }
-}
-
-// ── Misc helpers ──────────────────────────────────────────────────────────────
-
-/// Parse a raw query string into a key → values map.
-///
-/// Multiple values for the same key are collected in order.
-/// `+` and `%XX` sequences are **not** decoded here — add a proper
-/// `form_urlencoded` pass if that is needed in production.
-fn parse_query_string(qs: &str) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-    if qs.is_empty() {
-        return map;
-    }
-    for pair in qs.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = match pair.split_once('=') {
-            Some((k, v)) => (k.to_owned(), v.to_owned()),
-            None => (pair.to_owned(), String::new()),
-        };
-        if !key.is_empty() {
-            map.entry(key).or_default().push(value);
-        }
-    }
-    map
-}
-
-/// Generate a monotone request ID without pulling in a uuid dependency.
-fn new_request_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let n = CTR.fetch_add(1, Ordering::Relaxed);
-    format!("req-{n:016x}")
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -724,7 +524,7 @@ mod tests {
         // and our converter should fall back to 500.
         let env = ResponseEnvelope {
             status: 50, // below the valid 100-999 range
-            headers: std::collections::HashMap::new(),
+            headers: HeaderFields::default(),
             body: super::ResponseBody::Empty,
         };
         let resp = envelope_to_response(env);

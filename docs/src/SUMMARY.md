@@ -4,6 +4,7 @@
 - [Quickstart](quickstart.md)
 - [CLI Workflow](cli.md)
 - [Migration Integrity And Runtime Upgrade](migrations.md)
+- [HTTP Backend Options](http_backends.md)
 - [`.eon` Reference](reference/eon-reference.md)
 - [Infisical Guide](guides/infisical.md)
 - [Architecture Roadmap](architecture_roadmap.md)

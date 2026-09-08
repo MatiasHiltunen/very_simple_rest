@@ -15,6 +15,56 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  enterprise-authorization:
+    name: Enterprise Authorization (${{ matrix.transport }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [axum, actix, 'axum,actix']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Prove EON Authorization Over Real HTTP
+        run: cargo test -p enterprise-api --no-default-features --features ${{ matrix.transport }} --locked
+      - name: Verify Axum Runtime Isolation
+        if: matrix.transport == 'axum'
+        shell: bash
+        run: |
+          cargo tree -p enterprise-api --no-default-features --features axum -e normal --prefix none --locked > enterprise-dependencies.txt
+          if grep -E '^actix[-_ ]' enterprise-dependencies.txt; then
+            exit 1
+          fi
+
+  http-backend-contract:
+    name: HTTP Contract (${{ matrix.os }}, ${{ matrix.backend }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        backend: [http-actix, http-axum, 'http-actix,http-axum']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Neutral Contracts
+        run: cargo check -p vsr-runtime --no-default-features --locked
+      - name: Verify Backend Contract
+        run: cargo test -p vsr-runtime --no-default-features --features ${{ matrix.backend }} --test http_conformance --locked
+      - name: Compile Embedding Example
+        run: cargo check -p vsr-runtime --no-default-features --features ${{ matrix.backend }} --example http_backend --locked
+      - name: Keep Actix Out Of Axum Consumers
+        if: matrix.backend == 'http-axum'
+        shell: bash
+        run: |
+          cargo tree -p vsr-runtime --no-default-features --features http-axum -e normal --prefix none --locked > http-dependencies.txt
+          if grep -E '^actix[-_ ]' http-dependencies.txt; then
+            echo "Axum-only consumers must not depend on Actix"
+            exit 1
+          fi
+
   database-concurrency:
     name: Database Concurrency (${{ matrix.backend }})
     runs-on: ubuntu-latest

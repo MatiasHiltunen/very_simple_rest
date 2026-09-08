@@ -1,0 +1,10 @@
+backend: "Axum"
+listen: "127.0.0.1:8091"
+database: "var/enterprise.sqlite"
+verification_keys: [{ kid: "demo-es256", pem_file: "var/demo-public.pem" }]
+allowed_origins: ["http://127.0.0.1:8091"]
+request_timeout_seconds: 10
+shutdown_timeout_seconds: 15
+max_in_flight: 64
+max_string_chars: 4096
+max_page_size: 100

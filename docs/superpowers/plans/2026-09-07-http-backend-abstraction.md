@@ -1,10 +1,40 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: proposed; implementation not started by this review.
+Status: in progress; initial transport milestone implemented on 2026-09-08.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
 
-## Conclusion And Scope
+## Implementation Progress (2026-09-08)
+
+- [x] Commit the review snapshot and probes before implementation (`37ec77559`).
+- [x] Repair query decoding, raw-path contract, repeated headers and JSON errors.
+- [x] Add a validated common route table and canonical identity type.
+- [x] Implement Axum HTTP/TLS, middleware, body limits and observable lifecycle.
+- [x] Run the shared conformance suite on both transports, including cancellation.
+- [x] Add feature-isolated consumers, an embedding example and CI parity jobs.
+- [ ] Complete streaming and shared built-in authentication/policy integration.
+- [x] Prove an EON-defined authenticated database-backed CRUD example on both transports.
+- [ ] Migrate shared built-in policy services and native/generated application wiring.
+- [ ] Execute external database/platform CI and production workload parity gates.
+
+The adapters deliberately share a `matchit`-backed VSR route table instead of
+duplicating native router translation. Their framework-native fallback services
+provide transport, while one table defines validation, captures, precedence,
+HEAD/OPTIONS and method errors. This refines the original target design below.
+See [HTTP backend options](../../src/http_backends.md) for current scope and
+compatibility. Actix remains the native/generated application implementation;
+this milestone does not complete Phase 3 or add a CLI backend switch.
+
+The [enterprise API example](../../../examples/enterprise_api/README.md) adds
+the first database-backed slice. It compiles standard VSR EON resource policies
+at build time and uses an example-local bearer verifier, live SQL grants and
+transactional audit boundary. This does not migrate legacy built-in auth.
+See its [local proof record](../../reviews/2026-09-08-enterprise-axum-proof.md).
+
+## Review Snapshot And Scope (2026-09-07)
+
+The following findings and verification describe `7c27c9bb3`, before the
+implementation above. They are retained as the original review evidence.
 
 The project has a usable low-level HTTP contract and one Actix implementation,
 but not a backend-independent application server. Axum cannot currently replace

@@ -18,6 +18,11 @@ vsr-core.workspace = true
 bytes = "1"
 serde.workspace = true
 serde_json.workspace = true
+# Protocol types and routing are shared; no framework types escape the API.
+http = "1"
+matchit = "0.8"
+form_urlencoded = "1"
+percent-encoding = "2"
 
 [features]
 default = []
@@ -25,8 +30,8 @@ default = []
 # ── HTTP implementations ──────────────────────────────────────────────────────
 # Enable the actix-web adapter (default runtime implementation).
 http-actix = ["dep:actix-web", "dep:tokio", "dep:actix-cors", "dep:rustls"]
-# Enable the axum adapter (decision window: end of Phase 3, see §15.2).
-http-axum = ["dep:axum", "dep:tower"]
+# Alternative transport for the same VSR handlers and route table.
+http-axum = ["dep:axum", "dep:axum-server", "dep:tower-http", "dep:http-body-util", "dep:tokio", "dep:rustls"]
 
 # ── Auth capabilities ──────────────────────────────────────────────────────────
 # Email / OTP flows (pulls lettre).
@@ -50,7 +55,7 @@ turso-local = ["vsr-core/turso-local"]
 
 [dependencies.tokio]
 version = "1"
-features = ["rt"]
+features = ["rt", "time", "sync", "net"]
 optional = true
 
 [dependencies.actix-web]
@@ -70,8 +75,20 @@ optional = true
 version = "0.8"
 optional = true
 
-[dependencies.tower]
-version = "0.5"
+[dependencies.axum-server]
+version = "0.8"
+default-features = false
+features = ["tls-rustls-no-provider"]
+optional = true
+
+[dependencies.http-body-util]
+version = "0.1"
+optional = true
+
+[dependencies.tower-http]
+version = "0.7"
+default-features = false
+features = ["cors", "compression-br", "compression-gzip", "compression-deflate", "decompression-br", "decompression-gzip", "decompression-deflate"]
 optional = true
 
 [dependencies.lettre]
@@ -90,6 +107,8 @@ version = "0.1"
 optional = true
 
 [dev-dependencies]
+tempfile = "3"
+flate2 = "1"
 rcgen.workspace = true
 reqwest.workspace = true
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
