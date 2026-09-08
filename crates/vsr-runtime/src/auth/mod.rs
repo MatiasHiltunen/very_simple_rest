@@ -1,8 +1,9 @@
 //! Authentication trait seams.
 //!
-//! The default implementation (`vsr-runtime::auth::builtin`) lives in
-//! `rest_macro_core` today and migrates here during Phase 3. The traits
-//! defined here are the stable public contract.
+//! Built-in request authentication and password work live here behind
+//! `auth-builtin`. Key configuration, database adapters and account endpoints
+//! still live in `rest_macro_core` during Phase 3. The complete account provider
+//! described by [`AuthProvider`] has not yet been extracted.
 //!
 //! # Key traits
 //!
@@ -20,6 +21,14 @@ use vsr_core::error::VsrResult;
 
 #[cfg(feature = "auth-email")]
 pub mod smtp;
+
+pub mod request;
+
+#[cfg(feature = "auth-builtin")]
+pub mod builtin;
+
+#[cfg(feature = "auth-builtin")]
+pub mod password;
 
 // ─── Identity model ───────────────────────────────────────────────────────────
 
@@ -85,14 +94,14 @@ pub enum TokenPurpose {
 
 /// Top-level authentication contract.
 ///
-/// The default implementation (`BuiltinAuthProvider`) lives in the VSR runtime
-/// and uses JWT + bcrypt + SQLx. Operators can replace it with an OIDC bridge,
-/// SSO adapter, or any other implementation.
+/// Target contract for the complete built-in account provider. No complete
+/// implementation exists yet; [`request::RequestAuthenticator`] is the narrower
+/// implemented request boundary. This trait uses static dispatch, not trait objects.
 ///
 /// # Contract
 ///
-/// - Implementations MUST be `Send + Sync + 'static` so they can be held in
-///   `Arc<dyn AuthProvider>` and shared across tokio tasks.
+/// - Implementations MUST be `Send + Sync + 'static` so they can be shared
+///   across Tokio tasks using `Arc<Provider>`.
 /// - All operations MUST NOT panic. Errors are always returned as
 ///   `Err(VsrError::*)`.
 /// - Implementations MUST NOT log credential values (passwords, raw tokens).
@@ -126,10 +135,7 @@ pub trait AuthProvider: Send + Sync + 'static {
 
     /// Initiate a password-reset flow for `email`. If the email is not
     /// registered, silently succeeds (do not leak account existence).
-    fn request_password_reset(
-        &self,
-        email: &str,
-    ) -> impl Future<Output = VsrResult<()>> + Send;
+    fn request_password_reset(&self, email: &str) -> impl Future<Output = VsrResult<()>> + Send;
 
     /// Complete a password reset using a token issued by
     /// [`request_password_reset`](Self::request_password_reset).

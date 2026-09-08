@@ -21,10 +21,10 @@ turso-local = ["dep:turso", "sqlite"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql", "sqlx/mysql-rsa"]
 auth-email = ["dep:lettre", "dep:reqwest"]
-storage-local = ["dep:object_store", "dep:vsr-runtime"]
+storage-local = ["dep:object_store", "vsr-runtime/storage-local"]
 
 [dependencies]
-vsr-runtime = { workspace = true, features = ["storage-local"], optional = true }
+vsr-runtime = { workspace = true, features = ["auth-builtin"] }
 actix-cors.workspace = true
 actix-web.workspace = true
 actix-files.workspace = true
@@ -62,3 +62,8 @@ lettre = { workspace = true, optional = true }
 sha2.workspace = true
 hex.workspace = true
 vsr_schema_doc = { workspace = true, optional = true }
+
+[dev-dependencies]
+vsr-runtime = { workspace = true, features = ["http-actix", "http-axum"] }
+reqwest.workspace = true
+tempfile = "3"

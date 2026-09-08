@@ -10,7 +10,7 @@ depend on Actix. The contract-only build enables neither framework.
 
 This is the first transport milestone of the architecture migration, not an
 Axum replacement for the native CLI. `vsr serve`, generated applications,
-built-in authentication, and existing multipart/static routes still use their
+built-in account endpoints, and existing multipart/static routes still use their
 established Actix paths. No CLI `--http-backend` switch is provided yet.
 Those paths and their configuration have not been switched to the new adapter.
 
@@ -91,11 +91,60 @@ executor and rejects this setting; it is not silently interpreted as an executor
 thread count. Both adapters reject nonempty `trusted_proxies` until verified
 forwarded client identity is implemented. Raw forwarding headers are not trusted.
 
-The HTTP identity type now aliases `auth::AuthenticatedIdentity`. This unifies
-the data model but does not automatically authenticate a request. Unwrapped
-handlers receive no identity; built-in token verification, CSRF, anonymous-client
-policy, rate limiting and authorization still need shared runtime integration.
-Do not expose protected application handlers until those checks are supplied.
+The HTTP identity type aliases `auth::AuthenticatedIdentity`. This unifies the
+data model but does not automatically authenticate a request. Unwrapped handlers
+receive no identity. Use the explicit request-authentication wrapper described
+below and supply authorization before exposing protected application handlers.
+Anonymous-client policy and full application rate limiting still need migration.
+
+## Built-in Request Authentication
+
+The `auth-builtin` feature now owns the existing access-token claims format,
+account-state fingerprint, live-state validation policy, Bearer/cookie selection,
+CSRF checks and bounded password worker pool. It does not depend on Actix or Axum.
+The no-default-features runtime remains a lightweight contract-only consumer.
+
+`auth::request::RequestAuthenticator` is the request-only interface.
+`require_authentication(Arc<Authenticator>, handler)` authenticates on every
+request, discards any preexisting identity, and sets the canonical identity only
+after success. Rejections do not invoke the handler. The handler must still check
+operation permissions and row visibility; authentication is not authorization.
+
+`auth::builtin::BuiltinRequestAuth` requires an `AccessBackend` that verifies JWT
+signatures/algorithm/expiry/issuer/audience and reads current account state. It
+requires live state by default. The explicit `IfPresent` compatibility policy is
+only for externally issued tokens: it never bypasses a state claim when present.
+Do not select that mode for built-in account routes.
+
+`rest_macro_core::auth::builtin_request_authenticator(db, settings)` supplies the
+existing configured-key and SQL account adapters. The native/generated Actix
+`UserContext` extractor now delegates to exactly the same shared policy. Its
+serialized ID, roles and custom claims remain compatible, and account-state
+fingerprints remain byte-compatible with previously issued tokens. Password
+changes and account operations use the shared worker pool through facade helpers.
+
+Credential ambiguity is rejected consistently: repeated Authorization headers,
+duplicate session/CSRF cookies (including encoded aliases), duplicate CSRF headers
+and malformed Authorization values do not select an arbitrary credential. A
+present invalid Authorization header never falls back to a valid cookie. Bearer
+scheme matching is case-insensitive; cookie-based unsafe methods still require
+the configured CSRF pair. Nonpositive built-in numeric subjects are rejected.
+Authentication failures retain existing JSON codes and now include a Bearer
+challenge on 401 responses in both native and neutral paths.
+
+Password work uses a shared bounded pool with no unbounded admission queue.
+Cancelling a request does not release a running job's permit: started
+[`spawn_blocking` tasks cannot be aborted](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
+
+This is an incremental extraction, not a complete `BuiltinAuthProvider` or a CLI
+backend selector. Key loading/issuance, login and other account HTTP handlers,
+the SQL repository and row-policy integration remain in the legacy facade. The
+bridge therefore still links Actix even when a neutral route runs on Axum; the
+runtime-only policy and enterprise example retain their isolated dependency graphs.
+
+The extraction passed the 692-test workspace suite (16 ignored), including a
+real-login/SQLite comparison of native Actix and both adapters. The proof is
+recorded in `docs/reviews/2026-09-08-builtin-auth-migration-proof.md`.
 
 ## Experimental API Changes
 

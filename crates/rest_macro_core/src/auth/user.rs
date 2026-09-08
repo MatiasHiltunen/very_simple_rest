@@ -5,34 +5,31 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use actix_web::dev::Payload;
-use actix_web::{FromRequest, HttpRequest, http::Method, web};
+use actix_web::{FromRequest, HttpRequest, web};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
 
-use crate::errors;
-
-use super::helpers::{auth_settings_from_request, validate_cookie_csrf};
-use super::jwt::{Claims, configured_jwt_decoding_key};
-use super::settings::AuthSettings;
+use super::helpers::auth_settings_from_request;
+use super::runtime::{failure_error, request_authenticator, request_headers};
+use vsr_runtime::auth::request::{AuthFailure, RequestAuthenticator};
 
 pub(crate) struct BuiltinAuth;
 
 // Include the salted password hash and management revision, never expose them in the JWT.
 // updated_at prevents a managed role/claim change from reviving a token when reverted.
 pub(crate) fn account_auth_state(user: &AuthenticatedUser) -> String {
-    use sha2::{Digest, Sha256};
-    let state = serde_json::json!([
-        user.id,
-        user.email,
-        user.password_hash,
-        user.role,
-        user.claims,
-        user.email_verified_at,
-        user.created_at,
-        user.updated_at
-    ]);
-    hex::encode(Sha256::digest(state.to_string().as_bytes()))
+    vsr_runtime::auth::builtin::AccountState {
+        id: user.id,
+        email: &user.email,
+        password_hash: &user.password_hash,
+        role: &user.role,
+        claims: &user.claims,
+        email_verified_at: user.email_verified_at.as_deref(),
+        created_at: user.created_at.as_deref(),
+        updated_at: user.updated_at.as_deref(),
+    }
+    .fingerprint()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -66,111 +63,42 @@ impl FromRequest for UserContext {
     type Future = Pin<Box<dyn Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        use actix_web::http::header;
-
         let settings = auth_settings_from_request(req);
-        let db = req.app_data::<web::Data<crate::db::DbPool>>().cloned();
+        let db = req
+            .app_data::<web::Data<crate::db::DbPool>>()
+            .map(|db| db.get_ref().clone());
         let builtin = req.app_data::<BuiltinAuth>().is_some();
-        let bearer_token = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|s| s.to_string());
-
-        if let Some(token) = bearer_token {
-            return Box::pin(validate_user_context_token(token, settings, db, builtin));
-        }
-
-        if let Some(cookie_settings) = &settings.session_cookie
-            && let Some(cookie) = req.cookie(&cookie_settings.name)
-        {
-            if request_needs_csrf(req.method())
-                && let Err(response) = validate_cookie_csrf(req, cookie_settings)
-            {
-                return Box::pin(std::future::ready(Err(errors::into_actix_error(response))));
-            }
-
-            return Box::pin(validate_user_context_token(
-                cookie.value().to_owned(),
-                settings,
-                db,
-                builtin,
-            ));
-        }
-
-        Box::pin(std::future::ready(Err(errors::into_actix_error(
-            errors::unauthorized("missing_token", "Missing token"),
-        ))))
+        let method = req.method().as_str().to_owned();
+        let headers = request_headers(req);
+        Box::pin(async move {
+            let headers = headers.map_err(failure_error)?;
+            let identity = request_authenticator(db, settings, builtin)
+                .authenticate(&method, &headers)
+                .await
+                .map_err(failure_error)?;
+            Ok(Self {
+                id: identity
+                    .user_id
+                    .parse()
+                    .map_err(|_| failure_error(AuthFailure::InvalidToken))?,
+                roles: identity.roles,
+                claims: identity.claims.into_iter().collect(),
+            })
+        })
     }
 }
 
 #[cfg(test)]
 pub(crate) fn decode_user_context_token(
     token: &str,
-    settings: &AuthSettings,
+    settings: &super::settings::AuthSettings,
 ) -> Result<UserContext, actix_web::Error> {
-    let claims = decode_claims(token, settings)?;
+    let claims = super::runtime::decode_claims(token, settings).map_err(failure_error)?;
     Ok(UserContext {
         id: claims.sub,
         roles: claims.roles,
         claims: claims.extra,
     })
-}
-
-fn decode_claims(token: &str, settings: &AuthSettings) -> Result<Claims, actix_web::Error> {
-    use jsonwebtoken::decode;
-
-    let (decoding_key, validation) =
-        configured_jwt_decoding_key(token, settings).map_err(|_| {
-            errors::into_actix_error(errors::unauthorized("invalid_token", "Invalid token"))
-        })?;
-    let data = decode::<Claims>(token, decoding_key.as_ref(), &validation).map_err(|_| {
-        errors::into_actix_error(errors::unauthorized("invalid_token", "Invalid token"))
-    })?;
-    Ok(data.claims)
-}
-
-async fn validate_user_context_token(
-    token: String,
-    settings: AuthSettings,
-    db: Option<web::Data<crate::db::DbPool>>,
-    builtin: bool,
-) -> Result<UserContext, actix_web::Error> {
-    let claims = decode_claims(&token, &settings)?;
-    if builtin || claims.auth_state.is_some() {
-        let invalid = || {
-            errors::into_actix_error(errors::unauthorized(
-                "revoked_token",
-                "Account changed; log in again",
-            ))
-        };
-        let state = claims.auth_state.as_deref().ok_or_else(invalid)?;
-        let db = db.ok_or_else(invalid)?;
-        let account = super::db_ops::load_authenticated_user_by_id_with_settings(
-            db.get_ref(),
-            claims.sub,
-            &settings,
-        )
-        .await
-        .map_err(|_| errors::into_actix_error(errors::internal_error("Account validation failed")))?
-        .ok_or_else(invalid)?;
-        if state != account_auth_state(&account) {
-            return Err(invalid());
-        }
-    }
-    Ok(UserContext {
-        id: claims.sub,
-        roles: claims.roles,
-        claims: claims.extra,
-    })
-}
-
-pub(crate) fn request_needs_csrf(method: &Method) -> bool {
-    !matches!(
-        *method,
-        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
-    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

@@ -275,24 +275,7 @@ fn extract_ec_public_coordinates(
     Ok((URL_SAFE_NO_PAD.encode(x), URL_SAFE_NO_PAD.encode(y)))
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Claims {
-    #[serde(
-        default,
-        rename = "_vsr_auth_state",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub auth_state: Option<String>,
-    pub sub: i64,
-    pub roles: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iss: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aud: Option<String>,
-    pub exp: usize,
-    #[serde(flatten)]
-    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
-}
+pub(crate) use vsr_runtime::auth::builtin::AccessClaims as Claims;
 
 pub(crate) fn validation_for_settings(
     settings: &AuthSettings,

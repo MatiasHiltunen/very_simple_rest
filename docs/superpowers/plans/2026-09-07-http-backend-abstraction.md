@@ -1,6 +1,7 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: in progress; initial transport milestone implemented on 2026-09-08.
+Status: in progress; transport and built-in request-auth extraction milestones
+implemented on 2026-09-08. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
 
@@ -14,6 +15,10 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Add feature-isolated consumers, an embedding example and CI parity jobs.
 - [ ] Complete streaming and shared built-in authentication/policy integration.
 - [x] Prove an EON-defined authenticated database-backed CRUD example on both transports.
+- [x] Merge the reviewed baseline into `v1` (`f4421989d`, fast-forward).
+- [x] Extract built-in credential/CSRF/account-state policy and bounded password work.
+- [x] Delegate native/generated `UserContext` and password helpers to shared runtime code.
+- [x] Prove real built-in login/account revocation across native Actix and both adapters.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -30,6 +35,20 @@ the first database-backed slice. It compiles standard VSR EON resource policies
 at build time and uses an example-local bearer verifier, live SQL grants and
 transactional audit boundary. This does not migrate legacy built-in auth.
 See its [local proof record](../../reviews/2026-09-08-enterprise-axum-proof.md).
+
+The next extraction moves built-in request policy, token claims and the existing
+account-state fingerprint into `vsr-runtime::auth` with `auth-builtin`. The legacy
+`UserContext` extractor is now a transport adapter over that policy, and password
+helpers delegate to the shared bounded Tokio worker pool. A narrow
+`RequestAuthenticator` and `require_authentication` wrapper support neutral
+handlers without pretending the complete `AuthProvider` lifecycle is implemented.
+
+`rest_macro_core::auth::builtin_request_authenticator` temporarily supplies key
+configuration and the existing SQLx/Turso account repository. This bridge still
+links the legacy facade; only the runtime policy itself is framework-independent.
+Account endpoint handlers, issuance/key loading, row authorization, streaming and
+the native/generated bootstrap remain to be extracted. No CLI backend switch is
+added by this milestone. See [HTTP backend options](../../src/http_backends.md#built-in-request-authentication).
 
 ## Review Snapshot And Scope (2026-09-07)
 

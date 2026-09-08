@@ -8,6 +8,7 @@ mod migrations;
 mod pages;
 mod password;
 mod routing;
+mod runtime;
 mod settings;
 mod tokens;
 mod user;
@@ -58,6 +59,8 @@ pub use routing::{
 
 // Re-export jwks handler
 pub use jwt::jwks;
+
+pub use runtime::builtin_request_authenticator;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

@@ -302,22 +302,7 @@ pub(crate) fn validate_cookie_csrf(
     req: &HttpRequest,
     settings: &SessionCookieSettings,
 ) -> Result<(), HttpResponse> {
-    let csrf_cookie = req
-        .cookie(&settings.csrf_cookie_name)
-        .ok_or_else(|| errors::forbidden("invalid_csrf", "Missing or invalid CSRF token"))?;
-    let csrf_header = req
-        .headers()
-        .get(settings.csrf_header_name.as_str())
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| errors::forbidden("invalid_csrf", "Missing or invalid CSRF token"))?;
-
-    if csrf_header == csrf_cookie.value() {
-        Ok(())
-    } else {
-        Err(errors::forbidden(
-            "invalid_csrf",
-            "Missing or invalid CSRF token",
-        ))
-    }
+    let headers = super::runtime::request_headers(req).map_err(super::runtime::failure_response)?;
+    vsr_runtime::auth::builtin::validate_cookie_csrf(&headers, &super::runtime::cookie_policy(settings))
+        .map_err(super::runtime::failure_response)
 }
