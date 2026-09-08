@@ -130,19 +130,9 @@ pub(crate) fn build_public_auth_url(
             url.set_path(&scoped_path);
         }
         url
-    } else if let Some(req) = req {
-        let info = req.connection_info();
-        url::Url::parse(&format!(
-            "{}://{}{}",
-            info.scheme(),
-            info.host(),
-            scope_prefix.trim_end_matches('/')
-        ))
-        .map_err(|error| format!("failed to build auth base URL from request: {error}"))?
     } else {
         return Err(
-            "security.auth.email.public_base_url is required when auth emails are sent outside an HTTP request context"
-                .to_owned(),
+            "security.auth.email.public_base_url is required for authentication email links".to_owned(),
         );
     };
 

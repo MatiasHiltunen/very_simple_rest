@@ -215,10 +215,53 @@ Resetting a password changes the account fingerprint, invalidating old sessions.
 Existing Actix JSON endpoints and the verification HTML page delegate to this
 service without changing their public handler signatures or response codes.
 Real HTTP tests also mount the service behind both runtime adapters. These remain
-test-only route adapters: production extraction, rate limiting, email issuance and
-delivery, registration and admin operations still need migration. Native/emitted
+test-only route adapters: production extraction, rate limiting,
+registration and admin operations still need migration. Email issuance is covered
+by the next section. Native/emitted
 backend selection and the Actix-free infrastructure bridge remain incomplete.
 See `docs/reviews/2026-09-08-recovery-service-migration-proof.md`.
+
+## Shared Recovery Email
+
+`auth::recovery_email::RecoveryEmailService` now owns anonymous verification-resend
+and password-reset requests. It normalizes the submitted email, reads the current
+recipient inside a driver transaction, suppresses absent/already-verified
+verification recipients, replaces the email-bound token, sends the message and
+commits. Both normal and suppressed requests return an empty 202 response.
+
+`RecoveryEmailSender` is also used inside native registration and admin/account
+verification transactions. It uses the existing neutral `Mailer` interface,
+shared text/HTML templates, 256 bits of fallible OS entropy, SHA-256 token digests,
+checked microsecond expiry arithmetic and a bounded delivery wait. The facade
+uses a 30-second delivery timeout and retains configured SMTP, Resend, sender,
+reply-to and capture-file support. Provider errors are redacted in public errors;
+`MailMessage` Debug output no longer contains addresses or credential-bearing bodies.
+
+`rest_macro_core::auth::builtin_recovery_email_service` supplies the temporary SQL
+and provider bridge. SQLite/Turso anonymous requests reserve the write transaction
+before reading; PostgreSQL/MySQL use an account-row lock, including first issuance
+where no token row exists. Only local SQLite and Turso concurrency is verified.
+Native registration/admin transaction ownership has not yet moved to the runtime.
+
+Compatibility change: `security.auth.email.public_base_url` must now be configured
+to send authentication emails, even inside an HTTP request. Links never fall back
+to Host or Forwarded headers. Use HTTPS; HTTP is accepted only for literal
+loopback addresses or `localhost` development. Credential-bearing URLs are rejected.
+Application scope prefixes remain supported. Missing/invalid configuration fails
+before issuing a token; existing configuration documents still deserialize.
+Tokens remain opaque to clients; newly issued tokens are 64 hex characters rather
+than 48 alphanumeric characters. Existing unexpired, email-bound tokens still work.
+
+This is not a durable outbox: mail acceptance and database commit are not atomic.
+Commit failure or cancellation after acceptance can leave a delivered link unusable;
+retry requests replace earlier links. Missing-account responses, provider failures
+and response timing can still disclose account existence. Per-account recovery
+abuse controls, timing-resistant asynchronous delivery and reset-notification mail
+remain production hardening gates. These limits matter alongside the
+[OWASP recovery guidance](https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html).
+
+The real HTTP proof uses a local mock Resend provider, not an external inbox or
+SMTP acceptance test. See `docs/reviews/2026-09-08-recovery-email-migration-proof.md`.
 
 ## Experimental API Changes
 

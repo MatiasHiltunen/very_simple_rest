@@ -64,7 +64,7 @@ For real delivery:
 
 1. Set `RESEND_API_KEY`.
 2. Replace `from_email` with a sender that your provider accepts.
-3. If auth emails need a fixed public origin outside request scope, set `public_base_url` to your published HTTPS site.
+3. Set `security.auth.email.public_base_url` to your published HTTPS site. It is required for auth email links; the checked-in value targets the local `https://127.0.0.1:8443` demo. Request Host and Forwarded headers are never used as an email-link origin.
 
 If you prefer SMTP/`lettre`, swap the provider block in `bridgeboard.eon` to:
 

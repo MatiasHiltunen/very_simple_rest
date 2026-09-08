@@ -779,7 +779,7 @@ This block is required when email verification is mandatory.
 | security.auth.email.from_email | String | None | Yes when the block is present | Email-like string | Must contain `@`. |
 | security.auth.email.from_name | String | None | No | Display name | Optional sender display name. |
 | security.auth.email.reply_to | String | None | No | Email-like string | Cannot be empty when provided. |
-| security.auth.email.public_base_url | String | None | No | Absolute URL | Used when generating absolute links in auth emails. |
+| security.auth.email.public_base_url | String | None | Required to send auth email | HTTPS URL, or HTTP loopback for development | Trusted base for auth email links; no request Host fallback. Missing/invalid values fail at email issuance. |
 | security.auth.email.provider | Map | None | Yes when the block is present | See Auth Email Provider | Selects the outbound email provider implementation. |
 
 ## Auth Email Provider

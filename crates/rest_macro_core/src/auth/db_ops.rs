@@ -7,9 +7,9 @@ use sqlx::{Column, Row};
 use crate::db::{DbPool, query, query_scalar};
 
 use super::admin::ManagedClaimUpdateValue;
-use super::helpers::{
-    generate_ephemeral_secret, hash_auth_token, optional_text_column, row_has_column,
-};
+use super::helpers::{optional_text_column, row_has_column};
+#[cfg(test)]
+use super::helpers::hash_auth_token;
 use super::migrations::{AuthDbBackend, auth_user_table_ident};
 use super::settings::{AuthClaimType, AuthSettings};
 use super::user::{AccountInfo, AuthTokenPurpose, AuthenticatedUser, StoredAuthToken};
@@ -255,6 +255,7 @@ pub(crate) async fn list_authenticated_users_with_settings(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) async fn create_auth_token<E>(
     db: &E,
     user_id: i64,
@@ -265,28 +266,32 @@ pub(crate) async fn create_auth_token<E>(
 where
     E: crate::db::DbExecutor + ?Sized,
 {
-    use chrono::{Duration, SecondsFormat, Utc};
+    let token = vsr_runtime::auth::recovery_email::RecoveryToken::generate(
+        ttl_seconds,
+        &vsr_core::clock::SystemClock,
+    )
+    .map_err(|_| sqlx::Error::Protocol("Invalid recovery token configuration".to_owned()))?;
+    replace_auth_token(db, user_id, purpose, requested_email, &token).await?;
+    Ok(token.raw().to_owned())
+}
 
-    let token = generate_ephemeral_secret(48);
-    let token_hash = hash_auth_token(&token);
-    let expires_at = (Utc::now() + Duration::seconds(ttl_seconds.max(1)))
-        .to_rfc3339_opts(SecondsFormat::Micros, false);
-    query("DELETE FROM auth_user_token WHERE user_id = ? AND purpose = ?")
-        .bind(user_id)
-        .bind(purpose.as_str())
-        .execute(db)
-        .await?;
+pub(crate) async fn replace_auth_token<E>(
+    db: &E,
+    user_id: i64,
+    purpose: AuthTokenPurpose,
+    requested_email: Option<&str>,
+    token: &vsr_runtime::auth::recovery_email::RecoveryToken,
+) -> Result<(), sqlx::Error>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
+    delete_auth_tokens_for_user_purpose(db, user_id, purpose).await?;
     query(
         "INSERT INTO auth_user_token (user_id, purpose, token_hash, requested_email, expires_at) VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(user_id)
-    .bind(purpose.as_str())
-    .bind(token_hash)
-    .bind(requested_email)
-    .bind(expires_at)
-    .execute(db)
-    .await?;
-    Ok(token)
+    .bind(user_id).bind(purpose.as_str()).bind(token.digest())
+    .bind(requested_email).bind(token.expires_at()).execute(db).await?;
+    Ok(())
 }
 
 #[cfg(test)]

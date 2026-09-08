@@ -130,6 +130,10 @@ pub enum AccountError {
     Database,
     /// The configured signer could not issue a token.
     TokenGeneration,
+    /// Built-in transactional email is not configured.
+    EmailUnavailable,
+    /// Delivery failed or timed out; provider details must not reach clients.
+    EmailDelivery,
     /// Invalid TTL, subject or clock value.
     Configuration,
     /// A concurrent account update invalidated the password-change snapshot.
@@ -166,6 +170,18 @@ impl AccountError {
             ),
             Self::Database => (500, "internal_error", "Database error", None),
             Self::TokenGeneration => (500, "internal_error", "Token generation failed", None),
+            Self::EmailUnavailable => (
+                503,
+                "auth_email_unavailable",
+                "Built-in auth email delivery is not configured",
+                None,
+            ),
+            Self::EmailDelivery => (
+                500,
+                "internal_error",
+                "Failed to send authentication email",
+                None,
+            ),
             Self::Configuration => (
                 500,
                 "internal_error",

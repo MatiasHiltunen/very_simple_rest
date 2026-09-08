@@ -32,11 +32,16 @@ jobs:
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::accounts::tests --locked
       - name: Test Recovery Transactions And Cancellation
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::tokens::tests --locked
+      - name: Test Recovery Email Replacement And Rollback
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::recovery_email::tests --locked
       - name: Test Local Turso Recovery Transactions
         if: runner.os == 'Linux'
         run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::tokens::tests --locked
       - name: Compare Native Actix And Both Transports With Built-in Accounts
-        run: cargo test -p rest_macro_core --no-default-features --features sqlite --test builtin_auth_runtime --locked
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite,auth-email --test builtin_auth_runtime --locked
+      - name: Test Local Turso Recovery Email Issuance
+        if: runner.os == 'Linux'
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::recovery_email::tests --locked
       - name: Keep Frameworks Out Of Authentication Policy
         shell: bash
         run: |

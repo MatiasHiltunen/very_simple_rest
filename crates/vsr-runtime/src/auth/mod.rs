@@ -1,6 +1,6 @@
 //! Authentication trait seams.
 //!
-//! Built-in request authentication, account operations and recovery consumption
+//! Built-in request authentication, account operations, recovery and email issuance
 //! live here behind `auth-builtin`. Key configuration, database adapters and HTTP
 //! endpoints still live in `rest_macro_core` during Phase 3. The complete account provider
 //! described by [`AuthProvider`] has not yet been extracted.
@@ -32,6 +32,9 @@ pub mod accounts;
 
 #[cfg(feature = "auth-builtin")]
 pub mod recovery;
+
+#[cfg(feature = "auth-builtin")]
+pub mod recovery_email;
 
 #[cfg(feature = "auth-builtin")]
 pub mod password;
@@ -283,7 +286,7 @@ pub trait Mailer: Send + Sync + 'static {
 }
 
 /// A transactional email message.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MailMessage {
     /// Sender address (e.g. `"VSR Service <noreply@example.com>"`).
     pub from: String,
@@ -295,4 +298,10 @@ pub struct MailMessage {
     pub text_body: String,
     /// Optional HTML body.
     pub html_body: Option<String>,
+}
+
+impl std::fmt::Debug for MailMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailMessage").finish_non_exhaustive()
+    }
 }

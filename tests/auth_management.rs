@@ -169,13 +169,7 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
             .expect("auth management migration should apply");
     }
 
-    let mut security = auth_management_api::security();
-    security
-        .auth
-        .email
-        .as_mut()
-        .expect("auth management fixture should define email settings")
-        .public_base_url = Some("https://app.example".to_owned());
+    let security = auth_management_api::security();
     let app = test::init_service(
         App::new()
             .app_data(actix_web::web::Data::new(pool.clone()))
@@ -202,6 +196,9 @@ async fn built_in_auth_management_supports_verification_reset_and_dashboards() {
     let captured = capture_files(&capture_dir);
     assert_eq!(captured.len(), 1);
     let verification_token = token_from_capture(&captured[0]);
+    assert!(
+        url_from_capture(&captured[0]).starts_with("https://app.example/api/auth/verify-email?token=")
+    );
 
     let login_before_verify = test::TestRequest::post()
         .uri("/api/auth/login")

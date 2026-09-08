@@ -17,7 +17,7 @@ use super::db_ops::{
     user_table_columns,
 };
 use super::email::{
-    configured_auth_email, send_password_reset_email_for_user, send_verification_email_for_user,
+    configured_auth_email, send_verification_email_for_user,
 };
 use super::helpers::{
     auth_api_base_path_for_page, auth_settings_from_request, enforce_auth_rate_limit,
@@ -366,54 +366,47 @@ pub async fn verify_email_page(
     }
 }
 
+async fn request_recovery_email(
+    req: &HttpRequest,
+    email: &str,
+    db: &DbPool,
+    purpose: super::user::AuthTokenPurpose,
+    current_route_path: &str,
+) -> HttpResponse {
+    let settings = auth_settings_from_request(req);
+    let url =
+        match super::email::action_url(Some(req), &settings, purpose, Some(current_route_path)) {
+            Ok(url) => url,
+            Err(error) => return super::accounts::error_response(error),
+        };
+    let service = match super::recovery_email::builtin_recovery_email_service(
+        db.clone(),
+        &settings,
+        &url,
+        purpose,
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::error_response(error),
+    };
+    match service.request(email).await {
+        Ok(()) => HttpResponse::Accepted().finish(),
+        Err(error) => super::accounts::error_response(error),
+    }
+}
+
 pub async fn resend_verification(
     req: HttpRequest,
     input: web::Json<VerificationResendInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    let settings = auth_settings_from_request(&req);
-    if let Err(response) = configured_auth_email(&settings) {
-        return response;
-    }
-
-    let email = match normalize_auth_email(&input.email) {
-        Ok(email) => email,
-        Err(response) => return response,
-    };
-    let user = match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings)
-        .await
-    {
-        Ok(user) => user,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    let Some(user) = user else {
-        return HttpResponse::Accepted().finish();
-    };
-    if user.email_verified_at.is_some() {
-        return HttpResponse::Accepted().finish();
-    }
-
-    let tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    if let Err(response) = send_verification_email_for_user(
-        &tx,
-        Some(&req),
-        &settings,
-        &user,
+    request_recovery_email(
+        &req,
+        &input.email,
+        db.get_ref(),
+        super::user::AuthTokenPurpose::EmailVerification,
         "/auth/verification/resend",
     )
     .await
-    {
-        let _ = tx.rollback().await;
-        return response;
-    }
-    if tx.commit().await.is_err() {
-        return errors::internal_error("Database error");
-    }
-
-    HttpResponse::Accepted().finish()
 }
 
 pub async fn resend_account_verification(
@@ -466,40 +459,14 @@ pub async fn request_password_reset(
     input: web::Json<PasswordResetRequestInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    let settings = auth_settings_from_request(&req);
-    if let Err(response) = configured_auth_email(&settings) {
-        return response;
-    }
-
-    let email = match normalize_auth_email(&input.email) {
-        Ok(email) => email,
-        Err(response) => return response,
-    };
-    let user = match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings)
-        .await
-    {
-        Ok(user) => user,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    let Some(user) = user else {
-        return HttpResponse::Accepted().finish();
-    };
-
-    let tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    if let Err(response) =
-        send_password_reset_email_for_user(&tx, Some(&req), &settings, &user).await
-    {
-        let _ = tx.rollback().await;
-        return response;
-    }
-    if tx.commit().await.is_err() {
-        return errors::internal_error("Database error");
-    }
-
-    HttpResponse::Accepted().finish()
+    request_recovery_email(
+        &req,
+        &input.email,
+        db.get_ref(),
+        super::user::AuthTokenPurpose::PasswordReset,
+        "/auth/password-reset/request",
+    )
+    .await
 }
 
 pub async fn confirm_password_reset(

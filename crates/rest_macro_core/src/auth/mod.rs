@@ -2,6 +2,7 @@ mod admin;
 mod accounts;
 mod db_ops;
 mod email;
+mod recovery_email;
 pub mod handlers;
 mod helpers;
 mod jwt;
@@ -64,6 +65,7 @@ pub use jwt::jwks;
 pub use runtime::builtin_request_authenticator;
 pub use accounts::builtin_account_service;
 pub use tokens::builtin_recovery_service;
+pub use recovery_email::builtin_recovery_email_service;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

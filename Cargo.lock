@@ -5017,6 +5017,7 @@ dependencies = [
  "turso",
  "url",
  "uuid",
+ "vsr-core",
  "vsr-runtime",
  "vsr_schema_doc",
 ]
@@ -7062,6 +7063,7 @@ dependencies = [
  "cookie",
  "flate2",
  "form_urlencoded",
+ "getrandom 0.4.3",
  "hex",
  "http 1.5.0",
  "http-body-util",
@@ -7079,6 +7081,7 @@ dependencies = [
  "tokio",
  "tower-http 0.7.1",
  "tracing",
+ "url",
  "vsr-core",
 ]
 

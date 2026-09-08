@@ -28,6 +28,9 @@ struct Fixture {
 
 static PASSWORD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(feature = "auth-email")]
+mod builtin_auth_email_flow;
+
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -198,6 +201,7 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
         ]
         .into_iter()
         .chain(recovery_routes(fixture))
+        .chain(recovery_email_routes(fixture))
         .collect(),
     )
     .await
@@ -208,12 +212,62 @@ async fn account_response(request: reqwest::RequestBuilder, status: u16) -> Valu
     let response = request.send().await.unwrap();
     assert_eq!(response.status().as_u16(), status);
     assert_eq!(response.headers().get_all("set-cookie").iter().count(), 0);
-    if status == 204 {
+    if status == 204 || status == 202 {
         assert!(response.bytes().await.unwrap().is_empty());
         Value::Null
     } else {
         response.json().await.unwrap()
     }
+}
+
+fn recovery_email_routes(
+    fixture: &Fixture,
+) -> Vec<(HttpMethod, String, vsr_runtime::http::Handler)> {
+    use vsr_runtime::auth::recovery::TokenPurpose;
+    let Some(email) = &fixture.settings.email else {
+        return Vec::new();
+    };
+    let base = email.public_base_url.as_deref().unwrap();
+    [
+        (
+            "/auth/verification/resend",
+            "/auth/verify-email",
+            TokenPurpose::EmailVerification,
+        ),
+        (
+            "/auth/password-reset/request",
+            "/auth/password-reset",
+            TokenPurpose::PasswordReset,
+        ),
+    ]
+    .into_iter()
+    .map(|(path, action, purpose)| {
+        let service = Arc::new(
+            auth::builtin_recovery_email_service(
+                fixture.db.clone(),
+                &fixture.settings,
+                &format!("{base}{action}"),
+                purpose,
+            )
+            .unwrap(),
+        );
+        let handler = make_handler(move |request| {
+            let service = service.clone();
+            async move {
+                let input: auth::PasswordResetRequestInput =
+                    match serde_json::from_slice(request.body.as_deref().unwrap_or_default()) {
+                        Ok(input) => input,
+                        Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
+                    };
+                match service.request(&input.email).await {
+                    Ok(()) => ResponseEnvelope::status(202),
+                    Err(error) => error.response(),
+                }
+            }
+        });
+        (HttpMethod::Post, path.to_owned(), handler)
+    })
+    .collect()
 }
 
 fn recovery_routes(fixture: &Fixture) -> Vec<(HttpMethod, String, vsr_runtime::http::Handler)> {

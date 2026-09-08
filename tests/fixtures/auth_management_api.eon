@@ -10,6 +10,7 @@ security: {
         email: {
             from_email: "noreply@example.com"
             from_name: "VSR Auth"
+            public_base_url: "https://app.example"
             provider: {
                 kind: Resend
                 api_key_env: "RESEND_API_KEY"

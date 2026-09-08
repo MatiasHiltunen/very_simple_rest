@@ -1,6 +1,6 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: in progress; transport, request-auth, account and recovery-consumption milestones
+Status: in progress; transport, request-auth, account, recovery-consumption and email-issuance milestones
 implemented on 2026-09-08. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
@@ -27,6 +27,10 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Share verification/reset consumption and its transaction sequencing.
 - [x] Enforce email binding and prove expiry, single use, rollback and cancellation.
 - [x] Prove recovery and session revocation over native Actix and both runtime transports.
+- [x] Commit and push request-auth/account/recovery milestones to `origin/v1` (`edad7d389`).
+- [x] Extract recovery issuance, templates, delivery and anonymous request orchestration.
+- [x] Require trusted email-link configuration, checked expiry and bounded/redacted delivery.
+- [x] Prove actual issued email links over native Actix and both runtime transports.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -68,8 +72,16 @@ The SQLite/Turso bridge acquires a write reservation before token reads, and
 Turso transaction-control awaits discard unfinished leases on cancellation.
 See the [recovery proof](../../reviews/2026-09-08-recovery-service-migration-proof.md).
 
-Next: extract registration, recovery-token issuance/email delivery and admin
-changes while preserving transaction boundaries. Shared cookie/extraction/rate-limit routing, row authorization,
+Recovery issuance and anonymous request orchestration now live in `RecoveryEmailService`.
+Existing registration/admin transactions reuse `RecoveryEmailSender`, with the
+configured provider bridge implementing the existing `Mailer` interface. This
+preserves send-before-commit behavior, not durable/outbox delivery. Trusted public
+URLs are now required; provider errors are redacted and delivery waits are bounded.
+See the [email proof](../../reviews/2026-09-08-recovery-email-migration-proof.md).
+
+Next: extract registration and admin changes while preserving transaction
+boundaries. Durable recovery delivery and abuse/enumeration resistance remain
+hardening gates. Shared cookie/extraction/rate-limit routing, row authorization,
 streaming and native/generated bootstrap remain required. No CLI backend switch
 is added by these milestones. See [HTTP backend options](../../src/http_backends.md#shared-account-operations).
 

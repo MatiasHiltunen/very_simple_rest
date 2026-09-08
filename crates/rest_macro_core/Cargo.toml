@@ -24,6 +24,7 @@ auth-email = ["dep:lettre", "dep:reqwest"]
 storage-local = ["dep:object_store", "vsr-runtime/storage-local"]
 
 [dependencies]
+vsr-core.workspace = true
 vsr-runtime = { workspace = true, features = ["auth-builtin"] }
 actix-cors.workspace = true
 actix-web.workspace = true

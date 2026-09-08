@@ -215,7 +215,7 @@ fn parse_mailbox(name: Option<&str>, email: &str) -> Result<Mailbox, String> {
     ))
 }
 
-fn format_mailbox(name: Option<&str>, email: &str) -> String {
+pub(crate) fn format_mailbox(name: Option<&str>, email: &str) -> String {
     match name.filter(|value| !value.trim().is_empty()) {
         Some(name) => format!("{name} <{email}>"),
         None => email.to_owned(),
