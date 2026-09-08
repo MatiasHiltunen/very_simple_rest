@@ -50,8 +50,7 @@ pub(crate) fn normalize_auth_role(
 }
 
 pub(crate) fn hash_auth_token(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(token.as_bytes()))
+    vsr_runtime::auth::recovery::token_digest(token)
 }
 
 pub(crate) fn is_missing_auth_management_schema(error: &sqlx::Error) -> bool {

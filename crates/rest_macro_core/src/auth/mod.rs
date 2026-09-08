@@ -63,6 +63,7 @@ pub use jwt::jwks;
 
 pub use runtime::builtin_request_authenticator;
 pub use accounts::builtin_account_service;
+pub use tokens::builtin_recovery_service;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
@@ -91,7 +92,7 @@ mod tests {
             .await
             .unwrap();
         query(&format!("INSERT INTO {} (email, password_hash, role) VALUES ('race@example.com', 'old', 'user')", super::auth_user_table_ident(backend))).execute(&pool).await.unwrap();
-        let raw = create_auth_token(&pool, 1, AuthTokenPurpose::PasswordReset, None, 300)
+        let raw = create_auth_token(&pool, 1, AuthTokenPurpose::PasswordReset, Some("race@example.com"), 300)
             .await
             .unwrap();
         let results = futures_util::future::join_all(
@@ -198,7 +199,7 @@ mod tests {
             .await
             .unwrap();
         query("INSERT INTO user (email, password_hash, role) VALUES ('test@example.com', 'old', 'user')").execute(&pool).await.unwrap();
-        let raw = create_auth_token(&pool, 1, AuthTokenPurpose::PasswordReset, None, 300)
+        let raw = create_auth_token(&pool, 1, AuthTokenPurpose::PasswordReset, Some("test@example.com"), 300)
             .await
             .unwrap();
         let token = load_pending_auth_token(&pool, &raw, AuthTokenPurpose::PasswordReset)

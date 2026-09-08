@@ -1,6 +1,6 @@
 //! Authentication trait seams.
 //!
-//! Built-in request authentication, login, account reads and password changes
+//! Built-in request authentication, account operations and recovery consumption
 //! live here behind `auth-builtin`. Key configuration, database adapters and HTTP
 //! endpoints still live in `rest_macro_core` during Phase 3. The complete account provider
 //! described by [`AuthProvider`] has not yet been extracted.
@@ -29,6 +29,9 @@ pub mod builtin;
 
 #[cfg(feature = "auth-builtin")]
 pub mod accounts;
+
+#[cfg(feature = "auth-builtin")]
+pub mod recovery;
 
 #[cfg(feature = "auth-builtin")]
 pub mod password;

@@ -32,9 +32,7 @@ use super::pages::{
     render_password_reset_page,
 };
 use super::settings::{AuthSettings, SessionCookieSettings};
-use super::tokens::{
-    TokenActionOutcome, apply_email_verification_token, apply_password_reset_token,
-};
+use super::tokens::{TokenActionOutcome, apply_email_verification_token};
 use super::user::{
     AdminListQuery, AuthRateLimitScope, AuthTokenQuery, ChangePasswordInput,
     CreateManagedUserInput, LoginInput, PasswordResetConfirmInput, PasswordResetRequestInput,
@@ -311,23 +309,14 @@ pub async fn verify_email_token(
     input: web::Json<VerifyEmailInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    let token = input.token.trim();
-    if token.is_empty() {
-        return errors::validation_error("token", "Verification token cannot be empty");
-    }
-
-    match apply_email_verification_token(db.get_ref(), token).await {
-        Ok(TokenActionOutcome::Applied) => HttpResponse::NoContent().finish(),
-        Ok(TokenActionOutcome::Invalid) => {
-            errors::bad_request("invalid_token", "Verification token is invalid")
-        }
-        Ok(TokenActionOutcome::Expired) => {
-            errors::bad_request("expired_token", "Verification token has expired")
-        }
-        Err(error) if is_missing_auth_management_schema(&error) => {
-            missing_auth_management_schema_response()
-        }
-        Err(_) => errors::internal_error("Database error"),
+    match super::tokens::builtin_recovery_service(db.get_ref().clone())
+        .verify_email(&input.token)
+        .await
+    {
+        Ok(outcome) => super::accounts::response(
+            outcome.response(super::user::AuthTokenPurpose::EmailVerification),
+        ),
+        Err(error) => super::accounts::error_response(error),
     }
 }
 
@@ -364,7 +353,7 @@ pub async fn verify_email_page(
             "This verification link has expired.",
             "Request a new verification email from the account portal or sign-up flow.",
         ),
-        Err(error) if is_missing_auth_management_schema(&error) => render_message_page(
+        Err(vsr_runtime::auth::accounts::AccountError::MissingSchema) => render_message_page(
             "Migration Required",
             "The built-in auth management schema is missing.",
             "Apply the built-in auth migration again to add email verification support.",
@@ -517,31 +506,14 @@ pub async fn confirm_password_reset(
     input: web::Json<PasswordResetConfirmInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    let token = input.token.trim();
-    if token.is_empty() {
-        return errors::validation_error("token", "Reset token cannot be empty");
-    }
-    if let Err(response) = validate_auth_password(&input.new_password) {
-        return response;
-    }
-
-    let password_hash = match hash(&input.new_password, 12).await {
-        Ok(hash) => hash,
-        Err(response) => return response,
-    };
-
-    match apply_password_reset_token(db.get_ref(), token, &password_hash).await {
-        Ok(TokenActionOutcome::Applied) => HttpResponse::NoContent().finish(),
-        Ok(TokenActionOutcome::Invalid) => {
-            errors::bad_request("invalid_token", "Password reset token is invalid")
-        }
-        Ok(TokenActionOutcome::Expired) => {
-            errors::bad_request("expired_token", "Password reset token has expired")
-        }
-        Err(error) if is_missing_auth_management_schema(&error) => {
-            missing_auth_management_schema_response()
-        }
-        Err(_) => errors::internal_error("Database error"),
+    match super::tokens::builtin_recovery_service(db.get_ref().clone())
+        .reset_password(&input.token, &input.new_password)
+        .await
+    {
+        Ok(outcome) => super::accounts::response(
+            outcome.response(super::user::AuthTokenPurpose::PasswordReset),
+        ),
+        Err(error) => super::accounts::error_response(error),
     }
 }
 

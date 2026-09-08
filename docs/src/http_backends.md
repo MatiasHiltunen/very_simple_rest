@@ -175,12 +175,50 @@ the service. Cookie issuance, CSRF presentation, JSON extraction and login rate
 limiting remain in their existing HTTP layer. A neutral consumer must supply
 these controls itself; the service is not a production route installer.
 
-This milestone does not migrate registration, verification/reset tokens, admin
-operations, email delivery or application authorization. Native/emitted servers
+This account milestone does not migrate registration, admin operations, email
+delivery or application authorization. Verification/reset consumption is covered
+by the next section. Native/emitted servers
 still use Actix. The account service itself is framework-independent, but its
 temporary legacy infrastructure bridge still links Actix. Verification and
 remaining gates are recorded in
 `docs/reviews/2026-09-08-account-service-migration-proof.md`.
+
+## Shared Recovery Operations
+
+`auth::recovery::RecoveryService` owns email verification and password-reset
+consumption. `RecoveryRepository` supplies a transaction whose token lookup,
+conditional claim, account mutation and token deletion share one commit boundary.
+An error rolls the transaction back; cancellation drops an unfinished transaction.
+Adapters must implement rollback-on-drop and must not report success when no
+account row was updated.
+
+Expiry retains RFC3339 microsecond precision, rejects malformed dates and expires
+at the exact deadline. The service checks again after claiming because a claim
+can wait behind another transaction. The additive `Clock::now_unix_micros` method
+allows deterministic tests without reducing production precision. Recovery token
+hashes retain the existing SHA-256 format; the database receives only the digest.
+
+Tokens now require their stored `requested_email` to match the current account
+email atomically. Missing bindings, changed email addresses and deleted accounts
+cannot produce successful verification/reset. A mismatched token is removed, so
+restoring the old address cannot revive it. Existing normal email issuance already
+stores this binding. Legacy manually created tokens with NULL/empty bindings are
+now rejected; request a new email instead of rewriting stored recovery tokens.
+
+`rest_macro_core::auth::builtin_recovery_service(db)` supplies the temporary
+SQLx/Turso bridge. SQLite and local Turso reserve the write transaction before
+reading to avoid read-to-write lock-upgrade failures under competing consumers.
+Other databases retain their existing transaction/conditional-claim mechanism.
+Password validation and bounded bcrypt work run before opening the transaction.
+Resetting a password changes the account fingerprint, invalidating old sessions.
+
+Existing Actix JSON endpoints and the verification HTML page delegate to this
+service without changing their public handler signatures or response codes.
+Real HTTP tests also mount the service behind both runtime adapters. These remain
+test-only route adapters: production extraction, rate limiting, email issuance and
+delivery, registration and admin operations still need migration. Native/emitted
+backend selection and the Actix-free infrastructure bridge remain incomplete.
+See `docs/reviews/2026-09-08-recovery-service-migration-proof.md`.
 
 ## Experimental API Changes
 

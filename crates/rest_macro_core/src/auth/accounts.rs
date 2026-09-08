@@ -93,7 +93,10 @@ pub fn builtin_account_service(
 }
 
 pub(super) fn error_response(error: AccountError) -> HttpResponse {
-    let response = error.response();
+    response(error.response())
+}
+
+pub(super) fn response(response: vsr_runtime::http::ResponseEnvelope) -> HttpResponse {
     let mut builder =
         HttpResponse::build(StatusCode::from_u16(response.status).expect("valid account status"));
     for (name, value) in response.headers.iter() {

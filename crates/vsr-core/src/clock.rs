@@ -43,6 +43,12 @@ pub trait Clock: Send + Sync + 'static {
     /// Current time as seconds since the Unix epoch (UTC).
     fn now_unix(&self) -> UnixTimestamp;
 
+    /// Microseconds since the Unix epoch for subsecond token expiry/revisions.
+    /// Clocks with only second precision inherit a whole-second default.
+    fn now_unix_micros(&self) -> i64 {
+        self.now_unix().saturating_mul(1_000_000)
+    }
+
     /// Current time as an ISO-8601 UTC string (e.g. `"2024-01-15T12:34:56Z"`).
     ///
     /// The default implementation emits a minimal numeric string. Enable the
@@ -65,6 +71,13 @@ impl Clock for SystemClock {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     }
+
+    fn now_unix_micros(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
 }
 
 // ─── IdGenerator ─────────────────────────────────────────────────────────────
@@ -84,3 +97,26 @@ pub trait IdGenerator: Send + Sync + 'static {
 }
 
 use std::future::Future;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn second_precision_clocks_have_a_microsecond_default() {
+        let clock = crate::testing::MockClock::at(123);
+        assert_eq!(clock.now_unix_micros(), 123_000_000);
+        clock.advance(1);
+        assert_eq!(clock.now_unix_micros(), 124_000_000);
+    }
+
+    #[test]
+    fn system_microseconds_are_within_the_observed_epoch_seconds() {
+        let clock = SystemClock;
+        let before = clock.now_unix();
+        let micros = clock.now_unix_micros();
+        let after = clock.now_unix();
+        assert!(micros >= before * 1_000_000);
+        assert!(micros < (after + 1) * 1_000_000);
+    }
+}

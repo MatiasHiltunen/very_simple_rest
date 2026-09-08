@@ -163,34 +163,9 @@ pub struct UpdateManagedUserInput {
 pub use vsr_runtime::auth::accounts::AccountInfo;
 pub(crate) use vsr_runtime::auth::accounts::Account as AuthenticatedUser;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AuthTokenPurpose {
-    EmailVerification,
-    PasswordReset,
-}
-
-impl AuthTokenPurpose {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::EmailVerification => "email_verification",
-            Self::PasswordReset => "password_reset",
-        }
-    }
-
-    pub fn subject(self) -> &'static str {
-        match self {
-            Self::EmailVerification => "Verify your email address",
-            Self::PasswordReset => "Reset your password",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct StoredAuthToken {
-    pub id: i64,
-    pub user_id: i64,
-    pub expires_at: String,
-}
+pub(crate) use vsr_runtime::auth::recovery::{
+    PendingToken as StoredAuthToken, TokenPurpose as AuthTokenPurpose,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct AuthTokenQuery {

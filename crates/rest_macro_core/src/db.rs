@@ -299,9 +299,25 @@ impl DbPool {
     }
 
     pub async fn begin(&self) -> Result<DbTransaction, sqlx::Error> {
+        self.begin_with_statement(None).await
+    }
+
+    /// Acquire the SQLite/Turso write reservation before a read-then-write flow.
+    /// The caller must already have resolved this pool as SQLite-compatible.
+    pub(crate) async fn begin_immediate(&self) -> Result<DbTransaction, sqlx::Error> {
+        self.begin_with_statement(Some("BEGIN IMMEDIATE")).await
+    }
+
+    async fn begin_with_statement(
+        &self,
+        statement: Option<&'static str>,
+    ) -> Result<DbTransaction, sqlx::Error> {
         match self {
             Self::Sqlx { pool, backend } => {
-                let tx = pool.begin().await?;
+                let tx = match statement {
+                    Some(statement) => pool.begin_with(sqlx::AssertSqlSafe(statement)).await?,
+                    None => pool.begin().await?,
+                };
                 Ok(DbTransaction {
                     inner: DbTransactionInner::Sqlx {
                         tx: tokio::sync::Mutex::new(Some(tx)),
@@ -312,10 +328,12 @@ impl DbPool {
             #[cfg(feature = "turso-local")]
             Self::TursoLocal(pool) => {
                 let mut conn = pool.acquire().await?;
-                if let Err(error) = conn.connection().execute("BEGIN", ()).await {
-                    conn.discard();
+                // Until BEGIN completes, cancellation must discard the lease.
+                conn.discard();
+                if let Err(error) = conn.connection().execute(statement.unwrap_or("BEGIN"), ()).await {
                     return Err(map_turso_error(error));
                 }
+                conn.reusable = true;
                 Ok(DbTransaction {
                     inner: DbTransactionInner::TursoLocal(tokio::sync::Mutex::new(
                         TursoTransactionState {
@@ -403,10 +421,12 @@ impl DbTransaction {
                 let mut connection = guard.connection.take().ok_or_else(|| {
                     sqlx::Error::Protocol("transaction already finished".to_owned())
                 })?;
+                // The lease is outside guard state across this await.
+                connection.discard();
                 if let Err(error) = connection.connection().execute("COMMIT", ()).await {
-                    connection.discard();
                     return Err(map_turso_error(error));
                 }
+                connection.reusable = true;
                 guard.finished = true;
                 drop(guard);
                 drop(connection);
@@ -435,10 +455,11 @@ impl DbTransaction {
                 let mut connection = guard.connection.take().ok_or_else(|| {
                     sqlx::Error::Protocol("transaction already finished".to_owned())
                 })?;
+                connection.discard();
                 if let Err(error) = connection.connection().execute("ROLLBACK", ()).await {
-                    connection.discard();
                     return Err(map_turso_error(error));
                 }
+                connection.reusable = true;
                 guard.finished = true;
                 drop(guard);
                 drop(connection);

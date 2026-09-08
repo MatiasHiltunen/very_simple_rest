@@ -30,6 +30,11 @@ jobs:
         run: cargo test -p vsr-runtime --no-default-features --features auth-builtin --lib --locked
       - name: Test Account Password Concurrency And Schema Compatibility
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::accounts::tests --locked
+      - name: Test Recovery Transactions And Cancellation
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::tokens::tests --locked
+      - name: Test Local Turso Recovery Transactions
+        if: runner.os == 'Linux'
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::tokens::tests --locked
       - name: Compare Native Actix And Both Transports With Built-in Accounts
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --test builtin_auth_runtime --locked
       - name: Keep Frameworks Out Of Authentication Policy

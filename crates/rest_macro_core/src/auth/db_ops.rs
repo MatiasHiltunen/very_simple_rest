@@ -289,6 +289,7 @@ where
     Ok(token)
 }
 
+#[cfg(test)]
 pub(crate) async fn load_pending_auth_token<E>(
     db: &E,
     raw_token: &str,
@@ -298,6 +299,17 @@ where
     E: crate::db::DbExecutor + ?Sized,
 {
     let token_hash = hash_auth_token(raw_token);
+    load_pending_auth_token_by_digest(db, &token_hash, purpose).await
+}
+
+pub(crate) async fn load_pending_auth_token_by_digest<E>(
+    db: &E,
+    token_hash: &str,
+    purpose: AuthTokenPurpose,
+) -> Result<Option<StoredAuthToken>, sqlx::Error>
+where
+    E: crate::db::DbExecutor + ?Sized,
+{
     let row = query(
         "SELECT id, user_id, purpose, requested_email, expires_at FROM auth_user_token WHERE token_hash = ? AND purpose = ? AND used_at IS NULL",
     )
@@ -312,15 +324,9 @@ where
     Ok(Some(StoredAuthToken {
         id: row.try_get("id")?,
         user_id: row.try_get("user_id")?,
+        requested_email: row.try_get("requested_email")?,
         expires_at: row.try_get("expires_at")?,
     }))
-}
-
-pub(crate) fn auth_token_is_expired(token: &StoredAuthToken) -> bool {
-    use chrono::Utc;
-    chrono::DateTime::parse_from_rfc3339(&token.expires_at)
-        .map(|expires_at| expires_at.with_timezone(&Utc) < Utc::now())
-        .unwrap_or(true)
 }
 
 pub(crate) async fn mark_auth_token_used<E>(
@@ -407,29 +413,6 @@ where
         .await?;
     Ok(())
 }
-
-pub(crate) async fn update_user_password<E>(
-    db: &E,
-    backend: AuthDbBackend,
-    user_id: i64,
-    password_hash: &str,
-    updated_at: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: crate::db::DbExecutor + ?Sized,
-{
-    query(&format!(
-        "UPDATE {} SET password_hash = ?, updated_at = ? WHERE id = ?",
-        auth_user_table_ident(backend)
-    ))
-    .bind(password_hash)
-    .bind(updated_at)
-    .bind(user_id)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
 pub(crate) async fn compare_and_set_user_password(
     db: &DbPool,
     backend: AuthDbBackend,

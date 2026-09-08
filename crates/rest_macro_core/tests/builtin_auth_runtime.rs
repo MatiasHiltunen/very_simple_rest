@@ -195,7 +195,10 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
             (HttpMethod::Post, "/auth/login".into(), login),
             (HttpMethod::Get, "/auth/account".into(), account),
             (HttpMethod::Post, "/auth/account/password".into(), password),
-        ],
+        ]
+        .into_iter()
+        .chain(recovery_routes(fixture))
+        .collect(),
     )
     .await
     .unwrap()
@@ -210,6 +213,276 @@ async fn account_response(request: reqwest::RequestBuilder, status: u16) -> Valu
         Value::Null
     } else {
         response.json().await.unwrap()
+    }
+}
+
+fn recovery_routes(fixture: &Fixture) -> Vec<(HttpMethod, String, vsr_runtime::http::Handler)> {
+    use vsr_runtime::auth::recovery::TokenPurpose;
+    let service = Arc::new(auth::builtin_recovery_service(fixture.db.clone()));
+    [
+        ("/auth/verify-email", TokenPurpose::EmailVerification),
+        ("/auth/password-reset/confirm", TokenPurpose::PasswordReset),
+    ]
+    .into_iter()
+    .map(|(path, purpose)| {
+        let service = service.clone();
+        let handler = make_handler(move |request| {
+            let service = service.clone();
+            async move {
+                let result = match purpose {
+                    TokenPurpose::EmailVerification => {
+                        let input: auth::VerifyEmailInput = match serde_json::from_slice(
+                            request.body.as_deref().unwrap_or_default(),
+                        ) {
+                            Ok(input) => input,
+                            Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
+                        };
+                        service.verify_email(&input.token).await
+                    }
+                    TokenPurpose::PasswordReset => {
+                        let input: auth::PasswordResetConfirmInput = match serde_json::from_slice(
+                            request.body.as_deref().unwrap_or_default(),
+                        ) {
+                            Ok(input) => input,
+                            Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
+                        };
+                        service
+                            .reset_password(&input.token, &input.new_password)
+                            .await
+                    }
+                };
+                match result {
+                    Ok(outcome) => outcome.response(purpose),
+                    Err(error) => error.response(),
+                }
+            }
+        });
+        (HttpMethod::Post, path.into(), handler)
+    })
+    .collect()
+}
+
+async fn recovery_token(
+    fixture: &Fixture,
+    purpose: vsr_runtime::auth::recovery::TokenPurpose,
+    expiry: &str,
+) -> String {
+    // Controlled database fixture, using the real issuance hash/schema format.
+    // Email delivery is covered separately by the native lifecycle suite.
+    let raw = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    query("INSERT INTO auth_user_token (user_id, purpose, token_hash, requested_email, expires_at) VALUES (1, ?, ?, 'owner@example.test', ?)")
+        .bind(purpose.as_str()).bind(vsr_runtime::auth::recovery::token_digest(&raw)).bind(expiry).execute(&fixture.db).await.unwrap();
+    raw
+}
+
+#[actix_web::test]
+async fn recovery_tokens_are_single_use_and_revoke_sessions_across_all_three_paths() {
+    use vsr_runtime::auth::recovery::TokenPurpose::{EmailVerification, PasswordReset};
+    let _guard = PASSWORD_TEST_LOCK.lock().await;
+    let mut fixture = Fixture::new().await;
+    fixture.settings.session_cookie = None;
+    let db = fixture.db.clone();
+    let settings = fixture.settings.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let native_base = format!("http://{}", listener.local_addr().unwrap());
+    let server = NativeServer::new(move || {
+        let db = db.clone();
+        let settings = settings.clone();
+        App::new().configure(move |cfg| {
+            auth::auth_routes_with_settings(cfg, db.clone(), settings.clone())
+        })
+    })
+    .workers(1)
+    .disable_signals()
+    .listen(listener)
+    .unwrap()
+    .run();
+    let native_handle = server.handle();
+    let native_task = actix_web::rt::spawn(server);
+    let actix = start_account_service::<ActixHttpServer>(&fixture).await;
+    let axum = start_account_service::<AxumHttpServer>(&fixture).await;
+    let bases = [
+        native_base,
+        format!("http://{}", actix.addresses()[0]),
+        format!("http://{}", axum.addresses()[0]),
+    ];
+    let client = client();
+    let expires = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    let mut password = "original-password".to_owned();
+    for (index, writer) in bases.iter().enumerate() {
+        let before = account_response(
+            client
+                .post(format!("{writer}/auth/login"))
+                .json(&json!({"email":"owner@example.test", "password":password})),
+            200,
+        )
+        .await;
+        let before = before["token"].as_str().unwrap();
+        let verification = recovery_token(&fixture, EmailVerification, &expires).await;
+        let sibling = recovery_token(&fixture, EmailVerification, &expires).await;
+        let reset = recovery_token(&fixture, PasswordReset, &expires).await;
+        account_response(
+            client
+                .post(format!("{writer}/auth/verify-email"))
+                .json(&json!({"token":verification})),
+            204,
+        )
+        .await;
+        for base in &bases {
+            let body = account_response(
+                client
+                    .get(format!("{base}/auth/account"))
+                    .bearer_auth(before),
+                401,
+            )
+            .await;
+            assert_eq!(body["code"], "revoked_token");
+            for raw in [&verification, &sibling, &reset] {
+                let body = account_response(
+                    client
+                        .post(format!("{base}/auth/verify-email"))
+                        .json(&json!({"token":raw})),
+                    400,
+                )
+                .await;
+                assert_eq!(body["code"], "invalid_token");
+            }
+        }
+        let active = account_response(
+            client
+                .post(format!("{writer}/auth/login"))
+                .json(&json!({"email":"owner@example.test", "password":password})),
+            200,
+        )
+        .await;
+        let active = active["token"].as_str().unwrap();
+        let reset_sibling = recovery_token(&fixture, PasswordReset, &expires).await;
+        let next_password = format!("recovered-password-{index}");
+        // The reset credential survived wrong-purpose verification attempts.
+        account_response(
+            client
+                .post(format!("{writer}/auth/password-reset/confirm"))
+                .json(&json!({"token":reset, "new_password":next_password})),
+            204,
+        )
+        .await;
+        for base in &bases {
+            assert_eq!(
+                account_response(
+                    client
+                        .get(format!("{base}/auth/account"))
+                        .bearer_auth(active),
+                    401
+                )
+                .await["code"],
+                "revoked_token"
+            );
+            for raw in [&reset, &reset_sibling] {
+                assert_eq!(
+                    account_response(
+                        client
+                            .post(format!("{base}/auth/password-reset/confirm"))
+                            .json(&json!({"token":raw, "new_password":"replayed-password"})),
+                        400
+                    )
+                    .await["code"],
+                    "invalid_token"
+                );
+            }
+            let login = account_response(
+                client
+                    .post(format!("{base}/auth/login"))
+                    .json(&json!({"email":"owner@example.test", "password":next_password})),
+                200,
+            )
+            .await;
+            let account = account_response(
+                client
+                    .get(format!("{base}/auth/account"))
+                    .bearer_auth(login["token"].as_str().unwrap()),
+                200,
+            )
+            .await;
+            assert_eq!(account["email_verified"], true);
+            assert_eq!(account["tenant_id"], 7);
+        }
+        password = next_password;
+    }
+    for base in &bases {
+        for expiry in ["2000-01-01T00:00:00Z", "invalid-date"] {
+            let raw = recovery_token(&fixture, EmailVerification, expiry).await;
+            assert_eq!(
+                account_response(
+                    client
+                        .post(format!("{base}/auth/verify-email"))
+                        .json(&json!({"token":raw})),
+                    400
+                )
+                .await["code"],
+                "expired_token"
+            );
+        }
+        let body = account_response(
+            client
+                .post(format!("{base}/auth/password-reset/confirm"))
+                .json(&json!({"token":" ", "new_password":"valid-password"})),
+            400,
+        )
+        .await;
+        assert_eq!(body["field"], "token");
+        let body = account_response(
+            client
+                .post(format!("{base}/auth/password-reset/confirm"))
+                .json(&json!({"token":"nonempty", "new_password":"short"})),
+            400,
+        )
+        .await;
+        assert_eq!(body["field"], "password");
+    }
+    // A link sent to the previous address must not verify the new address.
+    for base in &bases {
+        let raw = recovery_token(&fixture, EmailVerification, &expires).await;
+        query("UPDATE user SET email = 'renamed@example.test' WHERE id = 1")
+            .execute(&fixture.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            account_response(
+                client
+                    .post(format!("{base}/auth/verify-email"))
+                    .json(&json!({"token":raw})),
+                400
+            )
+            .await["code"],
+            "invalid_token"
+        );
+        query("UPDATE user SET email = 'owner@example.test' WHERE id = 1")
+            .execute(&fixture.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            account_response(
+                client
+                    .post(format!("{base}/auth/verify-email"))
+                    .json(&json!({"token":raw})),
+                400
+            )
+            .await["code"],
+            "invalid_token"
+        );
+    }
+    AxumHttpServer::shutdown(axum).await.unwrap();
+    ActixHttpServer::shutdown(actix).await.unwrap();
+    native_handle.stop(true).await;
+    native_task.await.unwrap().unwrap();
+    match &fixture.db {
+        DbPool::Sqlx { pool, .. } => pool.close().await,
+        #[cfg(feature = "turso-local")]
+        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
     }
 }
 

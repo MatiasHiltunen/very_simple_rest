@@ -37,7 +37,7 @@ http-axum = ["dep:axum", "dep:axum-server", "dep:tower-http", "dep:http-body-uti
 # Email / OTP flows (pulls lettre).
 auth-email = ["dep:lettre"]
 # Built-in access-token/account-state policy and bounded password workers.
-auth-builtin = ["dep:cookie", "dep:bcrypt", "dep:sha2", "dep:hex", "dep:tokio"]
+auth-builtin = ["dep:cookie", "dep:bcrypt", "dep:sha2", "dep:hex", "dep:tokio", "dep:chrono"]
 
 # ── Storage ────────────────────────────────────────────────────────────────────
 storage-local = []
@@ -122,6 +122,10 @@ workspace = true
 optional = true
 
 [dependencies.hex]
+workspace = true
+optional = true
+
+[dependencies.chrono]
 workspace = true
 optional = true
 

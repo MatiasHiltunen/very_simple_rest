@@ -1,6 +1,6 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: in progress; transport, built-in request-auth and account-service milestones
+Status: in progress; transport, request-auth, account and recovery-consumption milestones
 implemented on 2026-09-08. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
@@ -23,6 +23,10 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Move login, account reads and password-change policy into the shared runtime.
 - [x] Make password changes conditional and prove concurrency/revocation behavior.
 - [x] Prove shared account operations over native Actix and both runtime transports.
+- [x] Commit the account-service milestone on local `v1` (`99c1f51b9`).
+- [x] Share verification/reset consumption and its transaction sequencing.
+- [x] Enforce email binding and prove expiry, single use, rollback and cancellation.
+- [x] Prove recovery and session revocation over native Actix and both runtime transports.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -58,9 +62,14 @@ The SQLx/Turso and configured-signing adapters remain in the legacy facade via
 `builtin_account_service`; this is not an Actix-free production application yet.
 See the [account-service proof](../../reviews/2026-09-08-account-service-migration-proof.md).
 
-Next: extract the remaining account lifecycle (registration, one-use verification
-and reset tokens, admin changes and email delivery) while preserving transaction
-boundaries. Shared cookie/extraction/rate-limit routing, row authorization,
+Verification and reset consumption now live in `RecoveryService`, with driver-owned
+transactions and shared expiry, token hashing, email binding and outcome mapping.
+The SQLite/Turso bridge acquires a write reservation before token reads, and
+Turso transaction-control awaits discard unfinished leases on cancellation.
+See the [recovery proof](../../reviews/2026-09-08-recovery-service-migration-proof.md).
+
+Next: extract registration, recovery-token issuance/email delivery and admin
+changes while preserving transaction boundaries. Shared cookie/extraction/rate-limit routing, row authorization,
 streaming and native/generated bootstrap remain required. No CLI backend switch
 is added by these milestones. See [HTTP backend options](../../src/http_backends.md#shared-account-operations).
 
