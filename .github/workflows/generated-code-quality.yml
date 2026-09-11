@@ -38,6 +38,10 @@ jobs:
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::recovery_email::tests --locked
       - name: Test Registration Transactions And Legacy Schemas
         run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::registration::tests --locked
+      - name: Test Admin Authorization And Transactions
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::management::tests --locked
+      - name: Test Admin Creation And Authenticated Verification Email
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite --lib auth::management::provisioning_tests --locked
       - name: Test Local Turso Recovery Transactions
         if: runner.os == 'Linux'
         run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::tokens::tests --locked
@@ -49,6 +53,12 @@ jobs:
       - name: Test Local Turso Registration Transactions
         if: runner.os == 'Linux'
         run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::registration::tests --locked
+      - name: Test Local Turso Admin Transactions
+        if: runner.os == 'Linux'
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::management::tests --locked
+      - name: Test Local Turso Provisioning Transactions
+        if: runner.os == 'Linux'
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib auth::management::provisioning_tests --locked
       - name: Keep Frameworks Out Of Authentication Policy
         shell: bash
         run: |
@@ -150,7 +160,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify Migration Serialization And Recovery
         run: cargo test -p vsra --all-features server_database_migration_integrity_and_concurrency -- --ignored --nocapture
-      - name: Verify Concurrent Reset-Token Consumption And Registration
+      - name: Verify Recovery Registration Admin And Provisioning Concurrency
         run: cargo test -p rest_macro_core --all-features server_database_auth_tokens_are_consumed_once -- --ignored --nocapture
 
   rust-feature-check:

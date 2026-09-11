@@ -1,11 +1,12 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: in progress; transport, request-auth, account, recovery-consumption, email-issuance and registration milestones
-implemented on 2026-09-08. Full native/generated backend selection is not complete.
+Status: in progress; transport, request-auth, account, recovery-consumption,
+email-issuance, registration, admin operations and provisioning milestones implemented
+through 2026-09-11. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
 
-## Implementation Progress (2026-09-08)
+## Implementation Progress (2026-09-11)
 
 - [x] Commit the review snapshot and probes before implementation (`37ec77559`).
 - [x] Repair query decoding, raw-path contract, repeated headers and JSON errors.
@@ -34,6 +35,11 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Merge the verified baseline into `main` (`3ac6ffd78`, 27 CI jobs passed).
 - [x] Move self-registration policy and transaction ownership into the shared runtime.
 - [x] Prove registration rollback, cancellation, schema compatibility and HTTP parity.
+- [x] Commit self-registration on local `v1` (`723f711cf`, not pushed).
+- [x] Share admin list/read/update/delete policy and live-role transaction checks.
+- [x] Prove typed claims, rollback, cancellation, revisions and admin HTTP parity locally.
+- [x] Extract admin creation, invitations and account/admin verification resend.
+- [x] Prove provisioning rollback, token replacement, cancellation and HTTP parity locally.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -89,8 +95,25 @@ resolution and rate limiting. Legacy base schemas remain supported without email
 partial schemas and initialization failures now fail closed. See the
 [registration proof](../../reviews/2026-09-08-registration-migration-proof.md).
 
-Next: extract admin changes while preserving authorization and transaction
-boundaries. Durable recovery delivery and abuse/enumeration resistance remain
+Admin list/read/update/delete now live in `ManagementService`. Ordered transaction
+locks cover the current actor and target; metadata, writes and response reloads
+stay on the same connection. Typed claims reject unknown/reserved mappings and
+invalid nulls. All updates require management columns and monotonically advance
+the session revision. Native Actix delegates to this service; real shared Actix
+and Axum tests exercise the same policy. See the
+[admin proof](../../reviews/2026-09-11-admin-management-migration-proof.md).
+
+Admin creation/invitations and authenticated verification resend now live in
+`ProvisioningService`, reusing the management locks and shared email sender.
+Creation hashes before acquiring locks, rechecks the actor and returns its snapshot
+from the same transaction. Resend locks the current recipient; failed delivery
+preserves the previous token. Native handlers retain their signatures/response
+contracts and no longer own these database transactions. See the
+[provisioning proof](../../reviews/2026-09-11-provisioning-migration-proof.md).
+
+Next: integrate production route extraction, cookies/session presentation and
+rate-limit composition over the shared services, retaining native Actix behavior.
+Durable recovery delivery and abuse/enumeration resistance remain
 hardening gates. Shared cookie/extraction/rate-limit routing, row authorization,
 streaming and native/generated bootstrap remain required. No CLI backend switch
 is added by these milestones. See [HTTP backend options](../../src/http_backends.md#shared-account-operations).

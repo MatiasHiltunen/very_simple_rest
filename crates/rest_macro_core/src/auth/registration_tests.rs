@@ -108,6 +108,7 @@ async fn users(db: &DbPool) -> i64 {
 
 #[tokio::test]
 async fn registration_schema_compatibility_and_write_failures_on_local_drivers() {
+    let _guard = super::super::PASSWORD_TEST_LOCK.lock().await;
     for driver in drivers() {
         for schema in ["base", "partial", "full"] {
             let (db, directory) = database(driver, schema).await;
@@ -182,6 +183,7 @@ async fn registration_schema_compatibility_and_write_failures_on_local_drivers()
 
 #[tokio::test]
 async fn registration_email_failure_cancellation_and_duplicate_race_are_atomic() {
+    let _guard = super::super::PASSWORD_TEST_LOCK.lock().await;
     for driver in drivers() {
         let (db, directory) = database(driver, "full").await;
         let mailbox = Mailbox::default();

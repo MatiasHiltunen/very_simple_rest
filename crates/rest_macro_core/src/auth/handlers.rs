@@ -1,32 +1,13 @@
-use super::password::hash;
 use actix_web::cookie::{Cookie, time::Duration as CookieDuration};
 use actix_web::{HttpRequest, HttpResponse, Responder, web};
 
-use crate::{
-    db::{DbPool, query},
-    errors,
-};
+use crate::{db::DbPool, errors};
 
-use super::admin::resolve_managed_claim_updates;
-use super::db_ops::{
-    account_info_from_user, delete_user_row, detect_auth_backend,
-    initialize_user_management_timestamps, list_authenticated_users_with_settings,
-    load_authenticated_user_by_email_with_settings,
-    load_authenticated_user_by_email_with_settings_for_backend,
-    load_authenticated_user_by_id_with_settings, mark_user_email_verified, update_managed_user_row,
-    user_table_columns,
-};
-use super::email::{
-    configured_auth_email, send_verification_email_for_user,
-};
 use super::helpers::{
     auth_api_base_path_for_page, auth_settings_from_request, enforce_auth_rate_limit,
-    generate_ephemeral_secret, is_missing_auth_management_schema, is_unique_violation,
-    missing_auth_management_schema_response, normalize_auth_email, normalize_auth_role,
-    now_timestamp_string, same_site_from_settings, scope_prefix_from_request, user_is_admin,
-    validate_auth_password, validate_cookie_csrf,
+    generate_ephemeral_secret, same_site_from_settings, scope_prefix_from_request, user_is_admin,
+    validate_cookie_csrf,
 };
-use super::migrations::auth_user_table_ident;
 use super::pages::{
     render_account_portal_page, render_admin_dashboard_page, render_message_page,
     render_password_reset_page,
@@ -346,44 +327,51 @@ pub async fn resend_account_verification(
     user: UserContext,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    let settings = auth_settings_from_request(&req);
-    if let Err(response) = configured_auth_email(&settings) {
-        return response;
-    }
+    resend_authenticated_verification(&req, &user, db.get_ref(), None).await
+}
 
-    let account =
-        match load_authenticated_user_by_id_with_settings(db.get_ref(), user.id, &settings).await {
-            Ok(Some(account)) => account,
-            Ok(None) => {
-                return errors::unauthorized("invalid_token", "Authenticated user not found");
-            }
-            Err(_) => return errors::internal_error("Database error"),
-        };
-    if account.email_verified_at.is_some() {
-        return HttpResponse::NoContent().finish();
+async fn resend_authenticated_verification(
+    req: &HttpRequest,
+    user: &UserContext,
+    db: &DbPool,
+    target: Option<i64>,
+) -> HttpResponse {
+    if target.is_some() && !user_is_admin(user) {
+        return errors::forbidden("forbidden", "Admin role is required");
     }
-
-    let tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return errors::internal_error("Database error"),
+    let settings = auth_settings_from_request(req);
+    let route = if target.is_some() {
+        "/auth/admin/users/verification"
+    } else {
+        "/auth/account/verification"
     };
-    if let Err(response) = send_verification_email_for_user(
-        &tx,
-        Some(&req),
+    let url = match super::email::action_url(
+        Some(req),
         &settings,
-        &account,
-        "/auth/account/verification",
-    )
-    .await
-    {
-        let _ = tx.rollback().await;
-        return response;
+        super::user::AuthTokenPurpose::EmailVerification,
+        Some(route),
+    ) {
+        Ok(url) => url,
+        Err(error) => return super::accounts::error_response(error),
+    };
+    let service = match super::management::builtin_provisioning_service(
+        db.clone(),
+        &settings,
+        Some(&url),
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::response(error.response()),
+    };
+    let actor = user.management_identity();
+    let result = if let Some(id) = target {
+        service.resend_managed(&actor, id).await
+    } else {
+        service.resend_account(&actor).await
+    };
+    match result {
+        Ok(outcome) => super::accounts::response(outcome.response()),
+        Err(error) => super::accounts::response(error.response()),
     }
-    if tx.commit().await.is_err() {
-        return errors::internal_error("Database error");
-    }
-
-    HttpResponse::Accepted().finish()
 }
 
 pub async fn request_password_reset(
@@ -436,145 +424,44 @@ pub async fn create_managed_user(
     if !user_is_admin(&user) {
         return errors::forbidden("forbidden", "Admin role is required");
     }
-
     let settings = auth_settings_from_request(&req);
-    let backend = match detect_auth_backend(db.get_ref()).await {
-        Ok(backend) => backend,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    let email = match normalize_auth_email(&input.email) {
-        Ok(email) => email,
-        Err(response) => return response,
-    };
-    if let Err(response) = validate_auth_password(&input.password) {
-        return response;
-    }
-    let role = match normalize_auth_role(input.role.as_deref(), "user") {
-        Ok(role) => role,
-        Err(response) => return response,
-    };
-    if input.email_verified == Some(true) && input.send_verification_email == Some(true) {
-        return errors::bad_request(
-            "invalid_invite_state",
-            "A verified user does not need a verification email",
-        );
-    }
-    if input.send_verification_email == Some(true)
-        && let Err(response) = configured_auth_email(&settings)
+    let url = if input.send_verification_email == Some(true)
+        && input.email_verified != Some(true)
+        && settings.email.is_some()
     {
-        return response;
-    }
-
-    let password_hash = match hash(&input.password, 12).await {
-        Ok(hash) => hash,
-        Err(response) => return response,
-    };
-
-    let tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    let insert_result = query(&format!(
-        "INSERT INTO {} (email, password_hash, role) VALUES (?, ?, ?)",
-        auth_user_table_ident(backend)
-    ))
-    .bind(&email)
-    .bind(&password_hash)
-    .bind(&role)
-    .execute(&tx)
-    .await;
-
-    match insert_result {
-        Ok(_) => {}
-        Err(error) if is_unique_violation(&error) => {
-            let _ = tx.rollback().await;
-            return errors::conflict("duplicate_email", "A user with that email already exists");
-        }
-        Err(error) => {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
-            }
-            return errors::internal_error("Database error");
-        }
-    }
-
-    let Some(created_user) = (match load_authenticated_user_by_email_with_settings_for_backend(
-        &tx, backend, &email, &settings,
-    )
-    .await
-    {
-        Ok(user) => user,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
-            }
-            return errors::internal_error("Database error");
-        }
-    }) else {
-        let _ = tx.rollback().await;
-        return errors::internal_error("Failed to load created user");
-    };
-
-    let now = now_timestamp_string();
-    if let Err(error) =
-        initialize_user_management_timestamps(&tx, backend, created_user.id, &now).await
-    {
-        let _ = tx.rollback().await;
-        if is_missing_auth_management_schema(&error) {
-            return missing_auth_management_schema_response();
-        }
-        return errors::internal_error("Database error");
-    }
-
-    if input.email_verified.unwrap_or(false) {
-        if let Err(error) = mark_user_email_verified(&tx, backend, created_user.id, &now).await {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
-            }
-            return errors::internal_error("Database error");
-        }
-    } else if input.send_verification_email.unwrap_or(false)
-        && let Err(response) = send_verification_email_for_user(
-            &tx,
+        match super::email::action_url(
             Some(&req),
             &settings,
-            &created_user,
-            "/auth/admin/users",
-        )
-        .await
-    {
-        let _ = tx.rollback().await;
-        return response;
-    }
-
-    if tx.commit().await.is_err() {
-        return errors::internal_error("Database error");
-    }
-
-    match load_authenticated_user_by_email_with_settings(db.get_ref(), &email, &settings).await {
-        Ok(Some(account)) => {
-            let scope_prefix = scope_prefix_from_request(&req, Some("/auth/admin/users"));
-            let location = if scope_prefix.is_empty() {
-                format!("/auth/admin/users/{}", account.id)
-            } else {
-                format!(
-                    "{}/auth/admin/users/{}",
-                    scope_prefix.trim_end_matches('/'),
-                    account.id
-                )
-            };
+            super::user::AuthTokenPurpose::EmailVerification,
+            Some("/auth/admin/users"),
+        ) {
+            Ok(url) => Some(url),
+            Err(error) => return super::accounts::error_response(error),
+        }
+    } else {
+        None
+    };
+    let service = match super::management::builtin_provisioning_service(
+        db.get_ref().clone(),
+        &settings,
+        url.as_deref(),
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::response(error.response()),
+    };
+    match service.create(&user.management_identity(), &input).await {
+        Ok(account) => {
+            let prefix = scope_prefix_from_request(&req, Some("/auth/admin/users"));
+            let location = format!(
+                "{}/auth/admin/users/{}",
+                prefix.trim_end_matches('/'),
+                account.id
+            );
             HttpResponse::Created()
                 .append_header(("Location", location))
-                .json(account_info_from_user(account))
+                .json(account)
         }
-        Ok(None) => errors::internal_error("Failed to load created user"),
-        Err(error) if is_missing_auth_management_schema(&error) => {
-            missing_auth_management_schema_response()
-        }
-        Err(_) => errors::internal_error("Database error"),
+        Err(error) => super::accounts::response(error.response()),
     }
 }
 
@@ -584,39 +471,16 @@ pub async fn list_managed_users(
     query_params: web::Query<AdminListQuery>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if !user_is_admin(&user) {
-        return errors::forbidden("forbidden", "Admin role is required");
-    }
-
-    let limit = query_params.limit.unwrap_or(50).clamp(1, 100);
-    let offset = query_params.offset.unwrap_or(0);
-    let email_filter = query_params
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let settings = auth_settings_from_request(&req);
-    let backend = match detect_auth_backend(db.get_ref()).await {
-        Ok(backend) => backend,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    match list_authenticated_users_with_settings(
-        db.get_ref(),
-        backend,
-        limit,
-        offset,
-        email_filter,
-        &settings,
-    )
-    .await
+    let service = super::management::builtin_management_service(
+        db.get_ref().clone(),
+        &auth_settings_from_request(&req),
+    );
+    match service
+        .list(&user.management_identity(), &query_params)
+        .await
     {
-        Ok(items) => HttpResponse::Ok().json(serde_json::json!({
-            "items": items,
-            "limit": limit,
-            "offset": offset,
-        })),
-        Err(_) => errors::internal_error("Database error"),
+        Ok(page) => HttpResponse::Ok().json(page),
+        Err(error) => super::accounts::response(error.response()),
     }
 }
 
@@ -626,17 +490,16 @@ pub async fn managed_user(
     path: web::Path<i64>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if !user_is_admin(&user) {
-        return errors::forbidden("forbidden", "Admin role is required");
-    }
-
-    let settings = auth_settings_from_request(&req);
-    match load_authenticated_user_by_id_with_settings(db.get_ref(), path.into_inner(), &settings)
+    let service = super::management::builtin_management_service(
+        db.get_ref().clone(),
+        &auth_settings_from_request(&req),
+    );
+    match service
+        .get(&user.management_identity(), path.into_inner())
         .await
     {
-        Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
-        Ok(None) => errors::not_found("User not found"),
-        Err(_) => errors::internal_error("Database error"),
+        Ok(account) => HttpResponse::Ok().json(account),
+        Err(error) => super::accounts::response(error.response()),
     }
 }
 
@@ -647,59 +510,20 @@ pub async fn update_managed_user(
     input: web::Json<UpdateManagedUserInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if !user_is_admin(&user) {
-        return errors::forbidden("forbidden", "Admin role is required");
-    }
-    if input
-        .role
-        .as_deref()
-        .is_some_and(|role| role.trim().is_empty())
-    {
-        return errors::validation_error("role", "Role cannot be empty");
-    }
-
-    let user_id = path.into_inner();
-    let now = now_timestamp_string();
-    let settings = auth_settings_from_request(&req);
-    let backend = match detect_auth_backend(db.get_ref()).await {
-        Ok(backend) => backend,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    let claim_updates = if input.claims.is_empty() {
-        Vec::new()
-    } else {
-        let user_columns = match user_table_columns(db.get_ref(), backend).await {
-            Ok(columns) => columns,
-            Err(_) => return errors::internal_error("Database error"),
-        };
-        match resolve_managed_claim_updates(&user_columns, &settings.claims, &input.claims) {
-            Ok(updates) => updates,
-            Err(response) => return response,
-        }
-    };
-    if input.role.is_none() && input.email_verified.is_none() && claim_updates.is_empty() {
-        return errors::bad_request(
-            "missing_changes",
-            "Provide `role`, `email_verified`, and/or `claims` to update the user",
-        );
-    }
-    match update_managed_user_row(db.get_ref(), backend, user_id, &input, &claim_updates, &now)
+    let service = super::management::builtin_management_service(
+        db.get_ref().clone(),
+        &auth_settings_from_request(&req),
+    );
+    match service
+        .update(
+            &user.management_identity(),
+            path.into_inner(),
+            input.into_inner(),
+        )
         .await
     {
-        Ok(true) => {
-            match load_authenticated_user_by_id_with_settings(db.get_ref(), user_id, &settings)
-                .await
-            {
-                Ok(Some(user)) => HttpResponse::Ok().json(account_info_from_user(user)),
-                Ok(None) => errors::not_found("User not found"),
-                Err(_) => errors::internal_error("Database error"),
-            }
-        }
-        Ok(false) => errors::not_found("User not found"),
-        Err(error) if is_missing_auth_management_schema(&error) => {
-            missing_auth_management_schema_response()
-        }
-        Err(_) => errors::internal_error("Database error"),
+        Ok(account) => HttpResponse::Ok().json(account),
+        Err(error) => super::accounts::response(error.response()),
     }
 }
 
@@ -708,26 +532,17 @@ pub async fn delete_managed_user(
     path: web::Path<i64>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if !user_is_admin(&user) {
-        return errors::forbidden("forbidden", "Admin role is required");
-    }
-
-    let user_id = path.into_inner();
-    if user.id == user_id {
-        return errors::bad_request(
-            "cannot_delete_self",
-            "Admins cannot delete their own account from the admin dashboard",
-        );
-    }
-
-    let backend = match detect_auth_backend(db.get_ref()).await {
-        Ok(backend) => backend,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    match delete_user_row(db.get_ref(), backend, user_id).await {
-        Ok(true) => HttpResponse::NoContent().finish(),
-        Ok(false) => errors::not_found("User not found"),
-        Err(_) => errors::internal_error("Database error"),
+    // Deletion needs only the live built-in role, not custom claim mappings.
+    let service = super::management::builtin_management_service(
+        db.get_ref().clone(),
+        &AuthSettings::default(),
+    );
+    match service
+        .delete(&user.management_identity(), path.into_inner())
+        .await
+    {
+        Ok(()) => HttpResponse::NoContent().finish(),
+        Err(error) => super::accounts::response(error.response()),
     }
 }
 
@@ -737,51 +552,7 @@ pub async fn resend_managed_user_verification(
     path: web::Path<i64>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if !user_is_admin(&user) {
-        return errors::forbidden("forbidden", "Admin role is required");
-    }
-    let settings = auth_settings_from_request(&req);
-    if let Err(response) = configured_auth_email(&settings) {
-        return response;
-    }
-
-    let Some(account) = (match load_authenticated_user_by_id_with_settings(
-        db.get_ref(),
-        path.into_inner(),
-        &settings,
-    )
-    .await
-    {
-        Ok(account) => account,
-        Err(_) => return errors::internal_error("Database error"),
-    }) else {
-        return errors::not_found("User not found");
-    };
-    if account.email_verified_at.is_some() {
-        return HttpResponse::NoContent().finish();
-    }
-
-    let tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    if let Err(response) = send_verification_email_for_user(
-        &tx,
-        Some(&req),
-        &settings,
-        &account,
-        "/auth/admin/users/verification",
-    )
-    .await
-    {
-        let _ = tx.rollback().await;
-        return response;
-    }
-    if tx.commit().await.is_err() {
-        return errors::internal_error("Database error");
-    }
-
-    HttpResponse::Accepted().finish()
+    resend_authenticated_verification(&req, &user, db.get_ref(), Some(path.into_inner())).await
 }
 
 pub async fn account_portal_page(req: HttpRequest) -> impl Responder {

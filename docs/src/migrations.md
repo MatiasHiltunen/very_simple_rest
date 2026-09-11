@@ -87,6 +87,25 @@ The original base user schema remains supported without email. Programmatic
 configuration, like EON configuration, may not require verification without a
 configured email provider; it no longer silently auto-verifies such accounts.
 
+Built-in admin list/read/update/delete operations now recheck the caller's live
+admin role inside the operation's transaction. A stale or deleted administrator
+cannot rely on a previously extracted role. Admin updates, including claim-only
+changes, require the complete management schema; legacy base-schema reads and
+deletion remain supported. The update revision advances monotonically even
+with a repeated or backward clock, so restoring earlier claims does not revive
+an old session. Reserved account/JWT claim mappings and duplicate column aliases
+are rejected by the management bridge. Null claim input follows actual column
+nullability, not whether an insert default exists.
+
+Admin creation/invitations and authenticated account/admin verification resend
+now use shared transactions and locked account state. The full management schema
+is required before provisioning. Native resend handlers validate trusted link
+configuration even when the target is already verified; invalid configuration
+now fails instead of returning a no-op 204. Account IDs and recipient addresses
+for self-service resend come only from the authenticated identity/current row,
+not the request body. Creation retains default `user` roles and explicit opt-in
+verification/invitation flags, including when email delivery is not configured.
+
 Trusted proxy chains are evaluated from the immediate peer right-to-left.
 Malformed chains, conflicting forwarding header families, or a missing peer
 never yield an attacker-supplied identity. Configure every trusted proxy and

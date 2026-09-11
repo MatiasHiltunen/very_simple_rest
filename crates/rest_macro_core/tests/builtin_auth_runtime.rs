@@ -35,6 +35,8 @@ static PASSWORD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 mod builtin_auth_email_flow;
 
 mod builtin_auth_registration_flow;
+mod builtin_auth_management_flow;
+mod builtin_auth_provisioning_flow;
 
 impl Fixture {
     async fn new() -> Self {
@@ -207,6 +209,8 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
         .chain(recovery_routes(fixture))
         .chain(recovery_email_routes(fixture))
         .chain(registration_routes(fixture))
+        .chain(builtin_auth_management_flow::routes(fixture))
+        .chain(builtin_auth_provisioning_flow::routes(fixture))
         .collect(),
     )
     .await

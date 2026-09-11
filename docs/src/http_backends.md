@@ -215,9 +215,9 @@ Resetting a password changes the account fingerprint, invalidating old sessions.
 Existing Actix JSON endpoints and the verification HTML page delegate to this
 service without changing their public handler signatures or response codes.
 Real HTTP tests also mount the service behind both runtime adapters. These remain
-test-only route adapters: production extraction, rate limiting,
-and admin operations still need migration. Email issuance and registration are
-covered by the following sections. Native/emitted
+test-only route adapters: production extraction and rate-limit wiring still need
+migration. Email issuance, registration and provisioning are covered by the
+following sections. Native/emitted
 backend selection and the Actix-free infrastructure bridge remain incomplete.
 See `docs/reviews/2026-09-08-recovery-service-migration-proof.md`.
 
@@ -229,8 +229,8 @@ recipient inside a driver transaction, suppresses absent/already-verified
 verification recipients, replaces the email-bound token, sends the message and
 commits. Both normal and suppressed requests return an empty 202 response.
 
-`RecoveryEmailSender` is also used inside native registration and admin/account
-verification transactions. It uses the existing neutral `Mailer` interface,
+`RecoveryEmailSender` is also used inside shared registration and provisioning
+transactions. It uses the existing neutral `Mailer` interface,
 shared text/HTML templates, 256 bits of fallible OS entropy, SHA-256 token digests,
 checked microsecond expiry arithmetic and a bounded delivery wait. The facade
 uses a 30-second delivery timeout and retains configured SMTP, Resend, sender,
@@ -241,7 +241,8 @@ reply-to and capture-file support. Provider errors are redacted in public errors
 and provider bridge. SQLite/Turso anonymous requests reserve the write transaction
 before reading; PostgreSQL/MySQL use an account-row lock, including first issuance
 where no token row exists. Only local SQLite and Turso concurrency is verified.
-Admin transaction ownership remains in the native facade; registration is covered below.
+Registration, managed reads/updates/deletion, admin creation and authenticated
+verification resend now have shared transaction ownership, covered below.
 
 Compatibility change: `security.auth.email.public_base_url` must now be configured
 to send authentication emails, even inside an HTTP request. Links never fall back
@@ -289,11 +290,98 @@ field validation remains 400. The database unique constraint arbitrates concurre
 normalized registrations; errors and cancellation roll back the entire account
 and token transaction. Transport-specific registration rate limits remain intact.
 
-This does not migrate admin operations or install production Axum routes. The
+This registration milestone does not install production Axum routes. The
 infrastructure bridge still links Actix. Mail acceptance is still not atomic with
 commit, duplicate/timing responses still disclose account existence, and the caller
 must control registration exposure and abuse. See the local proof and remaining
 gates in `docs/reviews/2026-09-08-registration-migration-proof.md`.
+
+## Shared Admin Operations
+
+`auth::management::ManagementService` owns built-in global-admin list/read,
+role/verification/claim updates, and deletion. Its input accepts an authenticated
+identity from the trusted request wrapper, never an actor ID from request JSON.
+The role must include exactly `admin`; the convenience `is_admin` flag alone
+does not authorize anything. The service also locks and reloads the caller's
+account and requires its current role to be `admin` before accessing the result
+or making changes. This is additional live-role authorization, not a substitute
+for token verification, expiry, account-state checks or cookie CSRF validation.
+
+`rest_macro_core::auth::builtin_management_service(db, settings)` provides the
+temporary SQLx/Turso bridge. SQLite/Turso reserve the write transaction; the
+PostgreSQL/MySQL implementation uses ordered account-row locks. The actor and
+target stay locked until commit/rollback. Claim metadata, all writes and response
+reloads use that transaction, without acquiring another pooled connection.
+Unfinished transactions roll back on errors/cancellation; failed commits are not
+success responses. A lost database commit acknowledgement can leave the outcome unknown.
+The existing native Actix function signatures, public input paths, response
+shapes, pagination limits and self-deletion prohibition remain intact.
+
+Only explicitly configured, typed application claims are writable. Storage
+nullability is independent of defaults: a `NOT NULL DEFAULT ...` column rejects
+null input. Reserved account/JWT fields and ambiguous column aliases are rejected
+by this bridge. SQL identifiers come from validated server configuration, and
+values remain bound parameters. Account responses omit password hashes and
+session fingerprints.
+
+Updates now require the full management schema, including claim-only changes.
+Every successful update advances `updated_at` beyond the previous revision even
+when the clock repeats or moves backward. Restoring prior role/claim values does
+not revive old tokens. Legacy base-schema reads/deletion remain available, but
+apply the management migration before attempting updates.
+
+Local tests cover runtime policy, SQLite/Turso transactions and real native
+Actix/shared Actix/Axum HTTP parity. The new PostgreSQL/MySQL concurrency checks
+and platform matrix have not run remotely for this unpushed milestone. See
+`docs/reviews/2026-09-11-admin-management-migration-proof.md`.
+
+Admin creation and authenticated verification resend are covered below; dashboard
+rendering remains in the native facade. These are global administrators, not
+tenant-scoped admin roles. No new last-administrator protection or audit/outbox
+policy is introduced.
+The bridge still links Actix; production route extraction, streaming and native/
+generated Axum backend selection remain incomplete. Actix stays the default.
+
+## Shared Provisioning
+
+`auth::provisioning::ProvisioningService` owns admin account creation/invitations,
+authenticated account verification resend and admin verification resend. It reuses
+the management transaction and live-role authorization instead of duplicating
+per-framework policy. The additional `ProvisioningTransaction` adds account insertion
+and token replacement capabilities without adding email dependencies to admin reads.
+
+Creation normalizes email, validates passwords/roles and uses bounded bcrypt work
+before opening a transaction. It then locks/rechecks the global admin, requires
+the complete management schema, inserts the initialized account, optionally sends
+verification mail and commits. The public account snapshot is read before commit.
+Concurrent normalized duplicates retain the 409 contract. Omitted/blank roles
+default to `user`; verification and invitation both default to false. Specifying
+both as true returns 400 `invalid_invite_state`. Only a current global admin may
+select the new role. Submitted account IDs, password hashes and custom claims are
+not accepted; configured database defaults initialize custom claims.
+
+Self-service resend accepts only the authenticated identity, not a target ID or
+email. Admin resend uses ordered actor/target locks and live admin authorization.
+Both read verification state and the current recipient address under lock before
+replacing a token. Success remains empty 202; already verified accounts return
+empty 204 without mail/token writes. Missing-email configuration returns 503.
+Failed delivery rolls back the new account or token replacement, preserving an
+earlier token on failed resend. Debug output for the create input redacts passwords.
+
+`rest_macro_core::auth::builtin_provisioning_service(db, settings, verification_url)`
+provides the temporary SQL/provider bridge. Pass a trusted configured URL to enable
+delivery, or None for creation without email. Native handlers keep their public
+signatures and scoped Location headers. They resolve trusted email configuration
+before dispatch, even for an already-verified resend: invalid link configuration
+now fails closed instead of returning a no-op response. Base and partial legacy
+schemas cannot be used for provisioning; apply the complete management migration.
+
+The local proof covers SQLite/Turso and real native Actix/shared Actix/Axum requests,
+including a mock Resend provider. This is not external inbox/SMTP acceptance, a
+durable outbox or production-load proof. Mail accepted before a failed commit may
+produce an unusable delivered link, and a lost commit acknowledgement may leave
+the outcome unknown. Abuse controls and request idempotency remain separate gates.
+See `docs/reviews/2026-09-11-provisioning-migration-proof.md`.
 
 ## Experimental API Changes
 

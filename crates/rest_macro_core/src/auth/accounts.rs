@@ -265,6 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_password_changes_have_one_winner_and_revoke_the_snapshot() {
+        let _guard = super::super::PASSWORD_TEST_LOCK.lock().await;
         let (_directory, db) = database(true).await;
         let hash = vsr_runtime::auth::password::hash("original-password", 4)
             .await

@@ -196,6 +196,7 @@ fn service(fixture: &Fixture, email: bool) -> RegistrationService<Fixture, Fixtu
 
 #[tokio::test]
 async fn public_registration_normalizes_hashes_and_creates_only_a_normal_user() {
+    let _guard = super::super::password::TEST_LOCK.lock().await;
     let fixture = Fixture::new();
     service(&fixture, false)
         .register(" Alice@EXAMPLE.TEST ", "secure-password")

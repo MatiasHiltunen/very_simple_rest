@@ -1,6 +1,7 @@
 //! Authentication trait seams.
 //!
-//! Built-in request authentication, account operations, recovery, email issuance and registration
+//! Built-in request authentication, account operations, recovery, email issuance,
+//! registration, admin operations and authenticated verification delivery
 //! live here behind `auth-builtin`. Key configuration, database adapters and HTTP
 //! endpoints still live in `rest_macro_core` during Phase 3. The complete account provider
 //! described by [`AuthProvider`] has not yet been extracted.
@@ -38,6 +39,12 @@ pub mod recovery_email;
 
 #[cfg(feature = "auth-builtin")]
 pub mod registration;
+
+#[cfg(feature = "auth-builtin")]
+pub mod management;
+
+#[cfg(feature = "auth-builtin")]
+pub mod provisioning;
 
 #[cfg(feature = "auth-builtin")]
 pub mod password;

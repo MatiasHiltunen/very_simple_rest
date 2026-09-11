@@ -31,6 +31,17 @@ pub struct UserContext {
 }
 
 impl UserContext {
+    pub(crate) fn management_identity(&self) -> vsr_runtime::auth::AuthenticatedIdentity {
+        vsr_runtime::auth::AuthenticatedIdentity {
+            user_id: self.id.to_string(),
+            email: None,
+            roles: self.roles.clone(),
+            claims: self.claims.clone().into_iter().collect(),
+            is_admin: self.roles.iter().any(|role| role == "admin"),
+            expires_at: None,
+        }
+    }
+
     pub fn claim_i64(&self, claim: &str) -> Option<i64> {
         self.claims.get(claim).and_then(Value::as_i64)
     }
@@ -138,27 +149,9 @@ pub struct ChangePasswordInput {
     pub new_password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CreateManagedUserInput {
-    pub email: String,
-    pub password: String,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub email_verified: Option<bool>,
-    #[serde(default)]
-    pub send_verification_email: Option<bool>,
-}
+pub use vsr_runtime::auth::provisioning::CreateManagedUserInput;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpdateManagedUserInput {
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub email_verified: Option<bool>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub claims: BTreeMap<String, Value>,
-}
+pub use vsr_runtime::auth::management::{AdminListQuery, UpdateManagedUserInput};
 
 pub use vsr_runtime::auth::accounts::AccountInfo;
 pub(crate) use vsr_runtime::auth::accounts::Account as AuthenticatedUser;
@@ -170,13 +163,6 @@ pub(crate) use vsr_runtime::auth::recovery::{
 #[derive(Debug, Deserialize)]
 pub struct AuthTokenQuery {
     pub token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AdminListQuery {
-    pub limit: Option<u32>,
-    pub offset: Option<u32>,
-    pub email: Option<String>,
 }
 
 #[derive(Default)]

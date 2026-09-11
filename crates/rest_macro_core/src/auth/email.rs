@@ -1,22 +1,8 @@
 use actix_web::HttpRequest;
-use vsr_runtime::auth::{
-    accounts::AccountError, recovery::TokenPurpose, recovery_email::RecoveryRecipient,
-};
+use vsr_runtime::auth::{accounts::AccountError, recovery::TokenPurpose};
 
-use super::helpers::{build_public_auth_url, service_unavailable};
-use super::settings::{AuthEmailSettings, AuthSettings};
-use super::user::AuthenticatedUser;
-
-pub(crate) fn configured_auth_email(
-    settings: &AuthSettings,
-) -> Result<&AuthEmailSettings, actix_web::HttpResponse> {
-    settings.email.as_ref().ok_or_else(|| {
-        service_unavailable(
-            "auth_email_unavailable",
-            "Built-in auth email delivery is not configured",
-        )
-    })
-}
+use super::helpers::build_public_auth_url;
+use super::settings::AuthSettings;
 
 pub(crate) fn escape_html(value: &str) -> String {
     value
@@ -43,32 +29,4 @@ pub(super) fn action_url(
     };
     build_public_auth_url(request, settings, path, current_route_path, &[])
         .map_err(|_| AccountError::Configuration)
-}
-
-pub(crate) async fn send_verification_email_for_user<E>(
-    db: &E,
-    request: Option<&HttpRequest>,
-    settings: &AuthSettings,
-    user: &AuthenticatedUser,
-    current_route_path: &str,
-) -> Result<(), actix_web::HttpResponse>
-where
-    E: crate::db::DbExecutor + Sync + ?Sized,
-{
-    let purpose = TokenPurpose::EmailVerification;
-    let url = action_url(request, settings, purpose, Some(current_route_path))
-        .map_err(super::accounts::error_response)?;
-    let sender = super::recovery_email::sender(settings, &url, purpose)
-        .map_err(super::accounts::error_response)?;
-    sender
-        .send_in_transaction(
-            &super::recovery_email::TokenStore(db),
-            &RecoveryRecipient {
-                id: user.id,
-                email: user.email.clone(),
-                verified: user.email_verified_at.is_some(),
-            },
-        )
-        .await
-        .map_err(super::accounts::error_response)
 }

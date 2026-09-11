@@ -4,17 +4,21 @@ mod db_ops;
 mod email;
 mod recovery_email;
 mod registration;
+mod management;
 pub mod handlers;
 mod helpers;
 mod jwt;
 mod migrations;
 mod pages;
-mod password;
 mod routing;
 mod runtime;
 mod settings;
 mod tokens;
 mod user;
+
+// Independent service tests must not exhaust the shared bounded bcrypt pool.
+#[cfg(test)]
+static PASSWORD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // Re-exports — settings
 pub use settings::{
@@ -68,6 +72,8 @@ pub use accounts::builtin_account_service;
 pub use tokens::builtin_recovery_service;
 pub use recovery_email::builtin_recovery_email_service;
 pub use registration::builtin_registration_service;
+pub use management::builtin_management_service;
+pub use management::builtin_provisioning_service;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
@@ -142,6 +148,8 @@ mod tests {
         assert!(account.email_verified_at.is_some());
         assert!(account.created_at.is_some());
         assert!(account.updated_at.is_some());
+        #[cfg(feature = "sqlite")]
+        super::management::tests::verify_server_concurrency(&pool, account.id).await;
     }
 
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]

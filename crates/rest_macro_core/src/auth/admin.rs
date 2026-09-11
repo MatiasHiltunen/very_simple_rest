@@ -1,12 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{IsTerminal, Write, stdin, stdout};
 
-use actix_web::HttpResponse;
 use bcrypt::hash;
-use serde_json::Value;
 
 use crate::db::{DbPool, query_scalar};
-use crate::errors;
 
 use super::db_ops::{
     UserColumnMetadata, detect_auth_backend, user_table_columns,
@@ -47,35 +44,6 @@ impl AdminClaimValue {
             Self::I64 { column_name, value } => format!("{column_name}={value}"),
             Self::String { column_name, value } => format!("{column_name}={value}"),
             Self::Bool { column_name, value } => format!("{column_name}={value}"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ManagedClaimUpdateValue {
-    I64 {
-        claim_name: String,
-        column_name: String,
-        value: Option<i64>,
-    },
-    String {
-        claim_name: String,
-        column_name: String,
-        value: Option<String>,
-    },
-    Bool {
-        claim_name: String,
-        column_name: String,
-        value: Option<bool>,
-    },
-}
-
-impl ManagedClaimUpdateValue {
-    pub fn column_name(&self) -> &str {
-        match self {
-            Self::I64 { column_name, .. }
-            | Self::String { column_name, .. }
-            | Self::Bool { column_name, .. } => column_name,
         }
     }
 }
@@ -338,128 +306,6 @@ pub(crate) fn parse_bool_claim(raw: &str) -> Option<bool> {
         "0" | "false" | "no" | "n" | "off" => Some(false),
         _ => None,
     }
-}
-
-pub(crate) fn resolve_managed_claim_updates(
-    user_columns: &[UserColumnMetadata],
-    configured_claims: &BTreeMap<String, AuthClaimMapping>,
-    provided_claims: &BTreeMap<String, Value>,
-) -> Result<Vec<ManagedClaimUpdateValue>, HttpResponse> {
-    if provided_claims.is_empty() {
-        return Ok(Vec::new());
-    }
-    if configured_claims.is_empty() {
-        return Err(errors::bad_request(
-            "claims_not_configured",
-            "This service does not declare `security.auth.claims`, so managed claim updates are unavailable",
-        ));
-    }
-
-    let configured_columns = configured_admin_claim_columns(user_columns, configured_claims)
-        .map_err(|error| errors::validation_error("claims", error))?;
-    let columns_by_claim = configured_columns
-        .into_iter()
-        .filter_map(|column| column.claim_name.clone().map(|name| (name, column)))
-        .collect::<HashMap<_, _>>();
-
-    let mut updates = Vec::new();
-    for (claim_name, raw_value) in provided_claims {
-        let field = format!("claims.{claim_name}");
-        let Some(column) = columns_by_claim.get(claim_name.as_str()) else {
-            return Err(errors::validation_error(
-                field,
-                format!(
-                    "Unknown managed auth claim `{claim_name}`. Declare it under `security.auth.claims` first"
-                ),
-            ));
-        };
-
-        let update = match (column.ty, raw_value) {
-            (AuthClaimType::I64, Value::Null) => {
-                if column.required {
-                    return Err(errors::validation_error(
-                        field,
-                        format!("Managed auth claim `{claim_name}` cannot be null"),
-                    ));
-                }
-                ManagedClaimUpdateValue::I64 {
-                    claim_name: claim_name.clone(),
-                    column_name: column.column_name.clone(),
-                    value: None,
-                }
-            }
-            (AuthClaimType::I64, Value::Number(number)) => {
-                let Some(value) = number.as_i64() else {
-                    return Err(errors::validation_error(
-                        field,
-                        format!("Managed auth claim `{claim_name}` must be an integer"),
-                    ));
-                };
-                ManagedClaimUpdateValue::I64 {
-                    claim_name: claim_name.clone(),
-                    column_name: column.column_name.clone(),
-                    value: Some(value),
-                }
-            }
-            (AuthClaimType::String, Value::Null) => {
-                if column.required {
-                    return Err(errors::validation_error(
-                        field,
-                        format!("Managed auth claim `{claim_name}` cannot be null"),
-                    ));
-                }
-                ManagedClaimUpdateValue::String {
-                    claim_name: claim_name.clone(),
-                    column_name: column.column_name.clone(),
-                    value: None,
-                }
-            }
-            (AuthClaimType::String, Value::String(value)) => ManagedClaimUpdateValue::String {
-                claim_name: claim_name.clone(),
-                column_name: column.column_name.clone(),
-                value: Some(value.clone()),
-            },
-            (AuthClaimType::Bool, Value::Null) => {
-                if column.required {
-                    return Err(errors::validation_error(
-                        field,
-                        format!("Managed auth claim `{claim_name}` cannot be null"),
-                    ));
-                }
-                ManagedClaimUpdateValue::Bool {
-                    claim_name: claim_name.clone(),
-                    column_name: column.column_name.clone(),
-                    value: None,
-                }
-            }
-            (AuthClaimType::Bool, Value::Bool(value)) => ManagedClaimUpdateValue::Bool {
-                claim_name: claim_name.clone(),
-                column_name: column.column_name.clone(),
-                value: Some(*value),
-            },
-            (AuthClaimType::I64, _) => {
-                return Err(errors::validation_error(
-                    field,
-                    format!("Managed auth claim `{claim_name}` must be an integer"),
-                ));
-            }
-            (AuthClaimType::String, _) => {
-                return Err(errors::validation_error(
-                    field,
-                    format!("Managed auth claim `{claim_name}` must be a string"),
-                ));
-            }
-            (AuthClaimType::Bool, _) => {
-                return Err(errors::validation_error(
-                    field,
-                    format!("Managed auth claim `{claim_name}` must be a boolean"),
-                ));
-            }
-        };
-        updates.push(update);
-    }
-
-    Ok(updates)
 }
 
 pub(crate) async fn insert_admin_user(

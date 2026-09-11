@@ -4,9 +4,8 @@ use serde_json::Value;
 use sqlx::any::AnyRow;
 use sqlx::{Column, Row};
 
-use crate::db::{DbPool, query, query_scalar};
+use crate::db::{DbPool, query};
 
-use super::admin::ManagedClaimUpdateValue;
 use super::helpers::{optional_text_column, row_has_column};
 #[cfg(test)]
 use super::helpers::hash_auth_token;
@@ -219,8 +218,8 @@ pub(crate) async fn load_authenticated_user_by_id_with_settings(
     load_authenticated_user_by_id_with_settings_for_backend(db, backend, user_id, settings).await
 }
 
-pub(crate) async fn list_authenticated_users_with_settings(
-    db: &DbPool,
+pub(crate) async fn list_authenticated_users_with_settings<E: crate::db::DbExecutor + ?Sized>(
+    db: &E,
     backend: AuthDbBackend,
     limit: u32,
     offset: u32,
@@ -476,106 +475,6 @@ where
     Ok(result.rows_affected() != 0)
 }
 
-pub(crate) async fn update_managed_user_row(
-    db: &DbPool,
-    backend: AuthDbBackend,
-    user_id: i64,
-    input: &super::user::UpdateManagedUserInput,
-    claim_updates: &[ManagedClaimUpdateValue],
-    updated_at: &str,
-) -> Result<bool, sqlx::Error> {
-    let tx = db.begin().await?;
-    let exists = query_scalar::<sqlx::Any, i64>(&format!(
-        "SELECT COUNT(*) FROM {} WHERE id = ?",
-        auth_user_table_ident(backend)
-    ))
-    .bind(user_id)
-    .fetch_one(&tx)
-    .await?;
-    if exists == 0 {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-
-    let role = input
-        .role
-        .as_ref()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let set_verified = input.email_verified == Some(true);
-    let clear_verified = input.email_verified == Some(false);
-    let should_update =
-        role.is_some() || input.email_verified.is_some() || !claim_updates.is_empty();
-
-    if role.is_some() || input.email_verified.is_some() {
-        query(
-            &format!(
-                "UPDATE {} \
-             SET role = CASE WHEN ? THEN ? ELSE role END, \
-                 email_verified_at = CASE WHEN ? THEN ? WHEN ? THEN NULL ELSE email_verified_at END, \
-                 updated_at = CASE WHEN ? THEN ? ELSE updated_at END \
-             WHERE id = ?",
-                auth_user_table_ident(backend)
-            ),
-        )
-        .bind(role.is_some())
-        .bind(role.unwrap_or_default())
-        .bind(set_verified)
-        .bind(updated_at)
-        .bind(clear_verified)
-        .bind(should_update)
-        .bind(updated_at)
-        .bind(user_id)
-        .execute(&tx)
-        .await?;
-    }
-
-    if !claim_updates.is_empty() {
-        let backend = detect_auth_backend(db).await?;
-        let user_columns = user_table_columns(db, backend).await?;
-        let has_updated_at = user_columns
-            .iter()
-            .any(|column| column.column_name == "updated_at");
-
-        for update in claim_updates {
-            let sql = if has_updated_at {
-                format!(
-                    "UPDATE {} SET {} = {}, {} = {} WHERE {} = {}",
-                    backend.quote_ident("user"),
-                    backend.quote_ident(update.column_name()),
-                    placeholder_for_backend(backend, 1),
-                    backend.quote_ident("updated_at"),
-                    placeholder_for_backend(backend, 2),
-                    backend.quote_ident("id"),
-                    placeholder_for_backend(backend, 3),
-                )
-            } else {
-                format!(
-                    "UPDATE {} SET {} = {} WHERE {} = {}",
-                    backend.quote_ident("user"),
-                    backend.quote_ident(update.column_name()),
-                    placeholder_for_backend(backend, 1),
-                    backend.quote_ident("id"),
-                    placeholder_for_backend(backend, 2),
-                )
-            };
-            let mut update_query = query(&sql);
-            update_query = match update {
-                ManagedClaimUpdateValue::I64 { value, .. } => update_query.bind(*value),
-                ManagedClaimUpdateValue::String { value, .. } => update_query.bind(value),
-                ManagedClaimUpdateValue::Bool { value, .. } => update_query.bind(*value),
-            };
-            if has_updated_at {
-                update_query = update_query.bind(updated_at);
-            }
-            update_query.bind(user_id).execute(&tx).await?;
-        }
-    }
-
-    tx.commit().await?;
-    Ok(should_update)
-}
-
 pub(crate) async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, sqlx::Error> {
     match pool {
         DbPool::Sqlx { pool, .. } => {
@@ -598,8 +497,8 @@ pub(crate) async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, 
     }
 }
 
-pub(crate) async fn user_table_columns(
-    pool: &DbPool,
+pub(crate) async fn user_table_columns<E: crate::db::DbExecutor + ?Sized>(
+    pool: &E,
     backend: AuthDbBackend,
 ) -> Result<Vec<UserColumnMetadata>, sqlx::Error> {
     let rows = match backend {
@@ -644,7 +543,7 @@ pub(crate) fn user_column_from_row(
     row: &AnyRow,
     backend: AuthDbBackend,
 ) -> Result<UserColumnMetadata, sqlx::Error> {
-    let (column_name, data_type, required) = match backend {
+    let (column_name, data_type, required, nullable) = match backend {
         AuthDbBackend::Sqlite => {
             let column_name: String = row.try_get("name")?;
             let data_type: String = row
@@ -653,7 +552,12 @@ pub(crate) fn user_column_from_row(
                 .to_ascii_lowercase();
             let notnull = row.try_get::<i64, _>("notnull")? != 0;
             let default_value = row.try_get::<Option<String>, _>("dflt_value")?;
-            (column_name, data_type, notnull && default_value.is_none())
+            (
+                column_name,
+                data_type,
+                notnull && default_value.is_none(),
+                !notnull,
+            )
         }
         AuthDbBackend::Postgres | AuthDbBackend::Mysql => {
             let column_name: String = row.try_get("column_name")?;
@@ -664,6 +568,7 @@ pub(crate) fn user_column_from_row(
                 column_name,
                 data_type,
                 is_nullable.eq_ignore_ascii_case("NO") && default_value.is_none(),
+                is_nullable.eq_ignore_ascii_case("YES"),
             )
         }
     };
@@ -672,6 +577,7 @@ pub(crate) fn user_column_from_row(
         column_name,
         data_type,
         required,
+        nullable,
     })
 }
 
@@ -687,4 +593,5 @@ pub(crate) struct UserColumnMetadata {
     pub column_name: String,
     pub data_type: String,
     pub required: bool,
+    pub nullable: bool,
 }

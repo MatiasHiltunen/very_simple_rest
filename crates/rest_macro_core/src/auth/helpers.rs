@@ -15,40 +15,6 @@ pub(crate) fn now_timestamp_string() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Micros, false)
 }
 
-pub(crate) fn service_unavailable(code: &'static str, message: impl Into<String>) -> HttpResponse {
-    errors::error_response(
-        actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
-        code,
-        message,
-    )
-}
-
-pub(crate) fn normalize_auth_email(raw: &str) -> Result<String, HttpResponse> {
-    vsr_runtime::auth::accounts::normalize_email(raw).map_err(super::accounts::error_response)
-}
-
-pub(crate) fn validate_auth_password(password: &str) -> Result<(), HttpResponse> {
-    vsr_runtime::auth::accounts::validate_password(password).map_err(super::accounts::error_response)
-}
-
-pub(crate) fn normalize_auth_role(
-    raw: Option<&str>,
-    default_role: &str,
-) -> Result<String, HttpResponse> {
-    let role = raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default_role)
-        .to_owned();
-    if role.chars().any(char::is_whitespace) {
-        return Err(errors::validation_error(
-            "role",
-            "Role cannot contain whitespace",
-        ));
-    }
-    Ok(role)
-}
-
 pub(crate) fn hash_auth_token(token: &str) -> String {
     vsr_runtime::auth::recovery::token_digest(token)
 }
@@ -67,12 +33,6 @@ pub(crate) fn is_missing_auth_management_schema(error: &sqlx::Error) -> bool {
         || message.contains("no such column: updated_at")
         || message.contains("column \"updated_at\" does not exist")
         || message.contains("unknown column 'updated_at'")
-}
-
-pub(crate) fn missing_auth_management_schema_response() -> HttpResponse {
-    errors::internal_error(
-        "Built-in auth management schema is missing. Apply the built-in auth migration again to add email verification and password reset tables.",
-    )
 }
 
 pub(crate) fn scope_prefix_from_request(
