@@ -71,7 +71,7 @@ impl AccessTokenIssuer for Issuer {
 
 /// Use the shared account service with existing configured keys and SQL drivers.
 /// Transport adapters remain responsible for request authentication, rate limits,
-/// JSON extraction and cookie responses. This facade still links Actix.
+/// JSON extraction and composing shared session responses. This facade still links Actix.
 pub fn builtin_account_service(
     db: crate::db::DbPool,
     settings: AuthSettings,

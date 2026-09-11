@@ -232,7 +232,7 @@ pub fn validate_cookie_csrf(
     Ok(())
 }
 
-fn unique_cookie(headers: &HeaderFields, name: &str) -> Result<Option<String>, ()> {
+pub(super) fn unique_cookie(headers: &HeaderFields, name: &str) -> Result<Option<String>, ()> {
     let mut found = None;
     for value in headers.get_all("cookie") {
         let text = std::str::from_utf8(value).map_err(|_| ())?;

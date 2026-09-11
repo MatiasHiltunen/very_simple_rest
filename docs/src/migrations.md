@@ -106,6 +106,18 @@ for self-service resend come only from the authenticated identity/current row,
 not the request body. Creation retains default `user` roles and explicit opt-in
 verification/invitation flags, including when email delivery is not configured.
 
+Session login/logout responses now use shared framework-neutral presentation.
+Successful responses add `Cache-Control: no-store`; cookie names, flags and JSON
+field names remain unchanged. Treat CSRF values as opaque: newly issued values
+are now 64 hexadecimal characters from 256 bits of OS randomness. EON and
+programmatic cookie configuration reject attribute injection, percent-escaped
+names, unsafe paths, reserved credential/CSRF header collisions and insecure
+cookie prefixes. Login fails closed if configuration or entropy is invalid.
+Logout rejects ambiguous/malformed cookies with 403 instead of selecting a first
+cookie or treating a parsing failure as absence. Cookie clearing still requires
+CSRF when any session cookie is present, even alongside a Bearer header. Logout
+does not revoke a copied bearer token; account-state revocation is unchanged.
+
 Trusted proxy chains are evaluated from the immediate peer right-to-left.
 Malformed chains, conflicting forwarding header families, or a missing peer
 never yield an attacker-supplied identity. Configure every trusted proxy and

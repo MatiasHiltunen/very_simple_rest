@@ -1,6 +1,7 @@
 //! Built-in account operations, independent of SQL drivers and HTTP frameworks.
 //!
-//! Adapters own JSON extraction, cookies, rate limiting and key/storage access.
+//! Adapters own JSON extraction, rate limiting and key/storage access. Cookie
+//! responses are supplied by the companion session presentation policy.
 //! This service owns credential policy and never accepts a client-selected user
 //! ID for protected operations: callers must use the authenticated identity.
 

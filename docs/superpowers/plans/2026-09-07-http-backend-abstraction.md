@@ -1,7 +1,7 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
 Status: in progress; transport, request-auth, account, recovery-consumption,
-email-issuance, registration, admin operations and provisioning milestones implemented
+email-issuance, registration, admin, provisioning and session presentation milestones implemented
 through 2026-09-11. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
@@ -40,6 +40,9 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Prove typed claims, rollback, cancellation, revisions and admin HTTP parity locally.
 - [x] Extract admin creation, invitations and account/admin verification resend.
 - [x] Prove provisioning rollback, token replacement, cancellation and HTTP parity locally.
+- [x] Commit admin management and provisioning on local `v1` (`499e61857`, not pushed).
+- [x] Share validated login-cookie presentation and cookie-clearing logout policy.
+- [x] Prove native/shared Actix/Axum login/logout cookies and CSRF behavior locally.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -111,10 +114,15 @@ preserves the previous token. Native handlers retain their signatures/response
 contracts and no longer own these database transactions. See the
 [provisioning proof](../../reviews/2026-09-11-provisioning-migration-proof.md).
 
-Next: integrate production route extraction, cookies/session presentation and
-rate-limit composition over the shared services, retaining native Actix behavior.
+Login-cookie issuance and logout now use `SessionPresentation`. EON and direct
+configuration share cookie validation; response attributes, entropy and logout
+CSRF handling are no longer implemented separately in the Actix facade. See the
+[session proof](../../reviews/2026-09-11-session-migration-proof.md).
+
+Next: integrate production route extraction and rate-limit composition over the
+shared services, retaining native Actix behavior.
 Durable recovery delivery and abuse/enumeration resistance remain
-hardening gates. Shared cookie/extraction/rate-limit routing, row authorization,
+hardening gates. Shared extraction/rate-limit routing, row authorization,
 streaming and native/generated bootstrap remain required. No CLI backend switch
 is added by these milestones. See [HTTP backend options](../../src/http_backends.md#shared-account-operations).
 

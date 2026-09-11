@@ -1,18 +1,16 @@
-use actix_web::cookie::{Cookie, time::Duration as CookieDuration};
 use actix_web::{HttpRequest, HttpResponse, Responder, web};
 
 use crate::{db::DbPool, errors};
 
 use super::helpers::{
     auth_api_base_path_for_page, auth_settings_from_request, enforce_auth_rate_limit,
-    generate_ephemeral_secret, same_site_from_settings, scope_prefix_from_request, user_is_admin,
-    validate_cookie_csrf,
+    scope_prefix_from_request, user_is_admin,
 };
 use super::pages::{
     render_account_portal_page, render_admin_dashboard_page, render_message_page,
     render_password_reset_page,
 };
-use super::settings::{AuthSettings, SessionCookieSettings};
+use super::settings::AuthSettings;
 use super::tokens::{TokenActionOutcome, apply_email_verification_token};
 use super::user::{
     AdminListQuery, AuthRateLimitScope, AuthTokenQuery, ChangePasswordInput,
@@ -78,6 +76,10 @@ pub(crate) async fn login_with_settings(
     db: web::Data<DbPool>,
     settings: AuthSettings,
 ) -> HttpResponse {
+    let presentation = match super::session::builtin_session_presentation(&settings) {
+        Ok(presentation) => presentation,
+        Err(error) => return super::accounts::error_response(error),
+    };
     let service = match super::accounts::builtin_account_service(
         db.get_ref().clone(),
         settings.clone(),
@@ -86,11 +88,9 @@ pub(crate) async fn login_with_settings(
         Err(error) => return super::accounts::error_response(error),
     };
     match service.login(&input.email, &input.password).await {
-        Ok(token) => match &settings.session_cookie {
-            Some(cookies) => {
-                issue_cookie_login_response(&token, cookies, settings.access_token_ttl_seconds)
-            }
-            None => HttpResponse::Ok().json(serde_json::json!({ "token": token })),
+        Ok(token) => match presentation.login(&token, settings.access_token_ttl_seconds) {
+            Ok(response) => super::accounts::response(response),
+            Err(error) => super::accounts::error_response(error),
         },
         Err(error) => super::accounts::error_response(error),
     }
@@ -108,79 +108,24 @@ pub async fn login_with_request(
     login_with_settings(input, db, settings).await
 }
 
-pub(crate) fn issue_cookie_login_response(
-    token: &str,
-    settings: &SessionCookieSettings,
-    ttl_seconds: i64,
-) -> HttpResponse {
-    let csrf_token = generate_ephemeral_secret(32);
-    let same_site = same_site_from_settings(settings.same_site);
-    let max_age = CookieDuration::seconds(ttl_seconds.max(1));
-
-    let session_cookie = Cookie::build(settings.name.clone(), token.to_owned())
-        .path(settings.path.clone())
-        .http_only(true)
-        .secure(settings.secure)
-        .same_site(same_site)
-        .max_age(max_age)
-        .finish();
-    let csrf_cookie = Cookie::build(settings.csrf_cookie_name.clone(), csrf_token.clone())
-        .path(settings.path.clone())
-        .http_only(false)
-        .secure(settings.secure)
-        .same_site(same_site)
-        .max_age(max_age)
-        .finish();
-
-    HttpResponse::Ok()
-        .cookie(session_cookie)
-        .cookie(csrf_cookie)
-        .json(serde_json::json!({
-            "token": token,
-            "csrf_token": csrf_token,
-        }))
-}
-
-pub(crate) fn clear_session_cookie_response(settings: &SessionCookieSettings) -> HttpResponse {
-    let same_site = same_site_from_settings(settings.same_site);
-    let expired_session = Cookie::build(settings.name.clone(), "")
-        .path(settings.path.clone())
-        .http_only(true)
-        .secure(settings.secure)
-        .same_site(same_site)
-        .max_age(CookieDuration::seconds(0))
-        .finish();
-    let expired_csrf = Cookie::build(settings.csrf_cookie_name.clone(), "")
-        .path(settings.path.clone())
-        .http_only(false)
-        .secure(settings.secure)
-        .same_site(same_site)
-        .max_age(CookieDuration::seconds(0))
-        .finish();
-
-    HttpResponse::NoContent()
-        .cookie(expired_session)
-        .cookie(expired_csrf)
-        .finish()
-}
-
 pub async fn me(user: UserContext) -> impl Responder {
     HttpResponse::Ok().json(user)
 }
 
 pub async fn logout(req: HttpRequest) -> impl Responder {
     let settings = auth_settings_from_request(&req);
-    let Some(cookie_settings) = settings.session_cookie.as_ref() else {
-        return HttpResponse::NoContent().finish();
+    let presentation = match super::session::builtin_session_presentation(&settings) {
+        Ok(presentation) => presentation,
+        Err(error) => return super::accounts::error_response(error),
     };
-
-    if req.cookie(&cookie_settings.name).is_some()
-        && let Err(response) = validate_cookie_csrf(&req, cookie_settings)
-    {
-        return response;
+    let headers = match super::runtime::request_headers(&req) {
+        Ok(headers) => headers,
+        Err(error) => return super::runtime::failure_response(error),
+    };
+    match presentation.logout(&headers) {
+        Ok(response) => super::accounts::response(response),
+        Err(error) => super::accounts::error_response(error),
     }
-
-    clear_session_cookie_response(cookie_settings)
 }
 
 pub async fn account(req: HttpRequest, user: UserContext, db: web::Data<DbPool>) -> impl Responder {

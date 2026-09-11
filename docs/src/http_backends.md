@@ -171,9 +171,9 @@ error during the update does not trigger a weaker fallback query.
 `rest_macro_core::auth::builtin_account_service(db, settings)` supplies the
 temporary configured-key and SQLx/Turso adapters. Existing public Actix login,
 account and password-change handler signatures remain unchanged and delegate to
-the service. Cookie issuance, CSRF presentation, JSON extraction and login rate
-limiting remain in their existing HTTP layer. A neutral consumer must supply
-these controls itself; the service is not a production route installer.
+the service. Cookie issuance and logout policy use the shared session presentation
+below. JSON extraction and login rate-limit composition remain in the HTTP layer;
+the account service is not a production route installer.
 
 This account milestone does not itself migrate admin operations or application
 authorization. Registration, verification/reset consumption and email delivery
@@ -182,6 +182,45 @@ still use Actix. The account service itself is framework-independent, but its
 temporary legacy infrastructure bridge still links Actix. Verification and
 remaining gates are recorded in
 `docs/reviews/2026-09-08-account-service-migration-proof.md`.
+
+## Shared Session Presentation
+
+`auth::session::SessionPresentation` (feature `auth-builtin`) presents successfully
+issued access tokens and clears browser cookies without depending on Actix or Axum.
+`rest_macro_core::auth::builtin_session_presentation(settings)` maps existing
+EON/programmatic settings into this policy. Native login/logout now delegate to it.
+Public handler signatures and existing bearer/cookie JSON fields are unchanged.
+
+Cookie mode returns two separate `Set-Cookie` headers: an HttpOnly session cookie
+and a readable CSRF cookie, with matching configured path, Secure, SameSite and
+Max-Age attributes. No Domain is emitted. CSRF tokens now use 32 bytes of fallible
+OS randomness encoded as 64 hexadecimal characters; clients must treat them as
+opaque. Entropy failure does not issue a partial response. Each serialized cookie
+is limited to 4096 bytes by application policy. Bearer-only mode returns only the
+token JSON without generating CSRF material. Successful login/logout responses
+include `Cache-Control: no-store`.
+
+EON and programmatic cookie configuration reject unsafe/ambiguous names, percent
+escapes in names, invalid paths, credential headers reused as CSRF headers, and
+insecure `__Host-`/`__Secure-` prefixes. SameSite=None requires Secure. Paths must
+be absolute visible ASCII without semicolons, query/fragment markers or backslashes.
+Programmatic configuration is validated before native login calls the account service.
+
+Logout checks every Cookie header through the same parser as request authentication.
+Any session cookie, including an empty or expired token, requires exactly one
+matching CSRF cookie/header. Duplicate/encoded-alias session cookies, duplicate
+CSRF fields and malformed cookies fail with 403 and no clearing cookies. A Bearer
+header does not bypass cookie-clearing CSRF checks. Without a session cookie,
+logout remains idempotent; without cookie configuration, it returns empty 204.
+Deletion uses the same attributes and scope as issuance with empty values and
+Max-Age=0. It does not require a valid, unexpired JWT.
+
+This is stateless presentation, not server-side session storage or per-token
+revocation. A copied bearer token remains valid after logout until expiry or an
+account-state change. Real HTTP tests prove cross-transport presentation and
+CSRF behavior, not browser SameSite/Secure enforcement. Full route extraction,
+rate-limit composition and native/generated Axum selection still remain. See
+`docs/reviews/2026-09-11-session-migration-proof.md`.
 
 ## Shared Recovery Operations
 

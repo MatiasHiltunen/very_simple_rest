@@ -37,6 +37,7 @@ mod builtin_auth_email_flow;
 mod builtin_auth_registration_flow;
 mod builtin_auth_management_flow;
 mod builtin_auth_provisioning_flow;
+mod builtin_auth_session_flow;
 
 impl Fixture {
     async fn new() -> Self {
@@ -133,8 +134,8 @@ async fn start_neutral<B: HttpServer>(fixture: &Fixture) -> B::Handle {
     .unwrap()
 }
 
-// Deliberately test-only bearer route adapters. Production cookie presentation,
-// extraction and login rate limiting still live in the legacy HTTP facade.
+// Test-only extraction and mounting; session presentation is production policy.
+// Extraction and login rate-limit composition still need migration.
 async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
     let service = Arc::new(
         auth::builtin_account_service(fixture.db.clone(), fixture.settings.clone()).unwrap(),
@@ -144,8 +145,12 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
         fixture.settings.clone(),
     ));
     let login_service = service.clone();
+    let presentation = auth::builtin_session_presentation(&fixture.settings).unwrap();
+    let logout_presentation = presentation.clone();
+    let ttl = fixture.settings.access_token_ttl_seconds;
     let login = make_handler(move |request| {
         let service = login_service.clone();
+        let presentation = presentation.clone();
         async move {
             let input: auth::LoginInput =
                 match serde_json::from_slice(request.body.as_deref().unwrap_or_default()) {
@@ -153,7 +158,19 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
                     Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
                 };
             match service.login(&input.email, &input.password).await {
-                Ok(token) => ResponseEnvelope::json(json!({"token": token})),
+                Ok(token) => match presentation.login(&token, ttl) {
+                    Ok(response) => response,
+                    Err(error) => error.response(),
+                },
+                Err(error) => error.response(),
+            }
+        }
+    });
+    let logout = make_handler(move |request| {
+        let presentation = logout_presentation.clone();
+        async move {
+            match presentation.logout(&request.headers) {
+                Ok(response) => response,
                 Err(error) => error.response(),
             }
         }
@@ -202,6 +219,7 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
         MiddlewareConfig::default(),
         vec![
             (HttpMethod::Post, "/auth/login".into(), login),
+            (HttpMethod::Post, "/auth/logout".into(), logout),
             (HttpMethod::Get, "/auth/account".into(), account),
             (HttpMethod::Post, "/auth/account/password".into(), password),
         ]

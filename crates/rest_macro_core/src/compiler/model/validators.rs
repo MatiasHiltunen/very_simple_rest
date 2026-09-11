@@ -1309,6 +1309,15 @@ pub fn validate_security_config(security: &SecurityConfig, span: Span) -> syn::R
                 ));
             }
         }
+        // Retain field-specific diagnostics above while sharing response constraints.
+        crate::auth::session::cookie_policy(cookie)
+            .validate()
+            .map_err(|_| {
+                syn::Error::new(
+                    span,
+                    "`security.auth.session_cookie` contains an unsafe or ambiguous cookie name, path, CSRF header or prefix",
+                )
+            })?;
     }
 
     if security.auth.jwt.is_some() && security.auth.jwt_secret.is_some() {

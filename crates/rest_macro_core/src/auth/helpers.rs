@@ -1,14 +1,11 @@
 use actix_web::{HttpRequest, HttpResponse, web};
-use actix_web::cookie::SameSite;
 use chrono::{SecondsFormat, Utc};
-use rand::distr::{Alphanumeric, SampleString};
-use rand::rng;
 use sqlx::any::AnyRow;
 use sqlx::{Column, Row};
 
 use crate::{errors, security::{SecurityConfig, request_client_ip}};
 
-use super::settings::{AuthSettings, SessionCookieSameSite, SessionCookieSettings};
+use super::settings::AuthSettings;
 use super::user::{AuthRateLimiter, AuthRateLimitScope, UserContext};
 
 pub(crate) fn now_timestamp_string() -> String {
@@ -142,19 +139,6 @@ pub(crate) fn is_unique_violation(error: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn generate_ephemeral_secret(length: usize) -> String {
-    let mut random = rng();
-    Alphanumeric.sample_string(&mut random, length)
-}
-
-pub(crate) fn same_site_from_settings(value: SessionCookieSameSite) -> SameSite {
-    match value {
-        SessionCookieSameSite::Lax => SameSite::Lax,
-        SessionCookieSameSite::None => SameSite::None,
-        SessionCookieSameSite::Strict => SameSite::Strict,
-    }
-}
-
 pub(crate) fn enforce_auth_rate_limit(
     req: &HttpRequest,
     scope: AuthRateLimitScope,
@@ -206,13 +190,4 @@ pub(crate) fn auth_api_base_path_for_page(req: &HttpRequest, page_path: Option<&
     } else {
         format!("{}/auth", scope_prefix.trim_end_matches('/'))
     }
-}
-
-pub(crate) fn validate_cookie_csrf(
-    req: &HttpRequest,
-    settings: &SessionCookieSettings,
-) -> Result<(), HttpResponse> {
-    let headers = super::runtime::request_headers(req).map_err(super::runtime::failure_response)?;
-    vsr_runtime::auth::builtin::validate_cookie_csrf(&headers, &super::runtime::cookie_policy(settings))
-        .map_err(super::runtime::failure_response)
 }

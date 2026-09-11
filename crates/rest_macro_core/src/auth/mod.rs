@@ -13,6 +13,7 @@ mod pages;
 mod routing;
 mod runtime;
 mod settings;
+pub(crate) mod session;
 mod tokens;
 mod user;
 
@@ -74,6 +75,7 @@ pub use recovery_email::builtin_recovery_email_service;
 pub use registration::builtin_registration_service;
 pub use management::builtin_management_service;
 pub use management::builtin_provisioning_service;
+pub use session::builtin_session_presentation;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

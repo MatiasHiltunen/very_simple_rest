@@ -4048,6 +4048,32 @@ fn rejects_invalid_cors_method_values() {
 }
 
 #[test]
+fn session_configuration_uses_shared_runtime_validation() {
+    for configuration in [
+        r#"name: "injected;name""#,
+        r#"csrf_cookie_name: "%73ession""#,
+        r#"csrf_header_name: "Authorization""#,
+        r#"path: "/; Domain=evil.test""#,
+        r#"name: "__Secure-session", secure: false"#,
+    ] {
+        let document = parse_document(&format!(
+            "security: {{ auth: {{ session_cookie: {{ {configuration} }} }} }}\nresources: []"
+        ));
+        let security = parse_security_document(document.security, Span::call_site()).unwrap();
+        let error = validate_security_config(&security, Span::call_site()).unwrap_err();
+        assert!(error.to_string().contains("security.auth.session_cookie"));
+        assert!(crate::auth::builtin_session_presentation(&security.auth).is_err());
+    }
+    let document = parse_document(r#"security: { auth: { session_cookie: {
+        name: "__Host-session", csrf_cookie_name: "__Host-csrf", path: "/", secure: true
+    } } }
+    resources: []"#);
+    let security = parse_security_document(document.security, Span::call_site()).unwrap();
+    validate_security_config(&security, Span::call_site()).unwrap();
+    assert!(crate::auth::builtin_session_presentation(&security.auth).is_ok());
+}
+
+#[test]
 fn rejects_invalid_trusted_proxy_values() {
     let document = parse_document(
         r#"
