@@ -38,6 +38,7 @@ mod builtin_auth_registration_flow;
 mod builtin_auth_management_flow;
 mod builtin_auth_provisioning_flow;
 mod builtin_auth_session_flow;
+mod builtin_auth_admission_flow;
 
 impl Fixture {
     async fn new() -> Self {
@@ -135,8 +136,15 @@ async fn start_neutral<B: HttpServer>(fixture: &Fixture) -> B::Handle {
 }
 
 // Test-only extraction and mounting; session presentation is production policy.
-// Extraction and login rate-limit composition still need migration.
+// Extraction and route installation still need migration.
 async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
+    start_account_service_with_admission::<B>(fixture, None).await
+}
+
+async fn start_account_service_with_admission<B: HttpServer>(
+    fixture: &Fixture,
+    admission: Option<(Arc<vsr_runtime::rate_limit::MemoryRateLimitStore>, rest_macro_core::security::RateLimitSecurity)>,
+) -> B::Handle {
     let service = Arc::new(
         auth::builtin_account_service(fixture.db.clone(), fixture.settings.clone()).unwrap(),
     );
@@ -229,6 +237,20 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
         .chain(registration_routes(fixture))
         .chain(builtin_auth_management_flow::routes(fixture))
         .chain(builtin_auth_provisioning_flow::routes(fixture))
+        .map(|(method, path, handler)| {
+            use vsr_runtime::auth::admission::{AuthRateLimitScope, rate_limit_authentication};
+            let rule = admission.as_ref().and_then(|(_, rules)| match path.as_str() {
+                "/auth/login" => rules.login.map(|rule| (AuthRateLimitScope::Login, rule)),
+                "/auth/register" => rules.register.map(|rule| (AuthRateLimitScope::Register, rule)),
+                _ => None,
+            });
+            let handler = if let Some((scope, rule)) = rule {
+                rate_limit_authentication(admission.as_ref().unwrap().0.clone(), scope, rule, handler).unwrap()
+            } else {
+                handler
+            };
+            (method, path, handler)
+        })
         .collect(),
     )
     .await

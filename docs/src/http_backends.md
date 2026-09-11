@@ -172,7 +172,7 @@ error during the update does not trigger a weaker fallback query.
 temporary configured-key and SQLx/Turso adapters. Existing public Actix login,
 account and password-change handler signatures remain unchanged and delegate to
 the service. Cookie issuance and logout policy use the shared session presentation
-below. JSON extraction and login rate-limit composition remain in the HTTP layer;
+below. JSON extraction remains in the HTTP layer; admission uses shared policy.
 the account service is not a production route installer.
 
 This account milestone does not itself migrate admin operations or application
@@ -219,8 +219,51 @@ This is stateless presentation, not server-side session storage or per-token
 revocation. A copied bearer token remains valid after logout until expiry or an
 account-state change. Real HTTP tests prove cross-transport presentation and
 CSRF behavior, not browser SameSite/Secure enforcement. Full route extraction,
-rate-limit composition and native/generated Axum selection still remain. See
+installation and native/generated Axum selection still remain. See
 `docs/reviews/2026-09-11-session-migration-proof.md`.
+
+## Shared Authentication Admission
+
+`auth::admission` (feature `auth-builtin`) supplies `check_auth_rate_limit` and the
+`rate_limit_authentication` handler wrapper for login and registration. The
+wrapper uses the direct socket IP, ignoring forwarding headers and supplied
+identities. A missing peer shares an `unknown` bucket. Proxy-aware consumers must
+explicitly resolve a trusted chain before calling the check function. Native
+Actix retains its existing trusted-proxy resolver; the neutral transports still
+reject nonempty `MiddlewareConfig.trusted_proxies`.
+
+`rate_limit::MemoryRateLimitStore` is a mutex-serialized sliding window with
+monotonic expiry and independent login/register keys. Successful and unsuccessful
+admitted attempts consume quota; denied attempts do not extend it. Exhaustion
+returns `429 rate_limited` with a rounded-up `Retry-After`. Store errors, missing
+configured native stores and capacity exhaustion return a redacted
+`503 auth_rate_limit_unavailable` with `Retry-After: 1`. Zero-valued rules are
+invalid, not a way to disable enforcement; absent EON rules remain disabled.
+
+Default capacity is 10,000 keys, 100,000 accepted timestamps and 1,024 string bytes
+per key. These are count limits, not a byte-exact memory budget. Expired bursts
+release excess queue allocation. Live counters are never evicted to admit a new
+key, and changing a live key's rule fails closed until its old events expire or
+an operator explicitly resets it. Cold expired keys are swept at most once per
+second, so capacity recovery can lag expiry by up to that interval. A per-key
+request limit above the store's total event capacity cannot be served.
+
+Native `vsr serve` and newly emitted Actix servers create one store outside their
+worker factories. Hand-built multi-worker apps must create one
+`web::Data<auth::AuthRateLimiter>` outside `HttpServer::new` and pass clones to
+`auth_api_routes_with_settings_and_limiter`. The older route helpers preserve
+their signatures but still create a fresh per-registration store. Explicit
+consumers may configure `MemoryRateLimitCapacity` through the store constructor;
+there are no EON capacity overrides yet.
+
+This is a single-process quota, reset on restart, not a distributed Redis store
+or complete abuse prevention. Use a shared-store adapter or ingress policy for
+multi-process deployments. Authentication admission does not itself authenticate
+a request. Native JSON extraction still precedes its handler check. Placing the
+neutral wrapper outside extraction charges malformed JSON that native Actix
+rejects first; complete extraction/installation parity remains migration work.
+Live tests share one store across four native workers and both neutral
+transports. See `docs/reviews/2026-09-11-admission-migration-proof.md`.
 
 ## Shared Recovery Operations
 
@@ -254,8 +297,9 @@ Resetting a password changes the account fingerprint, invalidating old sessions.
 Existing Actix JSON endpoints and the verification HTML page delegate to this
 service without changing their public handler signatures or response codes.
 Real HTTP tests also mount the service behind both runtime adapters. These remain
-test-only route adapters: production extraction and rate-limit wiring still need
-migration. Email issuance, registration and provisioning are covered by the
+test-only route adapters: production extraction and route installation still need
+migration. Recovery abuse controls remain separate from login/register admission.
+Email issuance, registration and provisioning are covered by the
 following sections. Native/emitted
 backend selection and the Actix-free infrastructure bridge remain incomplete.
 See `docs/reviews/2026-09-08-recovery-service-migration-proof.md`.
@@ -327,7 +371,7 @@ The existing Actix handlers delegate without changing their public signatures:
 success remains an empty 201, duplicate email remains 409 `duplicate_email`, and
 field validation remains 400. The database unique constraint arbitrates concurrent
 normalized registrations; errors and cancellation roll back the entire account
-and token transaction. Transport-specific registration rate limits remain intact.
+and token transaction. Registration rate limits now delegate to shared admission.
 
 This registration milestone does not install production Axum routes. The
 infrastructure bridge still links Actix. Mail acceptance is still not atomic with

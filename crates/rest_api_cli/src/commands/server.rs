@@ -1405,12 +1405,17 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
 
 fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth: bool) -> String {
     let auth_config = if include_builtin_auth {
-        "                    .configure(|cfg| very_simple_rest::core::auth::auth_api_routes_with_settings(cfg, server_pool.clone(), api_security.auth.clone()))\n"
+        "                    .configure(|cfg| very_simple_rest::core::auth::auth_api_routes_with_settings_and_limiter(cfg, server_pool.clone(), api_security.auth.clone(), auth_rate_limiter.clone()))\n"
     } else {
         ""
     };
     let public_auth_config = if include_builtin_auth {
         "            .configure(|cfg| very_simple_rest::core::auth::public_auth_discovery_routes_with_settings(cfg, api_security.auth.clone()))\n"
+    } else {
+        ""
+    };
+    let auth_rate_limit_setup = if include_builtin_auth {
+        "    let auth_rate_limiter = web::Data::new(very_simple_rest::core::auth::AuthRateLimiter::default());\n"
     } else {
         ""
     };
@@ -1561,7 +1566,7 @@ async fn main() -> std::io::Result<()> {{
     let anon_client_middleware = very_simple_rest::core::security::require_default_anon_client_middleware()
         .map_err(|error| std::io::Error::other(format!("anonymous client configuration error: {{error}}")))?;
     let server_pool = pool.clone();
-    let server = HttpServer::new(move || {{
+{auth_rate_limit_setup}    let server = HttpServer::new(move || {{
         let api_runtime = api_runtime.clone();
         let api_security = api_security.clone();
         let anon_client_middleware = anon_client_middleware.clone();
@@ -2989,6 +2994,7 @@ resources: [
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("mod generated;"));
+        assert!(!main_rs.contains("auth_rate_limiter"));
         assert!(!main_rs.contains("rest_api_from_eon!("));
         assert!(main_rs.contains("generated::blog_api::security()"));
         assert!(main_rs.contains("generated::blog_api::runtime()"));
@@ -3132,7 +3138,11 @@ resources: [
         assert!(root.join("migrations/0001_auth_management.sql").exists());
         assert!(root.join("migrations/0002_service.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("very_simple_rest::core::auth::auth_api_routes_with_settings"));
+        assert!(main_rs.contains("very_simple_rest::core::auth::auth_api_routes_with_settings_and_limiter"));
+        let limiter_setup = main_rs.find("let auth_rate_limiter = web::Data::new(").unwrap();
+        let worker_factory = main_rs.find("let server = HttpServer::new(move ||").unwrap();
+        assert!(limiter_setup < worker_factory, "all workers must share one budget");
+        assert!(main_rs.contains("auth_rate_limiter.clone()"));
         assert!(
             main_rs.contains(
                 "very_simple_rest::core::auth::public_auth_discovery_routes_with_settings"

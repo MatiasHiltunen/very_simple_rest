@@ -39,7 +39,8 @@ pub use jwt::{ensure_jwt_secret_configured, ensure_jwt_secret_configured_with_se
 
 // Re-exports — user types
 pub use user::{
-    AccountInfo, AdminListQuery, AuthTokenQuery, ChangePasswordInput, CreateManagedUserInput,
+    AccountInfo, AdminListQuery, AuthRateLimiter, AuthTokenQuery, ChangePasswordInput,
+    CreateManagedUserInput,
     LoginInput, PasswordResetConfirmInput, PasswordResetRequestInput, RegisterInput,
     UpdateManagedUserInput, User, UserContext, VerificationResendInput, VerifyEmailInput,
 };
@@ -60,7 +61,8 @@ pub use handlers::{
 
 // Re-exports — routing
 pub use routing::{
-    auth_api_routes_with_settings, auth_routes, auth_routes_with_settings,
+    auth_api_routes_with_settings, auth_api_routes_with_settings_and_limiter, auth_routes,
+    auth_routes_with_settings,
     public_auth_discovery_routes, public_auth_discovery_routes_with_settings, public_jwks_enabled,
     register_builtin_auth_html_pages,
 };

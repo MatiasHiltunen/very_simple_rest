@@ -1,8 +1,6 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
-use std::time::Instant;
 
 use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, web};
@@ -165,59 +163,5 @@ pub struct AuthTokenQuery {
     pub token: Option<String>,
 }
 
-#[derive(Default)]
-pub(crate) struct AuthRateLimiter {
-    pub entries: Mutex<HashMap<String, VecDeque<Instant>>>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum AuthRateLimitScope {
-    Login,
-    Register,
-}
-
-impl AuthRateLimitScope {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Login => "login",
-            Self::Register => "register",
-        }
-    }
-}
-
-impl AuthRateLimiter {
-    pub fn check(&self, key: &str, rule: crate::security::RateLimitRule) -> Option<u64> {
-        use std::time::Duration as StdDuration;
-
-        let now = Instant::now();
-        let window = StdDuration::from_secs(rule.window_seconds);
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let entry = entries.entry(key.to_owned()).or_default();
-
-        while entry
-            .front()
-            .is_some_and(|instant| now.duration_since(*instant) >= window)
-        {
-            entry.pop_front();
-        }
-
-        if entry.len() >= rule.requests as usize {
-            let retry_after = entry
-                .front()
-                .map(|oldest| {
-                    window
-                        .saturating_sub(now.duration_since(*oldest))
-                        .as_secs()
-                        .max(1)
-                })
-                .unwrap_or(rule.window_seconds);
-            return Some(retry_after);
-        }
-
-        entry.push_back(now);
-        None
-    }
-}
+pub(crate) use vsr_runtime::auth::admission::AuthRateLimitScope;
+pub use vsr_runtime::rate_limit::MemoryRateLimitStore as AuthRateLimiter;

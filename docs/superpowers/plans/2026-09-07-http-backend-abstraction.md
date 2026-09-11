@@ -1,7 +1,7 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
 Status: in progress; transport, request-auth, account, recovery-consumption,
-email-issuance, registration, admin, provisioning and session presentation milestones implemented
+email-issuance, registration, admin, provisioning, session presentation and admission milestones implemented
 through 2026-09-11. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
@@ -35,14 +35,17 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Merge the verified baseline into `main` (`3ac6ffd78`, 27 CI jobs passed).
 - [x] Move self-registration policy and transaction ownership into the shared runtime.
 - [x] Prove registration rollback, cancellation, schema compatibility and HTTP parity.
-- [x] Commit self-registration on local `v1` (`723f711cf`, not pushed).
+- [x] Commit self-registration on `v1` (`723f711cf`, subsequently pushed).
 - [x] Share admin list/read/update/delete policy and live-role transaction checks.
 - [x] Prove typed claims, rollback, cancellation, revisions and admin HTTP parity locally.
 - [x] Extract admin creation, invitations and account/admin verification resend.
 - [x] Prove provisioning rollback, token replacement, cancellation and HTTP parity locally.
-- [x] Commit admin management and provisioning on local `v1` (`499e61857`, not pushed).
+- [x] Commit admin management and provisioning on `v1` (`499e61857`, subsequently pushed).
 - [x] Share validated login-cookie presentation and cookie-clearing logout policy.
 - [x] Prove native/shared Actix/Axum login/logout cookies and CSRF behavior locally.
+- [x] Commit session presentation and push all three milestones to `origin/v1` (`d1f4a3580`).
+- [x] Share bounded auth admission and fail closed on missing/failed configured stores.
+- [x] Share native CLI/emitted admission state across workers and prove HTTP quotas locally.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -93,8 +96,8 @@ See the [email proof](../../reviews/2026-09-08-recovery-email-migration-proof.md
 
 Self-registration now lives in `RegistrationService`, including bounded password
 hashing, the server-selected user role, account initialization, verification and
-commit/rollback sequencing. The native handler retains extraction, trusted URL
-resolution and rate limiting. Legacy base schemas remain supported without email;
+commit/rollback sequencing. The native handler retains extraction and trusted URL
+resolution; admission now delegates to shared runtime policy. Legacy base schemas remain supported without email;
 partial schemas and initialization failures now fail closed. See the
 [registration proof](../../reviews/2026-09-08-registration-migration-proof.md).
 
@@ -119,10 +122,17 @@ configuration share cookie validation; response attributes, entropy and logout
 CSRF handling are no longer implemented separately in the Actix facade. See the
 [session proof](../../reviews/2026-09-11-session-migration-proof.md).
 
-Next: integrate production route extraction and rate-limit composition over the
-shared services, retaining native Actix behavior.
+Login/registration admission now uses a bounded in-memory `RateLimitStore` and
+shared policy with independent scopes. Native CLI/emitted servers share one store
+across workers. Live entries are never evicted to admit new keys; capacity/store
+failure returns 503, while exhausted client quotas return 429 with rounded-up
+Retry-After. See the [admission proof](../../reviews/2026-09-11-admission-migration-proof.md).
+
+Next: integrate production route extraction and installation over the shared
+services, retaining native Actix behavior. Native JSON extraction still precedes
+admission; neutral wrappers can charge malformed attempts before extraction.
 Durable recovery delivery and abuse/enumeration resistance remain
-hardening gates. Shared extraction/rate-limit routing, row authorization,
+hardening gates. Shared extraction/route installation, row authorization,
 streaming and native/generated bootstrap remain required. No CLI backend switch
 is added by these milestones. See [HTTP backend options](../../src/http_backends.md#shared-account-operations).
 

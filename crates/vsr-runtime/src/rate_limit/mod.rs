@@ -1,9 +1,11 @@
 //! Rate limiting trait seam.
 //!
-//! The default implementation is an in-process token-bucket store backed by
-//! `DashMap`. It is suitable for single-instance deployments. Multi-instance
-//! deployments need a shared store (Redis); that adapter lives behind
-//! `rate-limit-redis`.
+//! The in-process implementation is a bounded sliding-window store. Share it
+//! across workers in a single instance. Multi-instance deployments require a
+//! shared store; `rate-limit-redis` remains a placeholder, not an implementation.
+
+mod memory;
+pub use memory::{MemoryRateLimitCapacity, MemoryRateLimitStore};
 
 use std::{future::Future, time::Duration};
 use vsr_core::error::VsrResult;
@@ -50,7 +52,7 @@ pub enum RateLimitDecision {
     Allowed {
         /// How many more requests are allowed in the current window.
         remaining: u32,
-        /// When the current window resets (Unix timestamp).
+        /// Earliest accepted event expiration (Unix timestamp; informational).
         reset_at: i64,
     },
     /// The request exceeds the limit.

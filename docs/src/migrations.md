@@ -118,6 +118,21 @@ cookie or treating a parsing failure as absence. Cookie clearing still requires
 CSRF when any session cookie is present, even alongside a Bearer header. Logout
 does not revoke a copied bearer token; account-state revocation is unchanged.
 
+Login/registration now share bounded admission policy. Native CLI and newly
+emitted servers enforce one in-process budget across workers instead of one per
+worker, so multi-worker deployments may reach the configured quota sooner.
+Exhausted quotas retain 429 with a rounded-up `Retry-After`; missing or failed
+configured stores and capacity exhaustion now return 503 instead of bypassing
+enforcement or growing an unbounded client map. Defaults cap resident keys at
+10,000 and accepted timestamps at 100,000. Requests above the timestamp capacity
+cannot be served. Absent rules still disable enforcement. Re-emit generated
+servers to adopt shared worker state. Hand-built multi-worker apps should pass
+one externally created `web::Data<auth::AuthRateLimiter>` to
+`auth_api_routes_with_settings_and_limiter`; legacy helpers still allocate one
+store per registration. These budgets are not shared across processes. See
+[shared admission](http_backends.md#shared-authentication-admission) for capacity,
+proxy and extraction-order limitations.
+
 Trusted proxy chains are evaluated from the immediate peer right-to-left.
 Malformed chains, conflicting forwarding header families, or a missing peer
 never yield an attacker-supplied identity. Configure every trusted proxy and

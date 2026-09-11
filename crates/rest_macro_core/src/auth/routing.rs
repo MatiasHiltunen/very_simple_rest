@@ -69,14 +69,28 @@ pub fn register_builtin_auth_html_pages(cfg: &mut web::ServiceConfig, settings: 
     }
 }
 
+/// Register auth routes with a fresh per-registration budget. Multi-worker
+/// applications should use `auth_api_routes_with_settings_and_limiter` and share
+/// one `web::Data<AuthRateLimiter>` created outside the worker factory.
 pub fn auth_api_routes_with_settings(
     cfg: &mut web::ServiceConfig,
     db: impl Into<DbPool>,
     settings: AuthSettings,
 ) {
+    auth_api_routes_with_settings_and_limiter(
+        cfg, db, settings, web::Data::new(AuthRateLimiter::default()),
+    );
+}
+
+/// Register auth routes with an explicitly shared in-process admission budget.
+pub fn auth_api_routes_with_settings_and_limiter(
+    cfg: &mut web::ServiceConfig,
+    db: impl Into<DbPool>,
+    settings: AuthSettings,
+    limiter: web::Data<AuthRateLimiter>,
+) {
     let db = web::Data::new(db.into());
     let settings = web::Data::new(settings);
-    let limiter = web::Data::new(AuthRateLimiter::default());
     errors::configure_extractor_errors(cfg);
     cfg.app_data(db.clone());
     cfg.app_data(super::user::BuiltinAuth);

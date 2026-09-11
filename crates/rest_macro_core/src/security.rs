@@ -46,11 +46,7 @@ pub struct TrustedProxySecurity {
     pub proxies_env: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RateLimitRule {
-    pub requests: u32,
-    pub window_seconds: u64,
-}
+pub use vsr_runtime::auth::admission::AuthRateLimitRule as RateLimitRule;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RateLimitSecurity {

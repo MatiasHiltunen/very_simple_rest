@@ -2345,7 +2345,14 @@ database: {
     push_section(
         &mut markdown,
         "Rate Limits",
-        "Rate-limit rules are currently applied only to built-in auth endpoints.",
+        "Rate-limit rules are currently applied only to built-in auth endpoints.\n\n\
+Native CLI and newly emitted servers share one in-process budget across workers,\n\
+not across processes. The default store caps resident keys at 10,000 and accepted\n\
+timestamps at 100,000; per-key request limits above that timestamp capacity cannot\n\
+be served. Exhausted client quotas return 429 with rounded-up Retry-After.\n\
+Store/capacity failures return 503 without evicting live counters. Absent rules\n\
+disable enforcement; zero values are invalid. Store capacity is currently\n\
+configurable only by explicit Rust consumers, not through EON.",
         &[
             row(
                 "security.rate_limits.login.requests",

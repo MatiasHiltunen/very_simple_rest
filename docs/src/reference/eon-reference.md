@@ -663,6 +663,14 @@ Runtime behavior when lists are empty: methods default to `GET, POST, PUT, PATCH
 
 Rate-limit rules are currently applied only to built-in auth endpoints.
 
+Native CLI and newly emitted servers share one in-process budget across workers,
+not across processes. The default store caps resident keys at 10,000 and accepted
+timestamps at 100,000; per-key request limits above that timestamp capacity cannot
+be served. Exhausted client quotas return 429 with rounded-up Retry-After.
+Store/capacity failures return 503 without evicting live counters. Absent rules
+disable enforcement; zero values are invalid. Store capacity is currently
+configurable only by explicit Rust consumers, not through EON.
+
 | Path | Type / Shape | Default | Required | Accepted Values | Notes |
 | --- | --- | --- | --- | --- | --- |
 | security.rate_limits.login.requests | u32 | None | Required when `security.rate_limits.login` is set | Positive integer | Maximum requests allowed per window. |

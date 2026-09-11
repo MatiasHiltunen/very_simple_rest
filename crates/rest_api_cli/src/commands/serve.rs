@@ -539,6 +539,7 @@ struct DynamicService {
     docs_html: Arc<String>,
     include_builtin_auth: bool,
     static_mounts: Arc<Vec<StaticMount>>,
+    auth_rate_limiter: web::Data<auth::AuthRateLimiter>,
     #[cfg(feature = "storage-local")]
     storage_registry: Arc<StorageRegistry>,
     #[cfg(feature = "storage-local")]
@@ -595,6 +596,7 @@ impl DynamicService {
             docs_html: Arc::new(swagger_ui_html().to_owned()),
             include_builtin_auth,
             static_mounts,
+            auth_rate_limiter: web::Data::new(auth::AuthRateLimiter::default()),
             #[cfg(feature = "storage-local")]
             storage_registry,
             #[cfg(feature = "storage-local")]
@@ -1223,10 +1225,11 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
             &dynamic_service.runtime,
         );
         if dynamic_service.include_builtin_auth {
-            auth::auth_api_routes_with_settings(
+            auth::auth_api_routes_with_settings_and_limiter(
                 cfg,
                 pool.clone(),
                 dynamic_service.security.auth.clone(),
+                dynamic_service.auth_rate_limiter.clone(),
             );
         }
         if dynamic_service.authorization_management_enabled {
@@ -5755,6 +5758,28 @@ mod tests {
             dynamic_service: dynamic_service.clone(),
         };
         (dynamic_service, state)
+    }
+
+    #[actix_web::test]
+    async fn native_auth_budget_survives_rebuilding_worker_scopes() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("security_api.eon", true).await;
+        for attempt in 0..4 {
+            let app = test::init_service(
+                App::new().service(build_api_scope(dynamic_service.clone(), state.clone())),
+            ).await;
+            let request = test::TestRequest::post().uri("/api/auth/login")
+                .peer_addr("127.0.0.1:1234".parse().unwrap())
+                .set_json(json!({"email":"invalid", "password":"password"})).to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), if attempt < 2 { StatusCode::BAD_REQUEST } else { StatusCode::TOO_MANY_REQUESTS });
+            let body: Value = test::read_body_json(response).await;
+            assert_eq!(body["code"], if attempt < 2 { "validation_error" } else { "rate_limited" });
+        }
     }
 
     async fn seed_public_catalog(pool: &DbPool) {

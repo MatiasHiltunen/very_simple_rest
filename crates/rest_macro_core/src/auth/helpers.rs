@@ -3,7 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use sqlx::any::AnyRow;
 use sqlx::{Column, Row};
 
-use crate::{errors, security::{SecurityConfig, request_client_ip}};
+use crate::security::{SecurityConfig, request_client_ip};
 
 use super::settings::AuthSettings;
 use super::user::{AuthRateLimiter, AuthRateLimitScope, UserContext};
@@ -139,7 +139,7 @@ pub(crate) fn is_unique_violation(error: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn enforce_auth_rate_limit(
+pub(crate) async fn enforce_auth_rate_limit(
     req: &HttpRequest,
     scope: AuthRateLimitScope,
 ) -> Option<HttpResponse> {
@@ -149,23 +149,17 @@ pub(crate) fn enforce_auth_rate_limit(
         AuthRateLimitScope::Register => security.rate_limits.register,
     }?;
 
-    let limiter = req.app_data::<web::Data<AuthRateLimiter>>()?;
-    let client_ip = request_client_ip(req, &security)
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-    let key = format!("{}:{client_ip}", scope.as_str());
-    let retry_after = limiter.check(&key, rule)?;
-
-    let mut response = errors::too_many_requests(
-        "rate_limited",
-        format!("Too many {} attempts. Try again later.", scope.as_str()),
-    );
-    if let Ok(value) = actix_web::http::header::HeaderValue::from_str(&retry_after.to_string()) {
-        response
-            .headers_mut()
-            .insert(actix_web::http::header::RETRY_AFTER, value);
-    }
-    Some(response)
+    use vsr_runtime::auth::admission::{AuthAdmissionError, check_auth_rate_limit};
+    let result = if let Some(limiter) = req.app_data::<web::Data<AuthRateLimiter>>() {
+        check_auth_rate_limit(
+            limiter.get_ref(), scope, request_client_ip(req, &security), rule,
+        ).await
+    } else {
+        Err(AuthAdmissionError::Unavailable)
+    };
+    result
+        .err()
+        .map(|error| super::accounts::response(error.response()))
 }
 
 pub(crate) fn auth_settings_from_request(req: &HttpRequest) -> AuthSettings {

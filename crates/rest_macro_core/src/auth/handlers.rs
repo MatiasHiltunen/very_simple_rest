@@ -60,7 +60,7 @@ pub async fn register_with_request(
     input: web::Json<RegisterInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Register) {
+    if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Register).await {
         return response;
     }
     let settings = auth_settings_from_request(&req);
@@ -101,7 +101,7 @@ pub async fn login_with_request(
     input: web::Json<LoginInput>,
     db: web::Data<DbPool>,
 ) -> impl Responder {
-    if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Login) {
+    if let Some(response) = enforce_auth_rate_limit(&req, AuthRateLimitScope::Login).await {
         return response;
     }
     let settings = auth_settings_from_request(&req);
