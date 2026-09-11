@@ -175,9 +175,9 @@ the service. Cookie issuance, CSRF presentation, JSON extraction and login rate
 limiting remain in their existing HTTP layer. A neutral consumer must supply
 these controls itself; the service is not a production route installer.
 
-This account milestone does not migrate registration, admin operations, email
-delivery or application authorization. Verification/reset consumption is covered
-by the next section. Native/emitted servers
+This account milestone does not itself migrate admin operations or application
+authorization. Registration, verification/reset consumption and email delivery
+are covered by the following sections. Native/emitted servers
 still use Actix. The account service itself is framework-independent, but its
 temporary legacy infrastructure bridge still links Actix. Verification and
 remaining gates are recorded in
@@ -216,8 +216,8 @@ Existing Actix JSON endpoints and the verification HTML page delegate to this
 service without changing their public handler signatures or response codes.
 Real HTTP tests also mount the service behind both runtime adapters. These remain
 test-only route adapters: production extraction, rate limiting,
-registration and admin operations still need migration. Email issuance is covered
-by the next section. Native/emitted
+and admin operations still need migration. Email issuance and registration are
+covered by the following sections. Native/emitted
 backend selection and the Actix-free infrastructure bridge remain incomplete.
 See `docs/reviews/2026-09-08-recovery-service-migration-proof.md`.
 
@@ -241,7 +241,7 @@ reply-to and capture-file support. Provider errors are redacted in public errors
 and provider bridge. SQLite/Turso anonymous requests reserve the write transaction
 before reading; PostgreSQL/MySQL use an account-row lock, including first issuance
 where no token row exists. Only local SQLite and Turso concurrency is verified.
-Native registration/admin transaction ownership has not yet moved to the runtime.
+Admin transaction ownership remains in the native facade; registration is covered below.
 
 Compatibility change: `security.auth.email.public_base_url` must now be configured
 to send authentication emails, even inside an HTTP request. Links never fall back
@@ -262,6 +262,38 @@ remain production hardening gates. These limits matter alongside the
 
 The real HTTP proof uses a local mock Resend provider, not an external inbox or
 SMTP acceptance test. See `docs/reviews/2026-09-08-recovery-email-migration-proof.md`.
+
+## Shared Registration
+
+`auth::registration::RegistrationService` owns self-registration validation,
+bounded bcrypt work, the fixed `user` role, schema policy and transaction sequencing.
+`RegistrationRepository` supplies a transaction that creates and reads the account,
+initializes timestamps, sets verification state and writes recovery tokens. Password
+hashing happens before acquiring the transaction. No client-selected role, account
+ID, verification state or application claim is accepted by the service.
+
+With configured email, registration reuses `RecoveryEmailSender` and commits only
+after provider acceptance. The account stays unverified until its email-bound
+single-use token is consumed. Without email, full-schema accounts retain the
+existing automatic-verification behavior. A wholly legacy base schema is supported
+only without email. Partial management schemas now return `MissingSchema`; failed
+timestamp writes are no longer ignored. Requiring verification without a sender
+is rejected even when configuring the runtime directly, matching EON validation.
+
+`rest_macro_core::auth::builtin_registration_service(db, settings, verification_url)`
+provides the temporary SQLx/Turso/provider bridge. The optional URL is required
+when email is enabled and must be a trusted configured verification endpoint.
+The existing Actix handlers delegate without changing their public signatures:
+success remains an empty 201, duplicate email remains 409 `duplicate_email`, and
+field validation remains 400. The database unique constraint arbitrates concurrent
+normalized registrations; errors and cancellation roll back the entire account
+and token transaction. Transport-specific registration rate limits remain intact.
+
+This does not migrate admin operations or install production Axum routes. The
+infrastructure bridge still links Actix. Mail acceptance is still not atomic with
+commit, duplicate/timing responses still disclose account existence, and the caller
+must control registration exposure and abuse. See the local proof and remaining
+gates in `docs/reviews/2026-09-08-registration-migration-proof.md`.
 
 ## Experimental API Changes
 

@@ -182,6 +182,11 @@ impl<M: Mailer, C: Clock> RecoveryEmailSender<M, C> {
         })
     }
 
+    /// Configured token purpose, for services that require a verification sender.
+    pub fn purpose(&self) -> TokenPurpose {
+        self.policy.purpose
+    }
+
     /// Issue and deliver inside an existing transaction (registration/admin).
     /// The caller MUST roll back on error or cancellation and commit on success.
     pub async fn send_in_transaction(

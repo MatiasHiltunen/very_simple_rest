@@ -118,6 +118,8 @@ pub enum AccountError {
     Validation(&'static str, &'static str),
     /// Email or password is not accepted.
     InvalidCredentials,
+    /// The normalized registration email already exists.
+    DuplicateEmail,
     /// Current password was not accepted for a password change.
     InvalidCurrentPassword,
     /// The authenticated account no longer exists.
@@ -149,6 +151,12 @@ impl AccountError {
         let (status, code, message, field) = match self {
             Self::Validation(field, message) => (400, "validation_error", message, Some(field)),
             Self::InvalidCredentials => (401, "invalid_credentials", "Invalid credentials", None),
+            Self::DuplicateEmail => (
+                409,
+                "duplicate_email",
+                "A user with that email already exists",
+                None,
+            ),
             Self::InvalidCurrentPassword => (
                 401,
                 "invalid_credentials",

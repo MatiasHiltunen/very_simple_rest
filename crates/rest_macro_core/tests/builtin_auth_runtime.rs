@@ -34,6 +34,8 @@ static PASSWORD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 #[cfg(feature = "auth-email")]
 mod builtin_auth_email_flow;
 
+mod builtin_auth_registration_flow;
+
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -204,6 +206,7 @@ async fn start_account_service<B: HttpServer>(fixture: &Fixture) -> B::Handle {
         .into_iter()
         .chain(recovery_routes(fixture))
         .chain(recovery_email_routes(fixture))
+        .chain(registration_routes(fixture))
         .collect(),
     )
     .await
@@ -214,12 +217,49 @@ async fn account_response(request: reqwest::RequestBuilder, status: u16) -> Valu
     let response = request.send().await.unwrap();
     assert_eq!(response.status().as_u16(), status);
     assert_eq!(response.headers().get_all("set-cookie").iter().count(), 0);
-    if status == 204 || status == 202 {
+    if matches!(status, 201 | 202 | 204) {
         assert!(response.bytes().await.unwrap().is_empty());
         Value::Null
     } else {
         response.json().await.unwrap()
     }
+}
+
+fn registration_routes(
+    fixture: &Fixture,
+) -> Vec<(HttpMethod, String, vsr_runtime::http::Handler)> {
+    let verification_url = fixture.settings.email.as_ref().map(|email| {
+        format!(
+            "{}/auth/verify-email",
+            email.public_base_url.as_deref().unwrap()
+        )
+    });
+    let service = Arc::new(
+        auth::builtin_registration_service(
+            fixture.db.clone(),
+            &fixture.settings,
+            verification_url.as_deref(),
+        )
+        .unwrap(),
+    );
+    vec![(
+        HttpMethod::Post,
+        "/auth/register".into(),
+        make_handler(move |request| {
+            let service = service.clone();
+            async move {
+                let input: auth::RegisterInput =
+                    match serde_json::from_slice(request.body.as_deref().unwrap_or_default()) {
+                        Ok(input) => input,
+                        Err(_) => return ResponseEnvelope::error(400, "Invalid JSON"),
+                    };
+                match service.register(&input.email, &input.password).await {
+                    Ok(()) => ResponseEnvelope::status(201),
+                    Err(error) => error.response(),
+                }
+            }
+        }),
+    )]
 }
 
 fn recovery_email_routes(

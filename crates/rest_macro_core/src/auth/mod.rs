@@ -3,6 +3,7 @@ mod accounts;
 mod db_ops;
 mod email;
 mod recovery_email;
+mod registration;
 pub mod handlers;
 mod helpers;
 mod jwt;
@@ -66,6 +67,7 @@ pub use runtime::builtin_request_authenticator;
 pub use accounts::builtin_account_service;
 pub use tokens::builtin_recovery_service;
 pub use recovery_email::builtin_recovery_email_service;
+pub use registration::builtin_registration_service;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
@@ -112,6 +114,34 @@ mod tests {
             r,
             Ok(TokenActionOutcome::Applied | TokenActionOutcome::Invalid)
         )));
+        let registration = super::builtin_registration_service(
+            pool.clone(),
+            &AuthSettings::default(),
+            None,
+        )
+        .unwrap();
+        let (a, b) = tokio::join!(
+            registration.register(" REGISTERED@example.com ", "registration-password"),
+            registration.register("registered@example.com", "registration-password"),
+        );
+        use vsr_runtime::auth::accounts::AccountError;
+        assert!(matches!(
+            (a, b),
+            (Ok(()), Err(AccountError::DuplicateEmail))
+                | (Err(AccountError::DuplicateEmail), Ok(()))
+        ));
+        let account = super::db_ops::load_authenticated_user_by_email_with_settings(
+            &pool,
+            "registered@example.com",
+            &AuthSettings::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(account.role, "user");
+        assert!(account.email_verified_at.is_some());
+        assert!(account.created_at.is_some());
+        assert!(account.updated_at.is_some());
     }
 
     #[cfg(any(feature = "sqlite", feature = "turso-local"))]

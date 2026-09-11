@@ -1,6 +1,6 @@
 # HTTP Backend Abstraction: Review And Completion Plan
 
-Status: in progress; transport, request-auth, account, recovery-consumption and email-issuance milestones
+Status: in progress; transport, request-auth, account, recovery-consumption, email-issuance and registration milestones
 implemented on 2026-09-08. Full native/generated backend selection is not complete.
 Reviewed: 2026-09-07. This extends architecture roadmap sections 4.12,
 Phase 3, and 15.2; it does not replace the broader migration plan.
@@ -31,6 +31,9 @@ Phase 3, and 15.2; it does not replace the broader migration plan.
 - [x] Extract recovery issuance, templates, delivery and anonymous request orchestration.
 - [x] Require trusted email-link configuration, checked expiry and bounded/redacted delivery.
 - [x] Prove actual issued email links over native Actix and both runtime transports.
+- [x] Merge the verified baseline into `main` (`3ac6ffd78`, 27 CI jobs passed).
+- [x] Move self-registration policy and transaction ownership into the shared runtime.
+- [x] Prove registration rollback, cancellation, schema compatibility and HTTP parity.
 - [ ] Migrate shared built-in policy services and native/generated application wiring.
 - [ ] Execute external database/platform CI and production workload parity gates.
 
@@ -79,7 +82,14 @@ preserves send-before-commit behavior, not durable/outbox delivery. Trusted publ
 URLs are now required; provider errors are redacted and delivery waits are bounded.
 See the [email proof](../../reviews/2026-09-08-recovery-email-migration-proof.md).
 
-Next: extract registration and admin changes while preserving transaction
+Self-registration now lives in `RegistrationService`, including bounded password
+hashing, the server-selected user role, account initialization, verification and
+commit/rollback sequencing. The native handler retains extraction, trusted URL
+resolution and rate limiting. Legacy base schemas remain supported without email;
+partial schemas and initialization failures now fail closed. See the
+[registration proof](../../reviews/2026-09-08-registration-migration-proof.md).
+
+Next: extract admin changes while preserving authorization and transaction
 boundaries. Durable recovery delivery and abuse/enumeration resistance remain
 hardening gates. Shared cookie/extraction/rate-limit routing, row authorization,
 streaming and native/generated bootstrap remain required. No CLI backend switch

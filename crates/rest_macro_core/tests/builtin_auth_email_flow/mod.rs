@@ -222,18 +222,94 @@ async fn issued_email_links_work_across_native_actix_and_axum() {
             }
         }
     }
-    // Registration also uses the shared issuer within its existing transaction.
-    let response = client
-        .post(format!("{native_base}/auth/register"))
-        .json(&json!({"email":"new@example.test","password":"registration-password"}))
-        .send()
-        .await
+    for (index, writer) in bases.iter().enumerate() {
+        let email = format!("new-{index}@example.test");
+        let body = json!({"email":email,"password":"registration-password", "role":"admin", "email_verified_at":"forged"});
+        fail.store(true, Ordering::SeqCst);
+        let error = account_response(
+            client.post(format!("{writer}/auth/register")).json(&body),
+            500,
+        )
+        .await;
+        assert_eq!(error["message"], "Failed to send authentication email");
+        account_response(client.post(format!("{writer}/auth/login")).json(&body), 401).await;
+        fail.store(false, Ordering::SeqCst);
+        let count = messages.lock().unwrap().len();
+        account_response(
+            client
+                .post(format!("{writer}/auth/register"))
+                .header("host", "attacker.example")
+                .json(&body),
+            201,
+        )
+        .await;
+        assert_eq!(messages.lock().unwrap().len(), count + 1);
+        let message = messages.lock().unwrap()[count].clone();
+        assert_eq!(message["to"], json!([email]));
+        let url = url::Url::parse(
+            message["text"]
+                .as_str()
+                .unwrap()
+                .split("\n\n")
+                .nth(1)
+                .unwrap(),
+        )
         .unwrap();
-    assert_eq!(response.status(), 201);
-    assert_eq!(
-        messages.lock().unwrap().last().unwrap()["to"],
-        json!(["new@example.test"])
-    );
+        assert!(url.as_str().starts_with(&native_base));
+        assert_eq!(url.path(), "/auth/verify-email");
+        let raw = url
+            .query_pairs()
+            .find(|(name, _)| name == "token")
+            .unwrap()
+            .1
+            .into_owned();
+        account_response(
+            client.post(format!("{writer}/auth/register")).json(&body),
+            409,
+        )
+        .await;
+        assert_eq!(messages.lock().unwrap().len(), count + 1);
+        for consumer in &bases {
+            account_response(
+                client.post(format!("{consumer}/auth/login")).json(&body),
+                403,
+            )
+            .await;
+        }
+        let consumer = &bases[(index + 1) % bases.len()];
+        account_response(
+            client
+                .post(format!("{consumer}/auth/verify-email"))
+                .json(&json!({"token":raw})),
+            204,
+        )
+        .await;
+        account_response(
+            client
+                .post(format!("{writer}/auth/verify-email"))
+                .json(&json!({"token":raw})),
+            400,
+        )
+        .await;
+        for consumer in &bases {
+            let login = account_response(
+                client.post(format!("{consumer}/auth/login")).json(&body),
+                200,
+            )
+            .await;
+            let token = login["token"].as_str().unwrap();
+            let account = account_response(
+                client
+                    .get(format!("{consumer}/auth/account"))
+                    .bearer_auth(token),
+                200,
+            )
+            .await;
+            assert_eq!(account["role"], "user");
+            assert_eq!(account["email_verified"], true);
+            assert_eq!(account["tenant_id"], 7);
+        }
+    }
     AxumHttpServer::shutdown(axum).await.unwrap();
     ActixHttpServer::shutdown(actix).await.unwrap();
     native_handle.stop(true).await;

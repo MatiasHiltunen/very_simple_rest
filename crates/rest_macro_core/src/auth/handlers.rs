@@ -49,99 +49,31 @@ pub(crate) async fn register_with_settings(
     db: web::Data<DbPool>,
     settings: AuthSettings,
 ) -> HttpResponse {
-    let backend = match detect_auth_backend(db.get_ref()).await {
-        Ok(backend) => backend,
-        Err(_) => return errors::internal_error("Database error"),
+    let verification_url = if settings.email.is_some() {
+        match super::email::action_url(
+            request,
+            &settings,
+            super::user::AuthTokenPurpose::EmailVerification,
+            Some("/auth/register"),
+        ) {
+            Ok(url) => Some(url),
+            Err(error) => return super::accounts::error_response(error),
+        }
+    } else {
+        None
     };
-    let email = match normalize_auth_email(&input.email) {
-        Ok(email) => email,
-        Err(response) => return response,
+    let service = match super::registration::builtin_registration_service(
+        db.get_ref().clone(),
+        &settings,
+        verification_url.as_deref(),
+    ) {
+        Ok(service) => service,
+        Err(error) => return super::accounts::error_response(error),
     };
-    if let Err(response) = validate_auth_password(&input.password) {
-        return response;
+    match service.register(&input.email, &input.password).await {
+        Ok(()) => HttpResponse::Created().finish(),
+        Err(error) => super::accounts::error_response(error),
     }
-    let password_hash = match hash(&input.password, 12).await {
-        Ok(h) => h,
-        Err(response) => return response,
-    };
-
-    let tx = match db.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return errors::internal_error("Database error"),
-    };
-    let result = query(&format!(
-        "INSERT INTO {} (email, password_hash, role) VALUES (?, ?, ?)",
-        auth_user_table_ident(backend)
-    ))
-    .bind(&email)
-    .bind(&password_hash)
-    .bind("user")
-    .execute(&tx)
-    .await;
-
-    match result {
-        Ok(_) => {}
-        Err(error) if is_unique_violation(&error) => {
-            let _ = tx.rollback().await;
-            return errors::conflict("duplicate_email", "A user with that email already exists");
-        }
-        Err(error) => {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
-            }
-            return errors::internal_error("Database error");
-        }
-    };
-
-    let user = match load_authenticated_user_by_email_with_settings_for_backend(
-        &tx, backend, &email, &settings,
-    )
-    .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            let _ = tx.rollback().await;
-            return errors::internal_error("Failed to load registered account");
-        }
-        Err(error) => {
-            let _ = tx.rollback().await;
-            if is_missing_auth_management_schema(&error) {
-                return missing_auth_management_schema_response();
-            }
-            return errors::internal_error("Database error");
-        }
-    };
-    let now = now_timestamp_string();
-    if let Err(error) = initialize_user_management_timestamps(&tx, backend, user.id, &now).await
-        && (settings.email.is_some() || settings.require_email_verification)
-    {
-        let _ = tx.rollback().await;
-        if is_missing_auth_management_schema(&error) {
-            return missing_auth_management_schema_response();
-        }
-        return errors::internal_error("Database error");
-    }
-
-    if settings.email.is_some() {
-        if let Err(response) =
-            send_verification_email_for_user(&tx, request, &settings, &user, "/auth/register").await
-        {
-            let _ = tx.rollback().await;
-            return response;
-        }
-    } else if let Err(error) = mark_user_email_verified(&tx, backend, user.id, &now).await
-        && !is_missing_auth_management_schema(&error)
-    {
-        let _ = tx.rollback().await;
-        return errors::internal_error("Database error");
-    }
-
-    if tx.commit().await.is_err() {
-        return errors::internal_error("Database error");
-    }
-
-    HttpResponse::Created().finish()
 }
 
 pub async fn register_with_request(

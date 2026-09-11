@@ -80,6 +80,13 @@ the externally visible application prefix and check the resulting verification
 and reset links behind the deployed reverse proxy. Missing configuration fails
 closed instead of sending a request-controlled link.
 
+Self-registration now rejects partially applied management schemas and propagates
+timestamp-write failures instead of silently committing an incomplete account.
+Apply the complete built-in auth management migration before enabling email.
+The original base user schema remains supported without email. Programmatic
+configuration, like EON configuration, may not require verification without a
+configured email provider; it no longer silently auto-verifies such accounts.
+
 Trusted proxy chains are evaluated from the immediate peer right-to-left.
 Malformed chains, conflicting forwarding header families, or a missing peer
 never yield an attacker-supplied identity. Configure every trusted proxy and
