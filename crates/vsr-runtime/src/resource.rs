@@ -96,8 +96,36 @@ pub struct TextCrudConfig {
     pub id_field: String,
     /// Public name of the text field.
     pub value_field: String,
+    /// Optional length rule for the text field.
+    pub value_length: Option<TextLengthValidation>,
     /// Operation roles.
     pub roles: TextCrudRoles,
+}
+
+/// How to measure a text field's length.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextLengthMode {
+    /// UTF-8 bytes, matching EON's default and Simple modes.
+    Bytes,
+    /// Unicode scalar values.
+    Chars,
+    /// Extended grapheme clusters.
+    Graphemes,
+    /// UTF-16 code units.
+    Utf16,
+}
+
+/// Compiler-lowered text length limits, shared by both HTTP adapters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextLengthValidation {
+    /// Inclusive minimum length.
+    pub min: Option<usize>,
+    /// Inclusive maximum length.
+    pub max: Option<usize>,
+    /// Exact required length.
+    pub equal: Option<usize>,
+    /// Unit used for all three limits.
+    pub mode: TextLengthMode,
 }
 
 /// CRUD operation selected by a route.
@@ -150,6 +178,16 @@ impl<S: TextCrudStore> TextCrudService<S> {
             ]
             .iter()
             .any(|role| role.is_empty())
+            || config.value_length.as_ref().is_some_and(|length| {
+                length
+                    .min
+                    .zip(length.max)
+                    .is_some_and(|(min, max)| min > max)
+                    || length.equal.is_some_and(|equal| {
+                        length.min.is_some_and(|min| equal < min)
+                            || length.max.is_some_and(|max| equal > max)
+                    })
+            })
         {
             return Err("invalid text CRUD resource configuration");
         }
@@ -355,9 +393,37 @@ impl<S: TextCrudStore> TextCrudService<S> {
             return Err(ClientError::new("invalid_body", "Expected a JSON object"));
         };
         match body.get(&self.config.value_field) {
-            Some(Value::String(value)) => Ok(value.clone()),
+            Some(Value::String(value)) => {
+                self.validate_length(value)?;
+                Ok(value.clone())
+            }
             _ => Err(ClientError::new("invalid_field", "Expected a text field")),
         }
+    }
+
+    fn validate_length(&self, value: &str) -> Result<(), ClientError> {
+        let Some(length) = self.config.value_length.as_ref() else {
+            return Ok(());
+        };
+        let measured = match length.mode {
+            TextLengthMode::Bytes => value.len(),
+            TextLengthMode::Chars => value.chars().count(),
+            TextLengthMode::Graphemes => {
+                unicode_segmentation::UnicodeSegmentation::graphemes(value, true).count()
+            }
+            TextLengthMode::Utf16 => value.encode_utf16().count(),
+        };
+        let field = &self.config.value_field;
+        let message = if let Some(min) = length.min.filter(|min| measured < *min) {
+            format!("Field `{field}` must have at least {min} characters")
+        } else if let Some(max) = length.max.filter(|max| measured > *max) {
+            format!("Field `{field}` must have at most {max} characters")
+        } else if let Some(equal) = length.equal.filter(|equal| measured != *equal) {
+            format!("Field `{field}` must have exactly {equal} characters")
+        } else {
+            return Ok(());
+        };
+        Err(ClientError::validation(field.clone(), message))
     }
 
     fn record_json(&self, row: &TextRecord) -> Value {
@@ -393,19 +459,37 @@ fn valid_field_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ClientError {
     code: &'static str,
-    message: &'static str,
+    message: String,
+    field: Option<String>,
 }
 
 impl ClientError {
-    const fn new(code: &'static str, message: &'static str) -> Self {
-        Self { code, message }
+    fn new(code: &'static str, message: &'static str) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            field: None,
+        }
+    }
+
+    fn validation(field: String, message: String) -> Self {
+        Self {
+            code: "validation_error",
+            message,
+            field: Some(field),
+        }
     }
 
     fn response(self) -> ResponseEnvelope {
-        response_error(400, self.code, self.message)
+        let mut response = ResponseEnvelope::json(match self.field {
+            Some(field) => json!({"code": self.code, "message": self.message, "field": field}),
+            None => json!({"code": self.code, "message": self.message}),
+        });
+        response.status = 400;
+        response
     }
 }
 

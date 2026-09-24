@@ -583,7 +583,7 @@ impl DynamicService {
                 .ok_or_else(|| anyhow!("neutral CRUD resource `{selected}` was not found"))?;
             if neutral_crud::config_for(resource).is_none() {
                 bail!(
-                    "neutral CRUD resource `{selected}` must be a role-protected SQLite resource with only an integer ID and one unvalidated text field"
+                    "neutral CRUD resource `{selected}` must be a role-protected SQLite resource with only an integer ID and one text field with optional length validation"
                 );
             }
         }
@@ -5991,6 +5991,85 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn neutral_text_resource_matches_native_length_validation() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        for selected in [None, Some("note")] {
+            let (dynamic_service, state) =
+                build_test_state_with_neutral("neutral_text_validated_api.eon", false, selected).await;
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(state.pool.clone()))
+                    .service(build_api_scope(dynamic_service, state)),
+            )
+            .await;
+            let auth = ("Authorization", format!("Bearer {}", issue_token(1, &["user"])));
+
+            let short = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/api/note")
+                    .insert_header(auth.clone())
+                    .set_json(json!({"title": "éé"}))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+            let short: Value = test::read_body_json(short).await;
+            assert_eq!(short, json!({
+                "code": "validation_error",
+                "message": "Field `title` must have at least 3 characters",
+                "field": "title",
+            }));
+
+            let created = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/api/note")
+                    .insert_header(auth.clone())
+                    .set_json(json!({"title": "ééé"}))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::CREATED);
+            let created: Value = test::read_body_json(created).await;
+            assert_eq!(created, json!({"id": 1, "title": "ééé"}));
+
+            let long = test::call_service(
+                &app,
+                test::TestRequest::put()
+                    .uri("/api/note/1")
+                    .insert_header(auth.clone())
+                    .set_json(json!({"title": "abcdef"}))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(long.status(), StatusCode::BAD_REQUEST);
+            let long: Value = test::read_body_json(long).await;
+            assert_eq!(long, json!({
+                "code": "validation_error",
+                "message": "Field `title` must have at most 5 characters",
+                "field": "title",
+            }));
+
+            let fetched = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/api/note/1")
+                    .insert_header(auth)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(fetched.status(), StatusCode::OK);
+            let fetched: Value = test::read_body_json(fetched).await;
+            assert_eq!(fetched, json!({"id": 1, "title": "ééé"}));
+        }
+    }
+
+    #[actix_web::test]
     async fn neutral_text_resource_checks_live_builtin_account_state() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
@@ -6059,6 +6138,16 @@ mod tests {
         let selected = service.resources[0].api_name().to_owned();
         let result = DynamicService::from_spec(service, "{}".to_owned(), false, Some(&selected));
         assert!(result.is_err(), "policy-controlled resources must stay on the existing path");
+    }
+
+    #[::core::prelude::v1::test]
+    fn neutral_text_resource_rejects_other_validation_at_startup() {
+        let mut service = compiler::load_service_from_path(&fixture_path("neutral_text_validated_api.eon"))
+            .expect("validated fixture should load");
+        service.resources[0].fields[1].validation.email = true;
+        let selected = service.resources[0].api_name().to_owned();
+        let result = DynamicService::from_spec(service, "{}".to_owned(), false, Some(&selected));
+        assert!(result.is_err(), "unsupported validation must stay on the existing path");
     }
 
     async fn seed_public_catalog(pool: &DbPool) {

@@ -5,15 +5,15 @@ use std::sync::Arc;
 use actix_web::{HttpRequest, HttpResponse, web};
 use rest_macro_core::{
     auth,
-    compiler::{DbBackend, GeneratedValue},
+    compiler::{DbBackend, GeneratedValue, LengthMode},
     db::{DbPool, query, query_scalar},
 };
 use sqlx::Row;
 use vsr_runtime::{
     http::{ResponseEnvelope, RouteTable, actix_adapter},
     resource::{
-        TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextPage, TextPageRequest,
-        TextRecord, TextStoreError,
+        TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextLengthMode,
+        TextLengthValidation, TextPage, TextPageRequest, TextRecord, TextStoreError,
     },
 };
 
@@ -64,7 +64,6 @@ pub(super) fn config_for(resource: &DynamicResource) -> Option<TextCrudConfig> {
         || value.kind != FieldKind::Text
         || value.optional
         || value.generated != GeneratedValue::None
-        || !value.validation.is_empty()
         || !value.transforms.is_empty()
         || value.enum_values.is_some()
         || !safe_identifier(&value.name)
@@ -75,6 +74,22 @@ pub(super) fn config_for(resource: &DynamicResource) -> Option<TextCrudConfig> {
     {
         return None;
     }
+    let mut remaining_validation = value.validation.clone();
+    let length = remaining_validation.length.take();
+    if !remaining_validation.is_empty() {
+        return None;
+    }
+    let value_length = length.map(|length| TextLengthValidation {
+        min: length.min,
+        max: length.max,
+        equal: length.equal,
+        mode: match length.mode {
+            None | Some(LengthMode::Simple | LengthMode::Bytes) => TextLengthMode::Bytes,
+            Some(LengthMode::Chars) => TextLengthMode::Chars,
+            Some(LengthMode::Graphemes) => TextLengthMode::Graphemes,
+            Some(LengthMode::Utf16) => TextLengthMode::Utf16,
+        },
+    });
     let roles = TextCrudRoles {
         read: resource.roles.read.clone()?,
         create: resource.roles.create.clone()?,
@@ -91,6 +106,7 @@ pub(super) fn config_for(resource: &DynamicResource) -> Option<TextCrudConfig> {
         collection_path: format!("/api/{}", resource.api_name),
         id_field: id.api_name.clone(),
         value_field: value.api_name.clone(),
+        value_length,
         roles,
     })
 }

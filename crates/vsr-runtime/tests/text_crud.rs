@@ -14,8 +14,9 @@ use vsr_runtime::{
     },
     http::{HeaderFields, HttpServer, MiddlewareConfig, ResponseBody, ServerConfig, ServerHandle},
     resource::{
-        TextCrudAction, TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextPage,
-        TextPageRequest, TextRecord, TextStoreError,
+        TextCrudAction, TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore,
+        TextLengthMode, TextLengthValidation, TextPage, TextPageRequest, TextRecord,
+        TextStoreError,
     },
 };
 
@@ -128,6 +129,12 @@ async fn protected_crud<B: Backend>() {
                 collection_path: "/api/note".into(),
                 id_field: "id".into(),
                 value_field: "title".into(),
+                value_length: Some(TextLengthValidation {
+                    min: Some(3),
+                    max: Some(7),
+                    equal: None,
+                    mode: TextLengthMode::Chars,
+                }),
                 roles: TextCrudRoles {
                     read: "user".into(),
                     create: "user".into(),
@@ -166,6 +173,23 @@ async fn protected_crud<B: Backend>() {
         .await
         .unwrap();
     assert_eq!(forbidden.status(), 403);
+
+    let invalid_create = client
+        .post(&base)
+        .bearer_auth("user")
+        .json(&json!({"title": "no"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_create.status(), 400);
+    assert_eq!(
+        invalid_create.json::<Value>().await.unwrap(),
+        json!({
+            "code": "validation_error",
+            "message": "Field `title` must have at least 3 characters",
+            "field": "title",
+        })
+    );
 
     let created = client
         .post(&base)
@@ -209,6 +233,23 @@ async fn protected_crud<B: Backend>() {
         .await
         .unwrap();
     assert_eq!(unsupported.status(), 400);
+
+    let invalid_update = client
+        .put(format!("{base}/1"))
+        .bearer_auth("user")
+        .json(&json!({"title": "too long"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_update.status(), 400);
+    assert_eq!(
+        invalid_update.json::<Value>().await.unwrap(),
+        json!({
+            "code": "validation_error",
+            "message": "Field `title` must have at most 7 characters",
+            "field": "title",
+        })
+    );
 
     let updated = client
         .put(format!("{base}/1"))
@@ -265,6 +306,7 @@ async fn create_only_role_does_not_receive_an_unreadable_row() {
             collection_path: "/api/note".into(),
             id_field: "id".into(),
             value_field: "title".into(),
+            value_length: None,
             roles: TextCrudRoles {
                 read: "reader".into(),
                 create: "creator".into(),
@@ -296,4 +338,70 @@ async fn create_only_role_does_not_receive_an_unreadable_row() {
     assert_eq!(response.status, 201);
     assert!(matches!(response.body, ResponseBody::Empty));
     assert_eq!(response.headers.get("location"), Some(&b"/api/note/1"[..]));
+}
+
+#[tokio::test]
+async fn text_length_modes_match_eon_units() {
+    let identity = AuthenticatedIdentity {
+        user_id: "1".into(),
+        email: None,
+        roles: vec!["user".into()],
+        claims: Default::default(),
+        is_admin: false,
+        expires_at: None,
+    };
+    for (mode, expected) in [
+        (TextLengthMode::Bytes, 3),
+        (TextLengthMode::Chars, 2),
+        (TextLengthMode::Graphemes, 1),
+        (TextLengthMode::Utf16, 2),
+    ] {
+        let store = Arc::new(MemoryStore::default());
+        let config = TextCrudConfig {
+            collection_path: "/api/note".into(),
+            id_field: "id".into(),
+            value_field: "title".into(),
+            value_length: Some(TextLengthValidation {
+                min: None,
+                max: None,
+                equal: Some(expected),
+                mode,
+            }),
+            roles: TextCrudRoles {
+                read: "user".into(),
+                create: "user".into(),
+                update: "user".into(),
+                delete: "user".into(),
+            },
+        };
+        let service = TextCrudService::new(config.clone(), store.clone()).unwrap();
+        let create = service
+            .execute(
+                TextCrudAction::Create,
+                None,
+                Some(&identity),
+                Some(json!({"title": "e\u{301}"})),
+                "",
+                "/api/note",
+            )
+            .await;
+        assert_eq!(create.status, 201, "mode {mode:?}");
+        assert_eq!(store.count().await.unwrap(), 1);
+
+        let mut invalid_config = config;
+        invalid_config.value_length.as_mut().unwrap().equal = Some(expected + 1);
+        let invalid_service = TextCrudService::new(invalid_config, store.clone()).unwrap();
+        let update = invalid_service
+            .execute(
+                TextCrudAction::Update,
+                Some(1),
+                Some(&identity),
+                Some(json!({"title": "e\u{301}"})),
+                "",
+                "/api/note/1",
+            )
+            .await;
+        assert_eq!(update.status, 400, "mode {mode:?}");
+        assert_eq!(store.get(1).await.unwrap().unwrap().value, "e\u{301}");
+    }
 }
