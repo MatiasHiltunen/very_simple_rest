@@ -196,7 +196,9 @@ async fn dispatch(
     envelope_to_response(response)
 }
 
-fn envelope_to_response(envelope: ResponseEnvelope) -> HttpResponse {
+/// Convert a framework-neutral response for a legacy Actix route that is
+/// migrating to shared runtime services.
+pub fn envelope_to_response(envelope: ResponseEnvelope) -> HttpResponse {
     let status = actix_web::http::StatusCode::from_u16(envelope.status)
         .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = HttpResponse::build(status);

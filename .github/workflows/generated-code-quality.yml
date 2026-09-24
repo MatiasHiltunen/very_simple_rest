@@ -107,6 +107,8 @@ jobs:
         run: cargo check -p vsr-runtime --no-default-features --locked
       - name: Verify Backend Contract
         run: cargo test -p vsr-runtime --no-default-features --features ${{ matrix.backend }} --test http_conformance --locked
+      - name: Verify Protected CRUD Slice
+        run: cargo test -p vsr-runtime --no-default-features --features ${{ matrix.backend }} --test text_crud --locked
       - name: Compile Embedding Example
         run: cargo check -p vsr-runtime --no-default-features --features ${{ matrix.backend }} --example http_backend --locked
       - name: Keep Actix Out Of Axum Consumers
@@ -286,6 +288,9 @@ jobs:
           cargo test -p vsra --test serve_cli vsr_serve_applies_api_projections_in_spawned_process -- --nocapture
           cargo test -p vsra --test serve_cli vsr_serve_applies_field_transforms_in_spawned_process -- --nocapture
           cargo test -p vsra --test serve_cli vsr_serve_expands_mixin_fields_in_spawned_process -- --nocapture
+
+      - name: Verify Native CRUD Migration Preview
+        run: cargo test -p vsra --lib neutral_text_resource --locked
 
       - name: Verify Representative Examples Pass Strict Schema Checks
         run: |
