@@ -471,10 +471,12 @@ See `docs/reviews/2026-09-11-provisioning-migration-proof.md`.
 The native CLI has a narrow CRUD migration preview. Set
 `VSR_EXPERIMENTAL_NEUTRAL_CRUD_RESOURCE` to the API name of one resource before
 `vsr serve`. Startup rejects a resource unless it uses SQLite, requires roles
-for every operation, and has only an integer ID and one plain required text
-field, with no row policy, audit, relation, computed field, transform, or
-custom validation. That resource runs through `vsr-runtime::resource` and the
-shared route table while the other native resources keep their existing routes.
+for every operation, and has only an integer ID and one required text
+field, with no row policy, audit, relation, computed field, or transform. Text
+length validation (`min`, `max`, `equal`, and all EON length modes) is supported;
+other validation rules remain ineligible. That resource runs through
+`vsr-runtime::resource` and the shared route table while the other native
+resources keep their existing routes.
 Native requests use the same protected handlers as the Actix and Axum adapters;
 built-in auth still checks the live account state. The preview enforces the
 configured JSON body limit and accepts only JSON for writes. It supports basic
