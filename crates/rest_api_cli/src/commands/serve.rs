@@ -47,6 +47,8 @@ use vsr_core::{HttpRequestTelemetry, record_http_request};
 
 use super::serve_manager::{self, ServeInstanceContext};
 
+mod neutral_crud;
+
 #[cfg(windows)]
 use std::mem::{size_of, zeroed};
 #[cfg(windows)]
@@ -65,6 +67,7 @@ use windows_sys::Win32::System::Threading::{
 const BIND_MARKER: &str = "__vsr_bind__";
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
 const HTTP_WORKERS_ENV: &str = "VSR_HTTP_WORKERS";
+const NEUTRAL_CRUD_RESOURCE_ENV: &str = "VSR_EXPERIMENTAL_NEUTRAL_CRUD_RESOURCE";
 #[cfg(windows)]
 const PARENT_WATCH_ENV: &str = "VSR_WATCH_PARENT_PROCESS";
 #[cfg(windows)]
@@ -129,10 +132,16 @@ pub async fn serve_service(
 
     let openapi_json = build_openapi_json(&service, include_builtin_auth)?;
     let authorization_model = compiler::compile_service_authorization(&service);
+    let neutral_crud_resource = match std::env::var(NEUTRAL_CRUD_RESOURCE_ENV) {
+        Ok(name) => Some(name),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => bail!("{NEUTRAL_CRUD_RESOURCE_ENV} is not valid UTF-8"),
+    };
     let dynamic_service = Arc::new(DynamicService::from_spec(
         service,
         openapi_json,
         include_builtin_auth,
+        neutral_crud_resource.as_deref(),
     )?);
 
     let bind_addr = bind_addr_override
@@ -535,6 +544,7 @@ struct DynamicService {
     authorization_management_enabled: bool,
     authorization_management_mount: String,
     resources: Vec<Arc<DynamicResource>>,
+    neutral_crud_resource: Option<String>,
     openapi_json: Arc<String>,
     docs_html: Arc<String>,
     include_builtin_auth: bool,
@@ -555,6 +565,7 @@ impl DynamicService {
         service: ServiceSpec,
         openapi_json: String,
         include_builtin_auth: bool,
+        neutral_crud_resource: Option<&str>,
     ) -> anyhow::Result<Self> {
         let resources = service
             .resources
@@ -564,7 +575,18 @@ impl DynamicService {
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
             .map(Arc::new)
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(selected) = neutral_crud_resource {
+            let resource = resources
+                .iter()
+                .find(|resource| resource.api_name == selected)
+                .ok_or_else(|| anyhow!("neutral CRUD resource `{selected}` was not found"))?;
+            if neutral_crud::config_for(resource).is_none() {
+                bail!(
+                    "neutral CRUD resource `{selected}` must be a role-protected SQLite resource with only an integer ID and one unvalidated text field"
+                );
+            }
+        }
         let static_mounts = Arc::new(convert_static_mounts(service.static_mounts.as_slice()));
         #[cfg(not(feature = "storage-local"))]
         if !service.storage.is_empty() {
@@ -592,6 +614,7 @@ impl DynamicService {
             authorization_management_enabled: service.authorization.management_api.enabled,
             authorization_management_mount: service.authorization.management_api.mount.clone(),
             resources,
+            neutral_crud_resource: neutral_crud_resource.map(ToOwned::to_owned),
             openapi_json: Arc::new(openapi_json),
             docs_html: Arc::new(swagger_ui_html().to_owned()),
             include_builtin_auth,
@@ -1239,7 +1262,11 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
             );
         }
         for resource in &dynamic_service.resources {
-            register_resource(cfg, resource.clone());
+            if dynamic_service.neutral_crud_resource.as_deref() == Some(resource.api_name.as_str()) {
+                neutral_crud::register(cfg, resource, pool.clone());
+            } else {
+                register_resource(cfg, resource.clone());
+            }
         }
     });
     scope
@@ -5712,6 +5739,14 @@ mod tests {
         fixture_name: &str,
         include_builtin_auth: bool,
     ) -> (Arc<DynamicService>, NativeServeState) {
+        build_test_state_with_neutral(fixture_name, include_builtin_auth, None).await
+    }
+
+    async fn build_test_state_with_neutral(
+        fixture_name: &str,
+        include_builtin_auth: bool,
+        neutral_crud_resource: Option<&str>,
+    ) -> (Arc<DynamicService>, NativeServeState) {
         let input = fixture_path(fixture_name);
         let mut service =
             compiler::load_service_from_path(&input).expect("fixture service should load");
@@ -5749,7 +5784,12 @@ mod tests {
             build_openapi_json(&service, include_builtin_auth).expect("openapi should render");
         let authorization_model = compiler::compile_service_authorization(&service);
         let dynamic_service = Arc::new(
-            DynamicService::from_spec(service, openapi_json, include_builtin_auth)
+            DynamicService::from_spec(
+                service,
+                openapi_json,
+                include_builtin_auth,
+                neutral_crud_resource,
+            )
                 .expect("dynamic service should build"),
         );
         let state = NativeServeState {
@@ -5780,6 +5820,136 @@ mod tests {
             let body: Value = test::read_body_json(response).await;
             assert_eq!(body["code"], if attempt < 2 { "validation_error" } else { "rate_limited" });
         }
+    }
+
+    #[actix_web::test]
+    async fn neutral_text_resource_matches_native_crud_and_role_contract() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        for selected in [None, Some("note")] {
+            let (dynamic_service, state) =
+                build_test_state_with_neutral("neutral_text_api.eon", false, selected).await;
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(state.pool.clone()))
+                    .service(build_api_scope(dynamic_service, state)),
+            )
+            .await;
+            let token = issue_token(1, &["user"]);
+            let auth = ("Authorization", format!("Bearer {token}"));
+
+            let denied = test::call_service(
+                &app,
+                test::TestRequest::get().uri("/api/note").to_request(),
+            )
+            .await;
+            assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+            let forbidden = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/api/note")
+                    .insert_header(("Authorization", format!("Bearer {}", issue_token(2, &["reader"]))))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+            let created = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/api/note")
+                    .insert_header(auth.clone())
+                    .set_json(json!({"title": "first"}))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::CREATED);
+            assert_eq!(created.headers().get("Location").unwrap(), "/api/note/1");
+            let created: Value = test::read_body_json(created).await;
+            assert_eq!(created, json!({"id": 1, "title": "first"}));
+
+            let list = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/api/note")
+                    .insert_header(auth.clone())
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(list.status(), StatusCode::OK);
+            let list: Value = test::read_body_json(list).await;
+            assert_eq!(list["items"], json!([{"id": 1, "title": "first"}]));
+            assert_eq!(list["total"], 1);
+            assert_eq!(list["count"], 1);
+
+            let count = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/api/note/count")
+                    .insert_header(auth.clone())
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(count.status(), StatusCode::OK);
+            let count: Value = test::read_body_json(count).await;
+            assert_eq!(count, json!({"count": 1}));
+
+            let updated = test::call_service(
+                &app,
+                test::TestRequest::put()
+                    .uri("/api/note/1")
+                    .insert_header(auth.clone())
+                    .set_json(json!({"title": "changed"}))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(updated.status(), StatusCode::OK);
+
+            let fetched = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/api/note/1")
+                    .insert_header(auth.clone())
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(fetched.status(), StatusCode::OK);
+            let fetched: Value = test::read_body_json(fetched).await;
+            assert_eq!(fetched, json!({"id": 1, "title": "changed"}));
+
+            let deleted = test::call_service(
+                &app,
+                test::TestRequest::delete()
+                    .uri("/api/note/1")
+                    .insert_header(auth.clone())
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(deleted.status(), StatusCode::OK);
+
+            let missing = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/api/note/1")
+                    .insert_header(auth)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn neutral_text_resource_rejects_row_policies_at_startup() {
+        let service = compiler::load_service_from_path(&fixture_path("owned_api.eon"))
+            .expect("owner policy fixture should load");
+        let selected = service.resources[0].api_name().to_owned();
+        let result = DynamicService::from_spec(service, "{}".to_owned(), false, Some(&selected));
+        assert!(result.is_err(), "policy-controlled resources must stay on the existing path");
     }
 
     async fn seed_public_catalog(pool: &DbPool) {

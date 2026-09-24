@@ -468,6 +468,17 @@ See `docs/reviews/2026-09-11-provisioning-migration-proof.md`.
 
 ## Experimental API Changes
 
+The native CLI has a narrow CRUD migration preview. Set
+`VSR_EXPERIMENTAL_NEUTRAL_CRUD_RESOURCE` to the API name of one resource before
+`vsr serve`. Startup rejects a resource unless it uses SQLite, requires roles
+for every operation, and has only an integer ID and one plain required text
+field, with no row policy, audit, relation, computed field, transform, or
+custom validation. That resource runs through `vsr-runtime::resource` while
+the other native resources keep their existing routes. The preview supports
+basic list `limit` and `offset`; other list query options are rejected. Leave
+the variable unset for the established native behavior. This is a migration
+proof, not general native or generated Axum selection.
+
 The new `vsr-runtime::http` surface is still under construction. Consumers of
 its previous scaffold must adapt to these changes:
 

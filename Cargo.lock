@@ -7140,6 +7140,7 @@ dependencies = [
  "url",
  "uuid",
  "vsr-core",
+ "vsr-runtime",
  "vsr_schema_doc",
  "windows-sys 0.61.2",
 ]

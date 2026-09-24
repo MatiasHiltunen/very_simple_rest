@@ -47,4 +47,5 @@ pub mod auth;
 pub mod authz;
 pub mod http;
 pub mod rate_limit;
+pub mod resource;
 pub mod storage;
