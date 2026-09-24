@@ -4,24 +4,20 @@ use std::sync::Arc;
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use rest_macro_core::{
-    auth::UserContext,
+    auth,
     compiler::{DbBackend, GeneratedValue},
     db::{DbPool, query, query_scalar},
 };
-use serde_json::{Map, Value};
 use sqlx::Row;
 use vsr_runtime::{
-    auth::AuthenticatedIdentity,
-    http::actix_adapter::envelope_to_response,
+    http::{ResponseEnvelope, RouteTable, actix_adapter},
     resource::{
-        TextCrudAction, TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextPage,
-        TextPageRequest, TextRecord, TextStoreError,
+        TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextPage, TextPageRequest,
+        TextRecord, TextStoreError,
     },
 };
 
 use super::{DynamicResource, FieldKind};
-
-type Service = TextCrudService<SqliteTextStore>;
 
 /// Only a deliberately small, policy-free schema is eligible. Other resources
 /// keep the existing native path until their behavior is migrated.
@@ -99,13 +95,20 @@ pub(super) fn config_for(resource: &DynamicResource) -> Option<TextCrudConfig> {
     })
 }
 
-pub(super) fn register(cfg: &mut web::ServiceConfig, resource: &DynamicResource, pool: DbPool) {
+pub(super) fn register(
+    cfg: &mut web::ServiceConfig,
+    resource: &DynamicResource,
+    pool: DbPool,
+    auth_settings: auth::AuthSettings,
+    include_builtin_auth: bool,
+    json_max_bytes: Option<usize>,
+) {
     let config = config_for(resource).expect("neutral CRUD resource was validated at startup");
     let service = Arc::new(
         TextCrudService::new(
             config,
             Arc::new(SqliteTextStore {
-                pool,
+                pool: pool.clone(),
                 table: resource.table_name.clone(),
                 id_field: resource.id_field.clone(),
                 value_field: resource
@@ -119,113 +122,54 @@ pub(super) fn register(cfg: &mut web::ServiceConfig, resource: &DynamicResource,
         )
         .expect("neutral CRUD configuration was validated at startup"),
     );
+    let authenticator = Arc::new(auth::request_authenticator(
+        Some(pool),
+        auth_settings,
+        include_builtin_auth,
+    ));
+    let routes = RouteTable::from_routes(service.routes(authenticator))
+        .expect("neutral CRUD routes were validated at startup");
+    cfg.app_data(web::Data::new(routes));
     let collection_path = format!("/{}", resource.api_name);
     let count_path = format!("{collection_path}/count");
     let item_path = format!("{collection_path}/{{id}}");
-
-    let list = service.clone();
-    let create = service.clone();
+    let body_limit = json_max_bytes.unwrap_or(2 * 1024 * 1024);
     cfg.service(
         web::resource(collection_path)
-            .route(web::get().to(move |req: HttpRequest, user: UserContext| {
-                run(list.clone(), TextCrudAction::List, None, user, None, req)
-            }))
-            .route(web::post().to(
-                move |req: HttpRequest, user: UserContext, body: web::Json<Map<String, Value>>| {
-                    run(
-                        create.clone(),
-                        TextCrudAction::Create,
-                        None,
-                        user,
-                        Some(Value::Object(body.into_inner())),
-                        req,
-                    )
-                },
-            )),
+            .app_data(web::PayloadConfig::new(body_limit))
+            .route(web::to(dispatch)),
     );
-
-    let count = service.clone();
-    cfg.service(web::resource(count_path).route(web::get().to(
-        move |req: HttpRequest, user: UserContext| {
-            run(count.clone(), TextCrudAction::Count, None, user, None, req)
-        },
-    )));
-
-    let get = service.clone();
-    let update = service.clone();
-    let delete = service;
+    cfg.service(
+        web::resource(count_path)
+            .app_data(web::PayloadConfig::new(body_limit))
+            .route(web::to(dispatch)),
+    );
     cfg.service(
         web::resource(item_path)
-            .route(web::get().to(
-                move |id: web::Path<i64>, req: HttpRequest, user: UserContext| {
-                    run(
-                        get.clone(),
-                        TextCrudAction::Get,
-                        Some(id.into_inner()),
-                        user,
-                        None,
-                        req,
-                    )
-                },
-            ))
-            .route(web::put().to(
-                move |id: web::Path<i64>,
-                      req: HttpRequest,
-                      user: UserContext,
-                      body: web::Json<Map<String, Value>>| {
-                    run(
-                        update.clone(),
-                        TextCrudAction::Update,
-                        Some(id.into_inner()),
-                        user,
-                        Some(Value::Object(body.into_inner())),
-                        req,
-                    )
-                },
-            ))
-            .route(web::delete().to(
-                move |id: web::Path<i64>, req: HttpRequest, user: UserContext| {
-                    run(
-                        delete.clone(),
-                        TextCrudAction::Delete,
-                        Some(id.into_inner()),
-                        user,
-                        None,
-                        req,
-                    )
-                },
-            )),
+            .app_data(web::PayloadConfig::new(body_limit))
+            .route(web::to(dispatch)),
     );
 }
 
-async fn run(
-    service: Arc<Service>,
-    action: TextCrudAction,
-    id: Option<i64>,
-    user: UserContext,
-    body: Option<Value>,
+async fn dispatch(
     request: HttpRequest,
+    body: Result<web::Bytes, actix_web::Error>,
+    routes: web::Data<RouteTable>,
 ) -> HttpResponse {
-    let identity = AuthenticatedIdentity {
-        user_id: user.id.to_string(),
-        email: None,
-        is_admin: user.roles.iter().any(|role| role == "admin"),
-        roles: user.roles,
-        claims: user.claims.into_iter().collect(),
-        expires_at: None,
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => {
+            return actix_adapter::envelope_to_response(ResponseEnvelope::error(
+                error.as_response_error().status_code().as_u16(),
+                "Invalid request body",
+            ));
+        }
     };
-    envelope_to_response(
-        service
-            .execute(
-                action,
-                id,
-                Some(&identity),
-                body,
-                request.query_string(),
-                request.path(),
-            )
-            .await,
-    )
+    let response = match actix_adapter::request_context_from_actix(&request, body) {
+        Ok(context) => routes.dispatch(context).await,
+        Err(response) => response,
+    };
+    actix_adapter::envelope_to_response(response)
 }
 
 fn safe_identifier(name: &str) -> bool {

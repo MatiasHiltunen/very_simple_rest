@@ -38,7 +38,9 @@ pub fn builtin_request_authenticator(
     request_authenticator(Some(db), settings, true)
 }
 
-pub(super) fn request_authenticator(
+/// Build the same request authenticator used by the legacy native extractor.
+/// Native neutral routes use this during the incremental runtime migration.
+pub fn request_authenticator(
     db: Option<crate::db::DbPool>,
     settings: AuthSettings,
     builtin: bool,
