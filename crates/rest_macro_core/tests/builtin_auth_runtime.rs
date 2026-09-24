@@ -94,7 +94,9 @@ impl Fixture {
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        // Bcrypt cost-12 operations can exceed the default request budget on
+        // loaded Windows CI runners; keep a finite deadline for hung handlers.
+        .timeout(Duration::from_secs(30))
         .build()
         .unwrap()
 }
