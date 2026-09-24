@@ -175,25 +175,34 @@ async fn dispatch(
             ));
         }
     };
+    let context = request_context_from_actix(&req, body);
+    let response = match context {
+        Ok(context) => transport::dispatch(&state.routes, &state.readiness, context).await,
+        Err(response) => response,
+    };
+    envelope_to_response(response)
+}
+
+/// Convert a request in an existing Actix application to the shared handler
+/// contract. Native and generated routes can use this without a second server.
+pub fn request_context_from_actix(
+    req: &HttpRequest,
+    body: Bytes,
+) -> Result<super::RequestContext, ResponseEnvelope> {
     let mut headers = HeaderFields::default();
     for (name, value) in req.headers() {
         if headers.append(name.as_str(), value.as_bytes()).is_err() {
-            return envelope_to_response(ResponseEnvelope::error(400, "Invalid request headers"));
+            return Err(ResponseEnvelope::error(400, "Invalid request headers"));
         }
     }
-    let context = transport::request_context(
+    transport::request_context(
         req.method().as_str(),
         req.uri().path(),
         req.query_string(),
         headers,
         body,
         req.peer_addr(),
-    );
-    let response = match context {
-        Ok(context) => transport::dispatch(&state.routes, &state.readiness, context).await,
-        Err(response) => response,
-    };
-    envelope_to_response(response)
+    )
 }
 
 /// Convert a framework-neutral response for a legacy Actix route that is

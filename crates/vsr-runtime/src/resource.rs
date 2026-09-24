@@ -193,6 +193,15 @@ impl<S: TextCrudStore> TextCrudService<S> {
         action: TextCrudAction,
         context: RequestContext,
     ) -> ResponseEnvelope {
+        if matches!(action, TextCrudAction::Create | TextCrudAction::Update)
+            && !is_json_content_type(&context.headers)
+        {
+            return response_error(
+                415,
+                "invalid_content_type",
+                "Expected Content-Type: application/json",
+            );
+        }
         let id = match context.path_params.get("id") {
             Some(raw) => match raw.parse::<i64>() {
                 Ok(id) => Some(id),
@@ -357,6 +366,23 @@ impl<S: TextCrudStore> TextCrudService<S> {
         item.insert(self.config.value_field.clone(), json!(row.value));
         Value::Object(item)
     }
+}
+
+fn is_json_content_type(headers: &crate::http::HeaderFields) -> bool {
+    let Some(value) = headers.get("content-type") else {
+        return false;
+    };
+    let Ok(value) = std::str::from_utf8(value) else {
+        return false;
+    };
+    let media_type = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type == "application/json"
+        || media_type.starts_with("application/") && media_type.ends_with("+json")
 }
 
 fn valid_field_name(name: &str) -> bool {

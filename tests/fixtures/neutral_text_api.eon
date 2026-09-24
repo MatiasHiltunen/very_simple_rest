@@ -1,3 +1,6 @@
+security: {
+    requests: { json_max_bytes: 128 }
+}
 resources: [
     {
         name: "Note"

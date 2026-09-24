@@ -70,7 +70,7 @@ pub use routing::{
 // Re-export jwks handler
 pub use jwt::jwks;
 
-pub use runtime::builtin_request_authenticator;
+pub use runtime::{builtin_request_authenticator, request_authenticator};
 pub use accounts::builtin_account_service;
 pub use tokens::builtin_recovery_service;
 pub use recovery_email::builtin_recovery_email_service;

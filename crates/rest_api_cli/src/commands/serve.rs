@@ -1263,7 +1263,14 @@ fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState
         }
         for resource in &dynamic_service.resources {
             if dynamic_service.neutral_crud_resource.as_deref() == Some(resource.api_name.as_str()) {
-                neutral_crud::register(cfg, resource, pool.clone());
+                neutral_crud::register(
+                    cfg,
+                    resource,
+                    pool.clone(),
+                    dynamic_service.security.auth.clone(),
+                    dynamic_service.include_builtin_auth,
+                    dynamic_service.security.requests.json_max_bytes,
+                );
             } else {
                 register_resource(cfg, resource.clone());
             }
@@ -5643,6 +5650,7 @@ mod tests {
     };
     use actix_web::{App, HttpResponse, http::StatusCode, test, web};
     use jsonwebtoken::{EncodingKey, Header, encode};
+    use rest_macro_core::auth;
     use rest_macro_core::authorization::AuthorizationRuntime;
     use rest_macro_core::compiler::{self, GeneratedValue};
     use rest_macro_core::database::{
@@ -5940,7 +5948,108 @@ mod tests {
             )
             .await;
             assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+            if selected.is_some() {
+                let token = issue_token(1, &["user"]);
+                let options = test::call_service(
+                    &app,
+                    test::TestRequest::default()
+                        .method(actix_web::http::Method::OPTIONS)
+                        .uri("/api/note")
+                        .to_request(),
+                )
+                .await;
+                assert_eq!(options.status(), StatusCode::NO_CONTENT);
+                assert!(
+                    options.headers().get("allow").unwrap().to_str().unwrap().contains("POST")
+                );
+
+                let wrong_content_type = test::call_service(
+                    &app,
+                    test::TestRequest::post()
+                        .uri("/api/note")
+                        .insert_header(("Authorization", format!("Bearer {token}")))
+                        .insert_header(("Content-Type", "text/plain"))
+                        .set_payload(r#"{"title":"plain"}"#)
+                        .to_request(),
+                )
+                .await;
+                assert_eq!(wrong_content_type.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+                let oversized = test::call_service(
+                    &app,
+                    test::TestRequest::post()
+                        .uri("/api/note")
+                        .insert_header(("Authorization", format!("Bearer {token}")))
+                        .set_json(json!({"title": "x".repeat(200)}))
+                        .to_request(),
+                )
+                .await;
+                assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            }
         }
+    }
+
+    #[actix_web::test]
+    async fn neutral_text_resource_checks_live_builtin_account_state() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) =
+            build_test_state_with_neutral("neutral_text_api.eon", true, Some("note")).await;
+        state
+            .pool
+            .execute_batch(&auth::auth_migration_sql(auth::AuthDbBackend::Sqlite))
+            .await
+            .expect("auth migration should apply");
+        state
+            .pool
+            .execute_batch(&auth::auth_management_migration_sql(auth::AuthDbBackend::Sqlite))
+            .await
+            .expect("auth management migration should apply");
+        query("INSERT INTO user (email, password_hash, role, updated_at) VALUES (?, ?, 'user', 'initial')")
+            .bind("reader@example.test")
+            .bind(bcrypt::hash("password123", 4).unwrap())
+            .execute(&state.pool)
+            .await
+            .expect("account should insert");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state.pool.clone()))
+                .service(build_api_scope(dynamic_service, state.clone())),
+        )
+        .await;
+
+        let login = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(json!({"email": "reader@example.test", "password": "password123"}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let login: Value = test::read_body_json(login).await;
+        let token = login["token"].as_str().expect("login should issue a token");
+        let request = || {
+            test::TestRequest::get()
+                .uri("/api/note")
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .to_request()
+        };
+        assert_eq!(test::call_service(&app, request()).await.status(), StatusCode::OK);
+
+        query("UPDATE user SET role = 'reader', updated_at = 'demoted' WHERE id = 1")
+            .execute(&state.pool)
+            .await
+            .expect("role change should commit");
+        assert_eq!(
+            test::call_service(&app, request()).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "the neutral route must reject a token after account demotion"
+        );
     }
 
     #[::core::prelude::v1::test]
