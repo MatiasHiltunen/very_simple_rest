@@ -7055,6 +7055,7 @@ name = "vsr-runtime"
 version = "0.1.11"
 dependencies = [
  "actix-cors",
+ "actix-files",
  "actix-web",
  "axum",
  "axum-server",

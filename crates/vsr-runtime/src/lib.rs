@@ -8,9 +8,9 @@
 //! (axum HTTP server, OPA authz engine, Redis rate limiter, S3 storage)
 //! plug in by implementing the same traits behind their own features.
 //!
-//! No framework type (`actix_web::HttpRequest`, `axum::Router`, sqlx
-//! `Pool<DB>`, …) crosses the public surface of this crate. Only VSR-owned
-//! types appear in trait signatures.
+//! Framework types (`actix_web::HttpRequest`, `axum::Router`, sqlx
+//! `Pool<DB>`, …) stay in feature-gated adapter modules. Only VSR-owned types
+//! appear in trait signatures.
 //!
 //! ## Crate layout
 //!
@@ -22,6 +22,8 @@
 //! | [`storage`] | [`storage::ObjectStorage`], [`storage::StorageKey`] |
 //! | [`rate_limit`] | [`rate_limit::RateLimitStore`], [`rate_limit::RateLimitDecision`] |
 //! | [`security`] | Framework-neutral request and browser security settings |
+//! | [`runtime`] | Shared compression settings |
+//! | `static_files` | Feature-gated Actix static-file adapter |
 //! | [`audit`] | [`audit::AuditSink`], [`audit::AuditEvent`] |
 //! | [`tls`] | TLS path resolution and optional Rustls certificate loading |
 //!
@@ -50,6 +52,9 @@ pub mod authz;
 pub mod http;
 pub mod rate_limit;
 pub mod resource;
+pub mod runtime;
 pub mod security;
+#[cfg(feature = "static-actix")]
+pub mod static_files;
 pub mod storage;
 pub mod tls;
