@@ -28,6 +28,9 @@
 #[cfg(feature = "http-actix")]
 pub mod actix_adapter;
 
+#[cfg(feature = "actix-security")]
+pub mod actix_errors;
+
 #[cfg(feature = "http-actix")]
 pub use actix_adapter::ActixHttpServer;
 
