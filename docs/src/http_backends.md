@@ -109,6 +109,9 @@ types now live in `vsr-runtime::{field,resource,authz}`. The compiler retains
 its previous public paths as re-exports while the native serve path consumes
 these runtime-owned types directly. Lowering a complete `ServiceSpec` into a
 compiler-free runtime service model remains open.
+Database dialect and generated temporal SQL, relation and index metadata,
+custom resource actions, audit selection, and computed-field descriptions now
+live in `vsr-runtime::model` with the same compiler compatibility re-exports.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;

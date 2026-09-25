@@ -13,8 +13,8 @@ use rest_macro_core::authorization::{
     AuthorizationAction, AuthorizationRuntime, AuthorizationScopeBinding,
 };
 use rest_macro_core::compiler::{
-    self, DbBackend, FieldSpec, OpenApiSpecOptions,
-    ResourceSpec, ServiceSpec, StructuredScalarKind, default_service_database_url,
+    self, FieldSpec, OpenApiSpecOptions, ResourceSpec, ServiceSpec,
+    default_service_database_url,
     supports_exact_filters, supports_field_sort, supports_range_filters,
 };
 use rest_macro_core::database::{
@@ -50,6 +50,7 @@ use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
     workers_from_env,
 };
+use vsr_runtime::model::{self, DbBackend, StructuredScalarKind};
 
 use super::serve_manager::{self, ServeInstanceContext};
 
@@ -556,7 +557,7 @@ struct DynamicResource {
     field_index: HashMap<String, usize>,
     api_field_index: HashMap<String, usize>,
     response_contexts: HashMap<String, Vec<String>>,
-    computed_fields: Vec<compiler::ComputedFieldSpec>,
+    computed_fields: Vec<model::ComputedFieldSpec>,
     create_fields: Vec<CreateFieldRule>,
     update_field_names: Vec<String>,
     actions: Vec<DynamicResourceAction>,
@@ -574,7 +575,7 @@ struct DynamicAuditConfig {
     create: bool,
     update: bool,
     delete: bool,
-    actions: Option<compiler::ResourceAuditActionSelection>,
+    actions: Option<model::ResourceAuditActionSelection>,
 }
 
 impl DynamicResource {
@@ -981,12 +982,12 @@ enum DynamicResourceActionBehavior {
 }
 
 impl DynamicResourceAction {
-    fn from_spec(spec: &compiler::ResourceActionSpec) -> anyhow::Result<Self> {
+    fn from_spec(spec: &model::ResourceActionSpec) -> anyhow::Result<Self> {
         Ok(Self {
             name: spec.name.clone(),
             path: spec.path.clone(),
             behavior: match &spec.behavior {
-                compiler::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
+                model::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
                     DynamicResourceActionBehavior::UpdateFields {
                         assignments: assignments
                             .iter()
@@ -994,7 +995,7 @@ impl DynamicResourceAction {
                             .collect::<anyhow::Result<Vec<_>>>()?,
                     }
                 }
-                compiler::ResourceActionBehaviorSpec::DeleteResource => {
+                model::ResourceActionBehaviorSpec::DeleteResource => {
                     DynamicResourceActionBehavior::DeleteResource
                 }
             },
@@ -1067,14 +1068,14 @@ enum ActionAssignmentSource {
 }
 
 impl ActionUpdateAssignment {
-    fn from_action_spec(spec: &compiler::ResourceActionAssignmentSpec) -> anyhow::Result<Self> {
+    fn from_action_spec(spec: &model::ResourceActionAssignmentSpec) -> anyhow::Result<Self> {
         Ok(Self {
             field_name: spec.field.clone(),
             source: match &spec.value {
-                compiler::ResourceActionValueSpec::Literal(value) => {
+                model::ResourceActionValueSpec::Literal(value) => {
                     ActionAssignmentSource::Literal(bound_value_from_action_json(value)?)
                 }
-                compiler::ResourceActionValueSpec::InputField(name) => {
+                model::ResourceActionValueSpec::InputField(name) => {
                     ActionAssignmentSource::InputField(name.clone())
                 }
             },
@@ -2752,7 +2753,7 @@ fn read_optional_bool_column(
 }
 
 fn apply_computed_fields_to_map(
-    computed_fields: &[compiler::ComputedFieldSpec],
+    computed_fields: &[model::ComputedFieldSpec],
     map: &mut Map<String, Value>,
 ) {
     for field in computed_fields {
