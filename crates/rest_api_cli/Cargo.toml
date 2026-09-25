@@ -43,13 +43,12 @@ thiserror = "2.0"
 dotenvy.workspace = true
 rest_macro_core = { workspace = true, features = ["codegen"] }
 vsr-core = { workspace = true, features = ["telemetry"] }
-vsr-runtime = { workspace = true, features = ["http-actix"] }
+vsr-runtime = { workspace = true, features = ["http-actix", "native-validation"] }
 vsr_schema_doc.workspace = true
 bcrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-rust_decimal.workspace = true
 uuid.workspace = true
 colored = "3.1"
 rand.workspace = true
@@ -68,7 +67,6 @@ log.workspace = true
 syn.workspace = true
 prettyplease = "0.3.0"
 url = "2"
-garde.workspace = true
 
 [dev-dependencies]
 jsonwebtoken.workspace = true

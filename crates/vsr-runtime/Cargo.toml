@@ -29,9 +29,16 @@ dotenvy = { workspace = true, optional = true }
 dunce = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
 log = { workspace = true, optional = true }
+anyhow = { version = "1.0", optional = true }
+rust_decimal = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+garde = { workspace = true, optional = true }
 
 [features]
 default = []
+
+# Native field parsing and validation without a compiler or HTTP dependency.
+native-validation = ["dep:anyhow", "dep:chrono", "dep:rust_decimal", "dep:uuid", "dep:garde"]
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
 # Enable the actix-web adapter (default runtime implementation).
