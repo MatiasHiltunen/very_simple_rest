@@ -1315,6 +1315,7 @@ fn render_cargo_toml(
     backend: DbBackend,
 ) -> Result<String> {
     let dependency = render_runtime_dependency(service, backend)?;
+    let vsr_runtime_dependency = render_vsr_runtime_dependency(service)?;
     let actix_web_dependency = if service.tls.is_enabled() {
         "actix-web = { version = \"4\", features = [\"rustls-0_23\"] }"
     } else {
@@ -1335,6 +1336,7 @@ dotenvy = "0.15.7"
 serde = {{ version = "1", features = ["derive"] }}
 garde = {{ version = "=0.23.0", features = ["derive", "full", "rust_decimal"] }}
 {dependency}
+{vsr_runtime_dependency}
 {release_profile}
 "#
     ))
@@ -1403,6 +1405,38 @@ fn render_runtime_dependency(service: &ServiceSpec, backend: DbBackend) -> Resul
     ))
 }
 
+fn render_vsr_runtime_dependency(service: &ServiceSpec) -> Result<String> {
+    let features = if service.tls.is_enabled() {
+        ", features = [\"tls\"]"
+    } else {
+        ""
+    };
+
+    let source = if let Ok(explicit_path) = std::env::var(LOCAL_DEP_PATH_ENV) {
+        let path = Path::new(&explicit_path).join("crates/vsr-runtime");
+        format!(
+            "path = \"{}\"",
+            escape_toml_path(&path.display().to_string())
+        )
+    } else {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if workspace_root.join("Cargo.toml").exists() {
+            let root = workspace_root.canonicalize().map_err(Error::Io)?;
+            let path = root.join("crates/vsr-runtime");
+            format!(
+                "path = \"{}\"",
+                escape_toml_path(&path.display().to_string())
+            )
+        } else {
+            format!("git = \"{REPO_GIT_URL}\"")
+        }
+    };
+
+    Ok(format!(
+        "vsr-runtime = {{ {source}, default-features = false{features} }}"
+    ))
+}
+
 fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth: bool) -> String {
     let auth_config = if include_builtin_auth {
         "                    .configure(|cfg| very_simple_rest::core::auth::auth_api_routes_with_settings_and_limiter(cfg, server_pool.clone(), api_security.auth.clone(), auth_rate_limiter.clone()))\n"
@@ -1437,7 +1471,7 @@ fn render_main_rs(service: &ServiceSpec, module_name: &str, include_builtin_auth
     };
     let tls_setup = if service.tls.is_enabled() {
         format!(
-            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| current_exe.as_ref().and_then(|path| path.parent().map(|dir| dir.to_path_buf())))\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = generated::{module_name}::tls();\n    let rustls_config = very_simple_rest::core::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
+            "    let tls_base_dir = bundle_dir\n        .clone()\n        .or_else(|| current_exe.as_ref().and_then(|path| path.parent().map(|dir| dir.to_path_buf())))\n        .or_else(|| env::current_dir().ok())\n        .unwrap_or_else(|| PathBuf::from(\".\"));\n    let tls_config = generated::{module_name}::tls();\n    let rustls_config = vsr_runtime::tls::load_rustls_server_config(&tls_config, &tls_base_dir)\n        .map_err(|error| std::io::Error::other(format!(\"TLS configuration error: {{error}}\")))?;\n"
         )
     } else {
         String::new()
@@ -2065,6 +2099,7 @@ mod runtime_feature_list_tests {
             .expect("Cargo.toml should render");
 
         assert!(cargo_toml.contains("\"auth-email\""));
+        assert!(cargo_toml.contains("vsr-runtime = {"));
     }
 
     #[test]
@@ -3138,10 +3173,21 @@ resources: [
         assert!(root.join("migrations/0001_auth_management.sql").exists());
         assert!(root.join("migrations/0002_service.sql").exists());
         let main_rs = read_to_string(&root.join("src/main.rs"));
-        assert!(main_rs.contains("very_simple_rest::core::auth::auth_api_routes_with_settings_and_limiter"));
-        let limiter_setup = main_rs.find("let auth_rate_limiter = web::Data::new(").unwrap();
-        let worker_factory = main_rs.find("let server = HttpServer::new(move ||").unwrap();
-        assert!(limiter_setup < worker_factory, "all workers must share one budget");
+        assert!(
+            main_rs.contains(
+                "very_simple_rest::core::auth::auth_api_routes_with_settings_and_limiter"
+            )
+        );
+        let limiter_setup = main_rs
+            .find("let auth_rate_limiter = web::Data::new(")
+            .unwrap();
+        let worker_factory = main_rs
+            .find("let server = HttpServer::new(move ||")
+            .unwrap();
+        assert!(
+            limiter_setup < worker_factory,
+            "all workers must share one budget"
+        );
         assert!(main_rs.contains("auth_rate_limiter.clone()"));
         assert!(
             main_rs.contains(
@@ -3202,6 +3248,7 @@ resources: [
 
         let main_rs = read_to_string(&root.join("src/main.rs"));
         assert!(main_rs.contains("let tls_config = generated::tls_api::tls();"));
+        assert!(main_rs.contains("vsr_runtime::tls::load_rustls_server_config"));
         assert!(main_rs.contains("load_rustls_server_config(&tls_config, &tls_base_dir)"));
         assert!(main_rs.contains("bind_rustls_0_23"));
         assert!(main_rs.contains("Server listening on https://"));
@@ -3210,6 +3257,8 @@ resources: [
         assert!(
             cargo_toml.contains("actix-web = { version = \"4\", features = [\"rustls-0_23\"] }")
         );
+        assert!(cargo_toml.contains("vsr-runtime = {"));
+        assert!(cargo_toml.contains("default-features = false, features = [\"tls\"]"));
 
         let env_example = read_to_string(&root.join(".env.example"));
         assert!(env_example.contains("BIND_ADDR=127.0.0.1:8443"));

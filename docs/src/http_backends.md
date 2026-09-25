@@ -74,6 +74,8 @@ configuration now live in `vsr-runtime::tls`. The existing
 `rest_macro_core::tls` path re-exports them for compiler and native callers.
 The HTTP adapters set their own ALPN protocols after loading the shared
 certificate and key.
+Emitted server projects declare `vsr-runtime` directly and load TLS through
+`vsr_runtime::tls`; other generated handlers still use legacy runtime paths.
 
 Framework-neutral request, CORS, trusted proxy, rate-limit, access and security
 header settings are defined in `vsr-runtime::security`. The existing
