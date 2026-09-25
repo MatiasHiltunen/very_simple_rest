@@ -6,14 +6,7 @@ use crate::{
 };
 use std::{net::IpAddr, sync::Arc, time::Duration};
 
-/// Existing login/registration quota configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AuthRateLimitRule {
-    /// Maximum accepted attempts in the sliding window.
-    pub requests: u32,
-    /// Window duration in seconds.
-    pub window_seconds: u64,
-}
+pub use crate::rate_limit::AuthRateLimitRule;
 
 /// Independent budgets for credential endpoints, not arbitrary request paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

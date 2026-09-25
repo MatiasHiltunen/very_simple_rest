@@ -18,107 +18,12 @@ use crate::{
     secret::{SecretRef, load_optional_secret},
 };
 
-pub const DEFAULT_ANON_CLIENT_HEADER_NAME: &str = "x-vsr-anon-key";
-pub const DEFAULT_ANON_CLIENT_KEY_ENV: &str = "VSR_ANON_KEY";
-pub const DEFAULT_ANON_CLIENT_FALLBACK_KEY: &str = "vsr-default-anon-client-key";
-pub const DEFAULT_MAX_FILTER_IN_VALUES: usize = 100;
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RequestSecurity {
-    pub json_max_bytes: Option<usize>,
-    pub max_filter_in_values: Option<usize>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CorsSecurity {
-    pub origins: Vec<String>,
-    pub origins_env: Option<String>,
-    pub allow_credentials: bool,
-    pub allow_methods: Vec<String>,
-    pub allow_headers: Vec<String>,
-    pub expose_headers: Vec<String>,
-    pub max_age_seconds: Option<usize>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TrustedProxySecurity {
-    pub proxies: Vec<String>,
-    pub proxies_env: Option<String>,
-}
-
-pub use vsr_runtime::auth::admission::AuthRateLimitRule as RateLimitRule;
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RateLimitSecurity {
-    pub login: Option<RateLimitRule>,
-    pub register: Option<RateLimitRule>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum DefaultReadAccess {
-    #[default]
-    Inferred,
-    Authenticated,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct AccessSecurity {
-    pub default_read: DefaultReadAccess,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FrameOptions {
-    Deny,
-    SameOrigin,
-}
-
-impl FrameOptions {
-    fn as_header_value(self) -> &'static str {
-        match self {
-            Self::Deny => "DENY",
-            Self::SameOrigin => "SAMEORIGIN",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReferrerPolicy {
-    NoReferrer,
-    SameOrigin,
-    StrictOriginWhenCrossOrigin,
-    NoReferrerWhenDowngrade,
-    Origin,
-    OriginWhenCrossOrigin,
-    UnsafeUrl,
-}
-
-impl ReferrerPolicy {
-    fn as_header_value(self) -> &'static str {
-        match self {
-            Self::NoReferrer => "no-referrer",
-            Self::SameOrigin => "same-origin",
-            Self::StrictOriginWhenCrossOrigin => "strict-origin-when-cross-origin",
-            Self::NoReferrerWhenDowngrade => "no-referrer-when-downgrade",
-            Self::Origin => "origin",
-            Self::OriginWhenCrossOrigin => "origin-when-cross-origin",
-            Self::UnsafeUrl => "unsafe-url",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Hsts {
-    pub max_age_seconds: u64,
-    pub include_subdomains: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HeaderSecurity {
-    pub frame_options: Option<FrameOptions>,
-    pub content_type_options: bool,
-    pub referrer_policy: Option<ReferrerPolicy>,
-    pub hsts: Option<Hsts>,
-}
+pub use vsr_runtime::security::{
+    AccessSecurity, CorsSecurity, DEFAULT_ANON_CLIENT_FALLBACK_KEY,
+    DEFAULT_ANON_CLIENT_HEADER_NAME, DEFAULT_ANON_CLIENT_KEY_ENV, DEFAULT_MAX_FILTER_IN_VALUES,
+    DefaultReadAccess, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
+    ReferrerPolicy, RequestSecurity, TrustedProxySecurity,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SecurityConfig {
@@ -374,29 +279,15 @@ fn request_has_valid_anon_client_key(
 }
 
 pub fn request_client_ip(req: &HttpRequest, security: &SecurityConfig) -> Option<IpAddr> {
-    let peer_ip = req.peer_addr()?.ip();
+    let peer = req.peer_addr()?;
     let trusted_proxies = resolved_trusted_proxies(&security.trusted_proxies);
-
-    if !trusted_proxies.contains(&peer_ip) {
-        return Some(peer_ip);
-    }
-
-    let forwarded = forwarded_chain(req, "forwarded");
-    let xff = forwarded_chain(req, "x-forwarded-for");
-    let chain = match (forwarded, xff) {
-        (Ok(Some(a)), Ok(Some(b))) if a == b => a,
-        (Ok(Some(a)), Ok(None)) | (Ok(None), Ok(Some(a))) => a,
-        _ => return Some(peer_ip),
-    };
-    // Only the trusted suffix is authoritative; the client controls everything to its left.
-    let mut client = peer_ip;
-    for hop in chain.into_iter().rev() {
-        if !trusted_proxies.contains(&client) {
-            break;
+    let mut headers = vsr_runtime::http::HeaderFields::default();
+    for (name, value) in req.headers() {
+        if headers.append(name.as_str(), value.as_bytes()).is_err() {
+            return Some(peer.ip());
         }
-        client = hop;
     }
-    Some(client)
+    vsr_runtime::security::resolve_client_ip(Some(peer), &headers, &trusted_proxies)
 }
 
 fn resolved_cors_origins(cors: &CorsSecurity) -> Vec<String> {
@@ -449,63 +340,6 @@ fn resolved_trusted_proxies(config: &TrustedProxySecurity) -> Vec<IpAddr> {
     proxies.sort();
     proxies.dedup();
     proxies
-}
-
-fn forwarded_chain(req: &HttpRequest, name: &str) -> Result<Option<Vec<IpAddr>>, ()> {
-    let mut chain = Vec::new();
-    for header in req.headers().get_all(name) {
-        for entry in header.to_str().map_err(|_| ())?.split(',') {
-            let value = if name == "forwarded" {
-                let mut address = None;
-                for part in entry.split(';') {
-                    let (key, value) = part.trim().split_once('=').ok_or(())?;
-                    if key.eq_ignore_ascii_case("for") {
-                        if address.replace(value).is_some() {
-                            return Err(());
-                        }
-                    }
-                }
-                address.ok_or(())?
-            } else {
-                entry
-            };
-            chain.push(parse_forwarded_ip(value).ok_or(())?);
-        }
-    }
-    Ok((!chain.is_empty()).then_some(chain))
-}
-
-fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
-    let value = value.trim();
-    let value = if let Some(quoted) = value.strip_prefix('"') {
-        quoted.strip_suffix('"')?
-    } else {
-        value
-    };
-    if value.is_empty() || value.eq_ignore_ascii_case("unknown") || value.starts_with('_') {
-        return None;
-    }
-
-    if let Some(ipv6) = value.strip_prefix('[') {
-        let end = ipv6.find(']')?;
-        let suffix = &ipv6[end + 1..];
-        if !suffix.is_empty() {
-            suffix.strip_prefix(':')?.parse::<u16>().ok()?;
-        }
-        return IpAddr::from_str(&ipv6[..end]).ok();
-    }
-
-    if let Ok(ip) = IpAddr::from_str(value) {
-        return Some(ip);
-    }
-
-    if value.matches(':').count() == 1
-        && let Ok(addr) = std::net::SocketAddr::from_str(value)
-    {
-        return Some(addr.ip());
-    }
-
-    None
 }
 
 #[cfg(test)]
