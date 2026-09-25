@@ -112,6 +112,9 @@ compiler-free runtime service model remains open.
 Database dialect and generated temporal SQL, relation and index metadata,
 custom resource actions, audit selection, and computed-field descriptions now
 live in `vsr-runtime::model` with the same compiler compatibility re-exports.
+Native field descriptors and value kinds now live in `vsr-runtime::field` as
+`RuntimeField` and `FieldKind`; the CLI only lowers compiler `FieldSpec` inputs
+into those types. Native resource and HTTP handlers still need migration.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;

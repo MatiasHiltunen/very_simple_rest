@@ -44,13 +44,14 @@ use vsr_runtime::authz::policy::{
     PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource, RowPolicies,
 };
 use vsr_runtime::field::{
-    FieldTransform, FieldValidation, GeneratedValue, LengthMode, NumericBound,
+    FieldKind, FieldTransform, GeneratedValue, LengthMode, NumericBound,
+    RuntimeField as DynamicField,
 };
 use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
     workers_from_env,
 };
-use vsr_runtime::model::{self, DbBackend, StructuredScalarKind};
+use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
 
 use super::serve_manager::{self, ServeInstanceContext};
 
@@ -609,7 +610,7 @@ impl DynamicResource {
             .fields
             .iter()
             .cloned()
-            .map(DynamicField::from_spec)
+            .map(lower_dynamic_field)
             .collect::<anyhow::Result<Vec<_>>>()?;
         let field_index = fields
             .iter()
@@ -825,110 +826,71 @@ impl DynamicAuditConfig {
     }
 }
 
-#[derive(Clone)]
-struct DynamicField {
-    name: String,
-    api_name: String,
-    expose_in_api: bool,
-    enum_values: Option<Vec<String>>,
-    transforms: Vec<FieldTransform>,
-    kind: FieldKind,
-    list_item_kind: Option<FieldKind>,
-    object_fields: Option<Vec<DynamicField>>,
-    optional: bool,
-    generated: GeneratedValue,
-    validation: FieldValidation,
-    supports_exact_filters: bool,
-    supports_sort: bool,
-    supports_range_filters: bool,
-}
-
-impl DynamicField {
-    fn from_spec(spec: FieldSpec) -> anyhow::Result<Self> {
-        let name = spec.name();
-        let api_name = spec.api_name().to_owned();
-        let list_item_kind = spec.list_item_ty.as_ref().and_then(FieldKind::from_type);
-        let object_fields = spec
-            .object_fields
-            .clone()
-            .map(|fields| {
-                fields
-                    .into_iter()
-                    .map(DynamicField::from_spec)
-                    .collect::<anyhow::Result<Vec<_>>>()
-            })
-            .transpose()?;
-        let kind = if list_item_kind.is_some() {
-            Some(FieldKind::List)
-        } else {
-            FieldKind::from_field(&spec)
-        }
-        .ok_or_else(|| anyhow!("unsupported field type for dynamic serve: `{name}`"))?;
-        let optional = compiler::is_optional_type(&spec.ty);
-        Ok(Self {
-            name,
-            api_name,
-            expose_in_api: spec.expose_in_api(),
-            enum_values: spec.enum_values().map(|values| values.to_vec()),
-            transforms: spec.transforms().to_vec(),
-            kind,
-            list_item_kind,
-            object_fields,
-            optional,
-            generated: spec.generated,
-            validation: spec.validation.clone(),
-            supports_exact_filters: supports_exact_filters(&spec),
-            supports_sort: supports_field_sort(&spec),
-            supports_range_filters: supports_range_filters(&spec.ty),
+fn lower_dynamic_field(spec: FieldSpec) -> anyhow::Result<DynamicField> {
+    let name = spec.name();
+    let api_name = spec.api_name().to_owned();
+    let list_item_kind = spec.list_item_ty.as_ref().and_then(field_kind_from_type);
+    let object_fields = spec
+        .object_fields
+        .clone()
+        .map(|fields| {
+            fields
+                .into_iter()
+                .map(lower_dynamic_field)
+                .collect::<anyhow::Result<Vec<_>>>()
         })
+        .transpose()?;
+    let kind = if list_item_kind.is_some() {
+        Some(FieldKind::List)
+    } else {
+        field_kind_from_field(&spec)
     }
+    .ok_or_else(|| anyhow!("unsupported field type for dynamic serve: `{name}`"))?;
+    let optional = compiler::is_optional_type(&spec.ty);
+    Ok(DynamicField {
+        name,
+        api_name,
+        expose_in_api: spec.expose_in_api(),
+        enum_values: spec.enum_values().map(|values| values.to_vec()),
+        transforms: spec.transforms().to_vec(),
+        kind,
+        list_item_kind,
+        object_fields,
+        optional,
+        generated: spec.generated,
+        validation: spec.validation.clone(),
+        supports_exact_filters: supports_exact_filters(&spec),
+        supports_sort: supports_field_sort(&spec),
+        supports_range_filters: supports_range_filters(&spec.ty),
+    })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FieldKind {
-    Integer,
-    Real,
-    Boolean,
-    Text,
-    DateTime,
-    Date,
-    Time,
-    Uuid,
-    Decimal,
-    Json,
-    JsonObject,
-    JsonArray,
-    List,
-}
-
-impl FieldKind {
-    fn from_type(ty: &Type) -> Option<Self> {
-        match compiler::structured_scalar_kind(ty) {
-            Some(StructuredScalarKind::DateTime) => Some(Self::DateTime),
-            Some(StructuredScalarKind::Date) => Some(Self::Date),
-            Some(StructuredScalarKind::Time) => Some(Self::Time),
-            Some(StructuredScalarKind::Uuid) => Some(Self::Uuid),
-            Some(StructuredScalarKind::Decimal) => Some(Self::Decimal),
-            Some(StructuredScalarKind::Json) => Some(Self::Json),
-            Some(StructuredScalarKind::JsonObject) => Some(Self::JsonObject),
-            Some(StructuredScalarKind::JsonArray) => Some(Self::JsonArray),
-            None => {
-                if is_bool_type(ty) {
-                    Some(Self::Boolean)
-                } else {
-                    match compiler::infer_sql_type(ty, DbBackend::Sqlite).as_str() {
-                        sql_type if is_integer_sql_type(sql_type) => Some(Self::Integer),
-                        "REAL" => Some(Self::Real),
-                        _ => Some(Self::Text),
-                    }
+fn field_kind_from_type(ty: &Type) -> Option<FieldKind> {
+    match compiler::structured_scalar_kind(ty) {
+        Some(StructuredScalarKind::DateTime) => Some(FieldKind::DateTime),
+        Some(StructuredScalarKind::Date) => Some(FieldKind::Date),
+        Some(StructuredScalarKind::Time) => Some(FieldKind::Time),
+        Some(StructuredScalarKind::Uuid) => Some(FieldKind::Uuid),
+        Some(StructuredScalarKind::Decimal) => Some(FieldKind::Decimal),
+        Some(StructuredScalarKind::Json) => Some(FieldKind::Json),
+        Some(StructuredScalarKind::JsonObject) => Some(FieldKind::JsonObject),
+        Some(StructuredScalarKind::JsonArray) => Some(FieldKind::JsonArray),
+        None => {
+            if is_bool_type(ty) {
+                Some(FieldKind::Boolean)
+            } else {
+                match compiler::infer_sql_type(ty, DbBackend::Sqlite).as_str() {
+                    sql_type if is_integer_sql_type(sql_type) => Some(FieldKind::Integer),
+                    "REAL" => Some(FieldKind::Real),
+                    _ => Some(FieldKind::Text),
                 }
             }
         }
     }
+}
 
-    fn from_field(field: &FieldSpec) -> Option<Self> {
-        Self::from_type(&field.ty)
-    }
+fn field_kind_from_field(field: &FieldSpec) -> Option<FieldKind> {
+    field_kind_from_type(&field.ty)
 }
 
 #[derive(Clone)]
@@ -1737,9 +1699,9 @@ fn is_integer_sql_type(sql_type: &str) -> bool {
 
 fn generated_temporal_expression(db: DbBackend, field: &DynamicField) -> &'static str {
     let kind = match field.kind {
-        FieldKind::DateTime => Some(compiler::GeneratedTemporalKind::DateTime),
-        FieldKind::Date => Some(compiler::GeneratedTemporalKind::Date),
-        FieldKind::Time => Some(compiler::GeneratedTemporalKind::Time),
+        FieldKind::DateTime => Some(GeneratedTemporalKind::DateTime),
+        FieldKind::Date => Some(GeneratedTemporalKind::Date),
+        FieldKind::Time => Some(GeneratedTemporalKind::Time),
         FieldKind::Text
             if matches!(
                 field.generated,
