@@ -119,6 +119,9 @@ The native resource descriptor, action assignments, audit settings, hybrid
 settings, relation routes, and SQL-bound scalar values now live in
 `vsr-runtime::native_resource`. The CLI retains compiler-specific lowering and
 legacy handler adapters, which are the next migration boundary.
+The lowered native service settings now live in `vsr-runtime::native_service`.
+The CLI keeps its Actix state and storage registry beside that descriptor while
+it lowers `ServiceSpec` into the runtime-owned service and resource models.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;

@@ -56,6 +56,7 @@ pub mod field;
 pub mod http;
 pub mod model;
 pub mod native_resource;
+pub mod native_service;
 pub mod rate_limit;
 pub mod resource;
 pub mod runtime;
