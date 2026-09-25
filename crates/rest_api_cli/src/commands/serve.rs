@@ -13,10 +13,8 @@ use rest_macro_core::authorization::{
     AuthorizationAction, AuthorizationRuntime, AuthorizationScopeBinding,
 };
 use rest_macro_core::compiler::{
-    self, DbBackend, FieldSpec, GeneratedValue, NumericBound, OpenApiSpecOptions,
-    PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource, ResourceSpec, RoleRequirements,
-    RowPolicies, ServiceSpec, StructuredScalarKind, default_service_database_url,
+    self, DbBackend, FieldSpec, OpenApiSpecOptions,
+    ResourceSpec, ServiceSpec, StructuredScalarKind, default_service_database_url,
     supports_exact_filters, supports_field_sort, supports_range_filters,
 };
 use rest_macro_core::database::{
@@ -40,6 +38,14 @@ use sqlx::Row;
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use uuid::Uuid;
+use vsr_runtime::authz::RoleRequirements;
+use vsr_runtime::authz::policy::{
+    PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression,
+    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource, RowPolicies,
+};
+use vsr_runtime::field::{
+    FieldTransform, FieldValidation, GeneratedValue, LengthMode, NumericBound,
+};
 use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
     workers_from_env,
@@ -824,13 +830,13 @@ struct DynamicField {
     api_name: String,
     expose_in_api: bool,
     enum_values: Option<Vec<String>>,
-    transforms: Vec<compiler::FieldTransform>,
+    transforms: Vec<FieldTransform>,
     kind: FieldKind,
     list_item_kind: Option<FieldKind>,
     object_fields: Option<Vec<DynamicField>>,
     optional: bool,
     generated: GeneratedValue,
-    validation: compiler::FieldValidation,
+    validation: FieldValidation,
     supports_exact_filters: bool,
     supports_sort: bool,
     supports_range_filters: bool,
@@ -1837,18 +1843,18 @@ fn normalize_text_field_value(kind: FieldKind, value: &str) -> anyhow::Result<St
 }
 
 fn apply_field_transforms_to_text(
-    transforms: &[compiler::FieldTransform],
+    transforms: &[FieldTransform],
     value: String,
 ) -> String {
     transforms
         .iter()
         .fold(value, |current, transform| match transform {
-            compiler::FieldTransform::Trim => current.trim().to_owned(),
-            compiler::FieldTransform::Lowercase => current.to_lowercase(),
-            compiler::FieldTransform::CollapseWhitespace => {
+            FieldTransform::Trim => current.trim().to_owned(),
+            FieldTransform::Lowercase => current.to_lowercase(),
+            FieldTransform::CollapseWhitespace => {
                 current.split_whitespace().collect::<Vec<_>>().join(" ")
             }
-            compiler::FieldTransform::Slugify => slugify_text(current.as_str()),
+            FieldTransform::Slugify => slugify_text(current.as_str()),
         })
 }
 
@@ -2013,16 +2019,16 @@ fn invalid_json_field(path: &str, detail: impl Into<String>) -> JsonFieldError {
     )
 }
 
-fn measured_text_length(value: &str, mode: Option<compiler::LengthMode>) -> usize {
+fn measured_text_length(value: &str, mode: Option<LengthMode>) -> usize {
     match mode {
-        Some(compiler::LengthMode::Chars) => value.chars().count(),
-        Some(compiler::LengthMode::Graphemes) => {
+        Some(LengthMode::Chars) => value.chars().count(),
+        Some(LengthMode::Graphemes) => {
             use garde::rules::length::HasGraphemes as _;
 
             value.num_graphemes()
         }
-        Some(compiler::LengthMode::Utf16) => value.encode_utf16().count(),
-        Some(compiler::LengthMode::Simple | compiler::LengthMode::Bytes) | None => value.len(),
+        Some(LengthMode::Utf16) => value.encode_utf16().count(),
+        Some(LengthMode::Simple | LengthMode::Bytes) | None => value.len(),
     }
 }
 

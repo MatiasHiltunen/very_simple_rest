@@ -22,8 +22,53 @@
 use std::{collections::HashMap, future::Future};
 use vsr_core::error::VsrResult;
 
+/// Row-policy data model and structural traversal helpers.
+pub mod policy;
+
 // Re-export the identity type shared with the auth module.
 pub use crate::auth::AuthenticatedIdentity;
+
+/// Optional role required for each CRUD operation.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct RoleRequirements {
+    /// Role required to read.
+    pub read: Option<String>,
+    /// Role required to create.
+    pub create: Option<String>,
+    /// Role required to update.
+    pub update: Option<String>,
+    /// Role required to delete.
+    pub delete: Option<String>,
+}
+
+impl RoleRequirements {
+    /// Use the update role for create when legacy schemas omit a create role.
+    pub fn with_legacy_defaults(mut self) -> Self {
+        if self.create.is_none() {
+            self.create = self.update.clone();
+        }
+        self
+    }
+}
+
+/// How a resource's read access is selected.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResourceReadAccess {
+    /// Infer access from roles and policies.
+    #[default]
+    Inferred,
+    /// Allow anonymous reads.
+    Public,
+    /// Require an authenticated identity.
+    Authenticated,
+}
+
+/// Access settings for a resource.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ResourceAccess {
+    /// Read access setting.
+    pub read: ResourceReadAccess,
+}
 
 // ─── Authorization request ────────────────────────────────────────────────────
 
