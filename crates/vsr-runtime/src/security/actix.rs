@@ -9,6 +9,7 @@ use actix_web::{
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
     http::header::{HeaderName, HeaderValue},
     middleware::DefaultHeaders,
+    web,
 };
 use dotenvy::dotenv;
 use futures_util::future::{LocalBoxFuture, Ready, ready};
@@ -17,6 +18,16 @@ use super::{
     CorsSecurity, DEFAULT_ANON_CLIENT_FALLBACK_KEY, DEFAULT_ANON_CLIENT_HEADER_NAME,
     DEFAULT_ANON_CLIENT_KEY_ENV, SecurityConfig, TrustedProxySecurity,
 };
+
+/// Attach security and authentication settings to an Actix scope.
+pub fn configure_scope_security(cfg: &mut web::ServiceConfig, security: &SecurityConfig) {
+    crate::http::actix_errors::configure_extractor_errors_with_limit(
+        cfg,
+        security.requests.json_max_bytes,
+    );
+    cfg.app_data(web::Data::new(security.clone()));
+    cfg.app_data(web::Data::new(security.auth.clone()));
+}
 use crate::config_secret::{SecretRef, load_optional_secret};
 
 /// Reject requests without the configured anonymous client key.

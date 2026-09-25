@@ -81,9 +81,10 @@ Framework-neutral request, CORS, trusted proxy, rate-limit, access and security
 header settings are defined in `vsr-runtime::security`. The existing
 `rest_macro_core::security` module re-exports these types, including the
 auth-composing `SecurityConfig`. Actix CORS, security headers, anonymous-client
-admission and client-IP adapters live in `vsr-runtime::security::actix` behind
-`actix-security`; the legacy module re-exports them and still configures its
-request extractors. The client-IP adapter delegates forwarded-header validation
+admission, client-IP and scope setup adapters live in
+`vsr-runtime::security::actix` behind `actix-security`. Actix extractor errors
+live in `vsr-runtime::http::actix_errors`. The legacy modules re-export these
+adapters. The client-IP adapter delegates forwarded-header validation
 and trusted-suffix resolution to the framework-neutral runtime function.
 
 Serializable authentication settings and configuration secret resolution now
