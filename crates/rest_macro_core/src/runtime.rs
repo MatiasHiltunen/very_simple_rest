@@ -1,15 +1,6 @@
 use actix_web::middleware::{Compress, Condition};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CompressionConfig {
-    pub enabled: bool,
-    pub static_precompressed: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RuntimeConfig {
-    pub compression: CompressionConfig,
-}
+pub use vsr_runtime::runtime::{CompressionConfig, RuntimeConfig};
 
 pub fn compression_middleware(runtime: &RuntimeConfig) -> Condition<Compress> {
     Condition::new(runtime.compression.enabled, Compress::default())

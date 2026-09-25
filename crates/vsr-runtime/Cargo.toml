@@ -35,6 +35,9 @@ http-actix = ["dep:actix-web", "dep:tokio", "dep:actix-cors", "tls"]
 # Alternative transport for the same VSR handlers and route table.
 http-axum = ["dep:axum", "dep:axum-server", "dep:tower-http", "dep:http-body-util", "dep:tokio", "tls"]
 
+# Legacy static-file adapter hosted in the runtime until Axum parity lands.
+static-actix = ["dep:actix-web", "dep:actix-files"]
+
 # Certificate/key loading shared with the legacy facade and both transports.
 tls = ["dep:rustls"]
 
@@ -71,6 +74,10 @@ features = ["rustls-0_23"]
 optional = true
 
 [dependencies.actix-cors]
+workspace = true
+optional = true
+
+[dependencies.actix-files]
 workspace = true
 optional = true
 

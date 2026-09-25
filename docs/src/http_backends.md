@@ -82,9 +82,15 @@ the Actix middleware and the legacy auth-composing `SecurityConfig`. Its
 client-IP adapter delegates forwarded-header validation and trusted-suffix
 resolution to the framework-neutral runtime function.
 
+Static mount resolution, SPA fallbacks, cache headers and precompressed asset
+selection now live in `vsr-runtime::static_files` behind `static-actix`.
+Compression settings live in `vsr-runtime::runtime`. The existing
+`rest_macro_core` modules re-export these types and the Actix static adapter;
+Axum static-file parity remains open.
+
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
-streaming and the migration of large-file/static/multipart behavior are future
+streaming and Axum parity for large-file/static/multipart behavior are future
 work. A body limit is not a complete production denial-of-service control: request
 deadlines, concurrency budgets and full application rate limiting also need to be
 integrated before the new runtime replaces current production wiring.
