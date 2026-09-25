@@ -88,8 +88,12 @@ Serializable authentication settings and configuration secret resolution now
 live in `vsr-runtime::auth::settings` and `vsr-runtime::config_secret`. Legacy
 paths re-export them; JWT library conversion remains with the legacy adapter.
 
-Static mount resolution, SPA fallbacks, cache headers and precompressed asset
-selection now live in `vsr-runtime::static_files` behind `static-actix`.
+Static mount settings live in the always-available `vsr-runtime::static_config`;
+the Actix static-file adapter re-exports them for existing callers. Static mount
+resolution, SPA fallbacks, cache headers and precompressed asset selection live
+in `vsr-runtime::static_files` behind `static-actix`. Storage backend, public
+mount, upload and S3 compatibility settings live in `vsr-runtime::storage::config`
+and are re-exported by the legacy storage module.
 Compression settings live in `vsr-runtime::runtime`. The existing
 `rest_macro_core` modules re-export these types and the Actix static adapter;
 Axum static-file parity remains open.

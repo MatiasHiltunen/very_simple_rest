@@ -23,6 +23,7 @@
 //! | [`rate_limit`] | [`rate_limit::RateLimitStore`], [`rate_limit::RateLimitDecision`] |
 //! | [`security`] | Framework-neutral request and browser security settings |
 //! | [`config_secret`] | Serializable secret references for service configuration |
+//! | [`static_config`] | Framework-neutral static mount settings |
 //! | [`runtime`] | Shared compression settings |
 //! | `static_files` | Feature-gated Actix static-file adapter |
 //! | [`audit`] | [`audit::AuditSink`], [`audit::AuditEvent`] |
@@ -56,6 +57,7 @@ pub mod rate_limit;
 pub mod resource;
 pub mod runtime;
 pub mod security;
+pub mod static_config;
 #[cfg(feature = "static-actix")]
 pub mod static_files;
 pub mod storage;
