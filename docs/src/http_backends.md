@@ -126,6 +126,9 @@ Native field parsing, transforms, typed JSON validation, and scalar validation
 now live in `vsr-runtime::native_validation` behind `native-validation`. The
 CLI translates runtime validation failures into its existing HTTP errors and
 database decode errors. The compiler-free runtime build keeps this optional.
+Native row decoding, boolean column compatibility, and computed response fields
+now live in the optional `vsr-runtime::native_sqlx` adapter. The CLI still owns
+the database pool and HTTP handlers while passing rows to this adapter.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
