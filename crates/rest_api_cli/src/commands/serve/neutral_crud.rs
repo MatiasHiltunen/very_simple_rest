@@ -12,7 +12,7 @@ use sqlx::Row;
 use vsr_runtime::{
     http::{ResponseEnvelope, RouteTable, actix_adapter},
     resource::{
-        TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextLengthMode,
+        TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextFilters, TextLengthMode,
         TextLengthValidation, TextPage, TextPageRequest, TextRecord, TextStoreError,
     },
 };
@@ -39,8 +39,6 @@ pub(super) fn config_for(resource: &DynamicResource) -> Option<TextCrudConfig> {
         || !resource.computed_fields.is_empty()
         || !resource.response_contexts.is_empty()
         || resource.default_response_context.is_some()
-        || resource.default_limit.is_some()
-        || resource.max_limit.is_some()
         || !resource.filterable_in.is_empty()
         || !resource.count_endpoint
         || !safe_identifier(&resource.table_name)
@@ -107,6 +105,8 @@ pub(super) fn config_for(resource: &DynamicResource) -> Option<TextCrudConfig> {
         id_field: id.api_name.clone(),
         value_field: value.api_name.clone(),
         value_length,
+        default_limit: resource.default_limit,
+        max_limit: resource.max_limit,
         roles,
     })
 }
@@ -218,14 +218,45 @@ impl SqliteTextStore {
 }
 
 impl TextCrudStore for SqliteTextStore {
-    async fn list(&self, page: TextPageRequest) -> Result<TextPage, TextStoreError> {
-        let total = self.count().await?;
+    async fn list(
+        &self,
+        page: TextPageRequest,
+        filters: &TextFilters,
+    ) -> Result<TextPage, TextStoreError> {
+        let total = self.count(filters).await?;
+        let mut conditions = self.filter_conditions(filters);
+        if page.after_id.is_some() {
+            conditions.push(format!(
+                "{} {} ?",
+                self.id_field,
+                if page.descending { "<" } else { ">" }
+            ));
+        }
+        let where_clause = where_clause(&conditions);
         let sql = format!(
-            "SELECT {}, {} FROM {} ORDER BY {} ASC LIMIT ? OFFSET ?",
-            self.id_field, self.value_field, self.table, self.id_field
+            "SELECT {}, {} FROM {}{} ORDER BY {} {} LIMIT ? OFFSET ?",
+            self.id_field,
+            self.value_field,
+            self.table,
+            where_clause,
+            self.id_field,
+            if page.descending { "DESC" } else { "ASC" }
         );
-        let rows = query(&sql)
-            .bind(page.limit.map_or(-1, i64::from))
+        let mut query = query(&sql);
+        if let Some(id) = filters.id {
+            query = query.bind(id);
+        }
+        if let Some(value) = &filters.value {
+            query = query.bind(value);
+        }
+        if let Some(contains) = &filters.value_contains {
+            query = query.bind(contains_pattern(contains));
+        }
+        if let Some(after_id) = page.after_id {
+            query = query.bind(after_id);
+        }
+        let rows = query
+            .bind(page.limit.map_or(-1, |limit| i64::from(limit) + 1))
             .bind(i64::from(page.offset))
             .fetch_all(&self.pool)
             .await
@@ -239,12 +270,23 @@ impl TextCrudStore for SqliteTextStore {
         })
     }
 
-    async fn count(&self) -> Result<i64, TextStoreError> {
-        let sql = format!("SELECT COUNT(*) FROM {}", self.table);
-        query_scalar::<sqlx::Any, i64>(&sql)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(db_error)
+    async fn count(&self, filters: &TextFilters) -> Result<i64, TextStoreError> {
+        let sql = format!(
+            "SELECT COUNT(*) FROM {}{}",
+            self.table,
+            where_clause(&self.filter_conditions(filters))
+        );
+        let mut query = query_scalar::<sqlx::Any, i64>(&sql);
+        if let Some(id) = filters.id {
+            query = query.bind(id);
+        }
+        if let Some(value) = &filters.value {
+            query = query.bind(value);
+        }
+        if let Some(contains) = &filters.value_contains {
+            query = query.bind(contains_pattern(contains));
+        }
+        query.fetch_one(&self.pool).await.map_err(db_error)
     }
 
     async fn get(&self, id: i64) -> Result<Option<TextRecord>, TextStoreError> {
@@ -300,4 +342,40 @@ impl TextCrudStore for SqliteTextStore {
             .map(|result| result.rows_affected() > 0)
             .map_err(db_error)
     }
+}
+
+impl SqliteTextStore {
+    fn filter_conditions(&self, filters: &TextFilters) -> Vec<String> {
+        let mut conditions = Vec::new();
+        if filters.id.is_some() {
+            conditions.push(format!("{} = ?", self.id_field));
+        }
+        if filters.value.is_some() {
+            conditions.push(format!("{} = ?", self.value_field));
+        }
+        if filters.value_contains.is_some() {
+            conditions.push(format!("LOWER({}) LIKE ? ESCAPE '\\'", self.value_field));
+        }
+        conditions
+    }
+}
+
+fn where_clause(conditions: &[String]) -> String {
+    if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    }
+}
+
+fn contains_pattern(value: &str) -> String {
+    let mut pattern = String::from("%");
+    for ch in value.to_lowercase().chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
 }

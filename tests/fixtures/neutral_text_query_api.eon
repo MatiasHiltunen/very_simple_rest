@@ -1,0 +1,19 @@
+resources: [
+    {
+        name: "Note"
+        roles: {
+            read: "user"
+            create: "user"
+            update: "user"
+            delete: "user"
+        }
+        list: {
+            default_limit: 2
+            max_limit: 3
+        }
+        fields: [
+            { name: "id", type: I64, id: true }
+            { name: "title_text", api_name: "title", type: String }
+        ]
+    }
+]

@@ -6070,6 +6070,105 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn neutral_text_resource_matches_native_list_queries() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let mut responses = Vec::new();
+        for selected in [None, Some("note")] {
+            let (dynamic_service, state) =
+                build_test_state_with_neutral("neutral_text_query_api.eon", false, selected).await;
+            query("INSERT INTO note (title_text) VALUES ('Alpha'), ('beta'), ('A_foo'), ('100%')")
+                .execute(&state.pool)
+                .await
+                .expect("query fixture rows should insert");
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(state.pool.clone()))
+                    .service(build_api_scope(dynamic_service, state)),
+            )
+            .await;
+            let token = issue_token(1, &["user"]);
+            let mut cases = Vec::new();
+            for uri in [
+                "/api/note",
+                "/api/note?limit=9",
+                "/api/note?offset=1",
+                "/api/note?limit=0",
+                "/api/note?filter_id=3",
+                "/api/note?filter_title=beta",
+                "/api/note?filter_title_contains=AL",
+                "/api/note?filter_title_contains=%25",
+                "/api/note/count?filter_title_contains=a",
+                "/api/note?sort=id&order=desc",
+                "/api/note?filter_unknown=x",
+            ] {
+                let response = test::call_service(
+                    &app,
+                    test::TestRequest::get()
+                        .uri(uri)
+                        .insert_header(("Authorization", format!("Bearer {token}")))
+                        .to_request(),
+                )
+                .await;
+                let status = response.status();
+                let body: Value = test::read_body_json(response).await;
+                cases.push((status, body));
+            }
+            let cursor = cases[0].1["next_cursor"].as_str().expect("first page has cursor");
+            let cursor_uri = format!("/api/note?cursor={cursor}");
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(&cursor_uri)
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .to_request(),
+            )
+            .await;
+            let status = response.status();
+            let body: Value = test::read_body_json(response).await;
+            cases.push((status, body));
+            let cursor = cases[9].1["next_cursor"].as_str().expect("descending page has cursor");
+            let cursor_uri = format!("/api/note?cursor={cursor}");
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(&cursor_uri)
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .to_request(),
+            )
+            .await;
+            let status = response.status();
+            let body: Value = test::read_body_json(response).await;
+            cases.push((status, body));
+            responses.push(cases);
+        }
+        assert_eq!(responses[0], responses[1], "native and shared list responses must match");
+        let cases = &responses[0];
+        assert_eq!(cases[0].1["items"], json!([{"id": 1, "title": "Alpha"}, {"id": 2, "title": "beta"}]));
+        assert_eq!(cases[0].1["limit"], 2);
+        assert_eq!(cases[0].1["total"], 4);
+        assert_eq!(cases[0].1["next_offset"], 2);
+        assert_eq!(cases[1].1["limit"], 3);
+        assert_eq!(cases[2].1["next_offset"], 3);
+        assert_eq!(cases[3].1["count"], 0);
+        assert!(cases[3].1["next_cursor"].is_null());
+        assert_eq!(cases[4].1["items"][0]["title"], "A_foo");
+        assert_eq!(cases[5].1["total"], 1);
+        assert_eq!(cases[6].1["total"], 1);
+        assert_eq!(cases[7].1["items"][0]["title"], "100%");
+        assert_eq!(cases[8].1["count"], 3);
+        assert_eq!(cases[9].1["items"][0]["id"], 4);
+        assert_eq!(cases[10].0, StatusCode::BAD_REQUEST);
+        assert_eq!(cases[11].1["items"][0]["id"], 3);
+        assert!(cases[11].1["next_cursor"].is_null());
+        assert_eq!(cases[12].1["items"][0]["id"], 2);
+        assert!(cases[12].1["next_cursor"].is_null());
+    }
+
+    #[actix_web::test]
     async fn neutral_text_resource_checks_live_builtin_account_state() {
         let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
         unsafe {
