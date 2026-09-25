@@ -13,7 +13,6 @@ use dotenvy::dotenv;
 use futures_util::future::{LocalBoxFuture, Ready, ready};
 
 use crate::{
-    auth::AuthSettings,
     errors,
     secret::{SecretRef, load_optional_secret},
 };
@@ -22,19 +21,8 @@ pub use vsr_runtime::security::{
     AccessSecurity, CorsSecurity, DEFAULT_ANON_CLIENT_FALLBACK_KEY,
     DEFAULT_ANON_CLIENT_HEADER_NAME, DEFAULT_ANON_CLIENT_KEY_ENV, DEFAULT_MAX_FILTER_IN_VALUES,
     DefaultReadAccess, FrameOptions, HeaderSecurity, Hsts, RateLimitRule, RateLimitSecurity,
-    ReferrerPolicy, RequestSecurity, TrustedProxySecurity,
+    ReferrerPolicy, RequestSecurity, SecurityConfig, TrustedProxySecurity,
 };
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SecurityConfig {
-    pub requests: RequestSecurity,
-    pub cors: CorsSecurity,
-    pub trusted_proxies: TrustedProxySecurity,
-    pub rate_limits: RateLimitSecurity,
-    pub access: AccessSecurity,
-    pub headers: HeaderSecurity,
-    pub auth: AuthSettings,
-}
 
 #[derive(Clone, Debug)]
 pub struct RequireAnonClient {

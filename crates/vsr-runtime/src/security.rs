@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::http::HeaderFields;
+use crate::{auth::settings::AuthSettings, http::HeaderFields};
 
 pub use crate::rate_limit::AuthRateLimitRule as RateLimitRule;
 
@@ -154,6 +154,25 @@ pub struct HeaderSecurity {
     pub referrer_policy: Option<ReferrerPolicy>,
     /// HTTP Strict Transport Security policy.
     pub hsts: Option<Hsts>,
+}
+
+/// Security configuration used by native and emitted services.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SecurityConfig {
+    /// Request body and query limits.
+    pub requests: RequestSecurity,
+    /// Cross-origin policy.
+    pub cors: CorsSecurity,
+    /// Trusted reverse proxies.
+    pub trusted_proxies: TrustedProxySecurity,
+    /// Authentication endpoint rate limits.
+    pub rate_limits: RateLimitSecurity,
+    /// Default resource access policy.
+    pub access: AccessSecurity,
+    /// Browser-facing security headers.
+    pub headers: HeaderSecurity,
+    /// Built-in authentication settings.
+    pub auth: AuthSettings,
 }
 
 /// Resolve the caller IP from the direct peer and forwarding headers.

@@ -79,10 +79,14 @@ Emitted server projects declare `vsr-runtime` directly and load TLS through
 
 Framework-neutral request, CORS, trusted proxy, rate-limit, access and security
 header settings are defined in `vsr-runtime::security`. The existing
-`rest_macro_core::security` module re-exports these types while it still owns
-the Actix middleware and the legacy auth-composing `SecurityConfig`. Its
+`rest_macro_core::security` module re-exports these types, including the
+auth-composing `SecurityConfig`, while it still owns the Actix middleware. Its
 client-IP adapter delegates forwarded-header validation and trusted-suffix
 resolution to the framework-neutral runtime function.
+
+Serializable authentication settings and configuration secret resolution now
+live in `vsr-runtime::auth::settings` and `vsr-runtime::config_secret`. Legacy
+paths re-export them; JWT library conversion remains with the legacy adapter.
 
 Static mount resolution, SPA fallbacks, cache headers and precompressed asset
 selection now live in `vsr-runtime::static_files` behind `static-actix`.
