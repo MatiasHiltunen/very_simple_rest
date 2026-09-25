@@ -122,6 +122,10 @@ legacy handler adapters, which are the next migration boundary.
 The lowered native service settings now live in `vsr-runtime::native_service`.
 The CLI keeps its Actix state and storage registry beside that descriptor while
 it lowers `ServiceSpec` into the runtime-owned service and resource models.
+Native field parsing, transforms, typed JSON validation, and scalar validation
+now live in `vsr-runtime::native_validation` behind `native-validation`. The
+CLI translates runtime validation failures into its existing HTTP errors and
+database decode errors. The compiler-free runtime build keeps this optional.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
