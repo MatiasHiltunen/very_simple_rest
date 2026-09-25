@@ -206,3 +206,67 @@ impl GeneratedValue {
         )
     }
 }
+
+/// Compiler-lowered description used by native field validation and SQL bindings.
+#[derive(Clone)]
+pub struct RuntimeField {
+    /// Internal database field name.
+    pub name: String,
+    /// Public API field name.
+    pub api_name: String,
+    /// Whether requests and responses expose the field.
+    pub expose_in_api: bool,
+    /// Accepted enumeration values, when the field is an enum.
+    pub enum_values: Option<Vec<String>>,
+    /// Text transforms applied before persistence.
+    pub transforms: Vec<FieldTransform>,
+    /// Field value shape.
+    pub kind: FieldKind,
+    /// Element shape for a list field.
+    pub list_item_kind: Option<FieldKind>,
+    /// Nested fields for a typed JSON object.
+    pub object_fields: Option<Vec<RuntimeField>>,
+    /// Whether the value may be absent or null.
+    pub optional: bool,
+    /// Database-generated value policy.
+    pub generated: GeneratedValue,
+    /// Request validation rules.
+    pub validation: FieldValidation,
+    /// Whether exact filters are supported.
+    pub supports_exact_filters: bool,
+    /// Whether sorting is supported.
+    pub supports_sort: bool,
+    /// Whether range filters are supported.
+    pub supports_range_filters: bool,
+}
+
+/// Runtime value shape for a lowered service field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldKind {
+    /// Signed integer.
+    Integer,
+    /// Floating-point number.
+    Real,
+    /// Boolean.
+    Boolean,
+    /// Plain text.
+    Text,
+    /// Date and time with an offset.
+    DateTime,
+    /// Calendar date.
+    Date,
+    /// Time of day.
+    Time,
+    /// UUID.
+    Uuid,
+    /// Decimal value.
+    Decimal,
+    /// Arbitrary JSON value.
+    Json,
+    /// JSON object.
+    JsonObject,
+    /// JSON array.
+    JsonArray,
+    /// List of values.
+    List,
+}
