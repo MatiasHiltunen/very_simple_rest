@@ -7,6 +7,9 @@ use std::{
 
 use crate::{auth::settings::AuthSettings, http::HeaderFields};
 
+#[cfg(feature = "actix-security")]
+pub mod actix;
+
 pub use crate::rate_limit::AuthRateLimitRule as RateLimitRule;
 
 /// Default header used to identify the anonymous VSR client.
