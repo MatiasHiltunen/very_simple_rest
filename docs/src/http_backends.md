@@ -69,6 +69,12 @@ chain/private key. Axum uses `axum-server` for TLS connections and draining,
 and Tower HTTP for compression, decompression and CORS headers. Forbidden CORS
 origins/preflights are explicitly rejected, matching the Actix policy.
 
+TLS path resolution, environment overrides, PEM validation and Rustls server
+configuration now live in `vsr-runtime::tls`. The existing
+`rest_macro_core::tls` path re-exports them for compiler and native callers.
+The HTTP adapters set their own ALPN protocols after loading the shared
+certificate and key.
+
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
 streaming and the migration of large-file/static/multipart behavior are future

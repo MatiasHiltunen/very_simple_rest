@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr};
 
 use bytes::Bytes;
 use vsr_core::error::{VsrError, VsrResult};
@@ -84,21 +84,14 @@ pub(super) fn header_values(middleware: &MiddlewareConfig) -> Vec<(&'static str,
 }
 
 pub(super) fn load_tls(config: &super::TlsConfig) -> VsrResult<rustls::ServerConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    let load = || -> Result<_, Box<dyn std::error::Error>> {
-        let certificates =
-            CertificateDer::pem_file_iter(&config.cert_path)?.collect::<Result<Vec<_>, _>>()?;
-        let key = PrivateKeyDer::from_pem_file(&config.key_path)?;
-        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)?;
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Ok(config)
+    let paths = crate::tls::ResolvedTlsPaths {
+        cert_path: config.cert_path.clone(),
+        key_path: config.key_path.clone(),
     };
-    load().map_err(|e| VsrError::Other(format!("invalid TLS configuration: {e}").into()))
+    let mut tls = crate::tls::load_rustls_from_paths(&paths)
+        .map_err(|error| VsrError::Other(format!("invalid TLS configuration: {error}").into()))?;
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(tls)
 }
 
 pub(super) fn request_context(
