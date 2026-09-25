@@ -593,3 +593,8 @@ fail-closed handling for missing principal claims and qualifies outer-row
 fields in related-row checks. Native HTTP regression coverage exercises
 related-row reads, updates, and creates. Hybrid authorization and the emitted
 policy path still need the shared runtime boundary.
+
+Native collection filtering, sorting, count/page SQL, and cursor response
+metadata now run in `vsr-runtime::native_list`. The CLI supplies
+request query values and maps the planner's classified errors to HTTP
+responses. This path remains independent of the compiler crate.
