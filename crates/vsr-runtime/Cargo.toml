@@ -31,9 +31,12 @@ default = []
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
 # Enable the actix-web adapter (default runtime implementation).
-http-actix = ["dep:actix-web", "dep:tokio", "dep:actix-cors", "dep:rustls"]
+http-actix = ["dep:actix-web", "dep:tokio", "dep:actix-cors", "tls"]
 # Alternative transport for the same VSR handlers and route table.
-http-axum = ["dep:axum", "dep:axum-server", "dep:tower-http", "dep:http-body-util", "dep:tokio", "dep:rustls"]
+http-axum = ["dep:axum", "dep:axum-server", "dep:tower-http", "dep:http-body-util", "dep:tokio", "tls"]
+
+# Certificate/key loading shared with the legacy facade and both transports.
+tls = ["dep:rustls"]
 
 # ── Auth capabilities ──────────────────────────────────────────────────────────
 # Email / OTP flows (pulls lettre).
