@@ -1,6 +1,9 @@
 //! SQL planning for native row policies, independent of the compiler and HTTP adapter.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
@@ -41,6 +44,20 @@ pub struct PolicyPrincipal<'a> {
     pub user_id: i64,
     /// Typed claims carried by the request principal.
     pub claims: &'a BTreeMap<String, Value>,
+}
+
+/// Error while planning a create requirement.
+#[derive(Debug)]
+pub enum CreatePlanError {
+    /// A required principal claim is absent or has the wrong type.
+    MissingClaim {
+        /// Name of the required claim.
+        claim: String,
+        /// Public field whose comparison needs the claim.
+        field: String,
+    },
+    /// The lowered resource descriptors are inconsistent.
+    InvalidDescriptor(String),
 }
 
 fn field<'a>(resource: &'a RuntimeResource, name: &str) -> Result<&'a RuntimeField> {
@@ -88,6 +105,44 @@ fn comparison_value(
             PolicyLiteralValue::I64(value) => RuntimeBoundValue::Integer(*value),
             PolicyLiteralValue::Bool(value) => RuntimeBoundValue::Bool(*value),
         })),
+    }
+}
+
+fn create_comparison_value(
+    source: &PolicyComparisonValue,
+    field: &RuntimeField,
+    effective: &HashMap<String, RuntimeBoundValue>,
+    principal: &PolicyPrincipal<'_>,
+) -> Result<RuntimeBoundValue, CreatePlanError> {
+    match source {
+        PolicyComparisonValue::Source(PolicyValueSource::InputField(name)) => Ok(effective
+            .get(name)
+            .cloned()
+            .unwrap_or(RuntimeBoundValue::Null)),
+        PolicyComparisonValue::Source(PolicyValueSource::UserId) => {
+            Ok(RuntimeBoundValue::Integer(principal.user_id))
+        }
+        PolicyComparisonValue::Source(PolicyValueSource::Claim(name)) => {
+            let claim = principal.claims.get(name);
+            let value = match field.kind {
+                FieldKind::Integer => claim
+                    .and_then(Value::as_i64)
+                    .map(RuntimeBoundValue::Integer),
+                FieldKind::Boolean => claim.and_then(Value::as_bool).map(RuntimeBoundValue::Bool),
+                _ => claim
+                    .and_then(Value::as_str)
+                    .map(|value| RuntimeBoundValue::Text(value.to_owned())),
+            };
+            value.ok_or_else(|| CreatePlanError::MissingClaim {
+                claim: name.clone(),
+                field: field.api_name.clone(),
+            })
+        }
+        PolicyComparisonValue::Literal(value) => Ok(match value {
+            PolicyLiteralValue::String(value) => RuntimeBoundValue::Text(value.clone()),
+            PolicyLiteralValue::I64(value) => RuntimeBoundValue::Integer(*value),
+            PolicyLiteralValue::Bool(value) => RuntimeBoundValue::Bool(*value),
+        }),
     }
 }
 
@@ -158,7 +213,8 @@ fn build_row_exists_plan(
         })
         .ok_or_else(|| anyhow!("resource `{}` not found", filter.resource))?;
     let alias = format!("{}_exists", target.table_name);
-    let plan = build_row_exists_condition_plan(current, target, &filter.condition, principal, &alias)?;
+    let plan =
+        build_row_exists_condition_plan(current, target, &filter.condition, principal, &alias)?;
     match plan {
         PlanOutcome::Resolved(plan) => Ok(PlanOutcome::Resolved(SqlPlan {
             condition: format!(
@@ -228,6 +284,172 @@ fn build_row_exists_condition_plan(
         PolicyExistsCondition::Not(condition) => Ok(negate_plan(build_row_exists_condition_plan(
             current, target, condition, principal, alias,
         )?)),
+    }
+}
+
+/// Compile the pre-insert policy against effective field values and related
+/// resources. The caller evaluates the returned predicate in its transaction.
+pub fn build_create_requirement_plan(
+    current: &RuntimeResource,
+    resources: &[Arc<RuntimeResource>],
+    expression: &PolicyFilterExpression,
+    effective: &HashMap<String, RuntimeBoundValue>,
+    principal: &PolicyPrincipal<'_>,
+) -> std::result::Result<PlanOutcome, CreatePlanError> {
+    match expression {
+        PolicyFilterExpression::Match(filter) => {
+            let field = field(current, &filter.field)
+                .map_err(|error| CreatePlanError::InvalidDescriptor(error.to_string()))?;
+            let left = effective
+                .get(&filter.field)
+                .cloned()
+                .unwrap_or(RuntimeBoundValue::Null);
+            match &filter.operator {
+                PolicyFilterOperator::Equals(source) => {
+                    let right = create_comparison_value(source, field, effective, principal)?;
+                    Ok(PlanOutcome::Resolved(SqlPlan {
+                        condition: format!("{BIND_MARKER} = {BIND_MARKER}"),
+                        binds: vec![left, right],
+                    }))
+                }
+                PolicyFilterOperator::IsNull | PolicyFilterOperator::IsNotNull => {
+                    let is_null = matches!(left, RuntimeBoundValue::Null);
+                    let matched = match &filter.operator {
+                        PolicyFilterOperator::IsNull => is_null,
+                        PolicyFilterOperator::IsNotNull => !is_null,
+                        PolicyFilterOperator::Equals(_) => unreachable!(),
+                    };
+                    Ok(PlanOutcome::Resolved(SqlPlan {
+                        condition: if matched { "1 = 1" } else { "1 = 0" }.to_owned(),
+                        binds: Vec::new(),
+                    }))
+                }
+            }
+        }
+        PolicyFilterExpression::All(expressions) => {
+            let plans = expressions
+                .iter()
+                .map(|expression| {
+                    build_create_requirement_plan(
+                        current, resources, expression, effective, principal,
+                    )
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(combine_all_plans(plans))
+        }
+        PolicyFilterExpression::Any(expressions) => {
+            let plans = expressions
+                .iter()
+                .map(|expression| {
+                    build_create_requirement_plan(
+                        current, resources, expression, effective, principal,
+                    )
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(combine_any_plans(plans))
+        }
+        PolicyFilterExpression::Not(expression) => Ok(negate_plan(build_create_requirement_plan(
+            current, resources, expression, effective, principal,
+        )?)),
+        PolicyFilterExpression::Exists(filter) => {
+            let target = resources
+                .iter()
+                .find(|candidate| {
+                    candidate.resource_name == filter.resource
+                        || candidate.table_name == filter.resource
+                })
+                .ok_or_else(|| {
+                    CreatePlanError::InvalidDescriptor(format!(
+                        "resource `{}` not found",
+                        filter.resource
+                    ))
+                })?;
+            let alias = format!("{}_create_require", target.table_name);
+            let plan = build_create_exists_condition_plan(
+                target,
+                &filter.condition,
+                effective,
+                principal,
+                &alias,
+            )?;
+            Ok(match plan {
+                PlanOutcome::Resolved(plan) => PlanOutcome::Resolved(SqlPlan {
+                    condition: format!(
+                        "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",
+                        target.table_name, alias, plan.condition
+                    ),
+                    binds: plan.binds,
+                }),
+                PlanOutcome::Indeterminate => PlanOutcome::Indeterminate,
+            })
+        }
+    }
+}
+
+fn build_create_exists_condition_plan(
+    target: &RuntimeResource,
+    condition: &PolicyExistsCondition,
+    effective: &HashMap<String, RuntimeBoundValue>,
+    principal: &PolicyPrincipal<'_>,
+    alias: &str,
+) -> std::result::Result<PlanOutcome, CreatePlanError> {
+    match condition {
+        PolicyExistsCondition::Match(filter) => {
+            let field = field(target, &filter.field)
+                .map_err(|error| CreatePlanError::InvalidDescriptor(error.to_string()))?;
+            match &filter.operator {
+                PolicyFilterOperator::Equals(source) => {
+                    let value = create_comparison_value(source, field, effective, principal)?;
+                    Ok(PlanOutcome::Resolved(SqlPlan {
+                        condition: format!("{alias}.{} = {BIND_MARKER}", field.name),
+                        binds: vec![value],
+                    }))
+                }
+                PolicyFilterOperator::IsNull => Ok(PlanOutcome::Resolved(SqlPlan {
+                    condition: format!("{alias}.{} IS NULL", field.name),
+                    binds: Vec::new(),
+                })),
+                PolicyFilterOperator::IsNotNull => Ok(PlanOutcome::Resolved(SqlPlan {
+                    condition: format!("{alias}.{} IS NOT NULL", field.name),
+                    binds: Vec::new(),
+                })),
+            }
+        }
+        PolicyExistsCondition::CurrentRowField { field, row_field } => {
+            let value = effective
+                .get(row_field)
+                .cloned()
+                .unwrap_or(RuntimeBoundValue::Null);
+            Ok(PlanOutcome::Resolved(SqlPlan {
+                condition: format!("{alias}.{field} = {BIND_MARKER}"),
+                binds: vec![value],
+            }))
+        }
+        PolicyExistsCondition::All(conditions) => {
+            let plans = conditions
+                .iter()
+                .map(|condition| {
+                    build_create_exists_condition_plan(
+                        target, condition, effective, principal, alias,
+                    )
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(combine_all_plans(plans))
+        }
+        PolicyExistsCondition::Any(conditions) => {
+            let plans = conditions
+                .iter()
+                .map(|condition| {
+                    build_create_exists_condition_plan(
+                        target, condition, effective, principal, alias,
+                    )
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(combine_any_plans(plans))
+        }
+        PolicyExistsCondition::Not(condition) => Ok(negate_plan(
+            build_create_exists_condition_plan(target, condition, effective, principal, alias)?,
+        )),
     }
 }
 
@@ -442,5 +664,88 @@ mod tests {
             .unwrap();
             assert!(matches!(plan, PlanOutcome::Indeterminate));
         }
+    }
+
+    #[test]
+    fn create_requirement_uses_effective_input_and_principal_in_related_row() {
+        let member = resource("FamilyMember", &[("family_id", FieldKind::Integer)]);
+        let family = resource(
+            "Family",
+            &[
+                ("id", FieldKind::Integer),
+                ("owner_user_id", FieldKind::Integer),
+            ],
+        );
+        let expression = PolicyFilterExpression::Exists(PolicyExistsFilter {
+            resource: "Family".into(),
+            condition: PolicyExistsCondition::All(vec![
+                PolicyExistsCondition::Match(PolicyFilter {
+                    field: "id".into(),
+                    operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                        PolicyValueSource::InputField("family_id".into()),
+                    )),
+                }),
+                PolicyExistsCondition::Match(PolicyFilter {
+                    field: "owner_user_id".into(),
+                    operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                        PolicyValueSource::UserId,
+                    )),
+                }),
+            ]),
+        });
+        let effective = HashMap::from([("family_id".into(), RuntimeBoundValue::Integer(3))]);
+        let claims = BTreeMap::new();
+        let plan = build_create_requirement_plan(
+            &member,
+            &[member.clone(), family],
+            &expression,
+            &effective,
+            &PolicyPrincipal {
+                user_id: 11,
+                claims: &claims,
+            },
+        )
+        .unwrap();
+        let PlanOutcome::Resolved(plan) = plan else {
+            panic!("requirement should resolve")
+        };
+        assert_eq!(
+            plan.condition,
+            "EXISTS (SELECT 1 FROM family AS family_create_require WHERE (family_create_require.id = __vsr_bind__ AND family_create_require.owner_user_id = __vsr_bind__))"
+        );
+        assert_eq!(
+            plan.binds,
+            vec![
+                RuntimeBoundValue::Integer(3),
+                RuntimeBoundValue::Integer(11)
+            ]
+        );
+    }
+
+    #[test]
+    fn create_requirement_identifies_missing_typed_claim() {
+        let document = resource("Document", &[("tenant_id", FieldKind::Integer)]);
+        let expression = PolicyFilterExpression::Match(PolicyFilter {
+            field: "tenant_id".into(),
+            operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                PolicyValueSource::Claim("tenant".into()),
+            )),
+        });
+        let effective = HashMap::from([("tenant_id".into(), RuntimeBoundValue::Integer(3))]);
+        let claims = BTreeMap::from([("tenant".into(), json!("3"))]);
+        let result = build_create_requirement_plan(
+            &document,
+            &[document.clone()],
+            &expression,
+            &effective,
+            &PolicyPrincipal {
+                user_id: 11,
+                claims: &claims,
+            },
+        );
+        assert!(
+            matches!(result, Err(CreatePlanError::MissingClaim { claim, field })
+            if claim == "tenant" && field == "tenant_id")
+        );
     }
 }
