@@ -8,11 +8,13 @@
 together without changing handlers. An Axum-only runtime consumer does not
 depend on Actix. The contract-only build enables neither framework.
 
-This is the first transport milestone of the architecture migration, not an
-Axum replacement for the native CLI. `vsr serve`, generated applications,
-built-in account endpoints, and existing multipart/static routes still use their
-established Actix paths. No CLI `--http-backend` switch is provided yet.
-Those paths and their configuration have not been switched to the new adapter.
+This is an incremental transport milestone of the architecture migration.
+`vsr serve` now binds its native Actix server through
+`vsr-runtime::http::native_actix`, which owns the common middleware, telemetry,
+health and documentation endpoints, worker selection, and HTTP/TLS binding.
+The CLI still supplies service-specific auth, API, storage, and static routes.
+Generated applications and those native handlers still use their established
+Actix paths. No CLI `--http-backend` switch is provided yet.
 
 ## Embedding Example
 
