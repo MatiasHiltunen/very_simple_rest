@@ -586,3 +586,10 @@ recorded proof in `docs/reviews/2026-09-08-enterprise-axum-proof.md`.
 
 Streaming, complete shared policy integration, and native/emitted backend
 selection remain required before declaring Phase 3 complete.
+
+The native server now compiles read, update, and delete row predicates in
+`vsr-runtime::native_policy_sql`. It preserves fail-closed handling for missing
+principal claims and qualifies outer-row fields in related-row checks. Native
+HTTP regression coverage exercises related-row reads and updates. Create
+requirements, hybrid authorization, and the emitted policy path still need
+the shared runtime boundary.
