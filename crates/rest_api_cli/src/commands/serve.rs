@@ -36,7 +36,7 @@ use serde_json::{Map, Value, json};
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use vsr_runtime::authz::policy::{
-    PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression,
+    PolicyComparisonValue, PolicyExistsCondition, PolicyFilterExpression,
     PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
 };
 use vsr_runtime::field::{FieldKind, GeneratedValue, RuntimeField as DynamicField};
@@ -45,6 +45,10 @@ use vsr_runtime::http::native_actix::{
     workers_from_env,
 };
 use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
+use vsr_runtime::native_policy_sql::{
+    BIND_MARKER, PlanOutcome, PolicyPrincipal, SqlPlan, combine_all_plans, combine_any_plans,
+    negate_plan,
+};
 use vsr_runtime::native_response::{
     ResponseProjectionError, RuntimeListResponse as ListResponse, project_item, project_list,
 };
@@ -83,7 +87,6 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcessId, INFINITE, OpenProcess, WaitForSingleObject,
 };
 
-const BIND_MARKER: &str = "__vsr_bind__";
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
 const NEUTRAL_CRUD_RESOURCE_ENV: &str = "VSR_EXPERIMENTAL_NEUTRAL_CRUD_RESOURCE";
 #[cfg(windows)]
@@ -839,18 +842,6 @@ enum ListScope {
         target_field: String,
         parent_id: i64,
     },
-}
-
-#[derive(Clone, Debug)]
-struct SqlPlan {
-    condition: String,
-    binds: Vec<BoundValue>,
-}
-
-#[derive(Clone, Debug)]
-enum PlanOutcome {
-    Resolved(SqlPlan),
-    Indeterminate,
 }
 
 #[derive(Clone)]
@@ -1747,44 +1738,11 @@ async fn hybrid_runtime_allows(
     }
 }
 
-fn resolve_policy_source_value(
-    source: &PolicyValueSource,
-    target_field: &DynamicField,
-    user: &UserContext,
-) -> anyhow::Result<Option<BoundValue>> {
-    match source {
-        PolicyValueSource::UserId => Ok(Some(BoundValue::Integer(user.id))),
-        PolicyValueSource::Claim(name) => match target_field.kind {
-            FieldKind::Integer => Ok(user.claim_i64(name).map(BoundValue::Integer)),
-            FieldKind::Boolean => Ok(user.claim_bool(name).map(BoundValue::Bool)),
-            _ => Ok(user
-                .claim_str(name)
-                .map(|value| BoundValue::Text(value.to_owned()))),
-        },
-        PolicyValueSource::InputField(_) => {
-            bail!("input fields are not supported in row policy sources")
-        }
-    }
-}
-
 fn bound_value_from_policy_literal(value: &PolicyLiteralValue) -> BoundValue {
     match value {
         PolicyLiteralValue::String(value) => BoundValue::Text(value.clone()),
         PolicyLiteralValue::I64(value) => BoundValue::Integer(*value),
         PolicyLiteralValue::Bool(value) => BoundValue::Bool(*value),
-    }
-}
-
-fn resolve_policy_comparison_value(
-    source: &PolicyComparisonValue,
-    target_field: &DynamicField,
-    user: &UserContext,
-) -> anyhow::Result<Option<BoundValue>> {
-    match source {
-        PolicyComparisonValue::Source(source) => {
-            resolve_policy_source_value(source, target_field, user)
-        }
-        PolicyComparisonValue::Literal(value) => Ok(Some(bound_value_from_policy_literal(value))),
     }
 }
 
@@ -1944,194 +1902,18 @@ async fn effective_create_field_value(
     )
 }
 
-fn combine_all_plans(plans: Vec<PlanOutcome>) -> PlanOutcome {
-    let mut conditions = Vec::new();
-    let mut binds = Vec::new();
-    for plan in plans {
-        match plan {
-            PlanOutcome::Resolved(plan) => {
-                conditions.push(plan.condition);
-                binds.extend(plan.binds);
-            }
-            PlanOutcome::Indeterminate => return PlanOutcome::Indeterminate,
-        }
-    }
-    PlanOutcome::Resolved(SqlPlan {
-        condition: format!("({})", conditions.join(" AND ")),
-        binds,
-    })
-}
-
-fn combine_any_plans(plans: Vec<PlanOutcome>) -> PlanOutcome {
-    let mut conditions = Vec::new();
-    let mut binds = Vec::new();
-    for plan in plans {
-        match plan {
-            PlanOutcome::Resolved(plan) => {
-                conditions.push(plan.condition);
-                binds.extend(plan.binds);
-            }
-            PlanOutcome::Indeterminate => {}
-        }
-    }
-    if conditions.is_empty() {
-        PlanOutcome::Indeterminate
-    } else {
-        PlanOutcome::Resolved(SqlPlan {
-            condition: format!("({})", conditions.join(" OR ")),
-            binds,
-        })
-    }
-}
-
-fn negate_plan(plan: PlanOutcome) -> PlanOutcome {
-    match plan {
-        PlanOutcome::Resolved(plan) => PlanOutcome::Resolved(SqlPlan {
-            condition: format!("NOT ({})", plan.condition),
-            binds: plan.binds,
-        }),
-        PlanOutcome::Indeterminate => PlanOutcome::Indeterminate,
-    }
-}
-
 fn build_row_policy_plan(
     current: &DynamicResource,
     service: &DynamicService,
     expression: &PolicyFilterExpression,
     user: &UserContext,
 ) -> anyhow::Result<PlanOutcome> {
-    match expression {
-        PolicyFilterExpression::Match(filter) => {
-            let field = current.field(filter.field.as_str())?;
-            match &filter.operator {
-                PolicyFilterOperator::Equals(source) => {
-                    let Some(value) = resolve_policy_comparison_value(source, field, user)? else {
-                        return Ok(PlanOutcome::Indeterminate);
-                    };
-                    Ok(PlanOutcome::Resolved(SqlPlan {
-                        condition: format!("{} = {}", field.name, BIND_MARKER),
-                        binds: vec![value],
-                    }))
-                }
-                PolicyFilterOperator::IsNull => Ok(PlanOutcome::Resolved(SqlPlan {
-                    condition: format!("{} IS NULL", field.name),
-                    binds: Vec::new(),
-                })),
-                PolicyFilterOperator::IsNotNull => Ok(PlanOutcome::Resolved(SqlPlan {
-                    condition: format!("{} IS NOT NULL", field.name),
-                    binds: Vec::new(),
-                })),
-            }
-        }
-        PolicyFilterExpression::All(expressions) => {
-            let plans = expressions
-                .iter()
-                .map(|expression| build_row_policy_plan(current, service, expression, user))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            Ok(combine_all_plans(plans))
-        }
-        PolicyFilterExpression::Any(expressions) => {
-            let plans = expressions
-                .iter()
-                .map(|expression| build_row_policy_plan(current, service, expression, user))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            Ok(combine_any_plans(plans))
-        }
-        PolicyFilterExpression::Not(expression) => Ok(negate_plan(build_row_policy_plan(
-            current, service, expression, user,
-        )?)),
-        PolicyFilterExpression::Exists(filter) => {
-            build_row_exists_plan(current, service, filter, user)
-        }
-    }
-}
-
-fn build_row_exists_plan(
-    current: &DynamicResource,
-    service: &DynamicService,
-    filter: &PolicyExistsFilter,
-    user: &UserContext,
-) -> anyhow::Result<PlanOutcome> {
-    let target = service
-        .resources
-        .iter()
-        .find(|resource| {
-            resource.resource_name == filter.resource || resource.table_name == filter.resource
-        })
-        .ok_or_else(|| anyhow!("resource `{}` not found", filter.resource))?;
-    let alias = format!("{}_exists", target.table_name);
-    let plan =
-        build_row_exists_condition_plan(current, target.as_ref(), &filter.condition, user, &alias)?;
-    match plan {
-        PlanOutcome::Resolved(plan) => Ok(PlanOutcome::Resolved(SqlPlan {
-            condition: format!(
-                "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",
-                target.table_name, alias, plan.condition
-            ),
-            binds: plan.binds,
-        })),
-        PlanOutcome::Indeterminate => Ok(PlanOutcome::Indeterminate),
-    }
-}
-
-fn build_row_exists_condition_plan(
-    _current: &DynamicResource,
-    target: &DynamicResource,
-    condition: &PolicyExistsCondition,
-    user: &UserContext,
-    alias: &str,
-) -> anyhow::Result<PlanOutcome> {
-    match condition {
-        PolicyExistsCondition::Match(filter) => {
-            let field = target.field(filter.field.as_str())?;
-            match &filter.operator {
-                PolicyFilterOperator::Equals(source) => {
-                    let Some(value) = resolve_policy_comparison_value(source, field, user)? else {
-                        return Ok(PlanOutcome::Indeterminate);
-                    };
-                    Ok(PlanOutcome::Resolved(SqlPlan {
-                        condition: format!("{alias}.{} = {}", field.name, BIND_MARKER),
-                        binds: vec![value],
-                    }))
-                }
-                PolicyFilterOperator::IsNull => Ok(PlanOutcome::Resolved(SqlPlan {
-                    condition: format!("{alias}.{} IS NULL", field.name),
-                    binds: Vec::new(),
-                })),
-                PolicyFilterOperator::IsNotNull => Ok(PlanOutcome::Resolved(SqlPlan {
-                    condition: format!("{alias}.{} IS NOT NULL", field.name),
-                    binds: Vec::new(),
-                })),
-            }
-        }
-        PolicyExistsCondition::CurrentRowField { field, row_field } => {
-            Ok(PlanOutcome::Resolved(SqlPlan {
-                condition: format!("{alias}.{field} = {row_field}"),
-                binds: Vec::new(),
-            }))
-        }
-        PolicyExistsCondition::All(conditions) => {
-            let plans = conditions
-                .iter()
-                .map(|condition| {
-                    build_row_exists_condition_plan(_current, target, condition, user, alias)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            Ok(combine_all_plans(plans))
-        }
-        PolicyExistsCondition::Any(conditions) => {
-            let plans = conditions
-                .iter()
-                .map(|condition| {
-                    build_row_exists_condition_plan(_current, target, condition, user, alias)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            Ok(combine_any_plans(plans))
-        }
-        PolicyExistsCondition::Not(condition) => Ok(negate_plan(build_row_exists_condition_plan(
-            _current, target, condition, user, alias,
-        )?)),
-    }
+    vsr_runtime::native_policy_sql::build_row_policy_plan(
+        current,
+        &service.resources,
+        expression,
+        &PolicyPrincipal { user_id: user.id, claims: &user.claims },
+    )
 }
 
 async fn evaluate_create_require(
@@ -4962,6 +4744,74 @@ mod tests {
         let selected = service.resources[0].api_name().to_owned();
         let result = DynamicService::from_spec(service, "{}".to_owned(), false, Some(&selected));
         assert!(result.is_err(), "unsupported validation must stay on the existing path");
+    }
+
+    #[actix_web::test]
+    async fn native_serve_applies_related_row_policy_to_reads_and_updates() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("exists_policy_api.eon", false).await;
+        query("INSERT INTO family_member (family_id, user_id) VALUES (1, 11), (2, 21)")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        query("INSERT INTO shared_doc (family_id, title) VALUES (1, 'family one'), (2, 'family two')")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service, state.clone())),
+        )
+        .await;
+        let token = issue_token(11, &[]);
+        let authorized = format!("Bearer {token}");
+
+        let list = test::TestRequest::get()
+            .uri("/api/shared_doc")
+            .insert_header(("Authorization", authorized.clone()))
+            .to_request();
+        let body: Value = test::call_and_read_body_json(&app, list).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["items"][0]["title"], "family one");
+
+        let blocked_read = test::TestRequest::get()
+            .uri("/api/shared_doc/2")
+            .insert_header(("Authorization", authorized.clone()))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, blocked_read).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let blocked_update = test::TestRequest::put()
+            .uri("/api/shared_doc/2")
+            .insert_header(("Authorization", authorized.clone()))
+            .set_json(json!({ "title": "denied" }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, blocked_update).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let allowed_update = test::TestRequest::put()
+            .uri("/api/shared_doc/1")
+            .insert_header(("Authorization", authorized))
+            .set_json(json!({ "title": "allowed" }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, allowed_update).await.status(),
+            StatusCode::OK
+        );
+        let title: String = query_scalar::<sqlx::Any, String>(
+            "SELECT title FROM shared_doc WHERE id = 1",
+        )
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(title, "allowed");
     }
 
     async fn seed_public_catalog(pool: &DbPool) {
