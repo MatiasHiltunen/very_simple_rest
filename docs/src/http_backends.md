@@ -80,9 +80,11 @@ Emitted server projects declare `vsr-runtime` directly and load TLS through
 Framework-neutral request, CORS, trusted proxy, rate-limit, access and security
 header settings are defined in `vsr-runtime::security`. The existing
 `rest_macro_core::security` module re-exports these types, including the
-auth-composing `SecurityConfig`, while it still owns the Actix middleware. Its
-client-IP adapter delegates forwarded-header validation and trusted-suffix
-resolution to the framework-neutral runtime function.
+auth-composing `SecurityConfig`. Actix CORS, security headers, anonymous-client
+admission and client-IP adapters live in `vsr-runtime::security::actix` behind
+`actix-security`; the legacy module re-exports them and still configures its
+request extractors. The client-IP adapter delegates forwarded-header validation
+and trusted-suffix resolution to the framework-neutral runtime function.
 
 Serializable authentication settings and configuration secret resolution now
 live in `vsr-runtime::auth::settings` and `vsr-runtime::config_secret`. Legacy
@@ -94,8 +96,8 @@ resolution, SPA fallbacks, cache headers and precompressed asset selection live
 in `vsr-runtime::static_files` behind `static-actix`. Storage backend, public
 mount, upload and S3 compatibility settings live in `vsr-runtime::storage::config`
 and are re-exported by the legacy storage module.
-Compression settings live in `vsr-runtime::runtime`. The existing
-`rest_macro_core` modules re-export these types and the Actix static adapter;
+Compression settings and their Actix middleware live in `vsr-runtime::runtime`.
+The existing `rest_macro_core` modules re-export these types and the Actix adapters;
 Axum static-file parity remains open.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without

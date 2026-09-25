@@ -1,5 +1,8 @@
 //! Framework-neutral runtime settings for service adapters.
 
+#[cfg(feature = "actix-security")]
+pub mod actix;
+
 /// HTTP compression settings.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompressionConfig {
