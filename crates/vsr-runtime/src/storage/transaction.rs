@@ -61,11 +61,7 @@ impl LocalTransaction {
     ) -> io::Result<()> {
         self.validate(object, true)?;
         self.validate(metadata, true)?;
-        let relative = |path: &Path| {
-            path.strip_prefix(&self.root)
-                .map(Path::to_path_buf)
-                .map_err(|_| io::Error::other("storage path outside root"))
-        };
+        let relative = |path: &Path| storage_relative_path(&self.root, path).map(Path::to_path_buf);
         let journal = Journal {
             object: relative(object)?,
             metadata: relative(metadata)?,
@@ -145,9 +141,7 @@ impl LocalTransaction {
 }
 
 fn safe_path(root: &Path, path: &Path, create_parents: bool) -> io::Result<()> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| io::Error::other("storage path outside root"))?;
+    let relative = storage_relative_path(root, path)?;
     let mut components = relative.components().peekable();
     if components.peek().is_none() {
         return Err(io::Error::other("storage path is the root"));
@@ -194,6 +188,15 @@ fn safe_path(root: &Path, path: &Path, create_parents: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn storage_relative_path<'a>(root: &Path, path: &'a Path) -> io::Result<&'a Path> {
+    // object_store returns ordinary Windows paths while canonicalize returns
+    // verbatim paths. Only simplify when the path has an equivalent ordinary
+    // representation; component and symlink checks still run in safe_path.
+    dunce::simplified(path)
+        .strip_prefix(dunce::simplified(root))
+        .map_err(|_| io::Error::other("storage path outside root"))
+}
+
 fn sync_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -223,6 +226,23 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         fs::canonicalize(root).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accepts_ordinary_windows_paths_without_allowing_escape() {
+        let root = root();
+        let ordinary_root = dunce::simplified(&root);
+        let tx = LocalTransaction::lock(&root).unwrap();
+        let object = ordinary_root.join("object");
+        let metadata = ordinary_root.join(".vsr-meta/object.json");
+
+        tx.put(&object, &metadata, b"body", b"meta").unwrap();
+        assert_eq!(fs::read(&object).unwrap(), b"body");
+        assert!(tx.validate(&ordinary_root.join("../escape"), true).is_err());
+
+        drop(tx);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

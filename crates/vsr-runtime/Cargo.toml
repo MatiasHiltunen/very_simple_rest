@@ -26,6 +26,7 @@ percent-encoding = "2"
 unicode-segmentation = "1"
 base64 = "0.22"
 dotenvy = { workspace = true, optional = true }
+dunce = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
 log = { workspace = true, optional = true }
 
@@ -54,7 +55,7 @@ auth-email = ["dep:lettre"]
 auth-builtin = ["dep:cookie", "dep:bcrypt", "dep:sha2", "dep:hex", "dep:tokio", "dep:chrono", "dep:getrandom", "dep:url"]
 
 # ── Storage ────────────────────────────────────────────────────────────────────
-storage-local = []
+storage-local = ["dep:dunce"]
 storage-s3 = ["dep:object_store"]
 
 # ── Rate limiting ──────────────────────────────────────────────────────────────
