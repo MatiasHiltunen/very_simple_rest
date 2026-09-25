@@ -2,8 +2,9 @@
 //!
 //! Built-in request authentication, account operations, recovery, email issuance,
 //! registration, admin operations, verification delivery, session presentation and admission
-//! live here behind `auth-builtin`. Key configuration, database adapters and HTTP
-//! endpoints still live in `rest_macro_core` during Phase 3. The complete account provider
+//! live here behind `auth-builtin`. Serializable key configuration lives here;
+//! database adapters and legacy HTTP endpoints remain in `rest_macro_core`
+//! during Phase 3. The complete account provider
 //! described by [`AuthProvider`] has not yet been extracted.
 //!
 //! # Key traits
@@ -24,6 +25,7 @@ use vsr_core::error::VsrResult;
 pub mod smtp;
 
 pub mod request;
+pub mod settings;
 
 #[cfg(feature = "auth-builtin")]
 pub mod builtin;

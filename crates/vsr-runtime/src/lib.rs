@@ -22,6 +22,7 @@
 //! | [`storage`] | [`storage::ObjectStorage`], [`storage::StorageKey`] |
 //! | [`rate_limit`] | [`rate_limit::RateLimitStore`], [`rate_limit::RateLimitDecision`] |
 //! | [`security`] | Framework-neutral request and browser security settings |
+//! | [`config_secret`] | Serializable secret references for service configuration |
 //! | [`runtime`] | Shared compression settings |
 //! | `static_files` | Feature-gated Actix static-file adapter |
 //! | [`audit`] | [`audit::AuditSink`], [`audit::AuditEvent`] |
@@ -49,6 +50,7 @@
 pub mod audit;
 pub mod auth;
 pub mod authz;
+pub mod config_secret;
 pub mod http;
 pub mod rate_limit;
 pub mod resource;

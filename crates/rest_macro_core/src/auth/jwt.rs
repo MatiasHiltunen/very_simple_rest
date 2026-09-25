@@ -88,7 +88,7 @@ pub(crate) fn configured_jwt_signer(
     settings: &AuthSettings,
 ) -> Result<(Header, Arc<EncodingKey>), String> {
     if let Some(jwt) = &settings.jwt {
-        let mut header = Header::new(jwt.algorithm.jsonwebtoken());
+        let mut header = Header::new(jsonwebtoken_algorithm(jwt.algorithm));
         header.kid = jwt.active_kid.clone();
         let key = load_jwt_encoding_key(jwt.algorithm, &jwt.signing_key, "JWT signing key")?;
         Ok((header, key))
@@ -108,7 +108,7 @@ pub(crate) fn configured_jwt_decoding_key(
     if let Some(jwt) = &settings.jwt {
         let header =
             decode_header(token).map_err(|error| format!("invalid JWT header: {error}"))?;
-        if header.alg != jwt.algorithm.jsonwebtoken() {
+        if header.alg != jsonwebtoken_algorithm(jwt.algorithm) {
             return Err(format!(
                 "token header algorithm `{:?}` does not match configured `{}`",
                 header.alg,
@@ -161,6 +161,17 @@ pub(crate) fn algorithm_name(algorithm: AuthJwtAlgorithm) -> &'static str {
         AuthJwtAlgorithm::Es256 => "ES256",
         AuthJwtAlgorithm::Es384 => "ES384",
         AuthJwtAlgorithm::EdDsa => "EdDSA",
+    }
+}
+
+fn jsonwebtoken_algorithm(algorithm: AuthJwtAlgorithm) -> jsonwebtoken::Algorithm {
+    match algorithm {
+        AuthJwtAlgorithm::Hs256 => jsonwebtoken::Algorithm::HS256,
+        AuthJwtAlgorithm::Hs384 => jsonwebtoken::Algorithm::HS384,
+        AuthJwtAlgorithm::Hs512 => jsonwebtoken::Algorithm::HS512,
+        AuthJwtAlgorithm::Es256 => jsonwebtoken::Algorithm::ES256,
+        AuthJwtAlgorithm::Es384 => jsonwebtoken::Algorithm::ES384,
+        AuthJwtAlgorithm::EdDsa => jsonwebtoken::Algorithm::EdDSA,
     }
 }
 
@@ -281,7 +292,7 @@ pub(crate) fn validation_for_settings(
     settings: &AuthSettings,
     algorithm: AuthJwtAlgorithm,
 ) -> Validation {
-    let mut validation = Validation::new(algorithm.jsonwebtoken());
+    let mut validation = Validation::new(jsonwebtoken_algorithm(algorithm));
     let mut required = vec!["exp"];
 
     if let Some(audience) = &settings.audience {
