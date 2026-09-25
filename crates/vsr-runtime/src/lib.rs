@@ -55,6 +55,7 @@ pub mod config_secret;
 pub mod field;
 pub mod http;
 pub mod model;
+pub mod native_resource;
 pub mod rate_limit;
 pub mod resource;
 pub mod runtime;
