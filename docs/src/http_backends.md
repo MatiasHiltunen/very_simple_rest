@@ -75,6 +75,13 @@ configuration now live in `vsr-runtime::tls`. The existing
 The HTTP adapters set their own ALPN protocols after loading the shared
 certificate and key.
 
+Framework-neutral request, CORS, trusted proxy, rate-limit, access and security
+header settings are defined in `vsr-runtime::security`. The existing
+`rest_macro_core::security` module re-exports these types while it still owns
+the Actix middleware and the legacy auth-composing `SecurityConfig`. Its
+client-IP adapter delegates forwarded-header validation and trusted-suffix
+resolution to the framework-neutral runtime function.
+
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
 streaming and the migration of large-file/static/multipart behavior are future

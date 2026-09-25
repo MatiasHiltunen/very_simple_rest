@@ -21,7 +21,9 @@
 //! | [`authz`] | [`authz::AuthzEngine`], [`authz::PolicyDecision`] |
 //! | [`storage`] | [`storage::ObjectStorage`], [`storage::StorageKey`] |
 //! | [`rate_limit`] | [`rate_limit::RateLimitStore`], [`rate_limit::RateLimitDecision`] |
+//! | [`security`] | Framework-neutral request and browser security settings |
 //! | [`audit`] | [`audit::AuditSink`], [`audit::AuditEvent`] |
+//! | [`tls`] | TLS path resolution and optional Rustls certificate loading |
 //!
 //! ## Design rules
 //!
@@ -48,5 +50,6 @@ pub mod authz;
 pub mod http;
 pub mod rate_limit;
 pub mod resource;
+pub mod security;
 pub mod storage;
 pub mod tls;

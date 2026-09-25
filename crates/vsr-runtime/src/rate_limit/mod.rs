@@ -10,6 +10,15 @@ pub use memory::{MemoryRateLimitCapacity, MemoryRateLimitStore};
 use std::{future::Future, time::Duration};
 use vsr_core::error::VsrResult;
 
+/// Login or registration quota configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthRateLimitRule {
+    /// Maximum accepted attempts in the sliding window.
+    pub requests: u32,
+    /// Window duration in seconds.
+    pub window_seconds: u64,
+}
+
 // ─── RateLimitKey ─────────────────────────────────────────────────────────────
 
 /// The dimension over which a rate limit is applied.
