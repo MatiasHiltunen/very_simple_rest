@@ -1,8 +1,10 @@
 //! A small framework-neutral CRUD service used to migrate native resources one
 //! shape at a time. This first slice supports an integer ID and one text field.
 
-use std::{future::Future, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -29,6 +31,21 @@ pub struct TextPageRequest {
     pub limit: Option<u32>,
     /// Number of rows skipped before the page.
     pub offset: u32,
+    /// Resume after this ID when using cursor pagination.
+    pub after_id: Option<i64>,
+    /// Return IDs in descending order.
+    pub descending: bool,
+}
+
+/// Exact and case-insensitive contains filters for the text resource.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TextFilters {
+    /// Match the integer ID exactly.
+    pub id: Option<i64>,
+    /// Match the text field exactly.
+    pub value: Option<String>,
+    /// Match a substring of the text field without case sensitivity.
+    pub value_contains: Option<String>,
 }
 
 /// Rows and total count for a collection request.
@@ -51,9 +68,13 @@ pub trait TextCrudStore: Send + Sync + 'static {
     fn list(
         &self,
         page: TextPageRequest,
+        filters: &TextFilters,
     ) -> impl Future<Output = Result<TextPage, TextStoreError>> + Send;
-    /// Count all rows.
-    fn count(&self) -> impl Future<Output = Result<i64, TextStoreError>> + Send;
+    /// Count rows matching the filters, before pagination.
+    fn count(
+        &self,
+        filters: &TextFilters,
+    ) -> impl Future<Output = Result<i64, TextStoreError>> + Send;
     /// Fetch one row.
     fn get(
         &self,
@@ -98,6 +119,10 @@ pub struct TextCrudConfig {
     pub value_field: String,
     /// Optional length rule for the text field.
     pub value_length: Option<TextLengthValidation>,
+    /// Default list page size, if configured in EON.
+    pub default_limit: Option<u32>,
+    /// Maximum list page size, if configured in EON.
+    pub max_limit: Option<u32>,
     /// Operation roles.
     pub roles: TextCrudRoles,
 }
@@ -286,42 +311,63 @@ impl<S: TextCrudStore> TextCrudService<S> {
 
         match action {
             TextCrudAction::List => {
-                let page = match parse_page(raw_query) {
-                    Ok(page) => page,
+                let query = match parse_query(raw_query, &self.config) {
+                    Ok(query) => query,
                     Err(error) => return error.response(),
                 };
-                match self.store.list(page).await {
-                    Ok(result) => {
+                match self.store.list(query.page, &query.filters).await {
+                    Ok(mut result) => {
+                        let has_more = query
+                            .page
+                            .limit
+                            .is_some_and(|limit| limit > 0 && result.rows.len() > limit as usize);
+                        if let Some(limit) = query.page.limit {
+                            result.rows.truncate(limit as usize);
+                        }
                         let count = result.rows.len();
-                        let end = i64::try_from(count)
-                            .ok()
-                            .and_then(|count| i64::from(page.offset).checked_add(count));
-                        let next_offset =
-                            if page.limit.is_some() && end.is_some_and(|end| end < result.total) {
-                                u32::try_from(count)
-                                    .ok()
-                                    .and_then(|count| page.offset.checked_add(count))
-                            } else {
-                                None
+                        let next_offset = if has_more && query.page.after_id.is_none() {
+                            u32::try_from(count)
+                                .ok()
+                                .and_then(|count| query.page.offset.checked_add(count))
+                        } else {
+                            None
+                        };
+                        let next_cursor = if has_more {
+                            let Some(row) = result.rows.last() else {
+                                return store_error();
                             };
+                            let cursor = TextCursor {
+                                sort: self.config.id_field.clone(),
+                                order: if query.page.descending { "desc" } else { "asc" }.into(),
+                                last_id: row.id,
+                                value: CursorValue::Integer(row.id),
+                            };
+                            match encode_cursor(&cursor) {
+                                Ok(cursor) => Some(cursor),
+                                Err(_) => return store_error(),
+                            }
+                        } else {
+                            None
+                        };
                         ResponseEnvelope::json(json!({
                             "items": result.rows.iter().map(|row| self.record_json(row)).collect::<Vec<_>>(),
                             "total": result.total,
                             "count": count,
-                            "limit": page.limit,
-                            "offset": page.offset,
+                            "limit": query.page.limit,
+                            "offset": query.page.offset,
                             "next_offset": next_offset,
-                            "next_cursor": null
+                            "next_cursor": next_cursor
                         }))
                     }
                     Err(_) => store_error(),
                 }
             }
             TextCrudAction::Count => {
-                if !raw_query.is_empty() {
-                    return response_error(400, "invalid_query", "Unsupported query parameter");
-                }
-                match self.store.count().await {
+                let query = match parse_query(raw_query, &self.config) {
+                    Ok(query) => query,
+                    Err(error) => return error.response(),
+                };
+                match self.store.count(&query.filters).await {
                     Ok(count) => ResponseEnvelope::json(json!({"count": count})),
                     Err(_) => store_error(),
                 }
@@ -493,37 +539,138 @@ impl ClientError {
     }
 }
 
-fn parse_page(raw_query: &str) -> Result<TextPageRequest, ClientError> {
-    let mut page = TextPageRequest::default();
-    let mut seen_limit = false;
-    let mut seen_offset = false;
-    for (key, value) in form_urlencoded::parse(raw_query.as_bytes()) {
-        match key.as_ref() {
-            "limit" if !seen_limit => {
-                page.limit = Some(
-                    value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|limit| *limit > 0)
-                        .ok_or_else(|| ClientError::new("invalid_query", "Invalid limit"))?,
-                );
-                seen_limit = true;
-            }
-            "offset" if !seen_offset => {
-                page.offset = value
-                    .parse()
-                    .map_err(|_| ClientError::new("invalid_query", "Invalid offset"))?;
-                seen_offset = true;
-            }
+#[derive(Serialize, Deserialize)]
+enum CursorValue {
+    Integer(i64),
+}
+
+#[derive(Serialize, Deserialize)]
+struct TextCursor {
+    sort: String,
+    order: String,
+    last_id: i64,
+    value: CursorValue,
+}
+
+fn encode_cursor(cursor: &TextCursor) -> Result<String, serde_json::Error> {
+    Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor)?))
+}
+
+struct TextListQuery {
+    page: TextPageRequest,
+    filters: TextFilters,
+}
+
+fn parse_query(raw_query: &str, config: &TextCrudConfig) -> Result<TextListQuery, ClientError> {
+    let mut query: HashMap<String, String> = form_urlencoded::parse(raw_query.as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let requested_limit = query
+        .remove("limit")
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .map_err(|_| ClientError::new("invalid_query", "Query parameters are invalid"))?;
+    let offset = query
+        .remove("offset")
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .map_err(|_| ClientError::new("invalid_query", "Query parameters are invalid"))?;
+    let cursor = query.remove("cursor");
+    let sort = query.remove("sort");
+    let order = query.remove("order");
+    if cursor.is_some() && offset.is_some() {
+        return Err(ClientError::new(
+            "invalid_cursor",
+            "`cursor` cannot be combined with `offset`",
+        ));
+    }
+    if cursor.is_some() && (sort.is_some() || order.is_some()) {
+        return Err(ClientError::new(
+            "invalid_cursor",
+            "`cursor` cannot be combined with `sort` or `order`",
+        ));
+    }
+    let limit = requested_limit
+        .or(config.default_limit)
+        .map(|limit| config.max_limit.map_or(limit, |max| limit.min(max)));
+    let (after_id, descending) = if let Some(encoded) = cursor {
+        if limit.is_none() {
+            return Err(ClientError::new(
+                "invalid_cursor",
+                "`cursor` requires `limit` or a configured `default_limit`",
+            ));
+        }
+        if limit == Some(0) {
+            return Err(ClientError::new(
+                "invalid_cursor",
+                "`cursor` requires `limit` to be greater than 0",
+            ));
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| ClientError::new("invalid_cursor", "Cursor is not valid"))?;
+        let cursor: TextCursor = serde_json::from_slice(&bytes)
+            .map_err(|_| ClientError::new("invalid_cursor", "Cursor is not valid"))?;
+        if cursor.sort != config.id_field {
+            return Err(ClientError::new("invalid_sort", "Unsupported sort field"));
+        }
+        let descending = match cursor.order.as_str() {
+            "asc" => false,
+            "desc" => true,
+            _ => return Err(ClientError::new("invalid_cursor", "Cursor is not valid")),
+        };
+        (Some(cursor.last_id), descending)
+    } else {
+        if order.is_some() && sort.is_none() {
+            return Err(ClientError::new("invalid_sort", "`order` requires `sort`"));
+        }
+        if sort.as_deref().is_some_and(|sort| sort != config.id_field) {
+            return Err(ClientError::new("invalid_sort", "Unsupported sort field"));
+        }
+        let descending = match order.as_deref() {
+            None | Some("asc") => false,
+            Some("desc") => true,
             _ => {
                 return Err(ClientError::new(
                     "invalid_query",
-                    "Unsupported query parameter",
+                    "Query parameters are invalid",
                 ));
             }
-        }
+        };
+        (None, descending)
+    };
+    if offset.is_some() && limit.is_none() {
+        return Err(ClientError::new(
+            "invalid_pagination",
+            "`offset` requires `limit`",
+        ));
     }
-    Ok(page)
+    let id = query
+        .remove(&format!("filter_{}", config.id_field))
+        .map(|value| value.parse::<i64>())
+        .transpose()
+        .map_err(|_| ClientError::new("invalid_query", "Query parameters are invalid"))?;
+    let value = query.remove(&format!("filter_{}", config.value_field));
+    let value_contains = query.remove(&format!("filter_{}_contains", config.value_field));
+    if !query.is_empty() {
+        return Err(ClientError::new(
+            "invalid_query",
+            "Query parameters are invalid",
+        ));
+    }
+    Ok(TextListQuery {
+        page: TextPageRequest {
+            limit,
+            offset: offset.unwrap_or(0),
+            after_id,
+            descending,
+        },
+        filters: TextFilters {
+            id,
+            value,
+            value_contains,
+        },
+    })
 }
 
 fn response_error(status: u16, code: &str, message: &str) -> ResponseEnvelope {

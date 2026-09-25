@@ -479,9 +479,11 @@ other validation rules remain ineligible. That resource runs through
 resources keep their existing routes.
 Native requests use the same protected handlers as the Actix and Axum adapters;
 built-in auth still checks the live account state. The preview enforces the
-configured JSON body limit and accepts only JSON for writes. It supports basic
-list `limit` and `offset`; other list query options are rejected. Leave the
-variable unset for the established native behavior. This is a migration proof,
+configured JSON body limit and accepts only JSON for writes. Lists support
+default/maximum limits, `limit`, `offset`, ID cursors, ID and text equality
+filters, and case-insensitive text contains filters. Text sorting and `__in`
+filters are still unsupported in the preview. Leave the variable unset for the
+established native behavior. This is a migration proof,
 not general native or generated Axum selection.
 
 The new `vsr-runtime::http` surface is still under construction. Consumers of

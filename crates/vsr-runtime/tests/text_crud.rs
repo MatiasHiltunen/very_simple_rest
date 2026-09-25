@@ -14,7 +14,7 @@ use vsr_runtime::{
     },
     http::{HeaderFields, HttpServer, MiddlewareConfig, ResponseBody, ServerConfig, ServerHandle},
     resource::{
-        TextCrudAction, TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore,
+        TextCrudAction, TextCrudConfig, TextCrudRoles, TextCrudService, TextCrudStore, TextFilters,
         TextLengthMode, TextLengthValidation, TextPage, TextPageRequest, TextRecord,
         TextStoreError,
     },
@@ -42,14 +42,37 @@ impl Backend for vsr_runtime::http::AxumHttpServer {
 struct MemoryStore(Mutex<Vec<TextRecord>>);
 
 impl TextCrudStore for MemoryStore {
-    async fn list(&self, page: TextPageRequest) -> Result<TextPage, TextStoreError> {
+    async fn list(
+        &self,
+        page: TextPageRequest,
+        filters: &TextFilters,
+    ) -> Result<TextPage, TextStoreError> {
         let rows = self.0.lock().unwrap();
-        let total = rows.len() as i64;
-        let selected = rows
+        let mut matching = rows
             .iter()
-            .skip(page.offset as usize)
-            .take(page.limit.map_or(usize::MAX, |limit| limit as usize))
+            .filter(|row| matches_filters(row, filters))
             .cloned()
+            .collect::<Vec<_>>();
+        let total = matching.len() as i64;
+        if page.descending {
+            matching.reverse();
+        }
+        let selected = matching
+            .into_iter()
+            .filter(|row| {
+                page.after_id.is_none_or(|id| {
+                    if page.descending {
+                        row.id < id
+                    } else {
+                        row.id > id
+                    }
+                })
+            })
+            .skip(page.offset as usize)
+            .take(
+                page.limit
+                    .map_or(usize::MAX, |limit| limit.saturating_add(1) as usize),
+            )
             .collect();
         Ok(TextPage {
             rows: selected,
@@ -57,8 +80,14 @@ impl TextCrudStore for MemoryStore {
         })
     }
 
-    async fn count(&self) -> Result<i64, TextStoreError> {
-        Ok(self.0.lock().unwrap().len() as i64)
+    async fn count(&self, filters: &TextFilters) -> Result<i64, TextStoreError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| matches_filters(row, filters))
+            .count() as i64)
     }
 
     async fn get(&self, id: i64) -> Result<Option<TextRecord>, TextStoreError> {
@@ -98,6 +127,18 @@ impl TextCrudStore for MemoryStore {
     }
 }
 
+fn matches_filters(row: &TextRecord, filters: &TextFilters) -> bool {
+    filters.id.is_none_or(|id| id == row.id)
+        && filters
+            .value
+            .as_ref()
+            .is_none_or(|value| value == &row.value)
+        && filters
+            .value_contains
+            .as_ref()
+            .is_none_or(|needle| row.value.to_lowercase().contains(&needle.to_lowercase()))
+}
+
 struct TestAuth;
 
 impl RequestAuthenticator for TestAuth {
@@ -135,6 +176,8 @@ async fn protected_crud<B: Backend>() {
                     equal: None,
                     mode: TextLengthMode::Chars,
                 }),
+                default_limit: None,
+                max_limit: None,
                 roles: TextCrudRoles {
                     read: "user".into(),
                     create: "user".into(),
@@ -216,6 +259,28 @@ async fn protected_crud<B: Backend>() {
     assert_eq!(list["items"], json!([{"id": 1, "title": "first"}]));
     assert_eq!(list["total"], 1);
 
+    let filtered: Value = client
+        .get(format!("{base}?filter_title_contains=FIR"))
+        .bearer_auth("user")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered["items"], json!([{"id": 1, "title": "first"}]));
+    let invalid_cursor = client
+        .get(format!("{base}?limit=1&cursor=invalid"))
+        .bearer_auth("user")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_cursor.status(), 400);
+    assert_eq!(
+        invalid_cursor.json::<Value>().await.unwrap()["code"],
+        "invalid_cursor"
+    );
+
     let count: Value = client
         .get(format!("{base}/count"))
         .bearer_auth("user")
@@ -226,13 +291,17 @@ async fn protected_crud<B: Backend>() {
         .await
         .unwrap();
     assert_eq!(count, json!({"count": 1}));
-    let unsupported = client
+    let filtered_count = client
         .get(format!("{base}/count?filter_title=first"))
         .bearer_auth("user")
         .send()
         .await
         .unwrap();
-    assert_eq!(unsupported.status(), 400);
+    assert_eq!(filtered_count.status(), 200);
+    assert_eq!(
+        filtered_count.json::<Value>().await.unwrap(),
+        json!({"count": 1})
+    );
 
     let invalid_update = client
         .put(format!("{base}/1"))
@@ -307,6 +376,8 @@ async fn create_only_role_does_not_receive_an_unreadable_row() {
             id_field: "id".into(),
             value_field: "title".into(),
             value_length: None,
+            default_limit: None,
+            max_limit: None,
             roles: TextCrudRoles {
                 read: "reader".into(),
                 create: "creator".into(),
@@ -367,6 +438,8 @@ async fn text_length_modes_match_eon_units() {
                 equal: Some(expected),
                 mode,
             }),
+            default_limit: None,
+            max_limit: None,
             roles: TextCrudRoles {
                 read: "user".into(),
                 create: "user".into(),
@@ -386,7 +459,7 @@ async fn text_length_modes_match_eon_units() {
             )
             .await;
         assert_eq!(create.status, 201, "mode {mode:?}");
-        assert_eq!(store.count().await.unwrap(), 1);
+        assert_eq!(store.count(&TextFilters::default()).await.unwrap(), 1);
 
         let mut invalid_config = config;
         invalid_config.value_length.as_mut().unwrap().equal = Some(expected + 1);
