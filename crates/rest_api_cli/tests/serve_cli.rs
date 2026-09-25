@@ -2161,6 +2161,14 @@ fn vsr_serve_applies_response_contexts_in_spawned_process() {
     let edit_body: Value = edit_response.json().expect("edit body should decode");
     assert_eq!(edit_body["secret"], "secret alpha");
 
+    let edit_list_response = client
+        .get(format!("{base_url}/api/posts?context=edit"))
+        .send()
+        .expect("edit list should load");
+    assert_eq!(edit_list_response.status(), reqwest::StatusCode::OK);
+    let edit_list: Value = edit_list_response.json().expect("edit list should decode");
+    assert_eq!(edit_list["items"][0]["secret"], "secret alpha");
+
     let invalid_response = client
         .get(format!("{base_url}/api/posts/1?context=unknown"))
         .send()

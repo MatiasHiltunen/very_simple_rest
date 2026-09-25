@@ -33,7 +33,6 @@ use rest_macro_core::storage::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sqlx::Row;
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use vsr_runtime::authz::policy::{
@@ -46,6 +45,9 @@ use vsr_runtime::http::native_actix::{
     workers_from_env,
 };
 use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
+use vsr_runtime::native_response::{
+    ResponseProjectionError, RuntimeListResponse as ListResponse, project_item, project_list,
+};
 use vsr_runtime::native_resource::{
     RuntimeActionAssignmentSource as ActionAssignmentSource,
     RuntimeActionUpdateAssignment as ActionUpdateAssignment,
@@ -683,10 +685,6 @@ fn lower_dynamic_resource(
 trait DynamicResourceOps {
     fn field(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
     fn field_by_api_name(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
-    fn response_context_fields(
-        &self,
-        requested: Option<&str>,
-    ) -> Result<Option<&[String]>, HttpResponse>;
     fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool;
     fn can_read(&self, user: &UserContext) -> bool;
     fn requires_role(&self, action: AuthorizationAction) -> Option<&str>;
@@ -708,26 +706,6 @@ impl DynamicResourceOps for DynamicResource {
             .copied()
             .ok_or_else(|| anyhow!("field `{field_name}` not found in `{}`", self.api_name))?;
         Ok(&self.fields[index])
-    }
-
-    fn response_context_fields(
-        &self,
-        requested: Option<&str>,
-    ) -> Result<Option<&[String]>, HttpResponse> {
-        let context_name = requested.or(self.default_response_context.as_deref());
-        match context_name {
-            Some(name) => self
-                .response_contexts
-                .get(name)
-                .map(|fields| Some(fields.as_slice()))
-                .ok_or_else(|| {
-                    errors::bad_request(
-                        "invalid_context",
-                        format!("Unknown response context `{name}`"),
-                    )
-                }),
-            None => Ok(None),
-        }
     }
 
     fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool {
@@ -929,17 +907,6 @@ struct ListQueryPlan {
     sort: String,
     order: SortOrder,
     cursor_mode: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct ListResponse {
-    items: Vec<Value>,
-    total: i64,
-    count: usize,
-    limit: Option<u32>,
-    offset: u32,
-    next_offset: Option<u32>,
-    next_cursor: Option<String>,
 }
 
 fn build_api_scope(dynamic_service: Arc<DynamicService>, state: NativeServeState) -> Scope {
@@ -1676,19 +1643,10 @@ fn request_response_context(req: &HttpRequest) -> Option<String> {
 
 fn apply_response_context_to_item(
     resource: &DynamicResource,
-    mut item: Value,
+    item: Value,
     requested: Option<&str>,
 ) -> Result<Value, HttpResponse> {
-    let Some(fields) = resource.response_context_fields(requested)? else {
-        return Ok(item);
-    };
-    let Value::Object(map) = &mut item else {
-        return Err(errors::internal_error(
-            "response item must be a JSON object".to_owned(),
-        ));
-    };
-    map.retain(|key, _| fields.iter().any(|field| field == key));
-    Ok(item)
+    project_item(resource, item, requested).map_err(response_projection_error)
 }
 
 fn apply_response_context_to_list_response(
@@ -1696,40 +1654,19 @@ fn apply_response_context_to_list_response(
     response: ListResponse,
     requested: Option<&str>,
 ) -> Result<Value, HttpResponse> {
-    let ListResponse {
-        items,
-        total,
-        count,
-        limit,
-        offset,
-        next_offset,
-        next_cursor,
-    } = response;
-    let context_fields = resource.response_context_fields(requested)?;
-    let items = items
-        .into_iter()
-        .map(|mut item| {
-            if let Some(fields) = context_fields {
-                let Value::Object(map) = &mut item else {
-                    return Err(errors::internal_error(
-                        "response item must be a JSON object".to_owned(),
-                    ));
-                };
-                map.retain(|key, _| fields.iter().any(|field| field == key));
-            }
-            Ok(item)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    project_list(resource, response, requested).map_err(response_projection_error)
+}
 
-    Ok(serde_json::json!({
-        "items": items,
-        "total": total,
-        "count": count,
-        "limit": limit,
-        "offset": offset,
-        "next_offset": next_offset,
-        "next_cursor": next_cursor,
-    }))
+fn response_projection_error(error: ResponseProjectionError) -> HttpResponse {
+    match error {
+        ResponseProjectionError::UnknownContext(name) => errors::bad_request(
+            "invalid_context",
+            format!("Unknown response context `{name}`"),
+        ),
+        ResponseProjectionError::ExpectedObject => {
+            errors::internal_error("response item must be a JSON object".to_owned())
+        }
+    }
 }
 
 fn json_field_to_scope_value(value: &Value) -> Option<String> {

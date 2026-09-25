@@ -129,6 +129,9 @@ database decode errors. The compiler-free runtime build keeps this optional.
 Native row decoding, boolean column compatibility, and computed response fields
 now live in the optional `vsr-runtime::native_sqlx` adapter. The CLI still owns
 the database pool and HTTP handlers while passing rows to this adapter.
+Named response context selection and item/list projection now live in the
+compiler-free `vsr-runtime::native_response` module. The CLI parses the query
+parameter and maps projection failures to its existing HTTP error responses.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
