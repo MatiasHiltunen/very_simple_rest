@@ -18,6 +18,12 @@ use std::{future::Future, time::Duration};
 use bytes::Bytes;
 use vsr_core::error::{VsrError, VsrResult};
 
+pub mod config;
+pub use config::{
+    StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
+    StorageS3CompatBucket, StorageS3CompatConfig, StorageUploadEndpoint, StorageUploadResponse,
+};
+
 // ── Concrete implementations ──────────────────────────────────────────────────
 
 #[cfg(feature = "storage-local")]

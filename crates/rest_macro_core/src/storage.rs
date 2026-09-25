@@ -1,6 +1,13 @@
-// Unconditional: pure config and data types used by both the compiler and the runtime.
-// No heavy dependencies (no object_store, no actix-files, no multipart) in this section.
+// Pure config and data types are owned by vsr-runtime.
+#[cfg(feature = "storage-local")]
 use crate::static_files::StaticCacheProfile;
+
+pub use vsr_runtime::storage::{
+    StorageBackendConfig, StorageBackendKind, StorageConfig, StoragePublicMount,
+    StorageS3CompatBucket, StorageS3CompatConfig, StorageUploadEndpoint,
+};
+#[cfg(feature = "storage-local")]
+pub use vsr_runtime::storage::StorageUploadResponse;
 
 // ── Gated imports ────────────────────────────────────────────────────────────
 // All items below this point require the `storage-local` feature.
@@ -40,84 +47,7 @@ use uuid::Uuid;
 #[cfg(feature = "storage-local")]
 use crate::{auth::UserContext, errors, runtime::RuntimeConfig};
 
-// ── Pure config types (unconditional) ────────────────────────────────────────
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StorageBackendKind {
-    Local,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StorageBackendConfig {
-    pub name: String,
-    pub kind: StorageBackendKind,
-    pub root_dir: String,
-    pub resolved_root_dir: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoragePublicMount {
-    pub mount_path: String,
-    pub backend: String,
-    pub key_prefix: String,
-    pub cache: StaticCacheProfile,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StorageUploadEndpoint {
-    pub name: String,
-    pub path: String,
-    pub backend: String,
-    pub key_prefix: String,
-    pub max_bytes: usize,
-    pub require_auth: bool,
-    pub roles: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StorageS3CompatBucket {
-    pub name: String,
-    pub backend: String,
-    pub key_prefix: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StorageS3CompatConfig {
-    pub mount_path: String,
-    pub buckets: Vec<StorageS3CompatBucket>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct StorageConfig {
-    pub backends: Vec<StorageBackendConfig>,
-    pub public_mounts: Vec<StoragePublicMount>,
-    pub uploads: Vec<StorageUploadEndpoint>,
-    pub s3_compat: Option<StorageS3CompatConfig>,
-}
-
-impl StorageConfig {
-    pub fn is_empty(&self) -> bool {
-        self.backends.is_empty()
-            && self.public_mounts.is_empty()
-            && self.uploads.is_empty()
-            && self.s3_compat.is_none()
-    }
-}
-
 // ── Runtime types (storage-local) ────────────────────────────────────────────
-
-#[cfg(feature = "storage-local")]
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct StorageUploadResponse {
-    pub backend: String,
-    pub object_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_url: Option<String>,
-    pub file_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_type: Option<String>,
-    pub size_bytes: usize,
-}
 
 #[cfg(feature = "storage-local")]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
