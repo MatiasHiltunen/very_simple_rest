@@ -6,7 +6,6 @@
 
 use proc_macro2::Span;
 use quote::ToTokens;
-use serde_json::Value as JsonValue;
 use syn::{Ident, Type};
 
 use crate::authorization::AuthorizationContract;
@@ -17,51 +16,19 @@ use crate::security::SecurityConfig;
 use crate::storage::StorageConfig;
 use crate::tls::TlsConfig;
 
+pub use vsr_runtime::model::{
+    ComputedFieldPart, ComputedFieldSpec, EnumSpec, IndexSpec, ManyToManySpec, ReferentialAction,
+    RelationSpec, ResourceActionAssignmentSpec, ResourceActionBehaviorSpec,
+    ResourceActionInputFieldSpec, ResourceActionMethod, ResourceActionSpec, ResourceActionTarget,
+    ResourceActionValueSpec, ResourceAuditActionSelection, ResourceAuditConfig,
+    ResponseContextSpec,
+};
+
 use super::policies::RowPolicies;
 use super::scalars::{DbBackend, GeneratedValue, ResourceAccess, RoleRequirements};
 use super::validation::{
     BuildConfig, ClientsConfig, FieldTransform, FieldValidation, ListConfig, WriteModelStyle,
 };
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
-pub struct RelationSpec {
-    pub references_table: String,
-    pub references_field: String,
-    #[serde(default)]
-    pub on_delete: Option<ReferentialAction>,
-    #[serde(default)]
-    pub nested_route: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum ReferentialAction {
-    Cascade,
-    Restrict,
-    SetNull,
-    NoAction,
-}
-
-impl ReferentialAction {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "cascade" => Some(Self::Cascade),
-            "restrict" => Some(Self::Restrict),
-            "set_null" | "setnull" | "set-null" => Some(Self::SetNull),
-            "no_action" | "noaction" | "no-action" => Some(Self::NoAction),
-            _ => None,
-        }
-    }
-
-    pub fn sql(self) -> &'static str {
-        match self {
-            Self::Cascade => "CASCADE",
-            Self::Restrict => "RESTRICT",
-            Self::SetNull => "SET NULL",
-            Self::NoAction => "NO ACTION",
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct FieldSpec {
@@ -80,147 +47,6 @@ pub struct FieldSpec {
     pub generated: GeneratedValue,
     pub validation: FieldValidation,
     pub relation: Option<RelationSpec>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResponseContextSpec {
-    pub name: String,
-    pub fields: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EnumSpec {
-    pub name: String,
-    pub values: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IndexSpec {
-    pub fields: Vec<String>,
-    pub unique: bool,
-}
-
-impl IndexSpec {
-    pub fn name_for_table(&self, table_name: &str) -> String {
-        let prefix = if self.unique { "uidx" } else { "idx" };
-        format!("{prefix}_{table_name}_{}", self.fields.join("_"))
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManyToManySpec {
-    pub name: String,
-    pub target_table: String,
-    pub through_table: String,
-    pub source_field: String,
-    pub target_field: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResourceActionTarget {
-    Item,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResourceActionMethod {
-    Post,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ResourceActionValueSpec {
-    Literal(JsonValue),
-    InputField(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResourceActionInputFieldSpec {
-    pub name: String,
-    pub target_field: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourceActionAssignmentSpec {
-    pub field: String,
-    pub value: ResourceActionValueSpec,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ResourceActionBehaviorSpec {
-    UpdateFields {
-        assignments: Vec<ResourceActionAssignmentSpec>,
-    },
-    DeleteResource,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ResourceActionSpec {
-    pub name: String,
-    pub path: String,
-    pub target: ResourceActionTarget,
-    pub method: ResourceActionMethod,
-    pub input_fields: Vec<ResourceActionInputFieldSpec>,
-    pub behavior: ResourceActionBehaviorSpec,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ResourceAuditActionSelection {
-    All,
-    Named(Vec<String>),
-}
-
-impl ResourceAuditActionSelection {
-    pub fn audits_action(&self, action_name: &str) -> bool {
-        match self {
-            Self::All => true,
-            Self::Named(actions) => actions.iter().any(|candidate| candidate == action_name),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResourceAuditConfig {
-    pub resource: String,
-    pub create: bool,
-    pub update: bool,
-    pub delete: bool,
-    pub actions: Option<ResourceAuditActionSelection>,
-}
-
-impl ResourceAuditConfig {
-    pub fn audits_create(&self) -> bool {
-        self.create
-    }
-
-    pub fn audits_update(&self) -> bool {
-        self.update
-    }
-
-    pub fn audits_delete(&self) -> bool {
-        self.delete
-    }
-
-    pub fn audits_action(&self, action_name: &str) -> bool {
-        self.actions
-            .as_ref()
-            .is_some_and(|selection| selection.audits_action(action_name))
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.create || self.update || self.delete || self.actions.is_some()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ComputedFieldPart {
-    Literal(String),
-    Field(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ComputedFieldSpec {
-    pub api_name: String,
-    pub optional: bool,
-    pub parts: Vec<ComputedFieldPart>,
 }
 
 impl FieldSpec {
