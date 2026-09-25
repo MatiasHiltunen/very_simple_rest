@@ -38,10 +38,9 @@ use sqlx::Row;
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use uuid::Uuid;
-use vsr_runtime::authz::RoleRequirements;
 use vsr_runtime::authz::policy::{
     PolicyComparisonValue, PolicyExistsCondition, PolicyExistsFilter, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource, RowPolicies,
+    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
 };
 use vsr_runtime::field::{
     FieldKind, FieldTransform, GeneratedValue, LengthMode, NumericBound,
@@ -52,6 +51,15 @@ use vsr_runtime::http::native_actix::{
     workers_from_env,
 };
 use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
+use vsr_runtime::native_resource::{
+    RuntimeActionAssignmentSource as ActionAssignmentSource,
+    RuntimeActionUpdateAssignment as ActionUpdateAssignment,
+    RuntimeAuditConfig as DynamicAuditConfig, RuntimeBoundValue as BoundValue,
+    RuntimeCreateFieldRule as CreateFieldRule, RuntimeHybridResourceConfig as HybridResourceConfig,
+    RuntimeManyToManyRoute as ManyToManyRoute, RuntimeNestedRoute as NestedRoute,
+    RuntimeResource as DynamicResource, RuntimeResourceAction as DynamicResourceAction,
+    RuntimeResourceActionBehavior as DynamicResourceActionBehavior,
+};
 
 use super::serve_manager::{self, ServeInstanceContext};
 
@@ -477,7 +485,7 @@ impl DynamicService {
             .resources
             .iter()
             .cloned()
-            .map(|resource| DynamicResource::from_spec(resource, &service))
+            .map(|resource| lower_dynamic_resource(resource, &service))
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
             .map(Arc::new)
@@ -538,195 +546,169 @@ impl DynamicService {
     }
 }
 
-#[derive(Clone)]
-struct DynamicResource {
-    resource_name: String,
-    table_name: String,
-    api_name: String,
-    default_response_context: Option<String>,
-    id_field: String,
-    id_api_name: String,
-    db: DbBackend,
-    roles: RoleRequirements,
-    policies: RowPolicies,
-    default_limit: Option<u32>,
-    max_limit: Option<u32>,
-    filterable_in: BTreeSet<String>,
-    count_endpoint: bool,
-    create_assignment_sources: HashMap<String, PolicyValueSource>,
-    fields: Vec<DynamicField>,
-    field_index: HashMap<String, usize>,
-    api_field_index: HashMap<String, usize>,
-    response_contexts: HashMap<String, Vec<String>>,
-    computed_fields: Vec<model::ComputedFieldSpec>,
-    create_fields: Vec<CreateFieldRule>,
-    update_field_names: Vec<String>,
-    actions: Vec<DynamicResourceAction>,
-    audit: Option<DynamicAuditConfig>,
-    is_audit_sink: bool,
-    read_requires_auth: bool,
-    hybrid: Option<HybridResourceConfig>,
-    nested_relations: Vec<NestedRoute>,
-    many_to_many_routes: Vec<ManyToManyRoute>,
-}
-
-#[derive(Clone)]
-struct DynamicAuditConfig {
-    sink_table_name: String,
-    create: bool,
-    update: bool,
-    delete: bool,
-    actions: Option<model::ResourceAuditActionSelection>,
-}
-
-impl DynamicResource {
-    fn from_spec(spec: ResourceSpec, service: &ServiceSpec) -> anyhow::Result<Self> {
-        let audit = spec
-            .audit
-            .as_ref()
-            .map(|config| -> anyhow::Result<DynamicAuditConfig> {
-                let sink = service
-                    .resources
-                    .iter()
-                    .find(|candidate| {
-                        candidate.struct_ident == config.resource
-                            || candidate.table_name == config.resource
-                    })
-                    .ok_or_else(|| anyhow!("audit sink `{}` was not found", config.resource))?;
-                Ok(DynamicAuditConfig {
-                    sink_table_name: sink.table_name.clone(),
-                    create: config.create,
-                    update: config.update,
-                    delete: config.delete,
-                    actions: config.actions.clone(),
+fn lower_dynamic_resource(
+    spec: ResourceSpec,
+    service: &ServiceSpec,
+) -> anyhow::Result<DynamicResource> {
+    let audit = spec
+        .audit
+        .as_ref()
+        .map(|config| -> anyhow::Result<DynamicAuditConfig> {
+            let sink = service
+                .resources
+                .iter()
+                .find(|candidate| {
+                    candidate.struct_ident == config.resource
+                        || candidate.table_name == config.resource
                 })
+                .ok_or_else(|| anyhow!("audit sink `{}` was not found", config.resource))?;
+            Ok(DynamicAuditConfig {
+                sink_table_name: sink.table_name.clone(),
+                create: config.create,
+                update: config.update,
+                delete: config.delete,
+                actions: config.actions.clone(),
             })
-            .transpose()?;
-        let id_api_name = spec
-            .find_field(spec.id_field.as_str())
-            .map(|field| field.api_name().to_owned())
-            .unwrap_or_else(|| spec.id_field.clone());
-        let fields = spec
-            .fields
-            .iter()
-            .cloned()
-            .map(lower_dynamic_field)
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let field_index = fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| (field.name.clone(), index))
-            .collect::<HashMap<_, _>>();
-        let api_field_index = fields
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| field.expose_in_api)
-            .map(|(index, field)| (field.api_name.clone(), index))
-            .collect::<HashMap<_, _>>();
-        let response_contexts = spec
-            .response_contexts
-            .iter()
-            .map(|context| (context.name.clone(), context.fields.clone()))
-            .collect::<HashMap<_, _>>();
-        let computed_fields = spec.computed_fields.clone();
-        let controlled_fields = policy_controlled_fields(&spec);
-        let create_fields = build_create_field_rules(&spec, service)?;
-        let create_assignment_sources = spec
-            .policies
-            .create
-            .iter()
-            .map(|assignment| (assignment.field.clone(), assignment.source.clone()))
-            .collect();
-        let update_field_names = spec
-            .fields
-            .iter()
-            .filter(|field| {
-                !field.is_id
-                    && !field.generated.skip_update_bind()
-                    && !controlled_fields.contains(&field.name())
-            })
-            .map(FieldSpec::name)
-            .collect();
-        let actions = spec
-            .actions
-            .iter()
-            .map(DynamicResourceAction::from_spec)
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let hybrid = build_hybrid_resource_config(&spec, service);
-        let nested_relations = spec
-            .fields
-            .iter()
-            .filter_map(|field| {
-                field
-                    .relation
-                    .as_ref()
-                    .filter(|relation| relation.nested_route)
-                    .map(|relation| NestedRoute {
-                        field_name: field.name(),
-                        parent_api_name: service
-                            .resources
-                            .iter()
-                            .find(|candidate| candidate.table_name == relation.references_table)
-                            .map(|candidate| candidate.api_name().to_owned())
-                            .unwrap_or_else(|| relation.references_table.clone()),
-                    })
-            })
-            .collect();
-        let target_table = spec.table_name.clone();
-        let many_to_many_routes = service
-            .resources
-            .iter()
-            .flat_map(|candidate| {
-                candidate
-                    .many_to_many
-                    .iter()
-                    .filter({
-                        let target_table = target_table.clone();
-                        move |relation| relation.target_table == target_table
-                    })
-                    .map(move |relation| ManyToManyRoute {
-                        relation_name: relation.name.clone(),
-                        parent_api_name: candidate.api_name().to_owned(),
-                        through_table: relation.through_table.clone(),
-                        source_field: relation.source_field.clone(),
-                        target_field: relation.target_field.clone(),
-                    })
-            })
-            .collect();
-        let is_audit_sink = compiler::is_audit_sink_resource(&spec, &service.resources);
-
-        Ok(Self {
-            read_requires_auth: compiler::read_requires_auth(&spec),
-            resource_name: spec.struct_ident.to_string(),
-            table_name: spec.table_name.clone(),
-            api_name: spec.api_name().to_owned(),
-            default_response_context: spec.default_response_context.clone(),
-            id_field: spec.id_field.clone(),
-            id_api_name,
-            db: spec.db,
-            roles: spec.roles.clone(),
-            policies: spec.policies.clone(),
-            default_limit: spec.list.default_limit,
-            max_limit: spec.list.max_limit,
-            filterable_in: spec.list.filterable_in.iter().cloned().collect(),
-            count_endpoint: spec.list.count_endpoint,
-            create_assignment_sources,
-            fields,
-            field_index,
-            api_field_index,
-            response_contexts,
-            computed_fields,
-            create_fields,
-            update_field_names,
-            actions,
-            audit,
-            is_audit_sink,
-            hybrid,
-            nested_relations,
-            many_to_many_routes,
         })
-    }
+        .transpose()?;
+    let id_api_name = spec
+        .find_field(spec.id_field.as_str())
+        .map(|field| field.api_name().to_owned())
+        .unwrap_or_else(|| spec.id_field.clone());
+    let fields = spec
+        .fields
+        .iter()
+        .cloned()
+        .map(lower_dynamic_field)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let field_index = fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| (field.name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let api_field_index = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.expose_in_api)
+        .map(|(index, field)| (field.api_name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let response_contexts = spec
+        .response_contexts
+        .iter()
+        .map(|context| (context.name.clone(), context.fields.clone()))
+        .collect::<HashMap<_, _>>();
+    let computed_fields = spec.computed_fields.clone();
+    let controlled_fields = policy_controlled_fields(&spec);
+    let create_fields = build_create_field_rules(&spec, service)?;
+    let create_assignment_sources = spec
+        .policies
+        .create
+        .iter()
+        .map(|assignment| (assignment.field.clone(), assignment.source.clone()))
+        .collect();
+    let update_field_names = spec
+        .fields
+        .iter()
+        .filter(|field| {
+            !field.is_id
+                && !field.generated.skip_update_bind()
+                && !controlled_fields.contains(&field.name())
+        })
+        .map(FieldSpec::name)
+        .collect();
+    let actions = spec
+        .actions
+        .iter()
+        .map(lower_dynamic_resource_action)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let hybrid = build_hybrid_resource_config(&spec, service);
+    let nested_relations = spec
+        .fields
+        .iter()
+        .filter_map(|field| {
+            field
+                .relation
+                .as_ref()
+                .filter(|relation| relation.nested_route)
+                .map(|relation| NestedRoute {
+                    field_name: field.name(),
+                    parent_api_name: service
+                        .resources
+                        .iter()
+                        .find(|candidate| candidate.table_name == relation.references_table)
+                        .map(|candidate| candidate.api_name().to_owned())
+                        .unwrap_or_else(|| relation.references_table.clone()),
+                })
+        })
+        .collect();
+    let target_table = spec.table_name.clone();
+    let many_to_many_routes = service
+        .resources
+        .iter()
+        .flat_map(|candidate| {
+            candidate
+                .many_to_many
+                .iter()
+                .filter({
+                    let target_table = target_table.clone();
+                    move |relation| relation.target_table == target_table
+                })
+                .map(move |relation| ManyToManyRoute {
+                    relation_name: relation.name.clone(),
+                    parent_api_name: candidate.api_name().to_owned(),
+                    through_table: relation.through_table.clone(),
+                    source_field: relation.source_field.clone(),
+                    target_field: relation.target_field.clone(),
+                })
+        })
+        .collect();
+    let is_audit_sink = compiler::is_audit_sink_resource(&spec, &service.resources);
 
+    Ok(DynamicResource {
+        read_requires_auth: compiler::read_requires_auth(&spec),
+        resource_name: spec.struct_ident.to_string(),
+        table_name: spec.table_name.clone(),
+        api_name: spec.api_name().to_owned(),
+        default_response_context: spec.default_response_context.clone(),
+        id_field: spec.id_field.clone(),
+        id_api_name,
+        db: spec.db,
+        roles: spec.roles.clone(),
+        policies: spec.policies.clone(),
+        default_limit: spec.list.default_limit,
+        max_limit: spec.list.max_limit,
+        filterable_in: spec.list.filterable_in.iter().cloned().collect(),
+        count_endpoint: spec.list.count_endpoint,
+        create_assignment_sources,
+        fields,
+        field_index,
+        api_field_index,
+        response_contexts,
+        computed_fields,
+        create_fields,
+        update_field_names,
+        actions,
+        audit,
+        is_audit_sink,
+        hybrid,
+        nested_relations,
+        many_to_many_routes,
+    })
+}
+
+trait DynamicResourceOps {
+    fn field(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
+    fn field_by_api_name(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
+    fn response_context_fields(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<Option<&[String]>, HttpResponse>;
+    fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool;
+    fn can_read(&self, user: &UserContext) -> bool;
+    fn requires_role(&self, action: AuthorizationAction) -> Option<&str>;
+}
+
+impl DynamicResourceOps for DynamicResource {
     fn field(&self, field_name: &str) -> anyhow::Result<&DynamicField> {
         let index =
             self.field_index.get(field_name).copied().ok_or_else(|| {
@@ -791,38 +773,6 @@ impl DynamicResource {
             AuthorizationAction::Update => self.roles.update.as_deref(),
             AuthorizationAction::Delete => self.roles.delete.as_deref(),
         }
-    }
-}
-
-impl DynamicAuditConfig {
-    fn create_event_kind(&self) -> Option<&'static str> {
-        self.create.then_some("create")
-    }
-
-    fn update_event_kind(&self, action_name: Option<&str>) -> Option<String> {
-        if let Some(action_name) = action_name
-            && self
-                .actions
-                .as_ref()
-                .is_some_and(|selection| selection.audits_action(action_name))
-        {
-            return Some(format!("action:{action_name}"));
-        }
-
-        self.update.then(|| "update".to_owned())
-    }
-
-    fn delete_event_kind(&self, action_name: Option<&str>) -> Option<String> {
-        if let Some(action_name) = action_name
-            && self
-                .actions
-                .as_ref()
-                .is_some_and(|selection| selection.audits_action(action_name))
-        {
-            return Some(format!("action:{action_name}"));
-        }
-
-        self.delete.then(|| "delete".to_owned())
     }
 }
 
@@ -893,87 +843,26 @@ fn field_kind_from_field(field: &FieldSpec) -> Option<FieldKind> {
     field_kind_from_type(&field.ty)
 }
 
-#[derive(Clone)]
-struct CreateFieldRule {
-    name: String,
-    allow_admin_override: bool,
-    allow_hybrid_runtime: bool,
-    payload_optional: bool,
-}
-
-#[derive(Clone)]
-struct HybridResourceConfig {
-    scope: String,
-    scope_field: String,
-    item_read: bool,
-    collection_read: bool,
-    nested_read: bool,
-    create_payload: bool,
-    update: bool,
-    delete: bool,
-}
-
-#[derive(Clone)]
-struct NestedRoute {
-    field_name: String,
-    parent_api_name: String,
-}
-
-#[derive(Clone)]
-struct ManyToManyRoute {
-    relation_name: String,
-    parent_api_name: String,
-    through_table: String,
-    source_field: String,
-    target_field: String,
-}
-
-#[derive(Clone)]
-struct DynamicResourceAction {
-    name: String,
-    path: String,
-    behavior: DynamicResourceActionBehavior,
-}
-
-#[derive(Clone)]
-enum DynamicResourceActionBehavior {
-    UpdateFields {
-        assignments: Vec<ActionUpdateAssignment>,
-    },
-    DeleteResource,
-}
-
-impl DynamicResourceAction {
-    fn from_spec(spec: &model::ResourceActionSpec) -> anyhow::Result<Self> {
-        Ok(Self {
-            name: spec.name.clone(),
-            path: spec.path.clone(),
-            behavior: match &spec.behavior {
-                model::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
-                    DynamicResourceActionBehavior::UpdateFields {
-                        assignments: assignments
-                            .iter()
-                            .map(ActionUpdateAssignment::from_action_spec)
-                            .collect::<anyhow::Result<Vec<_>>>()?,
-                    }
+fn lower_dynamic_resource_action(
+    spec: &model::ResourceActionSpec,
+) -> anyhow::Result<DynamicResourceAction> {
+    Ok(DynamicResourceAction {
+        name: spec.name.clone(),
+        path: spec.path.clone(),
+        behavior: match &spec.behavior {
+            model::ResourceActionBehaviorSpec::UpdateFields { assignments } => {
+                DynamicResourceActionBehavior::UpdateFields {
+                    assignments: assignments
+                        .iter()
+                        .map(lower_action_update_assignment)
+                        .collect::<anyhow::Result<Vec<_>>>()?,
                 }
-                model::ResourceActionBehaviorSpec::DeleteResource => {
-                    DynamicResourceActionBehavior::DeleteResource
-                }
-            },
-        })
-    }
-
-    fn requires_input(&self) -> bool {
-        match &self.behavior {
-            DynamicResourceActionBehavior::UpdateFields { assignments } => {
-                assignments.iter().any(|assignment| {
-                    matches!(assignment.source, ActionAssignmentSource::InputField(_))
-                })
             }
-            DynamicResourceActionBehavior::DeleteResource => false,
-        }
-    }
+            model::ResourceActionBehaviorSpec::DeleteResource => {
+                DynamicResourceActionBehavior::DeleteResource
+            }
+        },
+    })
 }
 
 #[derive(Clone)]
@@ -1002,49 +891,27 @@ enum PlanOutcome {
     Indeterminate,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum BoundValue {
-    Null,
-    Bool(bool),
-    Integer(i64),
-    Real(f64),
-    Text(String),
-}
-
 #[derive(Clone)]
 struct UpdateAssignment {
     field_name: String,
     value: BoundValue,
 }
 
-#[derive(Clone)]
-struct ActionUpdateAssignment {
-    field_name: String,
-    source: ActionAssignmentSource,
+fn lower_action_update_assignment(
+    spec: &model::ResourceActionAssignmentSpec,
+) -> anyhow::Result<ActionUpdateAssignment> {
+    Ok(ActionUpdateAssignment {
+        field_name: spec.field.clone(),
+        source: match &spec.value {
+            model::ResourceActionValueSpec::Literal(value) => {
+                ActionAssignmentSource::Literal(bound_value_from_action_json(value)?)
+            }
+            model::ResourceActionValueSpec::InputField(name) => {
+                ActionAssignmentSource::InputField(name.clone())
+            }
+        },
+    })
 }
-
-#[derive(Clone)]
-enum ActionAssignmentSource {
-    Literal(BoundValue),
-    InputField(String),
-}
-
-impl ActionUpdateAssignment {
-    fn from_action_spec(spec: &model::ResourceActionAssignmentSpec) -> anyhow::Result<Self> {
-        Ok(Self {
-            field_name: spec.field.clone(),
-            source: match &spec.value {
-                model::ResourceActionValueSpec::Literal(value) => {
-                    ActionAssignmentSource::Literal(bound_value_from_action_json(value)?)
-                }
-                model::ResourceActionValueSpec::InputField(name) => {
-                    ActionAssignmentSource::InputField(name.clone())
-                }
-            },
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SortOrder {
     Asc,

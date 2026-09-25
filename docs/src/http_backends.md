@@ -115,6 +115,10 @@ live in `vsr-runtime::model` with the same compiler compatibility re-exports.
 Native field descriptors and value kinds now live in `vsr-runtime::field` as
 `RuntimeField` and `FieldKind`; the CLI only lowers compiler `FieldSpec` inputs
 into those types. Native resource and HTTP handlers still need migration.
+The native resource descriptor, action assignments, audit settings, hybrid
+settings, relation routes, and SQL-bound scalar values now live in
+`vsr-runtime::native_resource`. The CLI retains compiler-specific lowering and
+legacy handler adapters, which are the next migration boundary.
 
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
