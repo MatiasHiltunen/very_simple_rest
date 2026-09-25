@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env::VarError;
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -27,7 +28,7 @@ use rest_macro_core::security::DEFAULT_MAX_FILTER_IN_VALUES;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
 #[cfg(feature = "storage-local")]
 use rest_macro_core::storage::{
-    StoragePublicMount, StorageRegistry, StorageS3CompatConfig, StorageUploadEndpoint,
+    StorageRegistry,
     configure_public_mounts_with_runtime, configure_s3_compat_with_runtime,
     configure_upload_endpoints_with_runtime,
 };
@@ -60,6 +61,7 @@ use vsr_runtime::native_resource::{
     RuntimeResource as DynamicResource, RuntimeResourceAction as DynamicResourceAction,
     RuntimeResourceActionBehavior as DynamicResourceActionBehavior,
 };
+use vsr_runtime::native_service::RuntimeService;
 
 use super::serve_manager::{self, ServeInstanceContext};
 
@@ -451,27 +453,18 @@ struct NativeServeState {
 
 #[derive(Clone)]
 struct DynamicService {
-    module_name: String,
-    runtime: rest_macro_core::runtime::RuntimeConfig,
-    security: rest_macro_core::security::SecurityConfig,
-    tls: rest_macro_core::tls::TlsConfig,
-    authorization_management_enabled: bool,
-    authorization_management_mount: String,
-    resources: Vec<Arc<DynamicResource>>,
-    neutral_crud_resource: Option<String>,
-    openapi_json: Arc<String>,
-    docs_html: Arc<String>,
-    include_builtin_auth: bool,
-    static_mounts: Arc<Vec<StaticMount>>,
+    model: RuntimeService,
     auth_rate_limiter: web::Data<auth::AuthRateLimiter>,
     #[cfg(feature = "storage-local")]
     storage_registry: Arc<StorageRegistry>,
-    #[cfg(feature = "storage-local")]
-    storage_public_mounts: Arc<Vec<StoragePublicMount>>,
-    #[cfg(feature = "storage-local")]
-    storage_uploads: Arc<Vec<StorageUploadEndpoint>>,
-    #[cfg(feature = "storage-local")]
-    storage_s3_compat: Arc<Option<StorageS3CompatConfig>>,
+}
+
+impl Deref for DynamicService {
+    type Target = RuntimeService;
+
+    fn deref(&self) -> &Self::Target {
+        &self.model
+    }
 }
 
 impl DynamicService {
@@ -513,35 +506,27 @@ impl DynamicService {
             StorageRegistry::from_config(&service.storage)
                 .map_err(|error| anyhow!("storage configuration error: {error}"))?,
         );
-        #[cfg(feature = "storage-local")]
-        let storage_public_mounts = Arc::new(service.storage.public_mounts.clone());
-        #[cfg(feature = "storage-local")]
-        let storage_uploads = Arc::new(service.storage.uploads.clone());
-        #[cfg(feature = "storage-local")]
-        let storage_s3_compat = Arc::new(service.storage.s3_compat.clone());
-
         Ok(Self {
-            module_name: service.module_ident.to_string(),
-            runtime: service.runtime.clone(),
-            security: service.security.clone(),
-            tls: service.tls.clone(),
-            authorization_management_enabled: service.authorization.management_api.enabled,
-            authorization_management_mount: service.authorization.management_api.mount.clone(),
-            resources,
-            neutral_crud_resource: neutral_crud_resource.map(ToOwned::to_owned),
-            openapi_json: Arc::new(openapi_json),
-            docs_html: Arc::new(swagger_ui_html().to_owned()),
-            include_builtin_auth,
-            static_mounts,
+            model: RuntimeService {
+                module_name: service.module_ident.to_string(),
+                runtime: service.runtime.clone(),
+                security: service.security.clone(),
+                tls: service.tls.clone(),
+                authorization_management_enabled: service.authorization.management_api.enabled,
+                authorization_management_mount: service.authorization.management_api.mount.clone(),
+                resources,
+                neutral_crud_resource: neutral_crud_resource.map(ToOwned::to_owned),
+                openapi_json: Arc::new(openapi_json),
+                docs_html: Arc::new(swagger_ui_html().to_owned()),
+                include_builtin_auth,
+                static_mounts,
+                storage_public_mounts: Arc::new(service.storage.public_mounts.clone()),
+                storage_uploads: Arc::new(service.storage.uploads.clone()),
+                storage_s3_compat: Arc::new(service.storage.s3_compat.clone()),
+            },
             auth_rate_limiter: web::Data::new(auth::AuthRateLimiter::default()),
             #[cfg(feature = "storage-local")]
             storage_registry,
-            #[cfg(feature = "storage-local")]
-            storage_public_mounts,
-            #[cfg(feature = "storage-local")]
-            storage_uploads,
-            #[cfg(feature = "storage-local")]
-            storage_s3_compat,
         })
     }
 }
