@@ -15,6 +15,33 @@ use crate::{
     http::{Handler, HttpMethod, RequestContext, ResponseEnvelope, make_handler},
 };
 
+/// Pagination and filter settings for a service resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListConfig {
+    /// Default page size when a request omits `limit`.
+    pub default_limit: Option<u32>,
+    /// Maximum accepted page size.
+    pub max_limit: Option<u32>,
+    /// Fields that accept a multi-value exact filter.
+    pub filterable_in: Vec<String>,
+    /// Whether to expose the count route.
+    pub count_endpoint: bool,
+    /// Maximum values in any multi-value filter, set from request security settings.
+    pub max_filter_in_values: Option<usize>,
+}
+
+impl Default for ListConfig {
+    fn default() -> Self {
+        Self {
+            default_limit: None,
+            max_limit: None,
+            filterable_in: Vec::new(),
+            count_endpoint: true,
+            max_filter_in_values: None,
+        }
+    }
+}
+
 /// One persisted row in the first native CRUD slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextRecord {

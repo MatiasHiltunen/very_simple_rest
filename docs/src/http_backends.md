@@ -103,6 +103,13 @@ Compression settings and their Actix middleware live in `vsr-runtime::runtime`.
 The existing `rest_macro_core` modules re-export these types and the Actix adapters;
 Axum static-file parity remains open.
 
+Field validation, length/range limits, text transforms, generated-value policy,
+resource access and role requirements, list settings, and row-policy expression
+types now live in `vsr-runtime::{field,resource,authz}`. The compiler retains
+its previous public paths as re-exports while the native serve path consumes
+these runtime-owned types directly. Lowering a complete `ServiceSpec` into a
+compiler-free runtime service model remains open.
+
 `max_body_bytes` bounds the buffered, decompressed body, including bodies without
 a usable original content length. The boundary still buffers requests/responses;
 streaming and Axum parity for large-file/static/multipart behavior are future

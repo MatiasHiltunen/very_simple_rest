@@ -4,6 +4,9 @@
 //! These types have no dependencies on other compiler-model modules and are
 //! safe to import from anywhere else in the model layer.
 
+pub use vsr_runtime::authz::{ResourceAccess, ResourceReadAccess, RoleRequirements};
+pub use vsr_runtime::field::GeneratedValue;
+
 pub const GENERATED_DATETIME_ALIAS: &str = "__VsrDateTimeUtc";
 pub const GENERATED_DATE_ALIAS: &str = "__VsrNaiveDate";
 pub const GENERATED_TIME_ALIAS: &str = "__VsrNaiveTime";
@@ -132,59 +135,4 @@ impl DbBackend {
             None => "CURRENT_TIMESTAMP",
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
-pub enum GeneratedValue {
-    #[default]
-    None,
-    AutoIncrement,
-    CreatedAt,
-    UpdatedAt,
-}
-
-impl GeneratedValue {
-    pub fn skip_insert(self) -> bool {
-        matches!(
-            self,
-            Self::AutoIncrement | Self::CreatedAt | Self::UpdatedAt
-        )
-    }
-
-    pub fn skip_update_bind(self) -> bool {
-        matches!(
-            self,
-            Self::AutoIncrement | Self::CreatedAt | Self::UpdatedAt
-        )
-    }
-}
-
-#[derive(Clone, Debug, Default, serde::Deserialize)]
-pub struct RoleRequirements {
-    pub read: Option<String>,
-    pub create: Option<String>,
-    pub update: Option<String>,
-    pub delete: Option<String>,
-}
-
-impl RoleRequirements {
-    pub fn with_legacy_defaults(mut self) -> Self {
-        if self.create.is_none() {
-            self.create = self.update.clone();
-        }
-        self
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ResourceReadAccess {
-    #[default]
-    Inferred,
-    Public,
-    Authenticated,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResourceAccess {
-    pub read: ResourceReadAccess,
 }
