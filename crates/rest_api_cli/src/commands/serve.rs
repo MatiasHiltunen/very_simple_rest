@@ -2,11 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env::VarError;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
-use actix_web::dev::Service;
-use actix_web::middleware::Logger;
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Scope, web};
+use actix_web::{HttpRequest, HttpResponse, Scope, web};
 use anyhow::{Context, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -43,7 +40,10 @@ use sqlx::Row;
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use uuid::Uuid;
-use vsr_core::{HttpRequestTelemetry, record_http_request};
+use vsr_runtime::http::native_actix::{
+    BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
+    workers_from_env,
+};
 
 use super::serve_manager::{self, ServeInstanceContext};
 
@@ -66,24 +66,11 @@ use windows_sys::Win32::System::Threading::{
 
 const BIND_MARKER: &str = "__vsr_bind__";
 const DEFAULT_OPENAPI_VERSION: &str = "1.0.0";
-const HTTP_WORKERS_ENV: &str = "VSR_HTTP_WORKERS";
 const NEUTRAL_CRUD_RESOURCE_ENV: &str = "VSR_EXPERIMENTAL_NEUTRAL_CRUD_RESOURCE";
 #[cfg(windows)]
 const PARENT_WATCH_ENV: &str = "VSR_WATCH_PARENT_PROCESS";
 #[cfg(windows)]
 const PROCESS_SYNCHRONIZE_RIGHT: u32 = 0x0010_0000;
-
-async fn healthz() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("application/json")
-        .body(r#"{"status":"ok"}"#)
-}
-
-async fn readyz() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("application/json")
-        .body(r#"{"status":"ready"}"#)
-}
 
 pub async fn serve_service(
     input: &Path,
@@ -147,7 +134,7 @@ pub async fn serve_service(
     let bind_addr = bind_addr_override
         .map(ToOwned::to_owned)
         .or_else(|| std::env::var("BIND_ADDR").ok())
-        .unwrap_or_else(|| default_bind_addr_from_tls(dynamic_service.tls.is_enabled()).to_owned());
+        .unwrap_or_else(|| default_bind_addr(dynamic_service.tls.is_enabled()).to_owned());
     let managed_context = managed_context.cloned();
 
     let state = NativeServeState {
@@ -169,135 +156,64 @@ pub async fn serve_service(
     } else {
         None
     };
-    let server_workers = http_workers_from_env()?;
+    let server_workers = workers_from_env().map_err(anyhow::Error::msg)?;
 
-    let server = HttpServer::new({
-        let dynamic_service = dynamic_service.clone();
-        let state = state.clone();
-        let anon_client_middleware = anon_client_middleware.clone();
-        move || {
-            let api_runtime = dynamic_service.runtime.clone();
-            let api_security = dynamic_service.security.clone();
-            let static_mounts = dynamic_service.static_mounts.clone();
-            #[cfg(feature = "storage-local")]
-            let storage_registry = dynamic_service.storage_registry.clone();
-            #[cfg(feature = "storage-local")]
-            let storage_public_mounts = dynamic_service.storage_public_mounts.clone();
-            #[cfg(feature = "storage-local")]
-            let storage_s3_compat = dynamic_service.storage_s3_compat.clone();
-            let docs_html = dynamic_service.docs_html.clone();
-            let openapi_json = dynamic_service.openapi_json.clone();
-            let include_builtin_auth = dynamic_service.include_builtin_auth;
+    let BoundNativeActixServer { server, .. } = bind_native_actix_server(
+        NativeActixServerConfig {
+            bind_addr: bind_addr.clone(),
+            workers: server_workers,
+            tls: rustls_config,
+            runtime: dynamic_service.runtime.clone(),
+            security: dynamic_service.security.clone(),
+            openapi_json: dynamic_service.openapi_json.clone(),
+            docs_html: dynamic_service.docs_html.clone(),
+        },
+        {
+            let dynamic_service = dynamic_service.clone();
+            let state = state.clone();
+            let anon_client_middleware = anon_client_middleware.clone();
+            move |cfg: &mut web::ServiceConfig| {
+                let api_runtime = dynamic_service.runtime.clone();
+                let api_security = dynamic_service.security.clone();
+                cfg.app_data(web::Data::new(state.pool.clone()));
+                cfg.app_data(web::Data::new(dynamic_service.clone()));
+                cfg.app_data(web::Data::new(state.clone()));
 
-            App::new()
-                .app_data(web::Data::new(state.pool.clone()))
-                .app_data(web::Data::new(dynamic_service.clone()))
-                .app_data(web::Data::new(state.clone()))
-                .wrap(Logger::default())
-                .wrap_fn(|req, srv| {
-                    let method = req.method().as_str().to_owned();
-                    let route = req
-                        .match_pattern()
-                        .unwrap_or_else(|| "<unmatched>".to_owned());
-                    let started_at = Instant::now();
-                    let fut = srv.call(req);
-                    async move {
-                        let response = fut.await?;
-                        let status = response.status().as_u16();
-                        let latency_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-                        record_http_request(&HttpRequestTelemetry::new(
-                            method.as_str(),
-                            route.as_str(),
-                            status,
-                            latency_ms,
-                        ));
-                        Ok(response)
-                    }
-                })
-                .wrap(rest_macro_core::runtime::compression_middleware(
-                    &api_runtime,
-                ))
-                .wrap(rest_macro_core::security::cors_middleware(&api_security))
-                .wrap(rest_macro_core::security::security_headers_middleware(
-                    &api_security,
-                ))
-                .route("/healthz", web::get().to(healthz))
-                .route("/readyz", web::get().to(readyz))
-                .route(
-                    "/openapi.json",
-                    web::get().to(move || {
-                        let openapi_json = openapi_json.clone();
-                        async move {
-                            HttpResponse::Ok()
-                                .content_type("application/json")
-                                .body(openapi_json.as_ref().clone())
-                        }
-                    }),
-                )
-                .route(
-                    "/docs",
-                    web::get().to(move || {
-                        let docs_html = docs_html.clone();
-                        async move {
-                            HttpResponse::Ok()
-                                .content_type("text/html; charset=utf-8")
-                                .body(docs_html.as_ref().clone())
-                        }
-                    }),
-                )
-                .configure({
-                    let auth_settings = api_security.auth.clone();
-                    move |cfg| {
-                        if include_builtin_auth {
-                            auth::public_auth_discovery_routes_with_settings(
-                                cfg,
-                                auth_settings.clone(),
-                            );
-                            auth::register_builtin_auth_html_pages(cfg, auth_settings);
-                        }
-                    }
-                })
-                .service(
+                if dynamic_service.include_builtin_auth {
+                    auth::public_auth_discovery_routes_with_settings(
+                        cfg,
+                        api_security.auth.clone(),
+                    );
+                    auth::register_builtin_auth_html_pages(cfg, api_security.auth.clone());
+                }
+                cfg.service(
                     build_api_scope(dynamic_service.clone(), state.clone())
                         .wrap(anon_client_middleware.clone()),
-                )
-                .configure(move |cfg| {
-                    #[cfg(feature = "storage-local")]
-                    {
-                        configure_public_mounts_with_runtime(
-                            cfg,
-                            storage_registry.as_ref(),
-                            storage_public_mounts.as_slice(),
-                            &api_runtime,
-                        );
-                        configure_s3_compat_with_runtime(
-                            cfg,
-                            storage_registry.as_ref(),
-                            storage_s3_compat.as_ref().as_ref(),
-                            &api_runtime,
-                        );
-                    }
-                    configure_static_mounts_with_runtime(
+                );
+
+                #[cfg(feature = "storage-local")]
+                {
+                    configure_public_mounts_with_runtime(
                         cfg,
-                        static_mounts.as_slice(),
+                        dynamic_service.storage_registry.as_ref(),
+                        dynamic_service.storage_public_mounts.as_slice(),
                         &api_runtime,
                     );
-                })
-        }
-    });
-    let server = if let Some(workers) = server_workers {
-        server.workers(workers)
-    } else {
-        server
-    };
-
-    let server = if let Some(rustls_config) = rustls_config {
-        log::info!("Server listening on https://{}", bind_addr);
-        server.bind_rustls_0_23(&bind_addr, rustls_config)?.run()
-    } else {
-        log::info!("Server listening on http://{}", bind_addr);
-        server.bind(&bind_addr)?.run()
-    };
+                    configure_s3_compat_with_runtime(
+                        cfg,
+                        dynamic_service.storage_registry.as_ref(),
+                        dynamic_service.storage_s3_compat.as_ref().as_ref(),
+                        &api_runtime,
+                    );
+                }
+                configure_static_mounts_with_runtime(
+                    cfg,
+                    dynamic_service.static_mounts.as_slice(),
+                    &api_runtime,
+                );
+            }
+        },
+    )?;
     if let Some(context) = managed_context.as_ref() {
         serve_manager::register_running_instance(
             context,
@@ -506,24 +422,6 @@ fn wait_for_parent_exit(parent_pid: u32) -> std::io::Result<()> {
             other => Err(std::io::Error::other(format!(
                 "unexpected wait result {other} while watching parent process {parent_pid}"
             ))),
-        }
-    }
-}
-
-fn http_workers_from_env() -> anyhow::Result<Option<usize>> {
-    match std::env::var(HTTP_WORKERS_ENV) {
-        Ok(raw) => {
-            let workers = raw.parse::<usize>().map_err(|error| {
-                anyhow!("{HTTP_WORKERS_ENV} must be a positive integer, got `{raw}`: {error}")
-            })?;
-            if workers == 0 {
-                bail!("{HTTP_WORKERS_ENV} must be greater than 0");
-            }
-            Ok(Some(workers))
-        }
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(_)) => {
-            bail!("{HTTP_WORKERS_ENV} must contain valid UTF-8")
         }
     }
 }
@@ -1555,14 +1453,6 @@ fn default_title(service: &ServiceSpec) -> String {
         .replace('_', " ")
         .trim()
         .to_owned()
-}
-
-fn default_bind_addr_from_tls(tls_enabled: bool) -> &'static str {
-    if tls_enabled {
-        "127.0.0.1:8443"
-    } else {
-        "127.0.0.1:8080"
-    }
 }
 
 fn convert_static_mounts(mounts: &[compiler::StaticMountSpec]) -> Vec<StaticMount> {

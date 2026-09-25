@@ -28,6 +28,9 @@
 #[cfg(feature = "http-actix")]
 pub mod actix_adapter;
 
+#[cfg(feature = "http-actix")]
+pub mod native_actix;
+
 #[cfg(feature = "actix-security")]
 pub mod actix_errors;
 
