@@ -591,8 +591,8 @@ The native server now compiles read, update, and delete row predicates and
 create requirements in `vsr-runtime::native_policy_sql`. It preserves
 fail-closed handling for missing principal claims and qualifies outer-row
 fields in related-row checks. Native HTTP regression coverage exercises
-related-row reads, updates, and creates. Hybrid authorization and the emitted
-policy path still need the shared runtime boundary.
+related-row reads, updates, and creates. The emitted policy path still needs
+the shared runtime boundary.
 
 Native collection filtering, sorting, count/page SQL, and cursor response
 metadata now run in `vsr-runtime::native_list`. The CLI supplies
@@ -623,5 +623,17 @@ back before hybrid dispatch continues. The CLI implements the database
 operations adapter. Native HTTP coverage exercises denied scopes, read-only
 grants, successful hybrid mutations, and rollback on audit failures. CI also
 exercises audited update/delete plans and rollback on PostgreSQL and MySQL.
-Database driver adapters and hybrid read/list orchestration still need migration,
-alongside streaming and general native/emitted backend selection.
+
+`vsr-runtime::native_read` now owns native item, collection, and count
+authorization and execution through read executor and scoped grant traits.
+Item reads try the row policy before an enabled item grant. Collection and
+count reads share source checks, SQL planning, and error handling; nested
+constraints remain in both count and page queries. Scope resolution uses public
+field aliases. Required read roles also apply to created-response fallback.
+Top-level and nested collections honor their respective declared scope source
+flags. Missing claims remain fail-closed, and database or grant errors stop
+execution. PostgreSQL and MySQL CI exercise item visibility, scoped counts,
+cursor pagination, and zero-limit pages through the CLI database adapter.
+
+Database driver adapters, generated handler integration, streaming, and general
+native/emitted backend selection still need migration.

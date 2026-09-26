@@ -9,7 +9,10 @@ use serde_json::Value;
 use crate::{
     field::{FieldKind, RuntimeField},
     model::DbBackend,
-    native_policy_sql::{BIND_MARKER, PlanOutcome, PolicyPrincipal, build_row_policy_plan},
+    native_policy_sql::{
+        BIND_MARKER, PlanOutcome, PolicyPrincipal, build_row_policy_plan,
+        render_condition_with_placeholders,
+    },
     native_resource::{RuntimeBoundValue as BoundValue, RuntimeResource},
     native_response::RuntimeListResponse,
     native_validation::parse_query_value,
@@ -164,24 +167,6 @@ fn field_by_api_name<'a>(resource: &'a RuntimeResource, name: &str) -> Option<&'
 
 fn placeholder(backend: DbBackend, index: usize) -> String {
     backend.placeholder(index)
-}
-
-fn render_condition_with_placeholders(
-    condition: &str,
-    backend: DbBackend,
-    start_index: usize,
-) -> String {
-    let mut rendered = String::new();
-    let mut remaining = condition;
-    let mut index = start_index;
-    while let Some(position) = remaining.find(BIND_MARKER) {
-        rendered.push_str(&remaining[..position]);
-        rendered.push_str(&placeholder(backend, index));
-        remaining = &remaining[position + BIND_MARKER.len()..];
-        index += 1;
-    }
-    rendered.push_str(remaining);
-    rendered
 }
 
 fn supports_contains_filters(field: &RuntimeField) -> bool {
