@@ -35,10 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
-use vsr_runtime::authz::policy::{
-    PolicyComparisonValue, PolicyExistsCondition, PolicyFilterExpression,
-    PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
-};
+use vsr_runtime::authz::policy::{PolicyFilterExpression, PolicyValueSource};
 use vsr_runtime::field::{FieldKind, GeneratedValue, RuntimeField as DynamicField};
 use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
@@ -46,8 +43,7 @@ use vsr_runtime::http::native_actix::{
 };
 use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
 use vsr_runtime::native_policy_sql::{
-    BIND_MARKER, PlanOutcome, PolicyPrincipal, SqlPlan, combine_all_plans, combine_any_plans,
-    negate_plan,
+    BIND_MARKER, CreatePlanError, PlanOutcome, PolicyPrincipal,
 };
 use vsr_runtime::native_response::{
     ResponseProjectionError, RuntimeListResponse as ListResponse, project_item, project_list,
@@ -1738,14 +1734,6 @@ async fn hybrid_runtime_allows(
     }
 }
 
-fn bound_value_from_policy_literal(value: &PolicyLiteralValue) -> BoundValue {
-    match value {
-        PolicyLiteralValue::String(value) => BoundValue::Text(value.clone()),
-        PolicyLiteralValue::I64(value) => BoundValue::Integer(*value),
-        PolicyLiteralValue::Bool(value) => BoundValue::Bool(*value),
-    }
-}
-
 fn resolve_create_source_value(
     resource: &DynamicResource,
     source: &PolicyValueSource,
@@ -1934,8 +1922,20 @@ async fn evaluate_create_require(
         let value = effective_create_field_value(resource, field, payload, user, state).await?;
         effective.insert(field.name.clone(), value);
     }
-    let plan =
-        build_create_requirement_plan(resource, service, expression, payload, &effective, user)?;
+    let plan = vsr_runtime::native_policy_sql::build_create_requirement_plan(
+        resource,
+        &service.resources,
+        expression,
+        &effective,
+        &PolicyPrincipal { user_id: user.id, claims: &user.claims },
+    )
+    .map_err(|error| match error {
+        CreatePlanError::MissingClaim { claim, field } => errors::forbidden(
+            "missing_claim",
+            format!("Missing required claim `{claim}` for create requirement field `{field}`"),
+        ),
+        CreatePlanError::InvalidDescriptor(message) => errors::internal_error(message),
+    })?;
     let PlanOutcome::Resolved(plan) = plan else {
         return Ok(false);
     };
@@ -1950,247 +1950,6 @@ async fn evaluate_create_require(
     match query.fetch_optional(&state.pool).await {
         Ok(result) => Ok(result.is_some()),
         Err(error) => Err(errors::internal_error(error.to_string())),
-    }
-}
-
-fn build_create_requirement_plan(
-    resource: &DynamicResource,
-    service: &DynamicService,
-    expression: &PolicyFilterExpression,
-    payload: &Map<String, Value>,
-    effective: &HashMap<String, BoundValue>,
-    user: &UserContext,
-) -> Result<PlanOutcome, HttpResponse> {
-    match expression {
-        PolicyFilterExpression::Match(filter) => {
-            let field = resource
-                .field(filter.field.as_str())
-                .map_err(|error| errors::internal_error(error.to_string()))?;
-            match &filter.operator {
-                PolicyFilterOperator::Equals(source) => {
-                    let left = effective
-                        .get(filter.field.as_str())
-                        .cloned()
-                        .unwrap_or(BoundValue::Null);
-                    let right = resolve_create_requirement_comparison_value(
-                        resource, source, field, payload, effective, user,
-                    )?;
-                    Ok(PlanOutcome::Resolved(SqlPlan {
-                        condition: format!("{BIND_MARKER} = {BIND_MARKER}"),
-                        binds: vec![left, right],
-                    }))
-                }
-                PolicyFilterOperator::IsNull => {
-                    let value = effective
-                        .get(filter.field.as_str())
-                        .cloned()
-                        .unwrap_or(BoundValue::Null);
-                    Ok(PlanOutcome::Resolved(SqlPlan {
-                        condition: if matches!(value, BoundValue::Null) {
-                            "1 = 1".to_owned()
-                        } else {
-                            "1 = 0".to_owned()
-                        },
-                        binds: Vec::new(),
-                    }))
-                }
-                PolicyFilterOperator::IsNotNull => {
-                    let value = effective
-                        .get(filter.field.as_str())
-                        .cloned()
-                        .unwrap_or(BoundValue::Null);
-                    Ok(PlanOutcome::Resolved(SqlPlan {
-                        condition: if matches!(value, BoundValue::Null) {
-                            "1 = 0".to_owned()
-                        } else {
-                            "1 = 1".to_owned()
-                        },
-                        binds: Vec::new(),
-                    }))
-                }
-            }
-        }
-        PolicyFilterExpression::All(expressions) => {
-            let plans = expressions
-                .iter()
-                .map(|expression| {
-                    build_create_requirement_plan(
-                        resource, service, expression, payload, effective, user,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(combine_all_plans(plans))
-        }
-        PolicyFilterExpression::Any(expressions) => {
-            let plans = expressions
-                .iter()
-                .map(|expression| {
-                    build_create_requirement_plan(
-                        resource, service, expression, payload, effective, user,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(combine_any_plans(plans))
-        }
-        PolicyFilterExpression::Not(expression) => Ok(negate_plan(build_create_requirement_plan(
-            resource, service, expression, payload, effective, user,
-        )?)),
-        PolicyFilterExpression::Exists(filter) => {
-            let target = service
-                .resources
-                .iter()
-                .find(|candidate| {
-                    candidate.resource_name == filter.resource
-                        || candidate.table_name == filter.resource
-                })
-                .ok_or_else(|| {
-                    errors::internal_error(format!("resource `{}` not found", filter.resource))
-                })?;
-            let alias = format!("{}_create_require", target.table_name);
-            let plan = build_create_requirement_exists_condition_plan(
-                resource,
-                target.as_ref(),
-                &filter.condition,
-                payload,
-                effective,
-                user,
-                &alias,
-            )?;
-            Ok(match plan {
-                PlanOutcome::Resolved(plan) => PlanOutcome::Resolved(SqlPlan {
-                    condition: format!(
-                        "EXISTS (SELECT 1 FROM {} AS {} WHERE {})",
-                        target.table_name, alias, plan.condition
-                    ),
-                    binds: plan.binds,
-                }),
-                PlanOutcome::Indeterminate => PlanOutcome::Indeterminate,
-            })
-        }
-    }
-}
-
-fn build_create_requirement_exists_condition_plan(
-    current: &DynamicResource,
-    target: &DynamicResource,
-    condition: &PolicyExistsCondition,
-    payload: &Map<String, Value>,
-    effective: &HashMap<String, BoundValue>,
-    user: &UserContext,
-    alias: &str,
-) -> Result<PlanOutcome, HttpResponse> {
-    match condition {
-        PolicyExistsCondition::Match(filter) => {
-            let field = target
-                .field(filter.field.as_str())
-                .map_err(|error| errors::internal_error(error.to_string()))?;
-            match &filter.operator {
-                PolicyFilterOperator::Equals(source) => {
-                    let value = resolve_create_requirement_comparison_value(
-                        current, source, field, payload, effective, user,
-                    )?;
-                    Ok(PlanOutcome::Resolved(SqlPlan {
-                        condition: format!("{alias}.{} = {}", field.name, BIND_MARKER),
-                        binds: vec![value],
-                    }))
-                }
-                PolicyFilterOperator::IsNull => Ok(PlanOutcome::Resolved(SqlPlan {
-                    condition: format!("{alias}.{} IS NULL", field.name),
-                    binds: Vec::new(),
-                })),
-                PolicyFilterOperator::IsNotNull => Ok(PlanOutcome::Resolved(SqlPlan {
-                    condition: format!("{alias}.{} IS NOT NULL", field.name),
-                    binds: Vec::new(),
-                })),
-            }
-        }
-        PolicyExistsCondition::CurrentRowField { field, row_field } => {
-            let value = effective
-                .get(row_field.as_str())
-                .cloned()
-                .unwrap_or(BoundValue::Null);
-            Ok(PlanOutcome::Resolved(SqlPlan {
-                condition: format!("{alias}.{field} = {BIND_MARKER}"),
-                binds: vec![value],
-            }))
-        }
-        PolicyExistsCondition::All(conditions) => {
-            let plans = conditions
-                .iter()
-                .map(|condition| {
-                    build_create_requirement_exists_condition_plan(
-                        current, target, condition, payload, effective, user, alias,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(combine_all_plans(plans))
-        }
-        PolicyExistsCondition::Any(conditions) => {
-            let plans = conditions
-                .iter()
-                .map(|condition| {
-                    build_create_requirement_exists_condition_plan(
-                        current, target, condition, payload, effective, user, alias,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(combine_any_plans(plans))
-        }
-        PolicyExistsCondition::Not(condition) => {
-            Ok(negate_plan(build_create_requirement_exists_condition_plan(
-                current, target, condition, payload, effective, user, alias,
-            )?))
-        }
-    }
-}
-
-fn resolve_create_requirement_source_value(
-    resource: &DynamicResource,
-    source: &PolicyValueSource,
-    target_field: &DynamicField,
-    payload: &Map<String, Value>,
-    effective: &HashMap<String, BoundValue>,
-    user: &UserContext,
-) -> Result<BoundValue, HttpResponse> {
-    match source {
-        PolicyValueSource::UserId => Ok(BoundValue::Integer(user.id)),
-        PolicyValueSource::Claim(name) => {
-            match resolve_create_source_value(resource, source, target_field, payload, user)? {
-                Some(value) => Ok(value),
-                None => Err(errors::forbidden(
-                    "missing_claim",
-                    format!(
-                        "Missing required claim `{}` for create requirement field `{}`",
-                        name, target_field.api_name
-                    ),
-                )),
-            }
-        }
-        PolicyValueSource::InputField(name) => Ok(effective
-            .get(name.as_str())
-            .cloned()
-            .unwrap_or(BoundValue::Null)),
-    }
-}
-
-fn resolve_create_requirement_comparison_value(
-    resource: &DynamicResource,
-    source: &PolicyComparisonValue,
-    target_field: &DynamicField,
-    payload: &Map<String, Value>,
-    effective: &HashMap<String, BoundValue>,
-    user: &UserContext,
-) -> Result<BoundValue, HttpResponse> {
-    match source {
-        PolicyComparisonValue::Source(source) => resolve_create_requirement_source_value(
-            resource,
-            source,
-            target_field,
-            payload,
-            effective,
-            user,
-        ),
-        PolicyComparisonValue::Literal(value) => Ok(bound_value_from_policy_literal(value)),
     }
 }
 
@@ -4812,6 +4571,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(title, "allowed");
+    }
+
+    #[actix_web::test]
+    async fn native_serve_checks_related_row_create_requirement() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("create_require_api.eon", false).await;
+        query("INSERT INTO family (owner_user_id, name) VALUES (11, 'mine'), (21, 'theirs')")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let app = test::init_service(
+            App::new().service(build_api_scope(dynamic_service, state.clone())),
+        )
+        .await;
+        let authorized = format!("Bearer {}", issue_token(11, &["user"]));
+
+        for (family_id, expected_status) in [
+            (2, StatusCode::FORBIDDEN),
+            (1, StatusCode::CREATED),
+        ] {
+            let request = test::TestRequest::post()
+                .uri("/api/family_member")
+                .insert_header(("Authorization", authorized.clone()))
+                .set_json(json!({
+                    "family_id": family_id,
+                    "user_id": 11,
+                    "display_name": "member"
+                }))
+                .to_request();
+            assert_eq!(
+                test::call_service(&app, request).await.status(),
+                expected_status
+            );
+        }
+        let count: i64 = query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM family_member")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     async fn seed_public_catalog(pool: &DbPool) {
