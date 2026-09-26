@@ -33,14 +33,18 @@ use serde_json::{Map, Value, json};
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use vsr_runtime::authz::policy::{PolicyFilterExpression, PolicyValueSource};
-use vsr_runtime::field::{FieldKind, GeneratedValue, RuntimeField as DynamicField};
+use vsr_runtime::field::{FieldKind, RuntimeField as DynamicField};
 use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
     workers_from_env,
 };
-use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
+use vsr_runtime::model::{self, DbBackend, StructuredScalarKind};
 use vsr_runtime::native_insert::{InsertExecutor, InsertPlan};
 use vsr_runtime::native_list::{ListPlanError, ListQueryPlan, ListScope};
+use vsr_runtime::native_mutation::{
+    HybridMutationAuthorizer, MutationAction, MutationExecutor, MutationOutcome, MutationPlan,
+    MutationPlanError, MutationStatement,
+};
 use vsr_runtime::native_policy_sql::{
     BIND_MARKER, CreatePlanError, PlanOutcome, PolicyPrincipal,
 };
@@ -1478,24 +1482,6 @@ fn is_integer_sql_type(sql_type: &str) -> bool {
     matches!(sql_type, "INTEGER" | "BIGINT")
 }
 
-fn generated_temporal_expression(db: DbBackend, field: &DynamicField) -> &'static str {
-    let kind = match field.kind {
-        FieldKind::DateTime => Some(GeneratedTemporalKind::DateTime),
-        FieldKind::Date => Some(GeneratedTemporalKind::Date),
-        FieldKind::Time => Some(GeneratedTemporalKind::Time),
-        FieldKind::Text
-            if matches!(
-                field.generated,
-                GeneratedValue::CreatedAt | GeneratedValue::UpdatedAt
-            ) =>
-        {
-            Some(compiler::GeneratedTemporalKind::DateTime)
-        }
-        _ => None,
-    };
-    db.generated_temporal_expression(kind)
-}
-
 fn type_leaf_name(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(type_path) => {
@@ -1756,6 +1742,19 @@ async fn fetch_unfiltered_by_id_with_executor<E>(
 where
     E: DbExecutor + ?Sized,
 {
+    fetch_native_row(resource, executor, id)
+        .await
+        .map_err(errors::internal_error)
+}
+
+async fn fetch_native_row<E>(
+    resource: &DynamicResource,
+    executor: &E,
+    id: i64,
+) -> Result<Option<Value>, String>
+where
+    E: DbExecutor + ?Sized,
+{
     let sql = format!(
         "SELECT * FROM {} WHERE {} = {}",
         resource.table_name,
@@ -1766,34 +1765,10 @@ where
         .bind(id)
         .fetch_optional(executor)
         .await
-        .map_err(|error| errors::internal_error(error.to_string()))?;
+        .map_err(|error| error.to_string())?;
     row.map(|row| row_to_json(resource, &row))
         .transpose()
-        .map_err(|error| errors::internal_error(error.to_string()))
-}
-
-fn audit_actor_user_id(user: &UserContext) -> Option<i64> {
-    (user.id != 0).then_some(user.id)
-}
-
-fn audit_payload_json(
-    before: Option<&Value>,
-    after: Option<&Value>,
-) -> Result<String, HttpResponse> {
-    serde_json::to_string(&match (before, after) {
-        (Some(before), Some(after)) => json!({
-            "before": before,
-            "after": after,
-        }),
-        (Some(before), None) => json!({
-            "before": before,
-        }),
-        (None, Some(after)) => json!({
-            "after": after,
-        }),
-        (None, None) => json!({}),
-    })
-    .map_err(|error| errors::internal_error(error.to_string()))
+        .map_err(|error| error.to_string())
 }
 
 async fn insert_audit_event<E>(
@@ -1808,32 +1783,36 @@ async fn insert_audit_event<E>(
 where
     E: DbExecutor + ?Sized,
 {
-    let Some(audit) = resource.audit.as_ref() else {
-        return Ok(());
+    insert_native_audit_event(
+        resource, executor, user, event_kind, record_id, before, after,
+    )
+    .await
+    .map_err(errors::internal_error)
+}
+
+async fn insert_native_audit_event<E>(
+    resource: &DynamicResource,
+    executor: &E,
+    user: &UserContext,
+    event_kind: &str,
+    record_id: i64,
+    before: Option<&Value>,
+    after: Option<&Value>,
+) -> Result<(), String>
+where
+    E: DbExecutor + ?Sized,
+{
+    let actor = vsr_runtime::native_audit::AuditActor {
+        user_id: user.id,
+        roles: &user.roles,
     };
-    let payload_json = audit_payload_json(before, after)?;
-    let actor_roles_json = serde_json::to_string(&user.roles)
-        .map_err(|error| errors::internal_error(error.to_string()))?;
-    let sql = format!(
-        "INSERT INTO {} (event_kind, resource_name, record_id, actor_user_id, actor_roles_json, payload_json) VALUES ({}, {}, {}, {}, {}, {})",
-        audit.sink_table_name,
-        placeholder(resource.db, 1),
-        placeholder(resource.db, 2),
-        placeholder(resource.db, 3),
-        placeholder(resource.db, 4),
-        placeholder(resource.db, 5),
-        placeholder(resource.db, 6),
-    );
-    query(&sql)
-        .bind(event_kind)
-        .bind(resource.resource_name.as_str())
-        .bind(record_id)
-        .bind(audit_actor_user_id(user))
-        .bind(actor_roles_json)
-        .bind(payload_json)
-        .execute(executor)
-        .await
-        .map_err(|error| errors::internal_error(error.to_string()))?;
+    if let Some(statement) = vsr_runtime::native_audit::build_audit_plan(
+        resource, &actor, event_kind, record_id, before, after,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        execute_native_statement(executor, &statement).await?;
+    }
     Ok(())
 }
 
@@ -2272,22 +2251,11 @@ async fn update_handler(
         Ok(assignments) => assignments,
         Err(error) => return write_input_error(error),
     };
-    if let Some(event_kind) = resource
+    let event_kind = resource
         .audit
         .as_ref()
-        .and_then(|audit| audit.update_event_kind(None))
-    {
-        return audited_execute_update_assignments(
-            id,
-            &user,
-            &state,
-            &resource,
-            assignments,
-            event_kind,
-        )
-        .await;
-    }
-    execute_update_assignments(id, &user, &state, &resource, assignments).await
+        .and_then(|audit| audit.update_event_kind(None));
+    execute_update_assignments(id, &user, &state, &resource, assignments, event_kind).await
 }
 
 async fn action_handler(
@@ -2307,270 +2275,187 @@ async fn action_handler(
             }
             let empty_payload = Map::new();
             let payload = payload.as_ref().unwrap_or(&empty_payload);
-            let assignments =
-                match vsr_runtime::native_write::prepare_action_update(&resource, assignments, payload) {
-                    Ok(assignments) => assignments,
-                    Err(error) => return write_input_error(error),
-                };
-            if let Some(event_kind) = resource
+            let assignments = match vsr_runtime::native_write::prepare_action_update(
+                &resource,
+                assignments,
+                payload,
+            ) {
+                Ok(assignments) => assignments,
+                Err(error) => return write_input_error(error),
+            };
+            let event_kind = resource
                 .audit
                 .as_ref()
-                .and_then(|audit| audit.update_event_kind(Some(action.name.as_str())))
-            {
-                return audited_execute_update_assignments(
-                    id,
-                    &user,
-                    &state,
-                    &resource,
-                    assignments,
-                    event_kind,
-                )
-                .await;
-            }
-            execute_update_assignments(id, &user, &state, &resource, assignments).await
+                .and_then(|audit| audit.update_event_kind(Some(action.name.as_str())));
+            execute_update_assignments(id, &user, &state, &resource, assignments, event_kind).await
         }
         DynamicResourceActionBehavior::DeleteResource => {
-            if let Some(event_kind) = resource
+            let event_kind = resource
                 .audit
                 .as_ref()
-                .and_then(|audit| audit.delete_event_kind(Some(action.name.as_str())))
-            {
-                return audited_delete_handler(id, user, state, resource, event_kind).await;
-            }
-            delete_handler(id, user, state, resource).await
+                .and_then(|audit| audit.delete_event_kind(Some(action.name.as_str())));
+            delete_with_event(id, &user, &state, &resource, event_kind.as_deref()).await
         }
     }
 }
 
-async fn audited_execute_update_assignments(
-    id: i64,
-    user: &UserContext,
-    state: &NativeServeState,
-    resource: &DynamicResource,
-    assignments: Vec<UpdateAssignment>,
-    event_kind: String,
-) -> HttpResponse {
-    if assignments.is_empty() {
-        return errors::bad_request("no_updatable_fields", "No updatable fields configured");
+async fn execute_native_statement<E>(
+    executor: &E,
+    statement: &MutationStatement,
+) -> Result<u64, String>
+where
+    E: DbExecutor + ?Sized,
+{
+    let mut statement_query = query(&statement.sql);
+    for bind in &statement.binds {
+        statement_query = bind_query(statement_query, bind);
     }
-
-    let mut assignment_sql = Vec::new();
-    let mut write_binds = Vec::new();
-    for assignment in &assignments {
-        assignment_sql.push(format!(
-            "{} = {}",
-            assignment.field_name,
-            placeholder(resource.db, write_binds.len() + 1)
-        ));
-        write_binds.push(assignment.value.clone());
-    }
-    for field in &resource.fields {
-        if field.generated == GeneratedValue::UpdatedAt {
-            assignment_sql.push(format!(
-                "{} = {}",
-                field.name,
-                generated_temporal_expression(resource.db, field)
-            ));
-        }
-    }
-
-    let assignment_sql_joined = assignment_sql.join(", ");
-    let policy = resource.policies.update.as_ref();
-    let mut sql = format!(
-        "UPDATE {} SET {} WHERE {} = {}",
-        resource.table_name,
-        assignment_sql_joined,
-        resource.id_field,
-        placeholder(resource.db, write_binds.len() + 1),
-    );
-    let mut binds = write_binds.clone();
-    if let Some(policy) = policy
-        && !(resource.policies.admin_bypass && is_admin(user))
-    {
-        match build_row_policy_plan(resource, state.dynamic_service.as_ref(), policy, user)
-            .map_err(|error| errors::internal_error(error.to_string()))
-        {
-            Ok(PlanOutcome::Resolved(plan)) => {
-                sql.push_str(" AND ");
-                sql.push_str(
-                    render_condition_with_placeholders(
-                        plan.condition.as_str(),
-                        resource.db,
-                        write_binds.len() + 2,
-                    )
-                    .as_str(),
-                );
-                binds.push(BoundValue::Integer(id));
-                binds.extend(plan.binds);
-            }
-            Ok(PlanOutcome::Indeterminate) => {
-                return audited_update_hybrid_fallback(
-                    id,
-                    user,
-                    state,
-                    resource,
-                    assignment_sql_joined,
-                    write_binds,
-                    event_kind,
-                )
-                .await;
-            }
-            Err(response) => return response,
-        }
-    } else {
-        binds.push(BoundValue::Integer(id));
-    }
-
-    let tx = match state.pool.begin().await {
-        Ok(tx) => tx,
-        Err(error) => return errors::internal_error(error.to_string()),
-    };
-    let before = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
-        Ok(item) => item,
-        Err(response) => {
-            let _ = tx.rollback().await;
-            return response;
-        }
-    };
-    let mut update_query = query(&sql);
-    for bind in &binds {
-        update_query = bind_query(update_query, bind);
-    }
-    match update_query.execute(&tx).await {
-        Ok(result) if result.rows_affected() == 0 => {
-            let _ = tx.rollback().await;
-            audited_update_hybrid_fallback(
-                id,
-                user,
-                state,
-                resource,
-                assignment_sql_joined,
-                write_binds,
-                event_kind,
-            )
-            .await
-        }
-        Ok(_) => {
-            let after = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
-                Ok(Some(item)) => item,
-                Ok(None) => {
-                    let _ = tx.rollback().await;
-                    return errors::internal_error("updated row could not be reloaded for audit");
-                }
-                Err(response) => {
-                    let _ = tx.rollback().await;
-                    return response;
-                }
-            };
-            if let Err(response) = insert_audit_event(
-                resource,
-                &tx,
-                user,
-                event_kind.as_str(),
-                id,
-                before.as_ref(),
-                Some(&after),
-            )
-            .await
-            {
-                let _ = tx.rollback().await;
-                return response;
-            }
-            if let Err(error) = tx.commit().await {
-                return errors::internal_error(error.to_string());
-            }
-            HttpResponse::Ok().finish()
-        }
-        Err(error) => {
-            let _ = tx.rollback().await;
-            errors::internal_error(error.to_string())
-        }
-    }
-}
-
-async fn audited_update_hybrid_fallback(
-    id: i64,
-    user: &UserContext,
-    state: &NativeServeState,
-    resource: &DynamicResource,
-    assignment_sql: String,
-    assignment_binds: Vec<BoundValue>,
-    event_kind: String,
-) -> HttpResponse {
-    match fetch_hybrid_authorized_by_id(resource, state, user, id, AuthorizationAction::Update)
+    statement_query
+        .execute(executor)
         .await
-    {
-        Ok(Some(_)) => {
-            let tx = match state.pool.begin().await {
-                Ok(tx) => tx,
-                Err(error) => return errors::internal_error(error.to_string()),
-            };
-            let before = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
-                Ok(item) => item,
-                Err(response) => {
-                    let _ = tx.rollback().await;
-                    return response;
-                }
-            };
-            let sql = format!(
-                "UPDATE {} SET {} WHERE {} = {}",
-                resource.table_name,
-                assignment_sql,
-                resource.id_field,
-                placeholder(resource.db, assignment_binds.len() + 1),
-            );
-            let mut update_query = query(&sql);
-            for bind in &assignment_binds {
-                update_query = bind_query(update_query, bind);
+        .map(|result| result.rows_affected())
+        .map_err(|error| error.to_string())
+}
+
+struct NativeMutationExecutor<'a> {
+    state: &'a NativeServeState,
+    resource: &'a DynamicResource,
+    user: &'a UserContext,
+    record_id: i64,
+    event_kind: Option<&'a str>,
+}
+
+impl MutationExecutor for NativeMutationExecutor<'_> {
+    async fn execute(
+        &self,
+        action: MutationAction,
+        statement: &MutationStatement,
+    ) -> Result<u64, String> {
+        let Some(event_kind) = self.event_kind else {
+            return execute_native_statement(&self.state.pool, statement).await;
+        };
+        let tx = self
+            .state
+            .pool
+            .begin()
+            .await
+            .map_err(|error| error.to_string())?;
+        let result = async {
+            let before = fetch_native_row(self.resource, &tx, self.record_id).await?;
+            let affected = execute_native_statement(&tx, statement).await?;
+            if affected == 0 {
+                return Ok(0);
             }
-            update_query = update_query.bind(id);
-            match update_query.execute(&tx).await {
-                Ok(result) if result.rows_affected() == 0 => {
-                    let _ = tx.rollback().await;
-                    errors::not_found("Not found")
-                }
-                Ok(_) => {
-                    let after = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await
-                    {
-                        Ok(Some(item)) => item,
-                        Ok(None) => {
-                            let _ = tx.rollback().await;
-                            return errors::internal_error(
-                                "updated row could not be reloaded for audit",
-                            );
-                        }
-                        Err(response) => {
-                            let _ = tx.rollback().await;
-                            return response;
-                        }
-                    };
-                    if let Err(response) = insert_audit_event(
-                        resource,
-                        &tx,
-                        user,
-                        event_kind.as_str(),
-                        id,
-                        before.as_ref(),
-                        Some(&after),
-                    )
-                    .await
-                    {
-                        let _ = tx.rollback().await;
-                        return response;
+            let after = match action {
+                MutationAction::Update => Some(
+                    fetch_native_row(self.resource, &tx, self.record_id)
+                        .await?
+                        .ok_or_else(|| "updated row could not be reloaded for audit".to_owned())?,
+                ),
+                MutationAction::Delete => {
+                    if before.is_none() {
+                        return Err("deleted row could not be reloaded for audit".to_owned());
                     }
-                    if let Err(error) = tx.commit().await {
-                        return errors::internal_error(error.to_string());
-                    }
-                    HttpResponse::Ok().finish()
+                    None
                 }
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    errors::internal_error(error.to_string())
-                }
+            };
+            insert_native_audit_event(
+                self.resource,
+                &tx,
+                self.user,
+                event_kind,
+                self.record_id,
+                before.as_ref(),
+                after.as_ref(),
+            )
+            .await?;
+            Ok(affected)
+        }
+        .await;
+        match result {
+            Ok(0) => {
+                tx.rollback().await.map_err(|error| error.to_string())?;
+                Ok(0)
+            }
+            Ok(affected) => {
+                tx.commit().await.map_err(|error| error.to_string())?;
+                Ok(affected)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
             }
         }
-        Ok(None) => errors::not_found("Not found"),
-        Err(response) => response,
+    }
+}
+
+struct NativeMutationAuthorizer<'a> {
+    state: &'a NativeServeState,
+    resource: &'a DynamicResource,
+    user: &'a UserContext,
+}
+
+impl HybridMutationAuthorizer for NativeMutationAuthorizer<'_> {
+    async fn allows(&self, action: MutationAction, record_id: i64) -> Result<bool, String> {
+        let action = match action {
+            MutationAction::Update => AuthorizationAction::Update,
+            MutationAction::Delete => AuthorizationAction::Delete,
+        };
+        if !self.resource.supports_hybrid_action(action) {
+            return Ok(false);
+        }
+        let Some(item) = fetch_native_row(self.resource, &self.state.pool, record_id).await? else {
+            return Ok(false);
+        };
+        let Some(scope) = current_row_scope_binding(self.resource, &item) else {
+            return Ok(false);
+        };
+        self.state
+            .authorization_runtime
+            .evaluate_runtime_access_for_user(
+                self.user.id,
+                self.resource.resource_name.as_str(),
+                action,
+                scope,
+            )
+            .await
+            .map(|decision| decision.allowed)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn mutation_plan_error(error: MutationPlanError) -> HttpResponse {
+    match error {
+        MutationPlanError::NoUpdatableFields => {
+            errors::bad_request("no_updatable_fields", "No updatable fields configured")
+        }
+        MutationPlanError::InvalidDescriptor(message) => errors::internal_error(message),
+    }
+}
+
+async fn execute_native_mutation(
+    plan: &MutationPlan,
+    user: &UserContext,
+    state: &NativeServeState,
+    resource: &DynamicResource,
+    event_kind: Option<&str>,
+) -> HttpResponse {
+    let executor = NativeMutationExecutor {
+        state,
+        resource,
+        user,
+        record_id: plan.record_id,
+        event_kind,
+    };
+    let authorizer = NativeMutationAuthorizer {
+        state,
+        resource,
+        user,
+    };
+    match vsr_runtime::native_mutation::execute_mutation(plan, &executor, &authorizer).await {
+        Ok(MutationOutcome::Applied) => HttpResponse::Ok().finish(),
+        Ok(MutationOutcome::NotFound) => errors::not_found("Not found"),
+        Err(error) => errors::internal_error(error),
     }
 }
 
@@ -2580,351 +2465,51 @@ async fn execute_update_assignments(
     state: &NativeServeState,
     resource: &DynamicResource,
     assignments: Vec<UpdateAssignment>,
+    event_kind: Option<String>,
 ) -> HttpResponse {
-    if assignments.is_empty() {
-        return errors::bad_request("no_updatable_fields", "No updatable fields configured");
-    }
-
-    let mut assignment_sql = Vec::new();
-    let mut write_binds = Vec::new();
-    for assignment in &assignments {
-        assignment_sql.push(format!(
-            "{} = {}",
-            assignment.field_name,
-            placeholder(resource.db, write_binds.len() + 1)
-        ));
-        write_binds.push(assignment.value.clone());
-    }
-    for field in &resource.fields {
-        if field.generated == GeneratedValue::UpdatedAt {
-            assignment_sql.push(format!(
-                "{} = {}",
-                field.name,
-                generated_temporal_expression(resource.db, field)
-            ));
-        }
-    }
-
-    let assignment_sql_joined = assignment_sql.join(", ");
-    let policy = resource.policies.update.as_ref();
-    let mut sql = format!(
-        "UPDATE {} SET {} WHERE {} = {}",
-        resource.table_name,
-        assignment_sql_joined,
-        resource.id_field,
-        placeholder(resource.db, write_binds.len() + 1),
-    );
-    let mut binds = write_binds.clone();
-    if let Some(policy) = policy
-        && !(resource.policies.admin_bypass && is_admin(user))
-    {
-        match build_row_policy_plan(resource, state.dynamic_service.as_ref(), policy, user)
-            .map_err(|error| errors::internal_error(error.to_string()))
-        {
-            Ok(PlanOutcome::Resolved(plan)) => {
-                sql.push_str(" AND ");
-                sql.push_str(
-                    render_condition_with_placeholders(
-                        plan.condition.as_str(),
-                        resource.db,
-                        write_binds.len() + 2,
-                    )
-                    .as_str(),
-                );
-                binds.push(BoundValue::Integer(id));
-                binds.extend(plan.binds);
-            }
-            Ok(PlanOutcome::Indeterminate) => {
-                return update_hybrid_fallback(
-                    id,
-                    user,
-                    state,
-                    resource,
-                    assignment_sql_joined,
-                    write_binds,
-                )
-                .await;
-            }
-            Err(response) => return response,
-        }
-    } else {
-        binds.push(BoundValue::Integer(id));
-    }
-
-    let mut update_query = query(&sql);
-    for bind in &binds {
-        update_query = bind_query(update_query, bind);
-    }
-    match update_query.execute(&state.pool).await {
-        Ok(result) if result.rows_affected() == 0 => {
-            update_hybrid_fallback(
-                id,
-                user,
-                state,
-                resource,
-                assignment_sql_joined,
-                write_binds,
-            )
-            .await
-        }
-        Ok(_) => HttpResponse::Ok().finish(),
-        Err(error) => errors::internal_error(error.to_string()),
-    }
+    let principal = PolicyPrincipal {
+        user_id: user.id,
+        claims: &user.claims,
+    };
+    let plan = match vsr_runtime::native_mutation::build_update_plan(
+        resource,
+        &state.dynamic_service.resources,
+        &assignments,
+        id,
+        &principal,
+        is_admin(user),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => return mutation_plan_error(error),
+    };
+    execute_native_mutation(&plan, user, state, resource, event_kind.as_deref()).await
 }
 
-async fn update_hybrid_fallback(
+async fn delete_with_event(
     id: i64,
     user: &UserContext,
     state: &NativeServeState,
     resource: &DynamicResource,
-    assignment_sql: String,
-    assignment_binds: Vec<BoundValue>,
+    event_kind: Option<&str>,
 ) -> HttpResponse {
-    match fetch_hybrid_authorized_by_id(resource, state, user, id, AuthorizationAction::Update)
-        .await
-    {
-        Ok(Some(_)) => {
-            let sql = format!(
-                "UPDATE {} SET {} WHERE {} = {}",
-                resource.table_name,
-                assignment_sql,
-                resource.id_field,
-                placeholder(resource.db, assignment_binds.len() + 1),
-            );
-            let mut query = query(&sql);
-            for bind in &assignment_binds {
-                query = bind_query(query, bind);
-            }
-            query = query.bind(id);
-            match query.execute(&state.pool).await {
-                Ok(result) if result.rows_affected() == 0 => errors::not_found("Not found"),
-                Ok(_) => HttpResponse::Ok().finish(),
-                Err(error) => errors::internal_error(error.to_string()),
-            }
-        }
-        Ok(None) => errors::not_found("Not found"),
-        Err(response) => response,
-    }
-}
-
-async fn audited_delete_handler(
-    id: i64,
-    user: UserContext,
-    state: web::Data<NativeServeState>,
-    resource: Arc<DynamicResource>,
-    event_kind: String,
-) -> HttpResponse {
-    if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Delete))
-    {
+    if let Err(response) = require_role(user, resource.requires_role(AuthorizationAction::Delete)) {
         return response;
     }
-    if resource.policies.delete.is_none() || (resource.policies.admin_bypass && is_admin(&user)) {
-        let tx = match state.pool.begin().await {
-            Ok(tx) => tx,
-            Err(error) => return errors::internal_error(error.to_string()),
-        };
-        let before = match fetch_unfiltered_by_id_with_executor(&resource, &tx, id).await {
-            Ok(Some(item)) => item,
-            Ok(None) => {
-                let _ = tx.rollback().await;
-                return errors::not_found("Not found");
-            }
-            Err(response) => {
-                let _ = tx.rollback().await;
-                return response;
-            }
-        };
-        let sql = format!(
-            "DELETE FROM {} WHERE {} = {}",
-            resource.table_name,
-            resource.id_field,
-            placeholder(resource.db, 1),
-        );
-        match query(&sql).bind(id).execute(&tx).await {
-            Ok(result) if result.rows_affected() == 0 => {
-                let _ = tx.rollback().await;
-                errors::not_found("Not found")
-            }
-            Ok(_) => {
-                if let Err(response) = insert_audit_event(
-                    &resource,
-                    &tx,
-                    &user,
-                    event_kind.as_str(),
-                    id,
-                    Some(&before),
-                    None,
-                )
-                .await
-                {
-                    let _ = tx.rollback().await;
-                    return response;
-                }
-                if let Err(error) = tx.commit().await {
-                    return errors::internal_error(error.to_string());
-                }
-                HttpResponse::Ok().finish()
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                errors::internal_error(error.to_string())
-            }
-        }
-    } else {
-        match build_row_policy_plan(
-            &resource,
-            state.dynamic_service.as_ref(),
-            resource
-                .policies
-                .delete
-                .as_ref()
-                .expect("delete policy checked"),
-            &user,
-        )
-        .map_err(|error| errors::internal_error(error.to_string()))
-        {
-            Ok(PlanOutcome::Resolved(plan)) => {
-                let tx = match state.pool.begin().await {
-                    Ok(tx) => tx,
-                    Err(error) => return errors::internal_error(error.to_string()),
-                };
-                let before = match fetch_unfiltered_by_id_with_executor(&resource, &tx, id).await {
-                    Ok(item) => item,
-                    Err(response) => {
-                        let _ = tx.rollback().await;
-                        return response;
-                    }
-                };
-                let sql = format!(
-                    "DELETE FROM {} WHERE {} = {} AND {}",
-                    resource.table_name,
-                    resource.id_field,
-                    placeholder(resource.db, 1),
-                    render_condition_with_placeholders(plan.condition.as_str(), resource.db, 2),
-                );
-                let mut delete_query = query(&sql).bind(id);
-                for bind in &plan.binds {
-                    delete_query = bind_query(delete_query, bind);
-                }
-                match delete_query.execute(&tx).await {
-                    Ok(result) if result.rows_affected() == 0 => {
-                        let _ = tx.rollback().await;
-                        audited_delete_hybrid_fallback(
-                            id,
-                            &user,
-                            state.get_ref(),
-                            &resource,
-                            event_kind,
-                        )
-                        .await
-                    }
-                    Ok(_) => {
-                        let Some(before) = before else {
-                            let _ = tx.rollback().await;
-                            return errors::internal_error(
-                                "deleted row could not be reloaded for audit",
-                            );
-                        };
-                        if let Err(response) = insert_audit_event(
-                            &resource,
-                            &tx,
-                            &user,
-                            event_kind.as_str(),
-                            id,
-                            Some(&before),
-                            None,
-                        )
-                        .await
-                        {
-                            let _ = tx.rollback().await;
-                            return response;
-                        }
-                        if let Err(error) = tx.commit().await {
-                            return errors::internal_error(error.to_string());
-                        }
-                        HttpResponse::Ok().finish()
-                    }
-                    Err(error) => {
-                        let _ = tx.rollback().await;
-                        errors::internal_error(error.to_string())
-                    }
-                }
-            }
-            Ok(PlanOutcome::Indeterminate) => {
-                audited_delete_hybrid_fallback(id, &user, state.get_ref(), &resource, event_kind)
-                    .await
-            }
-            Err(response) => response,
-        }
-    }
-}
-
-async fn audited_delete_hybrid_fallback(
-    id: i64,
-    user: &UserContext,
-    state: &NativeServeState,
-    resource: &DynamicResource,
-    event_kind: String,
-) -> HttpResponse {
-    match fetch_hybrid_authorized_by_id(resource, state, user, id, AuthorizationAction::Delete)
-        .await
-    {
-        Ok(Some(_)) => {
-            let tx = match state.pool.begin().await {
-                Ok(tx) => tx,
-                Err(error) => return errors::internal_error(error.to_string()),
-            };
-            let before = match fetch_unfiltered_by_id_with_executor(resource, &tx, id).await {
-                Ok(Some(item)) => item,
-                Ok(None) => {
-                    let _ = tx.rollback().await;
-                    return errors::not_found("Not found");
-                }
-                Err(response) => {
-                    let _ = tx.rollback().await;
-                    return response;
-                }
-            };
-            let sql = format!(
-                "DELETE FROM {} WHERE {} = {}",
-                resource.table_name,
-                resource.id_field,
-                placeholder(resource.db, 1)
-            );
-            match query(&sql).bind(id).execute(&tx).await {
-                Ok(result) if result.rows_affected() == 0 => {
-                    let _ = tx.rollback().await;
-                    errors::not_found("Not found")
-                }
-                Ok(_) => {
-                    if let Err(response) = insert_audit_event(
-                        resource,
-                        &tx,
-                        user,
-                        event_kind.as_str(),
-                        id,
-                        Some(&before),
-                        None,
-                    )
-                    .await
-                    {
-                        let _ = tx.rollback().await;
-                        return response;
-                    }
-                    if let Err(error) = tx.commit().await {
-                        return errors::internal_error(error.to_string());
-                    }
-                    HttpResponse::Ok().finish()
-                }
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    errors::internal_error(error.to_string())
-                }
-            }
-        }
-        Ok(None) => errors::not_found("Not found"),
-        Err(response) => response,
-    }
+    let principal = PolicyPrincipal {
+        user_id: user.id,
+        claims: &user.claims,
+    };
+    let plan = match vsr_runtime::native_mutation::build_delete_plan(
+        resource,
+        &state.dynamic_service.resources,
+        id,
+        &principal,
+        is_admin(user),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => return mutation_plan_error(error),
+    };
+    execute_native_mutation(&plan, user, state, resource, event_kind).await
 }
 
 async fn delete_handler(
@@ -2933,95 +2518,11 @@ async fn delete_handler(
     state: web::Data<NativeServeState>,
     resource: Arc<DynamicResource>,
 ) -> HttpResponse {
-    if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Delete))
-    {
-        return response;
-    }
-    if let Some(event_kind) = resource
+    let event_kind = resource
         .audit
         .as_ref()
-        .and_then(|audit| audit.delete_event_kind(None))
-    {
-        return audited_delete_handler(id, user, state, resource, event_kind).await;
-    }
-    if resource.policies.delete.is_none() || (resource.policies.admin_bypass && is_admin(&user)) {
-        let sql = format!(
-            "DELETE FROM {} WHERE {} = {}",
-            resource.table_name,
-            resource.id_field,
-            placeholder(resource.db, 1),
-        );
-        return match query(&sql).bind(id).execute(&state.pool).await {
-            Ok(result) if result.rows_affected() == 0 => errors::not_found("Not found"),
-            Ok(_) => HttpResponse::Ok().finish(),
-            Err(error) => errors::internal_error(error.to_string()),
-        };
-    }
-
-    match build_row_policy_plan(
-        &resource,
-        state.dynamic_service.as_ref(),
-        resource
-            .policies
-            .delete
-            .as_ref()
-            .expect("delete policy checked"),
-        &user,
-    )
-    .map_err(|error| errors::internal_error(error.to_string()))
-    {
-        Ok(PlanOutcome::Resolved(plan)) => {
-            let sql = format!(
-                "DELETE FROM {} WHERE {} = {} AND {}",
-                resource.table_name,
-                resource.id_field,
-                placeholder(resource.db, 1),
-                render_condition_with_placeholders(plan.condition.as_str(), resource.db, 2),
-            );
-            let mut delete_query = query(&sql).bind(id);
-            for bind in &plan.binds {
-                delete_query = bind_query(delete_query, bind);
-            }
-            match delete_query.execute(&state.pool).await {
-                Ok(result) if result.rows_affected() == 0 => {
-                    delete_hybrid_fallback(id, &user, &state, &resource).await
-                }
-                Ok(_) => HttpResponse::Ok().finish(),
-                Err(error) => errors::internal_error(error.to_string()),
-            }
-        }
-        Ok(PlanOutcome::Indeterminate) => {
-            delete_hybrid_fallback(id, &user, &state, &resource).await
-        }
-        Err(response) => response,
-    }
-}
-
-async fn delete_hybrid_fallback(
-    id: i64,
-    user: &UserContext,
-    state: &NativeServeState,
-    resource: &DynamicResource,
-) -> HttpResponse {
-    match fetch_hybrid_authorized_by_id(resource, state, user, id, AuthorizationAction::Delete)
-        .await
-    {
-        Ok(Some(_)) => {
-            let sql = format!(
-                "DELETE FROM {} WHERE {} = {}",
-                resource.table_name,
-                resource.id_field,
-                placeholder(resource.db, 1)
-            );
-            match query(&sql).bind(id).execute(&state.pool).await {
-                Ok(result) if result.rows_affected() == 0 => errors::not_found("Not found"),
-                Ok(_) => HttpResponse::Ok().finish(),
-                Err(error) => errors::internal_error(error.to_string()),
-            }
-        }
-        Ok(None) => errors::not_found("Not found"),
-        Err(response) => response,
-    }
+        .and_then(|audit| audit.delete_event_kind(None));
+    delete_with_event(id, &user, &state, &resource, event_kind.as_deref()).await
 }
 
 #[cfg(test)]
@@ -3994,6 +3495,486 @@ mod tests {
         .execute(pool)
         .await
         .expect("interest seed data should insert");
+    }
+
+
+    #[actix_web::test]
+    async fn native_serve_hybrid_mutations_enforce_scope_and_audit_once() {
+        use rest_macro_core::authorization::{
+            AuthorizationScopeBinding, AuthorizationScopedAssignmentRecord,
+            AuthorizationScopedAssignmentTarget, insert_runtime_assignment,
+        };
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        for audited in [false, true] {
+            let (service, mut state) = build_test_state("hybrid_runtime_api.eon", false).await;
+            state
+                .pool
+                .execute_batch(
+                    &rest_macro_core::authorization::authorization_runtime_migration_sql(
+                        auth::AuthDbBackend::Sqlite,
+                    ),
+                )
+                .await
+                .unwrap();
+            state.pool.execute_batch("CREATE TABLE mutation_audit (id INTEGER PRIMARY KEY, event_kind TEXT, resource_name TEXT, record_id INTEGER, actor_user_id INTEGER, actor_roles_json TEXT, payload_json TEXT); INSERT INTO family (id) VALUES (42), (43); INSERT INTO scoped_doc (id, user_id, family_id, title) VALUES (1,21,42,'old'), (2,21,43,'foreign');").await.unwrap();
+            let mut service = service.as_ref().clone();
+            if audited {
+                let resource = service
+                    .model
+                    .resources
+                    .iter_mut()
+                    .find(|resource| resource.resource_name == "ScopedDoc")
+                    .unwrap();
+                Arc::make_mut(resource).audit =
+                    Some(vsr_runtime::native_resource::RuntimeAuditConfig {
+                        sink_table_name: "mutation_audit".into(),
+                        create: false,
+                        update: true,
+                        delete: true,
+                        actions: None,
+                    });
+            }
+            let service = Arc::new(service);
+            state.dynamic_service = service.clone();
+            let app =
+                test::init_service(App::new().service(build_api_scope(service, state.clone()))).await;
+            let token = encode(
+                &Header::default(),
+                &json!({
+                    "sub": 11, "roles": ["member"], "exp": 4_102_444_800_u64,
+                    "iss":"hybrid_runtime_tests", "aud":"hybrid_runtime_clients",
+                }),
+                &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+            )
+            .unwrap();
+            let auth = ("Authorization", format!("Bearer {token}"));
+            let update = |id| {
+                test::TestRequest::put()
+                    .uri(&format!("/api/scoped_doc/{id}"))
+                    .insert_header(auth.clone())
+                    .set_json(json!({"title":"new"}))
+                    .to_request()
+            };
+            let delete = |id| {
+                test::TestRequest::delete()
+                    .uri(&format!("/api/scoped_doc/{id}"))
+                    .insert_header(auth.clone())
+                    .to_request()
+            };
+            assert_eq!(
+                test::call_service(&app, update(1)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                test::call_service(&app, delete(1)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            let grant = |target| {
+                AuthorizationScopedAssignmentRecord::new(
+                    11,
+                    target,
+                    AuthorizationScopeBinding {
+                        scope: "Family".into(),
+                        value: "42".into(),
+                    },
+                )
+            };
+            insert_runtime_assignment(
+                &state.pool,
+                &grant(AuthorizationScopedAssignmentTarget::Permission {
+                    name: "FamilyRead".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                test::call_service(&app, update(1)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                test::call_service(&app, delete(1)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            insert_runtime_assignment(
+                &state.pool,
+                &grant(AuthorizationScopedAssignmentTarget::Template {
+                    name: "FamilyMember".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                test::call_service(&app, update(2)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                test::call_service(&app, delete(2)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM mutation_audit")
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap(),
+                0
+            );
+            if audited {
+                state.pool.execute_batch("CREATE TRIGGER reject_audit BEFORE INSERT ON mutation_audit BEGIN SELECT RAISE(FAIL, 'audit unavailable'); END;").await.unwrap();
+                assert_eq!(
+                    test::call_service(&app, update(1)).await.status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
+                assert_eq!(
+                    test::call_service(&app, delete(1)).await.status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
+                assert_eq!(
+                    query_scalar::<sqlx::Any, String>("SELECT title FROM scoped_doc WHERE id=1")
+                        .fetch_one(&state.pool)
+                        .await
+                        .unwrap(),
+                    "old"
+                );
+                state
+                    .pool
+                    .execute_batch("DROP TRIGGER reject_audit")
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                test::call_service(&app, update(1)).await.status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                query_scalar::<sqlx::Any, String>("SELECT title FROM scoped_doc WHERE id=1")
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap(),
+                "new"
+            );
+            assert_eq!(
+                test::call_service(&app, delete(1)).await.status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                test::call_service(&app, delete(1)).await.status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                query_scalar::<sqlx::Any, String>("SELECT title FROM scoped_doc WHERE id=2")
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap(),
+                "foreign"
+            );
+            let rows =
+                query("SELECT event_kind, actor_user_id, payload_json FROM mutation_audit ORDER BY id")
+                    .fetch_all(&state.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rows.len(), if audited { 2 } else { 0 });
+            if audited {
+                assert_eq!(
+                    rows[0].try_get::<String, _>("event_kind").unwrap(),
+                    "update"
+                );
+                assert_eq!(
+                    rows[1].try_get::<String, _>("event_kind").unwrap(),
+                    "delete"
+                );
+                assert!(
+                    rows.iter()
+                        .all(|row| row.try_get::<i64, _>("actor_user_id").unwrap() == 11)
+                );
+                let payload: Value =
+                    serde_json::from_str(&rows[0].try_get::<String, _>("payload_json").unwrap())
+                        .unwrap();
+                assert_eq!(payload["before"]["title"], "old");
+                assert_eq!(payload["after"]["title"], "new");
+                let payload: Value =
+                    serde_json::from_str(&rows[1].try_get::<String, _>("payload_json").unwrap())
+                        .unwrap();
+                assert_eq!(payload["before"]["title"], "new");
+                assert!(payload.get("after").is_none());
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn native_serve_audit_failure_rolls_back_create_update_and_delete() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (service, state) = build_test_state("audit_events_api.eon", false).await;
+        let app = test::init_service(App::new().service(build_api_scope(service, state.clone()))).await;
+        let auth = (
+            "Authorization",
+            format!("Bearer {}", issue_token(7, &["user"])),
+        );
+        let create = || {
+            test::TestRequest::post()
+                .uri("/api/posts")
+                .insert_header(auth.clone())
+                .set_json(json!({"title":"old"}))
+                .to_request()
+        };
+        assert_eq!(
+            test::call_service(&app, create()).await.status(),
+            StatusCode::CREATED
+        );
+        state.pool.execute_batch("CREATE TRIGGER reject_audit BEFORE INSERT ON audit_event BEGIN SELECT RAISE(FAIL, 'audit unavailable'); END;").await.unwrap();
+        assert_eq!(
+            test::call_service(&app, create()).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let update = test::TestRequest::put()
+            .uri("/api/posts/1")
+            .insert_header(auth.clone())
+            .set_json(json!({"title":"new"}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, update).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let delete = test::TestRequest::delete()
+            .uri("/api/posts/1")
+            .insert_header(auth)
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, delete).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM post")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            query_scalar::<sqlx::Any, String>("SELECT title FROM post WHERE id=1")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap(),
+            "old"
+        );
+        assert_eq!(
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM audit_event")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires VSR_TEST_DATABASE_URL with an isolated PostgreSQL or MySQL database"]
+    async fn server_database_native_audited_mutations() {
+        use vsr_runtime::authz::policy::{
+            PolicyComparisonValue, PolicyFilter, PolicyFilterExpression, PolicyFilterOperator,
+            PolicyValueSource,
+        };
+        let database_url = std::env::var("VSR_TEST_DATABASE_URL").expect("database URL is required");
+        let backend = if database_url.starts_with("postgres") {
+            vsr_runtime::model::DbBackend::Postgres
+        } else if database_url.starts_with("mysql") {
+            vsr_runtime::model::DbBackend::Mysql
+        } else {
+            panic!("expected PostgreSQL or MySQL")
+        };
+        let pool = DbPool::connect(&database_url).await.unwrap();
+        let spec = compiler::load_service_from_path(&fixture_path("audit_events_api.eon")).unwrap();
+        let authz = compiler::compile_service_authorization(&spec);
+        let mut service = DynamicService::from_spec(spec, "{}".into(), false, None).unwrap();
+        let mut resource = service
+            .resources
+            .iter()
+            .find(|resource| resource.resource_name == "Post")
+            .unwrap()
+            .as_ref()
+            .clone();
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        resource.db = backend;
+        resource.table_name = format!("vsr_mutation_{suffix}");
+        let audit_table = format!("vsr_audit_{suffix}");
+        resource.audit.as_mut().unwrap().sink_table_name = audit_table.clone();
+        let policy = PolicyFilterExpression::Match(PolicyFilter {
+            field: "id".into(),
+            operator: PolicyFilterOperator::Equals(PolicyComparisonValue::Source(
+                PolicyValueSource::Claim("target_id".into()),
+            )),
+        });
+        resource.policies.update = Some(policy.clone());
+        resource.policies.delete = Some(policy);
+        service.model.resources = vec![Arc::new(resource.clone())];
+        let state = NativeServeState {
+            pool: pool.clone(),
+            authorization_runtime: AuthorizationRuntime::new(authz, pool.clone()),
+            dynamic_service: Arc::new(service),
+        };
+        query(&format!("CREATE TABLE {} ({}, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",resource.table_name,backend.primary_key_sql("id"))).execute(&pool).await.unwrap();
+        let create_audit = format!(
+            "CREATE TABLE {audit_table} ({}, event_kind TEXT NOT NULL, resource_name TEXT NOT NULL, record_id BIGINT NOT NULL, actor_user_id BIGINT, actor_roles_json TEXT NOT NULL, payload_json TEXT NOT NULL)",
+            backend.primary_key_sql("id")
+        );
+        let result: Result<(), String> = async {
+            query(&create_audit)
+                .execute(&pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            let prepared = vsr_runtime::native_write::PreparedCreate {
+                assignments: vec![
+                    vsr_runtime::native_write::WriteAssignment {
+                        field_name: "title".into(),
+                        value: BoundValue::Text("old".into()),
+                    },
+                    vsr_runtime::native_write::WriteAssignment {
+                        field_name: "created_at".into(),
+                        value: BoundValue::Text("seed".into()),
+                    },
+                    vsr_runtime::native_write::WriteAssignment {
+                        field_name: "updated_at".into(),
+                        value: BoundValue::Text("seed".into()),
+                    },
+                ],
+            };
+            let id = vsr_runtime::native_insert::execute_insert(
+                &resource,
+                &prepared,
+                &super::NativeInsertExecutor(&pool),
+            )
+            .await?
+            .ok_or("ID required")?;
+            let mut user = auth::UserContext {
+                id: 7,
+                roles: vec![],
+                claims: std::collections::BTreeMap::from([("target_id".into(), json!(id + 1))]),
+            };
+            let assignments = || {
+                vec![vsr_runtime::native_write::WriteAssignment {
+                    field_name: "title".into(),
+                    value: BoundValue::Text("new".into()),
+                }]
+            };
+            let denied = super::execute_update_assignments(
+                id,
+                &user,
+                &state,
+                &resource,
+                assignments(),
+                Some("update".into()),
+            )
+            .await;
+            if denied.status() != StatusCode::NOT_FOUND {
+                return Err(format!("denied update: {}", denied.status()));
+            }
+            user.claims.insert("target_id".into(), json!(id));
+            let updated = super::execute_update_assignments(
+                id,
+                &user,
+                &state,
+                &resource,
+                assignments(),
+                Some("action:rename".into()),
+            )
+            .await;
+            if updated.status() != StatusCode::OK {
+                return Err(format!("authorized update: {}", updated.status()));
+            }
+            let payload =
+                query_scalar::<sqlx::Any, String>(&format!("SELECT payload_json FROM {audit_table}"))
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let payload: Value = serde_json::from_str(&payload).map_err(|error| error.to_string())?;
+            if payload["before"]["title"] != "old" || payload["after"]["title"] != "new" {
+                return Err("audit snapshots incorrect".into());
+            }
+            query(&format!("DROP TABLE {audit_table}"))
+                .execute(&pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            let failed = super::execute_update_assignments(
+                id,
+                &user,
+                &state,
+                &resource,
+                vec![vsr_runtime::native_write::WriteAssignment {
+                    field_name: "title".into(),
+                    value: BoundValue::Text("rollback".into()),
+                }],
+                Some("update".into()),
+            )
+            .await;
+            if failed.status() != StatusCode::INTERNAL_SERVER_ERROR {
+                return Err("missing audit sink must fail update".into());
+            }
+            let failed = super::delete_with_event(id, &user, &state, &resource, Some("delete")).await;
+            if failed.status() != StatusCode::INTERNAL_SERVER_ERROR {
+                return Err("missing audit sink must fail delete".into());
+            }
+            let title = query_scalar::<sqlx::Any, String>(&format!(
+                "SELECT title FROM {} WHERE id = {}",
+                resource.table_name,
+                backend.placeholder(1)
+            ))
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+            if title != "new" {
+                return Err("failed audit did not roll back resource mutation".into());
+            }
+            query(&create_audit)
+                .execute(&pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            let deleted = super::delete_with_event(id, &user, &state, &resource, Some("delete")).await;
+            if deleted.status() != StatusCode::OK {
+                return Err(format!("authorized delete: {}", deleted.status()));
+            }
+            let count = query_scalar::<sqlx::Any, i64>(&format!(
+                "SELECT COUNT(*) FROM {}",
+                resource.table_name
+            ))
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+            if count != 0 {
+                return Err("successful delete must remove row".into());
+            }
+            let count = query_scalar::<sqlx::Any, i64>(&format!("SELECT COUNT(*) FROM {audit_table}"))
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            if count != 1 {
+                return Err("successful delete must write one event".into());
+            }
+            Ok(())
+        }
+        .await;
+        let resource_cleanup = query(&format!("DROP TABLE {}", resource.table_name))
+            .execute(&pool)
+            .await;
+        let audit_cleanup = query(&format!("DROP TABLE IF EXISTS {audit_table}"))
+            .execute(&pool)
+            .await;
+        result.expect("native audited mutation and rollback should succeed");
+        resource_cleanup.unwrap();
+        audit_cleanup.unwrap();
     }
 
     #[actix_web::test]

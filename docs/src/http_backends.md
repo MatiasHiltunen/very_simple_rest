@@ -607,5 +607,19 @@ second claim resolution or scoped grant lookup.
 
 `vsr-runtime::native_insert` builds and dispatches native insert statements
 through an executor trait. A CLI database adapter runs the same plan against a
-pool or an existing audit transaction. Update/delete execution, audit
-transactions, and the other hybrid authorization paths still need migration.
+pool or an existing audit transaction.
+
+`vsr-runtime::native_mutation` now plans updates and deletes, including generated
+timestamps and row-policy bind ordering. Its shared dispatcher attempts the row
+policy first and consults a hybrid grant only when the policy misses or cannot
+resolve a required claim. Grant and database errors stop dispatch. Regular CRUD
+and custom actions use the same executor boundary.
+
+`vsr-runtime::native_audit` serializes actors and row snapshots and builds the
+audit insert. The CLI database adapter commits a successful mutation together
+with its audit event and rolls back failed or unmatched attempts before hybrid
+dispatch continues. Native HTTP coverage exercises denied scopes, read-only
+grants, successful hybrid mutations, and rollback on audit failures. CI also
+exercises audited update/delete plans and rollback on PostgreSQL and MySQL.
+Transaction lifecycle adapters and hybrid read/list orchestration still need
+migration, alongside streaming and general native/emitted backend selection.
