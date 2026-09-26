@@ -5,8 +5,10 @@ use std::{future::Future, sync::Arc};
 use crate::{
     authz::policy::PolicyFilterExpression,
     field::{FieldKind, GeneratedValue},
-    model::{DbBackend, GeneratedTemporalKind},
-    native_policy_sql::{BIND_MARKER, PlanOutcome, PolicyPrincipal, build_row_policy_plan},
+    model::GeneratedTemporalKind,
+    native_policy_sql::{
+        PlanOutcome, PolicyPrincipal, build_row_policy_plan, render_condition_with_placeholders,
+    },
     native_resource::{RuntimeBoundValue, RuntimeResource},
     native_write::WriteAssignment,
 };
@@ -191,7 +193,7 @@ fn build_plan(
         PlanOutcome::Resolved(policy) => {
             let mut statement = unfiltered.clone();
             statement.sql.push_str(" AND ");
-            statement.sql.push_str(&render_condition(
+            statement.sql.push_str(&render_condition_with_placeholders(
                 &policy.condition,
                 resource.db,
                 statement.binds.len() + 1,
@@ -207,19 +209,6 @@ fn build_plan(
         direct,
         hybrid: Some(unfiltered),
     })
-}
-
-fn render_condition(condition: &str, db: DbBackend, mut index: usize) -> String {
-    let mut rendered = String::new();
-    let mut remaining = condition;
-    while let Some(position) = remaining.find(BIND_MARKER) {
-        rendered.push_str(&remaining[..position]);
-        rendered.push_str(&db.placeholder(index));
-        remaining = &remaining[position + BIND_MARKER.len()..];
-        index += 1;
-    }
-    rendered.push_str(remaining);
-    rendered
 }
 
 /// Execute the direct policy first, then consult hybrid grants only on a miss.
@@ -258,6 +247,7 @@ mod tests {
             },
         },
         field::{FieldValidation, RuntimeField},
+        model::DbBackend,
         native_resource::{RuntimeAuditConfig, RuntimeCreateFieldRule},
     };
     use serde_json::json;

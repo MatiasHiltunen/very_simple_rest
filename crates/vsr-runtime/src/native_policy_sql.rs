@@ -14,11 +14,31 @@ use crate::{
         PolicyFilterOperator, PolicyLiteralValue, PolicyValueSource,
     },
     field::{FieldKind, RuntimeField},
+    model::DbBackend,
     native_resource::{RuntimeBoundValue, RuntimeResource},
 };
 
 /// Symbolic placeholder used while native SQL predicates are assembled.
 pub const BIND_MARKER: &str = "__vsr_bind__";
+
+/// Replace symbolic policy markers with dialect placeholders starting at a one-based index.
+pub fn render_condition_with_placeholders(
+    condition: &str,
+    backend: DbBackend,
+    start_index: usize,
+) -> String {
+    let mut rendered = String::new();
+    let mut remaining = condition;
+    let mut index = start_index;
+    while let Some(position) = remaining.find(BIND_MARKER) {
+        rendered.push_str(&remaining[..position]);
+        rendered.push_str(&backend.placeholder(index));
+        remaining = &remaining[position + BIND_MARKER.len()..];
+        index += 1;
+    }
+    rendered.push_str(remaining);
+    rendered
+}
 
 /// SQL predicate and values to bind in marker order.
 #[derive(Clone, Debug)]
