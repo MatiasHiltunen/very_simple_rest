@@ -56,6 +56,8 @@ pub mod field;
 pub mod http;
 pub mod model;
 #[cfg(feature = "native-validation")]
+pub mod native_insert;
+#[cfg(feature = "native-validation")]
 pub mod native_list;
 #[cfg(feature = "native-validation")]
 pub mod native_policy_sql;

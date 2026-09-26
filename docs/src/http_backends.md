@@ -603,5 +603,9 @@ Native create, update, and action input preparation now runs in
 `vsr-runtime::native_write`. The CLI supplies a hybrid create authorization
 adapter and maps classified input errors to existing HTTP responses. Create
 requirements reuse the validated values prepared for insertion, avoiding a
-second claim resolution or scoped grant lookup. Database writes, audit
+second claim resolution or scoped grant lookup.
+
+`vsr-runtime::native_insert` builds and dispatches native insert statements
+through an executor trait. A CLI database adapter runs the same plan against a
+pool or an existing audit transaction. Update/delete execution, audit
 transactions, and the other hybrid authorization paths still need migration.
