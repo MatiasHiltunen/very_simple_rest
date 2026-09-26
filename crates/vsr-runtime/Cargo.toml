@@ -34,6 +34,9 @@ rust_decimal = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 garde = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
+# Turso rows are bridged into SQLx Any values for compatibility with emitted code.
+sqlx-core = { version = "0.9.0", optional = true }
+turso = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -41,7 +44,9 @@ default = []
 # Native field parsing and validation without a compiler or HTTP dependency.
 native-validation = ["dep:anyhow", "dep:chrono", "dep:rust_decimal", "dep:uuid", "dep:garde"]
 # SQLx adapter for native database rows; keeps the contract-only build driver-free.
-native-sqlx = ["native-validation", "dep:sqlx"]
+native-sqlx = ["native-validation", "database-sqlx"]
+# Concrete pool/query adapter without a compiler or HTTP dependency.
+database-sqlx = ["dep:sqlx", "dep:chrono", "dep:rust_decimal", "dep:uuid", "dep:tokio"]
 
 # ── HTTP implementations ──────────────────────────────────────────────────────
 # Enable the actix-web adapter (default runtime implementation).
@@ -74,11 +79,11 @@ rate-limit-redis = []  # placeholder; implementation added when needed
 # ── Observability ──────────────────────────────────────────────────────────────
 tracing = ["dep:tracing", "vsr-core/tracing"]
 
-# ── Database back-ends (re-exported from vsr-core) ────────────────────────────
-sqlite     = ["vsr-core/sqlite"]
-postgres   = ["vsr-core/postgres"]
-mysql      = ["vsr-core/mysql"]
-turso-local = ["vsr-core/turso-local"]
+# ── Database back-ends ───────────────────────────────────────────────────────
+sqlite     = ["vsr-core/sqlite", "database-sqlx", "sqlx/sqlite"]
+postgres   = ["vsr-core/postgres", "database-sqlx", "sqlx/postgres"]
+mysql      = ["vsr-core/mysql", "database-sqlx", "sqlx/mysql", "sqlx/mysql-rsa"]
+turso-local = ["vsr-core/turso-local", "sqlite", "dep:turso", "dep:sqlx-core", "dep:url"]
 
 [dependencies.tokio]
 version = "1"

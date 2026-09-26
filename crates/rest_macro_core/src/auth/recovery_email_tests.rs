@@ -178,10 +178,8 @@ async fn issuance_replacement_rollback_and_consumption_on_local_drivers() {
             }
             mailbox.messages.lock().unwrap().clear();
         }
-        match &db {
-            DbPool::Sqlx { pool, .. } => pool.close().await,
-            #[cfg(feature = "turso-local")]
-            DbPool::TursoLocal(_) => {}
+        if let Some(pool) = db.sqlx_pool() {
+            pool.close().await;
         }
         drop(db);
         directory.close().unwrap();

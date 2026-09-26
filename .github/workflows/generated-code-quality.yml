@@ -28,6 +28,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test Native Planning Without Compiler Or Transport
         run: cargo test -p vsr-runtime --no-default-features --features native-validation --lib --locked
+      - name: Test Runtime Database Adapters And Native CRUD
+        run: cargo test -p vsr-runtime --no-default-features --features native-sqlx,sqlite,turso-local --lib --locked
+      - name: Check Facade With Runtime-Owned Turso Feature
+        run: cargo check -p rest_macro_core --no-default-features --features sqlite,vsr-runtime/turso-local --tests --locked
+      - name: Keep Compiler And Frameworks Out Of Database Adapters
+        shell: bash
+        run: |
+          cargo tree -p vsr-runtime --no-default-features --features native-sqlx,sqlite,turso-local -e normal --prefix none --locked > database-dependencies.txt
+          if grep -E '^(rest_macro_core |actix[-_ ]|axum[- ])' database-dependencies.txt; then
+            exit 1
+          fi
 
   builtin-auth-migration:
     name: Built-in Auth Migration (${{ matrix.os }})

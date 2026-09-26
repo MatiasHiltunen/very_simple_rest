@@ -23,6 +23,8 @@
 //! | [`rate_limit`] | [`rate_limit::RateLimitStore`], [`rate_limit::RateLimitDecision`] |
 //! | [`security`] | Framework-neutral request and browser security settings |
 //! | [`config_secret`] | Serializable secret references for service configuration |
+//! | [`database`] | Database configuration and engine startup |
+//! | `db` | Feature-gated SQLx and local Turso pools and queries |
 //! | [`static_config`] | Framework-neutral static mount settings |
 //! | [`runtime`] | Shared compression settings |
 //! | `static_files` | Feature-gated Actix static-file adapter |
@@ -52,11 +54,16 @@ pub mod audit;
 pub mod auth;
 pub mod authz;
 pub mod config_secret;
+pub mod database;
+#[cfg(feature = "database-sqlx")]
+pub mod db;
 pub mod field;
 pub mod http;
 pub mod model;
 #[cfg(feature = "native-validation")]
 pub mod native_audit;
+#[cfg(feature = "native-sqlx")]
+pub mod native_database;
 #[cfg(feature = "native-validation")]
 pub mod native_insert;
 #[cfg(feature = "native-validation")]

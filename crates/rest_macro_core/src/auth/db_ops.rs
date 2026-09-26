@@ -476,8 +476,8 @@ where
 }
 
 pub(crate) async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, sqlx::Error> {
-    match pool {
-        DbPool::Sqlx { pool, .. } => {
+    match pool.sqlx_pool() {
+        Some(pool) => {
             let connection = pool.acquire().await?;
             let backend_name = connection.backend_name().to_ascii_lowercase();
             if backend_name.contains("postgres") {
@@ -492,8 +492,7 @@ pub(crate) async fn detect_auth_backend(pool: &DbPool) -> Result<AuthDbBackend, 
                 )))
             }
         }
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => Ok(AuthDbBackend::Sqlite),
+        None => Ok(AuthDbBackend::Sqlite),
     }
 }
 

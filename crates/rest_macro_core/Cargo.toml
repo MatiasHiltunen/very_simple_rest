@@ -16,23 +16,22 @@ readme = "../../README.md"
 [features]
 default = []
 codegen = ["dep:eon", "dep:heck", "dep:proc-macro2", "dep:quote", "dep:syn", "dep:vsr_schema_doc"]
-sqlite = ["sqlx/sqlite"]
-turso-local = ["dep:turso", "sqlite"]
-postgres = ["sqlx/postgres"]
-mysql = ["sqlx/mysql", "sqlx/mysql-rsa"]
+sqlite = ["sqlx/sqlite", "vsr-runtime/sqlite"]
+turso-local = ["vsr-runtime/turso-local", "sqlite"]
+postgres = ["sqlx/postgres", "vsr-runtime/postgres"]
+mysql = ["sqlx/mysql", "sqlx/mysql-rsa", "vsr-runtime/mysql"]
 auth-email = ["dep:lettre", "dep:reqwest"]
 storage-local = ["dep:object_store", "vsr-runtime/storage-local"]
 
 [dependencies]
 vsr-core.workspace = true
-vsr-runtime = { workspace = true, features = ["auth-builtin", "tls", "static-actix", "actix-security"] }
+vsr-runtime = { workspace = true, features = ["auth-builtin", "tls", "static-actix", "actix-security", "database-sqlx"] }
 actix-cors.workspace = true
 actix-web.workspace = true
 actix-files.workspace = true
 actix-multipart = "0.8.1"
 serde.workspace = true
 sqlx.workspace = true
-sqlx-core = "0.9.0"
 rustls.workspace = true
 serde_json.workspace = true
 base64.workspace = true
@@ -56,7 +55,6 @@ heck = { workspace = true, optional = true }
 proc-macro2 = { workspace = true, optional = true }
 quote = { workspace = true, optional = true }
 syn = { workspace = true, optional = true }
-turso = { workspace = true, optional = true }
 uuid.workspace = true
 reqwest = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }

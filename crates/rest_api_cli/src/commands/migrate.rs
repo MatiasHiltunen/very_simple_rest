@@ -1356,8 +1356,8 @@ pub async fn baseline_migration(
 }
 
 async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
-    match pool {
-        DbPool::Sqlx { pool, .. } => {
+    match pool.sqlx_pool() {
+        Some(pool) => {
             let connection = pool.acquire().await?;
             let backend_name = connection.backend_name().to_ascii_lowercase();
             if backend_name.contains("postgres") {
@@ -1371,10 +1371,9 @@ async fn detect_runtime_backend(pool: &DbPool) -> Result<AuthDbBackend> {
             }
         }
         #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => Ok(AuthDbBackend::Sqlite),
+        None => Ok(AuthDbBackend::Sqlite),
         #[cfg(not(feature = "turso-local"))]
-        #[allow(unreachable_patterns)]
-        _ => bail!("Turso Local migrations require the `turso-local` feature"),
+        None => bail!("Turso Local migrations require the `turso-local` feature"),
     }
 }
 

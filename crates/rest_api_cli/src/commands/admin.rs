@@ -675,8 +675,8 @@ enum DbBackend {
 }
 
 async fn detect_backend(pool: &DbPool) -> Result<DbBackend> {
-    match pool {
-        DbPool::Sqlx { pool, .. } => {
+    match pool.sqlx_pool() {
+        Some(pool) => {
             let connection = pool.acquire().await?;
             let backend_name = connection.backend_name().to_ascii_lowercase();
             if backend_name.contains("postgres") {
@@ -692,10 +692,9 @@ async fn detect_backend(pool: &DbPool) -> Result<DbBackend> {
             }
         }
         #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => Ok(DbBackend::Sqlite),
+        None => Ok(DbBackend::Sqlite),
         #[cfg(not(feature = "turso-local"))]
-        #[allow(unreachable_patterns)]
-        _ => Err(Error::Config(
+        None => Err(Error::Config(
             "Turso Local admin setup requires the `turso-local` feature".to_owned(),
         )),
     }

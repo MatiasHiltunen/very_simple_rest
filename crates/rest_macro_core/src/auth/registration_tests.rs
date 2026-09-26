@@ -66,10 +66,8 @@ fn drivers() -> &'static [&'static str] {
     ]
 }
 async fn close(db: DbPool, directory: tempfile::TempDir) {
-    match &db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => {}
+    if let Some(pool) = db.sqlx_pool() {
+        pool.close().await;
     }
     drop(db);
     directory.close().unwrap();

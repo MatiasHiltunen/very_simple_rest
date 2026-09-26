@@ -165,10 +165,8 @@ async fn shared_budgets_span_native_workers_and_both_transports() {
         ActixHttpServer::shutdown(actix).await.unwrap();
         native_handle.stop(true).await;
         native_task.await.unwrap().unwrap();
-        match &fixture.db {
-            DbPool::Sqlx { pool, .. } => pool.close().await,
-            #[cfg(feature = "turso-local")]
-            DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+        if let Some(pool) = fixture.db.sqlx_pool() {
+            pool.close().await;
         }
     }
 }
@@ -199,9 +197,7 @@ async fn configured_native_limit_without_store_fails_closed() {
     assert!(!response.headers().contains_key("set-cookie"));
     let body: Value = actix_web::test::read_body_json(response).await;
     assert_eq!(body["code"], "auth_rate_limit_unavailable");
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }

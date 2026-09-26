@@ -104,9 +104,7 @@ async fn registration_without_email_has_identical_policy_on_all_three_paths() {
     ActixHttpServer::shutdown(actix).await.unwrap();
     native_handle.stop(true).await;
     native_task.await.unwrap().unwrap();
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }

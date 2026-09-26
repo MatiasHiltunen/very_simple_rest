@@ -244,10 +244,8 @@ async fn login_and_logout_cookie_contract_matches_across_native_actix_and_axum()
         ActixHttpServer::shutdown(actix).await.unwrap();
         native_handle.stop(true).await;
         native_task.await.unwrap().unwrap();
-        match &fixture.db {
-            DbPool::Sqlx { pool, .. } => pool.close().await,
-            #[cfg(feature = "turso-local")]
-            DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+        if let Some(pool) = fixture.db.sqlx_pool() {
+            pool.close().await;
         }
     }
 }
@@ -280,9 +278,7 @@ async fn invalid_programmatic_session_configuration_cannot_issue_native_credenti
         assert!(body.get("token").is_none());
         assert!(!body.to_string().contains("evil.test"));
     }
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }

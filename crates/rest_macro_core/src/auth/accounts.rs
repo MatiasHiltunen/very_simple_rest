@@ -116,10 +116,8 @@ mod tests {
     use crate::{auth::AuthDbBackend, db::query};
 
     async fn close(db: &crate::db::DbPool) {
-        match db {
-            crate::db::DbPool::Sqlx { pool, .. } => pool.close().await,
-            #[cfg(feature = "turso-local")]
-            crate::db::DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+        if let Some(pool) = db.sqlx_pool() {
+            pool.close().await;
         }
     }
 

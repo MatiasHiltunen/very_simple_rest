@@ -15,11 +15,6 @@ use rest_macro_core::compiler::{
     default_service_database_url,
     supports_exact_filters, supports_field_sort, supports_range_filters,
 };
-use rest_macro_core::database::{
-    DatabaseConfig, DatabaseEngine, prepare_database_engine, resolve_database_config,
-    resolve_database_url, service_base_dir_from_config_path,
-};
-use rest_macro_core::db::{DbExecutor, DbPool, DbTransaction, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::security::DEFAULT_MAX_FILTER_IN_VALUES;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
@@ -33,14 +28,19 @@ use serde_json::{Map, Value, json};
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
 use vsr_runtime::authz::policy::PolicyValueSource;
+use vsr_runtime::database::{
+    DatabaseConfig, DatabaseEngine, prepare_database_engine, resolve_database_config,
+    resolve_database_url, service_base_dir_from_config_path,
+};
+use vsr_runtime::db::{DbPool, query_scalar};
 use vsr_runtime::field::{FieldKind, RuntimeField as DynamicField};
 use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
     workers_from_env,
 };
 use vsr_runtime::model::{self, DbBackend, StructuredScalarKind};
-use vsr_runtime::native_audit::{AuditActor, AuditDatabase, AuditTransaction, AuditedMutation};
-use vsr_runtime::native_insert::{InsertExecutor, InsertPlan};
+use vsr_runtime::native_audit::{AuditActor, AuditedMutation};
+use vsr_runtime::native_database::{bind_scalar_query, execute_native_statement, fetch_native_row};
 use vsr_runtime::native_list::{ListPlanError, ListScope};
 use vsr_runtime::native_mutation::{
     HybridMutationAuthorizer, MutationAction, MutationExecutor, MutationOutcome, MutationPlan,
@@ -50,7 +50,7 @@ use vsr_runtime::native_policy_sql::{
     CreatePlanError, PlanOutcome, PolicyPrincipal, render_condition_with_placeholders,
 };
 use vsr_runtime::native_read::{
-    CollectionRead, ReadExecutor, ReadGrantAuthorizer, ReadGrantRequest, ReadPrincipal, ReadStatement,
+    CollectionRead, ReadGrantAuthorizer, ReadGrantRequest, ReadPrincipal,
 };
 use vsr_runtime::native_response::{
     ResponseProjectionError, RuntimeListResponse as ListResponse, project_item, project_list,
@@ -58,14 +58,14 @@ use vsr_runtime::native_response::{
 use vsr_runtime::native_resource::{
     RuntimeActionAssignmentSource as ActionAssignmentSource,
     RuntimeActionUpdateAssignment as ActionUpdateAssignment,
-    RuntimeAuditConfig as DynamicAuditConfig, RuntimeBoundValue as BoundValue,
-    RuntimeCreateFieldRule as CreateFieldRule, RuntimeHybridResourceConfig as HybridResourceConfig,
-    RuntimeManyToManyRoute as ManyToManyRoute, RuntimeNestedRoute as NestedRoute,
-    RuntimeResource as DynamicResource, RuntimeResourceAction as DynamicResourceAction,
+    RuntimeAuditConfig as DynamicAuditConfig, RuntimeCreateFieldRule as CreateFieldRule,
+    RuntimeHybridResourceConfig as HybridResourceConfig, RuntimeManyToManyRoute as ManyToManyRoute,
+    RuntimeNestedRoute as NestedRoute, RuntimeResource as DynamicResource,
+    RuntimeResourceAction as DynamicResourceAction,
     RuntimeResourceActionBehavior as DynamicResourceActionBehavior,
 };
+
 use vsr_runtime::native_service::RuntimeService;
-use vsr_runtime::native_sqlx::row_to_json;
 use vsr_runtime::native_validation::bound_value_from_action_json;
 use vsr_runtime::native_write::{
     HybridCreateAuthorizer, HybridCreateRequest, PreparedCreate,
@@ -690,30 +690,11 @@ fn lower_dynamic_resource(
 }
 
 trait DynamicResourceOps {
-    fn field(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
-    fn field_by_api_name(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
     fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool;
     fn requires_role(&self, action: AuthorizationAction) -> Option<&str>;
 }
 
 impl DynamicResourceOps for DynamicResource {
-    fn field(&self, field_name: &str) -> anyhow::Result<&DynamicField> {
-        let index =
-            self.field_index.get(field_name).copied().ok_or_else(|| {
-                anyhow!("field `{field_name}` not found in `{}`", self.table_name)
-            })?;
-        Ok(&self.fields[index])
-    }
-
-    fn field_by_api_name(&self, field_name: &str) -> anyhow::Result<&DynamicField> {
-        let index = self
-            .api_field_index
-            .get(field_name)
-            .copied()
-            .ok_or_else(|| anyhow!("field `{field_name}` not found in `{}`", self.api_name))?;
-        Ok(&self.fields[index])
-    }
-
     fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool {
         match (&self.hybrid, action) {
             (Some(hybrid), AuthorizationAction::Read) => hybrid.item_read,
@@ -824,34 +805,6 @@ fn lower_dynamic_resource_action(
 }
 
 struct NativeCreateAuthorizer<'a>(&'a AuthorizationRuntime);
-
-struct NativeInsertExecutor<'a, E: ?Sized>(&'a E);
-
-impl<E: DbExecutor + Sync + ?Sized> InsertExecutor for NativeInsertExecutor<'_, E> {
-    async fn insert(&self, plan: &InsertPlan) -> Result<Option<i64>, String> {
-        if plan.returning_id {
-            let mut insert = query_scalar::<sqlx::Any, i64>(&plan.sql);
-            for value in &plan.binds {
-                insert = bind_scalar_query(insert, value);
-            }
-            insert
-                .fetch_one(self.0)
-                .await
-                .map(Some)
-                .map_err(|error| error.to_string())
-        } else {
-            let mut insert = query(&plan.sql);
-            for value in &plan.binds {
-                insert = bind_query(insert, value);
-            }
-            insert
-                .execute(self.0)
-                .await
-                .map(|result| result.last_insert_rowid())
-                .map_err(|error| error.to_string())
-        }
-    }
-}
 
 impl HybridCreateAuthorizer for NativeCreateAuthorizer<'_> {
     async fn allows_create(&self, request: HybridCreateRequest<'_>) -> Result<bool, String> {
@@ -1412,35 +1365,6 @@ fn create_assignment_source<'a>(
         .map(|policy| &policy.source)
 }
 
-fn placeholder(backend: DbBackend, index: usize) -> String {
-    backend.placeholder(index)
-}
-
-fn bind_query<'q>(mut query: Query<'q>, value: &BoundValue) -> Query<'q> {
-    query = match value {
-        BoundValue::Null => query.bind::<Option<String>>(None),
-        BoundValue::Bool(value) => query.bind(*value),
-        BoundValue::Integer(value) => query.bind(*value),
-        BoundValue::Real(value) => query.bind(*value),
-        BoundValue::Text(value) => query.bind(value.clone()),
-    };
-    query
-}
-
-fn bind_scalar_query<'q, T>(
-    mut query: rest_macro_core::db::QueryScalar<'q, T>,
-    value: &BoundValue,
-) -> rest_macro_core::db::QueryScalar<'q, T> {
-    query = match value {
-        BoundValue::Null => query.bind::<Option<String>>(None),
-        BoundValue::Bool(value) => query.bind(*value),
-        BoundValue::Integer(value) => query.bind(*value),
-        BoundValue::Real(value) => query.bind(*value),
-        BoundValue::Text(value) => query.bind(value.clone()),
-    };
-    query
-}
-
 fn anonymous_user_context() -> UserContext {
     UserContext {
         id: 0,
@@ -1591,77 +1515,6 @@ fn list_plan_error(error: ListPlanError) -> HttpResponse {
     }
 }
 
-async fn fetch_native_row<E>(
-    resource: &DynamicResource,
-    executor: &E,
-    id: i64,
-) -> Result<Option<Value>, String>
-where
-    E: DbExecutor + ?Sized,
-{
-    let statement = vsr_runtime::native_read::unfiltered_item_statement(resource, id);
-    let mut request = query(&statement.sql);
-    for bind in &statement.binds {
-        request = bind_query(request, bind);
-    }
-    let row = request.fetch_optional(executor).await.map_err(|error| error.to_string())?;
-    row.map(|row| row_to_json(resource, &row))
-        .transpose()
-        .map_err(|error| error.to_string())
-}
-
-struct NativeReadExecutor<'a>(&'a DbPool);
-
-impl ReadExecutor for NativeReadExecutor<'_> {
-    async fn fetch_optional(
-        &self,
-        resource: &DynamicResource,
-        statement: &ReadStatement,
-    ) -> Result<Option<Value>, String> {
-        let mut request = query(&statement.sql);
-        for bind in &statement.binds {
-            request = bind_query(request, bind);
-        }
-        let row = request
-            .fetch_optional(self.0)
-            .await
-            .map_err(|error| error.to_string())?;
-        row.map(|row| row_to_json(resource, &row))
-            .transpose()
-            .map_err(|error| error.to_string())
-    }
-
-    async fn fetch_all(
-        &self,
-        resource: &DynamicResource,
-        statement: &ReadStatement,
-    ) -> Result<Vec<Value>, String> {
-        let mut request = query(&statement.sql);
-        for bind in &statement.binds {
-            request = bind_query(request, bind);
-        }
-        let rows = request
-            .fetch_all(self.0)
-            .await
-            .map_err(|error| error.to_string())?;
-        rows.iter()
-            .map(|row| row_to_json(resource, row))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())
-    }
-
-    async fn count(&self, statement: &ReadStatement) -> Result<i64, String> {
-        let mut request = query_scalar::<sqlx::Any, i64>(&statement.sql);
-        for bind in &statement.binds {
-            request = bind_scalar_query(request, bind);
-        }
-        request
-            .fetch_one(self.0)
-            .await
-            .map_err(|error| error.to_string())
-    }
-}
-
 struct NativeReadAuthorizer<'a>(&'a AuthorizationRuntime);
 
 impl ReadGrantAuthorizer for NativeReadAuthorizer<'_> {
@@ -1724,7 +1577,7 @@ async fn fetch_readable_by_id(
         &state.dynamic_service.resources,
         &read_principal(user),
         id,
-        &NativeReadExecutor(&state.pool),
+        &state.pool,
         &NativeReadAuthorizer(&state.authorization_runtime),
     )
     .await
@@ -1743,7 +1596,7 @@ async fn list_handler(
     let requested_context = request_response_context(&req);
     match vsr_runtime::native_read::read_collection(
         collection_read(&resource, &state, &req, &principal, scope.as_ref()),
-        &NativeReadExecutor(&state.pool),
+        &state.pool,
         &NativeReadAuthorizer(&state.authorization_runtime),
     )
     .await
@@ -1770,7 +1623,7 @@ async fn count_handler(
     let principal = read_principal(&user);
     match vsr_runtime::native_read::read_count(
         collection_read(&resource, &state, &req, &principal, None),
-        &NativeReadExecutor(&state.pool),
+        &state.pool,
         &NativeReadAuthorizer(&state.authorization_runtime),
     )
     .await
@@ -1862,7 +1715,7 @@ async fn create_handler(
                 roles: &user.roles,
             },
             event_kind,
-            &NativeAuditDatabase(&state.pool),
+            &state.pool,
         )
         .await
         {
@@ -1873,7 +1726,7 @@ async fn create_handler(
         match vsr_runtime::native_insert::execute_insert(
             &resource,
             &prepared,
-            &NativeInsertExecutor(&state.pool),
+            &state.pool,
         )
         .await
         {
@@ -1965,68 +1818,6 @@ async fn action_handler(
     }
 }
 
-async fn execute_native_statement<E>(
-    executor: &E,
-    statement: &MutationStatement,
-) -> Result<u64, String>
-where
-    E: DbExecutor + ?Sized,
-{
-    let mut statement_query = query(&statement.sql);
-    for bind in &statement.binds {
-        statement_query = bind_query(statement_query, bind);
-    }
-    statement_query
-        .execute(executor)
-        .await
-        .map(|result| result.rows_affected())
-        .map_err(|error| error.to_string())
-}
-
-struct NativeAuditDatabase<'a>(&'a DbPool);
-
-struct NativeAuditTransaction(DbTransaction);
-
-impl AuditDatabase for NativeAuditDatabase<'_> {
-    type Transaction = NativeAuditTransaction;
-
-    async fn begin(&self) -> Result<Self::Transaction, String> {
-        self.0
-            .begin()
-            .await
-            .map(NativeAuditTransaction)
-            .map_err(|error| error.to_string())
-    }
-}
-
-impl InsertExecutor for NativeAuditTransaction {
-    async fn insert(&self, plan: &InsertPlan) -> Result<Option<i64>, String> {
-        NativeInsertExecutor(&self.0).insert(plan).await
-    }
-}
-
-impl AuditTransaction for NativeAuditTransaction {
-    async fn snapshot(
-        &self,
-        resource: &DynamicResource,
-        record_id: i64,
-    ) -> Result<Option<Value>, String> {
-        fetch_native_row(resource, &self.0, record_id).await
-    }
-
-    async fn execute(&self, statement: &MutationStatement) -> Result<u64, String> {
-        execute_native_statement(&self.0, statement).await
-    }
-
-    async fn commit(self) -> Result<(), String> {
-        self.0.commit().await.map_err(|error| error.to_string())
-    }
-
-    async fn rollback(self) -> Result<(), String> {
-        self.0.rollback().await.map_err(|error| error.to_string())
-    }
-}
-
 struct NativeMutationExecutor<'a> {
     state: &'a NativeServeState,
     resource: &'a DynamicResource,
@@ -2056,7 +1847,7 @@ impl MutationExecutor for NativeMutationExecutor<'_> {
                 action,
                 statement,
             },
-            &NativeAuditDatabase(&self.state.pool),
+            &self.state.pool,
         )
         .await
     }
@@ -2207,7 +1998,7 @@ async fn delete_handler(
 #[allow(unsafe_code)]
 mod tests {
     use super::{
-        BoundValue, DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,
+        DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,
         build_openapi_json, database_engine_bootstrap_error,
     };
     use actix_web::{App, HttpResponse, http::StatusCode, test, web};
@@ -2227,6 +2018,7 @@ mod tests {
     use serde::Serialize;
     use serde_json::{Value, json};
     use sqlx::Row;
+    use vsr_runtime::native_resource::RuntimeBoundValue as BoundValue;
     use vsr_runtime::native_validation::parse_json_value;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2931,21 +2723,21 @@ mod tests {
             query(&format!("INSERT INTO {} (id,user_id,family_id,title) VALUES (1,21,42,'granted'), (2,21,42,'second'), (3,21,43,'foreign'), (4,11,43,'owned')", resource.table_name)).execute(&pool).await.map_err(|error| error.to_string())?;
             let claims = BTreeMap::new(); let roles = vec!["member".into()];
             let principal = ReadPrincipal { policy: PolicyPrincipal { user_id: 11, claims: &claims }, roles: &roles };
-            let executor = super::NativeReadExecutor(&pool);
+            let executor = &pool;
             for (id, expected) in [(1, true), (3, false), (4, true), (99, false)] {
-                let item = read_item(&resource, &[], &principal, id, &executor, &Grants).await?;
+                let item = read_item(&resource, &[], &principal, id, executor, &Grants).await?;
                 if item.is_some() != expected { return Err(format!("unexpected item visibility for {id}")); }
             }
             let parent = ListScope::ParentField { field_name: "family_id".into(), value: 42 };
             let request = |query, scope| CollectionRead { resource: &resource, resources: &[], query, principal: &principal, scope, max_filter_in_values: 10 };
-            let first = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "1".into())]), None), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            let first = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "1".into())]), None), executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
             if first.total != 2 || first.items.len() != 1 || first.items[0]["id"] != 1 { return Err("first page mismatch".into()); }
             let cursor = first.next_cursor.ok_or("continuation cursor required")?;
-            let second = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "1".into()), ("cursor".into(), cursor)]), None), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            let second = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "1".into()), ("cursor".into(), cursor)]), None), executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
             if second.total != 2 || second.items.len() != 1 || second.items[0]["id"] != 2 || second.next_cursor.is_some() { return Err("cursor page mismatch".into()); }
-            let nested = read_count(request(HashMap::new(), Some(&parent)), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            let nested = read_count(request(HashMap::new(), Some(&parent)), executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
             if nested != 2 { return Err("nested count mismatch".into()); }
-            let zero = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "0".into())]), None), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            let zero = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "0".into())]), None), executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
             if zero.total != 2 || !zero.items.is_empty() { return Err("zero limit mismatch".into()); }
             Ok(())
         }.await;
@@ -3004,7 +2796,7 @@ mod tests {
             let inserted = vsr_runtime::native_insert::execute_insert(
                 &resource,
                 &prepared,
-                &super::NativeInsertExecutor(&pool),
+                &pool,
             )
             .await?
             .ok_or("insert must return a generated ID")?;
@@ -3015,7 +2807,7 @@ mod tests {
             let staged = vsr_runtime::native_insert::execute_insert(
                 &resource,
                 &prepared,
-                &super::NativeInsertExecutor(&tx),
+                &tx,
             )
             .await?
             .ok_or("transaction insert must return a generated ID")?;
@@ -3853,7 +3645,7 @@ mod tests {
             let id = vsr_runtime::native_insert::execute_insert(
                 &resource,
                 &prepared,
-                &super::NativeInsertExecutor(&pool),
+                &pool,
             )
             .await?
             .ok_or("ID required")?;
