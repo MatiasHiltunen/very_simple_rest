@@ -65,6 +65,8 @@ pub mod native_list;
 pub mod native_mutation;
 #[cfg(feature = "native-validation")]
 pub mod native_policy_sql;
+#[cfg(feature = "native-validation")]
+pub mod native_read;
 pub mod native_resource;
 pub mod native_response;
 pub mod native_service;

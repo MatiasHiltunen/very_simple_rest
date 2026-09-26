@@ -32,7 +32,7 @@ use rest_macro_core::storage::{
 use serde_json::{Map, Value, json};
 use syn::{GenericArgument, PathArguments, Type};
 use url::form_urlencoded;
-use vsr_runtime::authz::policy::{PolicyFilterExpression, PolicyValueSource};
+use vsr_runtime::authz::policy::PolicyValueSource;
 use vsr_runtime::field::{FieldKind, RuntimeField as DynamicField};
 use vsr_runtime::http::native_actix::{
     BoundNativeActixServer, NativeActixServerConfig, bind_native_actix_server, default_bind_addr,
@@ -41,13 +41,16 @@ use vsr_runtime::http::native_actix::{
 use vsr_runtime::model::{self, DbBackend, StructuredScalarKind};
 use vsr_runtime::native_audit::{AuditActor, AuditDatabase, AuditTransaction, AuditedMutation};
 use vsr_runtime::native_insert::{InsertExecutor, InsertPlan};
-use vsr_runtime::native_list::{ListPlanError, ListQueryPlan, ListScope};
+use vsr_runtime::native_list::{ListPlanError, ListScope};
 use vsr_runtime::native_mutation::{
     HybridMutationAuthorizer, MutationAction, MutationExecutor, MutationOutcome, MutationPlan,
     MutationPlanError, MutationStatement,
 };
 use vsr_runtime::native_policy_sql::{
-    BIND_MARKER, CreatePlanError, PlanOutcome, PolicyPrincipal,
+    CreatePlanError, PlanOutcome, PolicyPrincipal, render_condition_with_placeholders,
+};
+use vsr_runtime::native_read::{
+    CollectionRead, ReadExecutor, ReadGrantAuthorizer, ReadGrantRequest, ReadPrincipal, ReadStatement,
 };
 use vsr_runtime::native_response::{
     ResponseProjectionError, RuntimeListResponse as ListResponse, project_item, project_list,
@@ -690,7 +693,6 @@ trait DynamicResourceOps {
     fn field(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
     fn field_by_api_name(&self, field_name: &str) -> anyhow::Result<&DynamicField>;
     fn supports_hybrid_action(&self, action: AuthorizationAction) -> bool;
-    fn can_read(&self, user: &UserContext) -> bool;
     fn requires_role(&self, action: AuthorizationAction) -> Option<&str>;
 }
 
@@ -719,16 +721,6 @@ impl DynamicResourceOps for DynamicResource {
             (Some(hybrid), AuthorizationAction::Update) => hybrid.update,
             (Some(hybrid), AuthorizationAction::Delete) => hybrid.delete,
             (None, _) => false,
-        }
-    }
-
-    fn can_read(&self, user: &UserContext) -> bool {
-        match self.roles.read.as_deref() {
-            Some(role) => user
-                .roles
-                .iter()
-                .any(|candidate| candidate == "admin" || candidate == role),
-            None => true,
         }
     }
 
@@ -1424,24 +1416,6 @@ fn placeholder(backend: DbBackend, index: usize) -> String {
     backend.placeholder(index)
 }
 
-fn render_condition_with_placeholders(
-    condition: &str,
-    backend: DbBackend,
-    start_index: usize,
-) -> String {
-    let mut rendered = String::new();
-    let mut remaining = condition;
-    let mut index = start_index;
-    while let Some(position) = remaining.find(BIND_MARKER) {
-        rendered.push_str(&remaining[..position]);
-        rendered.push_str(&placeholder(backend, index));
-        remaining = &remaining[position + BIND_MARKER.len()..];
-        index += 1;
-    }
-    rendered.push_str(remaining);
-    rendered
-}
-
 fn bind_query<'q>(mut query: Query<'q>, value: &BoundValue) -> Query<'q> {
     query = match value {
         BoundValue::Null => query.bind::<Option<String>>(None),
@@ -1549,16 +1523,6 @@ fn response_projection_error(error: ResponseProjectionError) -> HttpResponse {
     }
 }
 
-fn json_field_to_scope_value(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::String(value) => Some(value.clone()),
-        Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
 fn require_role(user: &UserContext, role: Option<&str>) -> Result<(), HttpResponse> {
     if let Some(role) = role
         && !user
@@ -1569,76 +1533,6 @@ fn require_role(user: &UserContext, role: Option<&str>) -> Result<(), HttpRespon
         return Err(errors::forbidden("forbidden", "Insufficient privileges"));
     }
     Ok(())
-}
-
-fn current_row_scope_binding(
-    resource: &DynamicResource,
-    item: &Value,
-) -> Option<AuthorizationScopeBinding> {
-    let hybrid = resource.hybrid.as_ref()?;
-    let scope_field = resource.field(hybrid.scope_field.as_str()).ok()?;
-    let value = item.get(scope_field.api_name.as_str())?;
-    Some(AuthorizationScopeBinding {
-        scope: hybrid.scope.clone(),
-        value: json_field_to_scope_value(value)?,
-    })
-}
-
-fn list_scope_binding(
-    resource: &DynamicResource,
-    query: &HashMap<String, String>,
-    scope: Option<&ListScope>,
-) -> Option<AuthorizationScopeBinding> {
-    let hybrid = resource.hybrid.as_ref()?;
-    if let Some(ListScope::ParentField { field_name, value }) = scope
-        && field_name == hybrid.scope_field.as_str()
-    {
-        return Some(AuthorizationScopeBinding {
-            scope: hybrid.scope.clone(),
-            value: value.to_string(),
-        });
-    }
-    let filter_name = resource
-        .field(hybrid.scope_field.as_str())
-        .map(|field| format!("filter_{}", field.api_name))
-        .ok()?;
-    query
-        .get(filter_name.as_str())
-        .map(|value| AuthorizationScopeBinding {
-            scope: hybrid.scope.clone(),
-            value: value.clone(),
-        })
-}
-
-async fn hybrid_runtime_allows(
-    resource: &DynamicResource,
-    user: &UserContext,
-    state: &NativeServeState,
-    action: AuthorizationAction,
-    scope: AuthorizationScopeBinding,
-) -> Result<bool, HttpResponse> {
-    match state
-        .authorization_runtime
-        .evaluate_runtime_access_for_user(user.id, resource.resource_name.as_str(), action, scope)
-        .await
-    {
-        Ok(result) => Ok(result.allowed),
-        Err(message) => Err(errors::internal_error(message)),
-    }
-}
-
-fn build_row_policy_plan(
-    current: &DynamicResource,
-    service: &DynamicService,
-    expression: &PolicyFilterExpression,
-    user: &UserContext,
-) -> anyhow::Result<PlanOutcome> {
-    vsr_runtime::native_policy_sql::build_row_policy_plan(
-        current,
-        &service.resources,
-        expression,
-        &PolicyPrincipal { user_id: user.id, claims: &user.claims },
-    )
 }
 
 async fn evaluate_create_require(
@@ -1689,52 +1583,12 @@ fn parse_list_query(req: &HttpRequest) -> HashMap<String, String> {
         .collect()
 }
 
-fn build_list_plan(
-    resource: &DynamicResource,
-    service: &DynamicService,
-    req: &HttpRequest,
-    user: &UserContext,
-    scope: Option<&ListScope>,
-    skip_static_read_policy: bool,
-) -> Result<ListQueryPlan, HttpResponse> {
-    vsr_runtime::native_list::build_list_plan(
-        resource,
-        &service.resources,
-        parse_list_query(req),
-        &PolicyPrincipal { user_id: user.id, claims: &user.claims },
-        is_admin(user),
-        scope,
-        skip_static_read_policy,
-        service.security.requests.max_filter_in_values.unwrap_or(DEFAULT_MAX_FILTER_IN_VALUES),
-    ).map_err(list_plan_error)
-}
-
 fn list_plan_error(error: ListPlanError) -> HttpResponse {
     match error {
         ListPlanError::BadRequest { code, message } => errors::bad_request(code, message),
         ListPlanError::Forbidden { code, message } => errors::forbidden(code, message),
         ListPlanError::Internal(message) => errors::internal_error(message),
     }
-}
-
-fn finalize_list_response(
-    resource: &DynamicResource,
-    plan: ListQueryPlan,
-    total: i64,
-    items: Vec<Value>,
-) -> Result<ListResponse, HttpResponse> {
-    vsr_runtime::native_list::finalize_list_response(resource, plan, total, items)
-        .map_err(list_plan_error)
-}
-
-async fn fetch_unfiltered_by_id(
-    resource: &DynamicResource,
-    state: &NativeServeState,
-    id: i64,
-) -> Result<Option<Value>, HttpResponse> {
-    fetch_native_row(resource, &state.pool, id)
-        .await
-        .map_err(errors::internal_error)
 }
 
 async fn fetch_native_row<E>(
@@ -1745,97 +1599,136 @@ async fn fetch_native_row<E>(
 where
     E: DbExecutor + ?Sized,
 {
-    let sql = format!(
-        "SELECT * FROM {} WHERE {} = {}",
-        resource.table_name,
-        resource.id_field,
-        placeholder(resource.db, 1)
-    );
-    let row = query(&sql)
-        .bind(id)
-        .fetch_optional(executor)
-        .await
-        .map_err(|error| error.to_string())?;
+    let statement = vsr_runtime::native_read::unfiltered_item_statement(resource, id);
+    let mut request = query(&statement.sql);
+    for bind in &statement.binds {
+        request = bind_query(request, bind);
+    }
+    let row = request.fetch_optional(executor).await.map_err(|error| error.to_string())?;
     row.map(|row| row_to_json(resource, &row))
         .transpose()
         .map_err(|error| error.to_string())
 }
 
-async fn fetch_readable_by_id(
-    resource: &DynamicResource,
-    service: &DynamicService,
-    state: &NativeServeState,
-    user: &UserContext,
-    id: i64,
-) -> Result<Option<Value>, HttpResponse> {
-    if !resource.can_read(user) {
-        return Ok(None);
-    }
-    let mut sql = format!(
-        "SELECT * FROM {} WHERE {} = {}",
-        resource.table_name,
-        resource.id_field,
-        placeholder(resource.db, 1)
-    );
-    let mut binds = vec![BoundValue::Integer(id)];
-    if resource.policies.has_read_filters() && !(resource.policies.admin_bypass && is_admin(user)) {
-        match build_row_policy_plan(
-            resource,
-            service,
-            resource
-                .policies
-                .read
-                .as_ref()
-                .expect("read filters checked"),
-            user,
-        )
-        .map_err(|error| errors::internal_error(error.to_string()))?
-        {
-            PlanOutcome::Resolved(plan) => {
-                sql.push_str(" AND ");
-                sql.push_str(
-                    render_condition_with_placeholders(plan.condition.as_str(), resource.db, 2)
-                        .as_str(),
-                );
-                binds.extend(plan.binds);
-            }
-            PlanOutcome::Indeterminate => return Ok(None),
+struct NativeReadExecutor<'a>(&'a DbPool);
+
+impl ReadExecutor for NativeReadExecutor<'_> {
+    async fn fetch_optional(
+        &self,
+        resource: &DynamicResource,
+        statement: &ReadStatement,
+    ) -> Result<Option<Value>, String> {
+        let mut request = query(&statement.sql);
+        for bind in &statement.binds {
+            request = bind_query(request, bind);
         }
+        let row = request
+            .fetch_optional(self.0)
+            .await
+            .map_err(|error| error.to_string())?;
+        row.map(|row| row_to_json(resource, &row))
+            .transpose()
+            .map_err(|error| error.to_string())
     }
-    let mut query = query(&sql);
-    for bind in &binds {
-        query = bind_query(query, bind);
+
+    async fn fetch_all(
+        &self,
+        resource: &DynamicResource,
+        statement: &ReadStatement,
+    ) -> Result<Vec<Value>, String> {
+        let mut request = query(&statement.sql);
+        for bind in &statement.binds {
+            request = bind_query(request, bind);
+        }
+        let rows = request
+            .fetch_all(self.0)
+            .await
+            .map_err(|error| error.to_string())?;
+        rows.iter()
+            .map(|row| row_to_json(resource, row))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
     }
-    let row = query
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|error| errors::internal_error(error.to_string()))?;
-    row.map(|row| row_to_json(resource, &row))
-        .transpose()
-        .map_err(|error| errors::internal_error(error.to_string()))
+
+    async fn count(&self, statement: &ReadStatement) -> Result<i64, String> {
+        let mut request = query_scalar::<sqlx::Any, i64>(&statement.sql);
+        for bind in &statement.binds {
+            request = bind_scalar_query(request, bind);
+        }
+        request
+            .fetch_one(self.0)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
-async fn fetch_hybrid_authorized_by_id(
+struct NativeReadAuthorizer<'a>(&'a AuthorizationRuntime);
+
+impl ReadGrantAuthorizer for NativeReadAuthorizer<'_> {
+    async fn allows_read(&self, request: ReadGrantRequest<'_>) -> Result<bool, String> {
+        self.0
+            .evaluate_runtime_access_for_user(
+                request.user_id,
+                request.resource_name,
+                AuthorizationAction::Read,
+                AuthorizationScopeBinding {
+                    scope: request.binding.scope.clone(),
+                    value: request.binding.value.clone(),
+                },
+            )
+            .await
+            .map(|decision| decision.allowed)
+    }
+}
+
+fn read_principal(user: &UserContext) -> ReadPrincipal<'_> {
+    ReadPrincipal {
+        policy: PolicyPrincipal {
+            user_id: user.id,
+            claims: &user.claims,
+        },
+        roles: &user.roles,
+    }
+}
+
+fn collection_read<'a>(
+    resource: &'a DynamicResource,
+    state: &'a NativeServeState,
+    req: &HttpRequest,
+    principal: &'a ReadPrincipal<'a>,
+    scope: Option<&'a ListScope>,
+) -> CollectionRead<'a> {
+    CollectionRead {
+        resource,
+        resources: &state.dynamic_service.resources,
+        query: parse_list_query(req),
+        principal,
+        scope,
+        max_filter_in_values: state
+            .dynamic_service
+            .security
+            .requests
+            .max_filter_in_values
+            .unwrap_or(DEFAULT_MAX_FILTER_IN_VALUES),
+    }
+}
+
+async fn fetch_readable_by_id(
     resource: &DynamicResource,
     state: &NativeServeState,
     user: &UserContext,
     id: i64,
-    action: AuthorizationAction,
 ) -> Result<Option<Value>, HttpResponse> {
-    if !resource.supports_hybrid_action(action) {
-        return Ok(None);
-    }
-    let Some(item) = fetch_unfiltered_by_id(resource, state, id).await? else {
-        return Ok(None);
-    };
-    let Some(scope) = current_row_scope_binding(resource, &item) else {
-        return Ok(None);
-    };
-    if hybrid_runtime_allows(resource, user, state, action, scope).await? {
-        Ok(Some(item))
-    } else {
-        Ok(None)
-    }
+    vsr_runtime::native_read::read_item(
+        resource,
+        &state.dynamic_service.resources,
+        &read_principal(user),
+        id,
+        &NativeReadExecutor(&state.pool),
+        &NativeReadAuthorizer(&state.authorization_runtime),
+    )
+    .await
+    .map_err(errors::internal_error)
 }
 
 async fn list_handler(
@@ -1845,84 +1738,25 @@ async fn list_handler(
     resource: Arc<DynamicResource>,
     scope: Option<ListScope>,
 ) -> HttpResponse {
-    let dynamic_service = state.dynamic_service.clone();
     let user = user.unwrap_or_else(anonymous_user_context);
+    let principal = read_principal(&user);
     let requested_context = request_response_context(&req);
-    if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Read)) {
-        return response;
-    }
-
-    let query_map = parse_list_query(&req);
-    let skip_static = match (&resource.hybrid, user.id != 0) {
-        (Some(hybrid), true) if hybrid.collection_read || hybrid.nested_read => {
-            match list_scope_binding(&resource, &query_map, scope.as_ref()) {
-                Some(scope) => match hybrid_runtime_allows(
-                    &resource,
-                    &user,
-                    state.get_ref(),
-                    AuthorizationAction::Read,
-                    scope,
-                )
-                .await
-                {
-                    Ok(allowed) => allowed,
-                    Err(response) => return response,
-                },
-                None => false,
-            }
-        }
-        _ => false,
-    };
-
-    let plan = match build_list_plan(
-        &resource,
-        dynamic_service.as_ref(),
-        &req,
-        &user,
-        scope.as_ref(),
-        skip_static,
-    ) {
-        Ok(plan) => plan,
-        Err(response) => return response,
-    };
-
-    let mut count_query = query_scalar::<sqlx::Any, i64>(&plan.count_sql);
-    for bind in &plan.filter_binds {
-        count_query = bind_scalar_query(count_query, bind);
-    }
-    let total = match count_query.fetch_one(&state.pool).await {
-        Ok(total) => total,
-        Err(error) => return errors::internal_error(error.to_string()),
-    };
-
-    let mut select_query = query(&plan.select_sql);
-    for bind in &plan.select_binds {
-        select_query = bind_query(select_query, bind);
-    }
-    let rows = match select_query.fetch_all(&state.pool).await {
-        Ok(rows) => rows,
-        Err(error) => return errors::internal_error(error.to_string()),
-    };
-    let items = match rows
-        .iter()
-        .map(|row| row_to_json(&resource, row))
-        .collect::<Result<Vec<_>, _>>()
+    match vsr_runtime::native_read::read_collection(
+        collection_read(&resource, &state, &req, &principal, scope.as_ref()),
+        &NativeReadExecutor(&state.pool),
+        &NativeReadAuthorizer(&state.authorization_runtime),
+    )
+    .await
     {
-        Ok(items) => items,
-        Err(error) => return errors::internal_error(error.to_string()),
-    };
-    match finalize_list_response(&resource, plan, total, items) {
-        Ok(response) => {
-            match apply_response_context_to_list_response(
-                &resource,
-                response,
-                requested_context.as_deref(),
-            ) {
-                Ok(value) => HttpResponse::Ok().json(value),
-                Err(response) => response,
-            }
-        }
-        Err(response) => response,
+        Ok(response) => match apply_response_context_to_list_response(
+            &resource,
+            response,
+            requested_context.as_deref(),
+        ) {
+            Ok(value) => HttpResponse::Ok().json(value),
+            Err(response) => response,
+        },
+        Err(error) => list_plan_error(error),
     }
 }
 
@@ -1932,53 +1766,17 @@ async fn count_handler(
     state: web::Data<NativeServeState>,
     resource: Arc<DynamicResource>,
 ) -> HttpResponse {
-    let dynamic_service = state.dynamic_service.clone();
     let user = user.unwrap_or_else(anonymous_user_context);
-    if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Read)) {
-        return response;
-    }
-
-    let query_map = parse_list_query(&req);
-    let skip_static = match (&resource.hybrid, user.id != 0) {
-        (Some(hybrid), true) if hybrid.collection_read => {
-            match list_scope_binding(&resource, &query_map, None) {
-                Some(scope) => match hybrid_runtime_allows(
-                    &resource,
-                    &user,
-                    state.get_ref(),
-                    AuthorizationAction::Read,
-                    scope,
-                )
-                .await
-                {
-                    Ok(allowed) => allowed,
-                    Err(response) => return response,
-                },
-                None => false,
-            }
-        }
-        _ => false,
-    };
-
-    let plan = match build_list_plan(
-        &resource,
-        dynamic_service.as_ref(),
-        &req,
-        &user,
-        None,
-        skip_static,
-    ) {
-        Ok(plan) => plan,
-        Err(response) => return response,
-    };
-
-    let mut count_query = query_scalar::<sqlx::Any, i64>(&plan.count_sql);
-    for bind in &plan.filter_binds {
-        count_query = bind_scalar_query(count_query, bind);
-    }
-    match count_query.fetch_one(&state.pool).await {
+    let principal = read_principal(&user);
+    match vsr_runtime::native_read::read_count(
+        collection_read(&resource, &state, &req, &principal, None),
+        &NativeReadExecutor(&state.pool),
+        &NativeReadAuthorizer(&state.authorization_runtime),
+    )
+    .await
+    {
         Ok(count) => HttpResponse::Ok().json(json!({ "count": count })),
-        Err(error) => errors::internal_error(error.to_string()),
+        Err(error) => list_plan_error(error),
     }
 }
 
@@ -1989,38 +1787,19 @@ async fn get_handler(
     state: web::Data<NativeServeState>,
     resource: Arc<DynamicResource>,
 ) -> HttpResponse {
-    let dynamic_service = state.dynamic_service.clone();
     let user = user.unwrap_or_else(anonymous_user_context);
     let requested_context = request_response_context(&req);
     if let Err(response) = require_role(&user, resource.requires_role(AuthorizationAction::Read)) {
         return response;
     }
-    match fetch_readable_by_id(&resource, dynamic_service.as_ref(), &state, &user, id).await {
+    match fetch_readable_by_id(&resource, &state, &user, id).await {
         Ok(Some(item)) => {
             match apply_response_context_to_item(&resource, item, requested_context.as_deref()) {
                 Ok(value) => HttpResponse::Ok().json(value),
                 Err(response) => response,
             }
         }
-        Ok(None) => match fetch_hybrid_authorized_by_id(
-            &resource,
-            &state,
-            &user,
-            id,
-            AuthorizationAction::Read,
-        )
-        .await
-        {
-            Ok(Some(item)) => {
-                match apply_response_context_to_item(&resource, item, requested_context.as_deref())
-                {
-                    Ok(value) => HttpResponse::Ok().json(value),
-                    Err(response) => response,
-                }
-            }
-            Ok(None) => errors::not_found("Not found"),
-            Err(response) => response,
-        },
+        Ok(None) => errors::not_found("Not found"),
         Err(response) => response,
     }
 }
@@ -2107,15 +1886,7 @@ async fn create_handler(
         return HttpResponse::Created().finish();
     };
     let location = format!("{}/{}", req.uri().path().trim_end_matches('/'), created_id);
-    match fetch_readable_by_id(
-        &resource,
-        dynamic_service.as_ref(),
-        &state,
-        &user,
-        created_id,
-    )
-    .await
-    {
+    match fetch_readable_by_id(&resource, &state, &user, created_id).await {
         Ok(Some(item)) => {
             match apply_response_context_to_item(&resource, item, requested_context.as_deref()) {
                 Ok(value) => HttpResponse::Created()
@@ -2124,29 +1895,9 @@ async fn create_handler(
                 Err(response) => response,
             }
         }
-        Ok(None) => match fetch_hybrid_authorized_by_id(
-            &resource,
-            &state,
-            &user,
-            created_id,
-            AuthorizationAction::Read,
-        )
-        .await
-        {
-            Ok(Some(item)) => {
-                match apply_response_context_to_item(&resource, item, requested_context.as_deref())
-                {
-                    Ok(value) => HttpResponse::Created()
-                        .append_header(("Location", location))
-                        .json(value),
-                    Err(response) => response,
-                }
-            }
-            Ok(None) => HttpResponse::Created()
-                .append_header(("Location", location))
-                .finish(),
-            Err(response) => response,
-        },
+        Ok(None) => HttpResponse::Created()
+            .append_header(("Location", location))
+            .finish(),
         Err(response) => response,
     }
 }
@@ -2329,7 +2080,7 @@ impl HybridMutationAuthorizer for NativeMutationAuthorizer<'_> {
         let Some(item) = fetch_native_row(self.resource, &self.state.pool, record_id).await? else {
             return Ok(false);
         };
-        let Some(scope) = current_row_scope_binding(self.resource, &item) else {
+        let Some(scope) = vsr_runtime::native_read::row_scope_binding(self.resource, &item) else {
             return Ok(false);
         };
         self.state
@@ -2338,7 +2089,10 @@ impl HybridMutationAuthorizer for NativeMutationAuthorizer<'_> {
                 self.user.id,
                 self.resource.resource_name.as_str(),
                 action,
-                scope,
+                AuthorizationScopeBinding {
+                    scope: scope.scope,
+                    value: scope.value,
+                },
             )
             .await
             .map(|decision| decision.allowed)
@@ -3128,6 +2882,82 @@ mod tests {
 
     #[actix_web::test]
     #[ignore = "requires VSR_TEST_DATABASE_URL with an isolated PostgreSQL or MySQL database"]
+    async fn server_database_native_reads() {
+        use std::collections::{BTreeMap, HashMap};
+        use vsr_runtime::native_list::ListScope;
+        use vsr_runtime::native_policy_sql::PolicyPrincipal;
+        use vsr_runtime::native_read::{
+            CollectionRead, ReadGrantAuthorizer, ReadGrantRequest, ReadPrincipal, read_collection,
+            read_count, read_item,
+        };
+        struct Grants;
+        impl ReadGrantAuthorizer for Grants {
+            async fn allows_read(&self, request: ReadGrantRequest<'_>) -> Result<bool, String> {
+                Ok(request.user_id == 11
+                    && request.resource_name == "ScopedDoc"
+                    && request.binding.scope == "Family"
+                    && request.binding.value == "42")
+            }
+        }
+        let database_url = std::env::var("VSR_TEST_DATABASE_URL").expect("database URL is required");
+        let backend = if database_url.starts_with("postgres") {
+            vsr_runtime::model::DbBackend::Postgres
+        } else if database_url.starts_with("mysql") {
+            vsr_runtime::model::DbBackend::Mysql
+        } else {
+            panic!("expected PostgreSQL or MySQL")
+        };
+        let pool = DbPool::connect(&database_url).await.unwrap();
+        let spec = compiler::load_service_from_path(&fixture_path("hybrid_runtime_api.eon")).unwrap();
+        let service = DynamicService::from_spec(spec, "{}".into(), false, None).unwrap();
+        let mut resource = service
+            .resources
+            .iter()
+            .find(|resource| resource.resource_name == "ScopedDoc")
+            .unwrap()
+            .as_ref()
+            .clone();
+        resource.db = backend;
+        resource.table_name = format!(
+            "vsr_read_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        query(&format!("CREATE TABLE {} (id BIGINT PRIMARY KEY, user_id BIGINT NOT NULL, family_id BIGINT NOT NULL, title TEXT NOT NULL)", resource.table_name)).execute(&pool).await.unwrap();
+        let result: Result<(), String> = async {
+            query(&format!("INSERT INTO {} (id,user_id,family_id,title) VALUES (1,21,42,'granted'), (2,21,42,'second'), (3,21,43,'foreign'), (4,11,43,'owned')", resource.table_name)).execute(&pool).await.map_err(|error| error.to_string())?;
+            let claims = BTreeMap::new(); let roles = vec!["member".into()];
+            let principal = ReadPrincipal { policy: PolicyPrincipal { user_id: 11, claims: &claims }, roles: &roles };
+            let executor = super::NativeReadExecutor(&pool);
+            for (id, expected) in [(1, true), (3, false), (4, true), (99, false)] {
+                let item = read_item(&resource, &[], &principal, id, &executor, &Grants).await?;
+                if item.is_some() != expected { return Err(format!("unexpected item visibility for {id}")); }
+            }
+            let parent = ListScope::ParentField { field_name: "family_id".into(), value: 42 };
+            let request = |query, scope| CollectionRead { resource: &resource, resources: &[], query, principal: &principal, scope, max_filter_in_values: 10 };
+            let first = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "1".into())]), None), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            if first.total != 2 || first.items.len() != 1 || first.items[0]["id"] != 1 { return Err("first page mismatch".into()); }
+            let cursor = first.next_cursor.ok_or("continuation cursor required")?;
+            let second = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "1".into()), ("cursor".into(), cursor)]), None), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            if second.total != 2 || second.items.len() != 1 || second.items[0]["id"] != 2 || second.next_cursor.is_some() { return Err("cursor page mismatch".into()); }
+            let nested = read_count(request(HashMap::new(), Some(&parent)), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            if nested != 2 { return Err("nested count mismatch".into()); }
+            let zero = read_collection(request(HashMap::from([("filter_family_id".into(), "42".into()), ("limit".into(), "0".into())]), None), &executor, &Grants).await.map_err(|error| format!("{error:?}"))?;
+            if zero.total != 2 || !zero.items.is_empty() { return Err("zero limit mismatch".into()); }
+            Ok(())
+        }.await;
+        let cleanup = query(&format!("DROP TABLE {}", resource.table_name))
+            .execute(&pool)
+            .await;
+        result.expect("native item, scoped count, and cursor reads should succeed");
+        cleanup.expect("isolated read table should be removed");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires VSR_TEST_DATABASE_URL with an isolated PostgreSQL or MySQL database"]
     async fn server_database_native_insert_default_values() {
         let database_url = std::env::var("VSR_TEST_DATABASE_URL").expect("database URL is required");
         let backend = if database_url.starts_with("postgres") {
@@ -3250,6 +3080,253 @@ mod tests {
         assert!(created["id"].as_i64().unwrap() > 0);
         assert_eq!(
             query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM family")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    fn hybrid_read_token(user_id: i64, roles: &[&str]) -> String {
+        encode(
+            &Header::default(),
+            &json!({"sub": user_id, "roles": roles, "exp": 4_102_444_800_u64,
+                "iss": "hybrid_runtime_tests", "aud": "hybrid_runtime_clients"}),
+            &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    #[actix_web::test]
+    async fn native_serve_hybrid_reads_enforce_source_flags_roles_and_public_scope_names() {
+        use rest_macro_core::authorization::{
+            AuthorizationScopeBinding, AuthorizationScopedAssignmentRecord,
+            AuthorizationScopedAssignmentTarget, insert_runtime_assignment,
+        };
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        for collection_enabled in [false, true] {
+            for nested_enabled in [false, true] {
+                let (service, mut state) = build_test_state("hybrid_runtime_api.eon", false).await;
+                state
+                    .pool
+                    .execute_batch(
+                        &rest_macro_core::authorization::authorization_runtime_migration_sql(
+                            auth::AuthDbBackend::Sqlite,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                state.pool.execute_batch("INSERT INTO family (id) VALUES (42), (43); INSERT INTO scoped_doc (id,user_id,family_id,title) VALUES (1,21,42,'granted'),(2,21,43,'foreign'),(3,11,43,'owned'); INSERT INTO scoped_claim_doc (id,family_id,title) VALUES (1,42,'claim missing');").await.unwrap();
+                let mut service = service.as_ref().clone();
+                let resource = service
+                    .model
+                    .resources
+                    .iter_mut()
+                    .find(|resource| resource.resource_name == "ScopedDoc")
+                    .unwrap();
+                let resource = Arc::make_mut(resource);
+                resource.count_endpoint = true;
+                resource.hybrid.as_mut().unwrap().collection_read = collection_enabled;
+                resource.hybrid.as_mut().unwrap().nested_read = nested_enabled;
+                let index = resource.field_index["family_id"];
+                resource.fields[index].api_name = "family".into();
+                resource.api_field_index.remove("family_id");
+                resource.api_field_index.insert("family".into(), index);
+                let service = Arc::new(service);
+                state.dynamic_service = service.clone();
+                let app =
+                    test::init_service(App::new().service(build_api_scope(service, state.clone())))
+                        .await;
+                let member = (
+                    "Authorization",
+                    format!("Bearer {}", hybrid_read_token(11, &["member"])),
+                );
+                let get = |uri: &str| {
+                    test::TestRequest::get()
+                        .uri(uri)
+                        .insert_header(member.clone())
+                        .to_request()
+                };
+                assert_eq!(
+                    test::call_service(&app, get("/api/scoped_doc/1"))
+                        .await
+                        .status(),
+                    StatusCode::NOT_FOUND
+                );
+                insert_runtime_assignment(
+                    &state.pool,
+                    &AuthorizationScopedAssignmentRecord::new(
+                        11,
+                        AuthorizationScopedAssignmentTarget::Permission {
+                            name: "FamilyRead".into(),
+                        },
+                        AuthorizationScopeBinding {
+                            scope: "Family".into(),
+                            value: "42".into(),
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+                let item = test::call_service(&app, get("/api/scoped_doc/1")).await;
+                assert_eq!(item.status(), StatusCode::OK);
+                let item: Value = test::read_body_json(item).await;
+                assert_eq!(item["family"], 42);
+                assert!(item.get("family_id").is_none());
+                assert_eq!(
+                    test::call_service(&app, get("/api/scoped_doc/2"))
+                        .await
+                        .status(),
+                    StatusCode::NOT_FOUND
+                );
+                for (uri, expected) in [
+                    (
+                        "/api/scoped_doc?filter_family=42",
+                        usize::from(collection_enabled),
+                    ),
+                    ("/api/family/42/scoped_doc", usize::from(nested_enabled)),
+                    ("/api/scoped_doc", 1),
+                ] {
+                    let response = test::call_service(&app, get(uri)).await;
+                    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+                    let response: Value = test::read_body_json(response).await;
+                    assert_eq!(response["total"], expected, "{uri}");
+                    assert_eq!(
+                        response["items"].as_array().unwrap().len(),
+                        expected,
+                        "{uri}"
+                    );
+                }
+                let count: Value = test::call_and_read_body_json(
+                    &app,
+                    get("/api/scoped_doc/count?filter_family=42&limit=0"),
+                )
+                .await;
+                assert_eq!(count["count"], usize::from(collection_enabled));
+                let nested: Value = test::call_and_read_body_json(
+                    &app,
+                    get("/api/family/42/scoped_doc?filter_family=43"),
+                )
+                .await;
+                assert_eq!(nested["total"], 0);
+                assert_eq!(
+                    test::call_service(&app, get("/api/scoped_claim_doc/1"))
+                        .await
+                        .status(),
+                    StatusCode::OK
+                );
+                let missing =
+                    test::call_service(&app, get("/api/scoped_claim_doc?filter_family_id=42")).await;
+                assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+                for uri in [
+                    "/api/scoped_doc/1",
+                    "/api/scoped_doc?filter_family=42",
+                    "/api/scoped_doc/count?filter_family=42",
+                    "/api/family/42/scoped_doc",
+                ] {
+                    let wrong_role = test::TestRequest::get()
+                        .uri(uri)
+                        .insert_header((
+                            "Authorization",
+                            format!("Bearer {}", hybrid_read_token(11, &["writer"])),
+                        ))
+                        .to_request();
+                    assert_eq!(
+                        test::call_service(&app, wrong_role).await.status(),
+                        StatusCode::FORBIDDEN,
+                        "{uri}"
+                    );
+                }
+                let foreign_user = test::TestRequest::get()
+                    .uri("/api/scoped_doc/1")
+                    .insert_header((
+                        "Authorization",
+                        format!("Bearer {}", hybrid_read_token(12, &["member"])),
+                    ))
+                    .to_request();
+                assert_eq!(
+                    test::call_service(&app, foreign_user).await.status(),
+                    StatusCode::NOT_FOUND
+                );
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn native_serve_created_response_requires_read_role_even_with_hybrid_grant() {
+        use rest_macro_core::authorization::{
+            AuthorizationScopeBinding, AuthorizationScopedAssignmentRecord,
+            AuthorizationScopedAssignmentTarget, insert_runtime_assignment,
+        };
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (service, mut state) = build_test_state("hybrid_runtime_api.eon", false).await;
+        state
+            .pool
+            .execute_batch(
+                &rest_macro_core::authorization::authorization_runtime_migration_sql(
+                    auth::AuthDbBackend::Sqlite,
+                ),
+            )
+            .await
+            .unwrap();
+        query("INSERT INTO family (id) VALUES (42)")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        insert_runtime_assignment(
+            &state.pool,
+            &AuthorizationScopedAssignmentRecord::new(
+                11,
+                AuthorizationScopedAssignmentTarget::Template {
+                    name: "FamilyMember".into(),
+                },
+                AuthorizationScopeBinding {
+                    scope: "Family".into(),
+                    value: "42".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let mut service = service.as_ref().clone();
+        let resource = service
+            .model
+            .resources
+            .iter_mut()
+            .find(|resource| resource.resource_name == "ScopedDoc")
+            .unwrap();
+        Arc::make_mut(resource).roles.read = Some("reviewer".into());
+        let service = Arc::new(service);
+        state.dynamic_service = service.clone();
+        let app = test::init_service(App::new().service(build_api_scope(service, state.clone()))).await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/scoped_doc")
+                .insert_header((
+                    "Authorization",
+                    format!("Bearer {}", hybrid_read_token(11, &["member"])),
+                ))
+                .set_json(json!({"family_id": 42, "title": "created"}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.headers().get("Location").unwrap(),
+            "/api/scoped_doc/1"
+        );
+        assert!(test::read_body(response).await.is_empty());
+        assert_eq!(
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM scoped_doc")
                 .fetch_one(&state.pool)
                 .await
                 .unwrap(),
