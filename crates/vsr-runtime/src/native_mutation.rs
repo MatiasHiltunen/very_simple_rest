@@ -739,15 +739,13 @@ mod tests {
                         expected
                     );
                     assert!(!plan.sql.contains("archive"));
-                    assert!(
-                        plan.sql.ends_with(&format!(
+                    assert!(plan.sql.ends_with(&format!(
                             "VALUES ({})",
                             (1..=6)
                                 .map(|index| db.placeholder(index))
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        ))
-                    );
+                        )));
                 }
             }
         }
@@ -766,6 +764,380 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[derive(Clone)]
+    struct AuditDriver {
+        events: Arc<Mutex<Vec<String>>>,
+        snapshots: Arc<Mutex<VecDeque<Result<Option<serde_json::Value>, String>>>>,
+        audit_plans: Arc<Mutex<Vec<MutationStatement>>>,
+        insert_result: Result<Option<i64>, String>,
+        write_result: Result<u64, String>,
+        audit_result: Result<u64, String>,
+        begin_result: Result<(), String>,
+        commit_result: Result<(), String>,
+        rollback_result: Result<(), String>,
+    }
+    impl AuditDriver {
+        fn new(snapshots: Vec<Result<Option<serde_json::Value>, String>>) -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                snapshots: Arc::new(Mutex::new(snapshots.into())),
+                audit_plans: Arc::new(Mutex::new(Vec::new())),
+                insert_result: Ok(Some(17)),
+                write_result: Ok(1),
+                audit_result: Ok(1),
+                begin_result: Ok(()),
+                commit_result: Ok(()),
+                rollback_result: Ok(()),
+            }
+        }
+    }
+    impl crate::native_audit::AuditDatabase for AuditDriver {
+        type Transaction = Self;
+        async fn begin(&self) -> Result<Self, String> {
+            self.events.lock().unwrap().push("begin".into());
+            self.begin_result.clone()?;
+            Ok(self.clone())
+        }
+    }
+    impl crate::native_insert::InsertExecutor for AuditDriver {
+        async fn insert(
+            &self,
+            _: &crate::native_insert::InsertPlan,
+        ) -> Result<Option<i64>, String> {
+            self.events.lock().unwrap().push("insert".into());
+            self.insert_result.clone()
+        }
+    }
+    impl crate::native_audit::AuditTransaction for AuditDriver {
+        async fn snapshot(
+            &self,
+            _: &RuntimeResource,
+            id: i64,
+        ) -> Result<Option<serde_json::Value>, String> {
+            self.events.lock().unwrap().push(format!("snapshot:{id}"));
+            self.snapshots
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra snapshot")
+        }
+        async fn execute(&self, statement: &MutationStatement) -> Result<u64, String> {
+            if statement.sql.starts_with("INSERT INTO events ") {
+                self.events.lock().unwrap().push("audit".into());
+                self.audit_plans.lock().unwrap().push(statement.clone());
+                self.audit_result.clone()
+            } else {
+                self.events.lock().unwrap().push("write".into());
+                self.write_result.clone()
+            }
+        }
+        async fn commit(self) -> Result<(), String> {
+            self.events.lock().unwrap().push("commit".into());
+            self.commit_result.clone()
+        }
+        async fn rollback(self) -> Result<(), String> {
+            self.events.lock().unwrap().push("rollback".into());
+            self.rollback_result.clone()
+        }
+    }
+    fn audited_resource() -> RuntimeResource {
+        let mut resource = resource(vec![]);
+        resource.audit = Some(RuntimeAuditConfig {
+            sink_table_name: "events".into(),
+            create: true,
+            update: true,
+            delete: true,
+            actions: None,
+        });
+        resource
+    }
+
+    #[tokio::test]
+    async fn audited_insert_requires_id_and_snapshot_and_commits_the_event_last() {
+        use crate::native_audit::{AuditActor, execute_audited_insert};
+        let resource = audited_resource();
+        let prepared = crate::native_write::PreparedCreate {
+            assignments: vec![],
+        };
+        let actor = AuditActor {
+            user_id: 7,
+            roles: &[],
+        };
+        let driver = AuditDriver::new(vec![Ok(Some(json!({"id":17,"title":"new"})))]);
+        assert_eq!(
+            execute_audited_insert(&resource, &prepared, &actor, "create", &driver)
+                .await
+                .unwrap(),
+            17
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "insert", "snapshot:17", "audit", "commit"]
+        );
+        let plans = driver.audit_plans.lock().unwrap();
+        let RuntimeBoundValue::Text(payload) = &plans[0].binds[5] else {
+            panic!("payload must be text")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(payload).unwrap(),
+            json!({"after":{"id":17,"title":"new"}})
+        );
+        drop(plans);
+        let mut driver = AuditDriver::new(vec![]);
+        driver.insert_result = Ok(None);
+        assert_eq!(
+            execute_audited_insert(&resource, &prepared, &actor, "create", &driver)
+                .await
+                .unwrap_err(),
+            "created row id was not returned"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "insert", "rollback"]
+        );
+        let driver = AuditDriver::new(vec![Ok(None)]);
+        assert_eq!(
+            execute_audited_insert(&resource, &prepared, &actor, "create", &driver)
+                .await
+                .unwrap_err(),
+            "created row could not be reloaded for audit"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "insert", "snapshot:17", "rollback"]
+        );
+        let mut driver = AuditDriver::new(vec![Ok(Some(json!({"id":17})))]);
+        driver.audit_result = Err("audit unavailable".into());
+        driver.rollback_result = Err("rollback also failed".into());
+        assert_eq!(
+            execute_audited_insert(&resource, &prepared, &actor, "create", &driver)
+                .await
+                .unwrap_err(),
+            "audit unavailable"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "insert", "snapshot:17", "audit", "rollback"]
+        );
+    }
+
+    #[tokio::test]
+    async fn audited_mutations_capture_only_required_snapshots_and_roll_back_misses() {
+        use crate::native_audit::{AuditActor, AuditedMutation, execute_audited_mutation};
+        let resource = audited_resource();
+        let statement = MutationStatement {
+            sql: "resource write".into(),
+            binds: vec![],
+        };
+        for action in [MutationAction::Update, MutationAction::Delete] {
+            let request = AuditedMutation {
+                resource: &resource,
+                actor: AuditActor {
+                    user_id: 7,
+                    roles: &[],
+                },
+                event_kind: "action:change",
+                record_id: 42,
+                action,
+                statement: &statement,
+            };
+            let before = json!({"title":"old"});
+            let after = json!({"title":"new"});
+            let snapshots = if action == MutationAction::Update {
+                vec![Ok(Some(before.clone())), Ok(Some(after.clone()))]
+            } else {
+                vec![Ok(Some(before.clone()))]
+            };
+            let driver = AuditDriver::new(snapshots);
+            assert_eq!(
+                execute_audited_mutation(&request, &driver).await.unwrap(),
+                1
+            );
+            let expected = if action == MutationAction::Update {
+                vec![
+                    "begin",
+                    "snapshot:42",
+                    "write",
+                    "snapshot:42",
+                    "audit",
+                    "commit",
+                ]
+            } else {
+                vec!["begin", "snapshot:42", "write", "audit", "commit"]
+            };
+            assert_eq!(*driver.events.lock().unwrap(), expected);
+            let plans = driver.audit_plans.lock().unwrap();
+            assert_eq!(
+                plans[0].binds[0],
+                RuntimeBoundValue::Text("action:change".into())
+            );
+            let RuntimeBoundValue::Text(payload) = &plans[0].binds[5] else {
+                panic!("payload must be text")
+            };
+            let expected = if action == MutationAction::Update {
+                json!({"before":before,"after":after})
+            } else {
+                json!({"before":before})
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(payload).unwrap(),
+                expected
+            );
+            drop(plans);
+            let mut driver = AuditDriver::new(vec![Ok(None)]);
+            driver.write_result = Ok(0);
+            assert_eq!(
+                execute_audited_mutation(&request, &driver).await.unwrap(),
+                0
+            );
+            assert_eq!(
+                *driver.events.lock().unwrap(),
+                ["begin", "snapshot:42", "write", "rollback"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn audited_mutation_failures_roll_back_and_preserve_the_original_error() {
+        use crate::native_audit::{AuditActor, AuditedMutation, execute_audited_mutation};
+        let resource = audited_resource();
+        let statement = MutationStatement {
+            sql: "resource write".into(),
+            binds: vec![],
+        };
+        let mut request = AuditedMutation {
+            resource: &resource,
+            actor: AuditActor {
+                user_id: 7,
+                roles: &[],
+            },
+            event_kind: "update",
+            record_id: 42,
+            action: MutationAction::Update,
+            statement: &statement,
+        };
+        let driver = AuditDriver::new(vec![Err("snapshot failed".into())]);
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "snapshot failed"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "snapshot:42", "rollback"]
+        );
+        let mut driver = AuditDriver::new(vec![Ok(Some(json!({})))]);
+        driver.write_result = Err("write failed".into());
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "write failed"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "snapshot:42", "write", "rollback"]
+        );
+        let driver = AuditDriver::new(vec![Ok(Some(json!({}))), Ok(None)]);
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "updated row could not be reloaded for audit"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "snapshot:42", "write", "snapshot:42", "rollback"]
+        );
+        let mut driver = AuditDriver::new(vec![Ok(Some(json!({}))), Ok(Some(json!({})))]);
+        driver.audit_result = Err("audit failed".into());
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "audit failed"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            [
+                "begin",
+                "snapshot:42",
+                "write",
+                "snapshot:42",
+                "audit",
+                "rollback"
+            ]
+        );
+        request.action = MutationAction::Delete;
+        let driver = AuditDriver::new(vec![Ok(None)]);
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "deleted row could not be reloaded for audit"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "snapshot:42", "write", "rollback"]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_transaction_begin_commit_and_rollback_errors_stop_processing() {
+        use crate::native_audit::{AuditActor, AuditedMutation, execute_audited_mutation};
+        let resource = audited_resource();
+        let statement = MutationStatement {
+            sql: "resource write".into(),
+            binds: vec![],
+        };
+        let request = AuditedMutation {
+            resource: &resource,
+            actor: AuditActor {
+                user_id: 7,
+                roles: &[],
+            },
+            event_kind: "delete",
+            record_id: 42,
+            action: MutationAction::Delete,
+            statement: &statement,
+        };
+        let mut driver = AuditDriver::new(vec![]);
+        driver.begin_result = Err("begin failed".into());
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "begin failed"
+        );
+        assert_eq!(*driver.events.lock().unwrap(), ["begin"]);
+        let mut driver = AuditDriver::new(vec![Ok(Some(json!({})))]);
+        driver.commit_result = Err("commit failed".into());
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "commit failed"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "snapshot:42", "write", "audit", "commit"]
+        );
+        let mut driver = AuditDriver::new(vec![Ok(None)]);
+        driver.write_result = Ok(0);
+        driver.rollback_result = Err("rollback failed".into());
+        assert_eq!(
+            execute_audited_mutation(&request, &driver)
+                .await
+                .unwrap_err(),
+            "rollback failed"
+        );
+        assert_eq!(
+            *driver.events.lock().unwrap(),
+            ["begin", "snapshot:42", "write", "rollback"]
         );
     }
 }

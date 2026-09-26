@@ -19,7 +19,7 @@ use rest_macro_core::database::{
     DatabaseConfig, DatabaseEngine, prepare_database_engine, resolve_database_config,
     resolve_database_url, service_base_dir_from_config_path,
 };
-use rest_macro_core::db::{DbExecutor, DbPool, Query, query, query_scalar};
+use rest_macro_core::db::{DbExecutor, DbPool, DbTransaction, Query, query, query_scalar};
 use rest_macro_core::errors;
 use rest_macro_core::security::DEFAULT_MAX_FILTER_IN_VALUES;
 use rest_macro_core::static_files::{StaticMount, configure_static_mounts_with_runtime};
@@ -39,6 +39,7 @@ use vsr_runtime::http::native_actix::{
     workers_from_env,
 };
 use vsr_runtime::model::{self, DbBackend, StructuredScalarKind};
+use vsr_runtime::native_audit::{AuditActor, AuditDatabase, AuditTransaction, AuditedMutation};
 use vsr_runtime::native_insert::{InsertExecutor, InsertPlan};
 use vsr_runtime::native_list::{ListPlanError, ListQueryPlan, ListScope};
 use vsr_runtime::native_mutation::{
@@ -1731,18 +1732,7 @@ async fn fetch_unfiltered_by_id(
     state: &NativeServeState,
     id: i64,
 ) -> Result<Option<Value>, HttpResponse> {
-    fetch_unfiltered_by_id_with_executor(resource, &state.pool, id).await
-}
-
-async fn fetch_unfiltered_by_id_with_executor<E>(
-    resource: &DynamicResource,
-    executor: &E,
-    id: i64,
-) -> Result<Option<Value>, HttpResponse>
-where
-    E: DbExecutor + ?Sized,
-{
-    fetch_native_row(resource, executor, id)
+    fetch_native_row(resource, &state.pool, id)
         .await
         .map_err(errors::internal_error)
 }
@@ -1769,51 +1759,6 @@ where
     row.map(|row| row_to_json(resource, &row))
         .transpose()
         .map_err(|error| error.to_string())
-}
-
-async fn insert_audit_event<E>(
-    resource: &DynamicResource,
-    executor: &E,
-    user: &UserContext,
-    event_kind: &str,
-    record_id: i64,
-    before: Option<&Value>,
-    after: Option<&Value>,
-) -> Result<(), HttpResponse>
-where
-    E: DbExecutor + ?Sized,
-{
-    insert_native_audit_event(
-        resource, executor, user, event_kind, record_id, before, after,
-    )
-    .await
-    .map_err(errors::internal_error)
-}
-
-async fn insert_native_audit_event<E>(
-    resource: &DynamicResource,
-    executor: &E,
-    user: &UserContext,
-    event_kind: &str,
-    record_id: i64,
-    before: Option<&Value>,
-    after: Option<&Value>,
-) -> Result<(), String>
-where
-    E: DbExecutor + ?Sized,
-{
-    let actor = vsr_runtime::native_audit::AuditActor {
-        user_id: user.id,
-        roles: &user.roles,
-    };
-    if let Some(statement) = vsr_runtime::native_audit::build_audit_plan(
-        resource, &actor, event_kind, record_id, before, after,
-    )
-    .map_err(|error| error.to_string())?
-    {
-        execute_native_statement(executor, &statement).await?;
-    }
-    Ok(())
 }
 
 async fn fetch_readable_by_id(
@@ -2109,8 +2054,14 @@ async fn create_handler(
         Ok(prepared) => prepared,
         Err(error) => return write_input_error(error),
     };
-    match evaluate_create_require(&resource, dynamic_service.as_ref(), &prepared, &user, &state)
-        .await
+    match evaluate_create_require(
+        &resource,
+        dynamic_service.as_ref(),
+        &prepared,
+        &user,
+        &state,
+    )
+    .await
     {
         Ok(true) => {}
         Ok(false) => {
@@ -2124,57 +2075,21 @@ async fn create_handler(
         .as_ref()
         .and_then(DynamicAuditConfig::create_event_kind)
     {
-        let tx = match state.pool.begin().await {
-            Ok(tx) => tx,
-            Err(error) => return errors::internal_error(error.to_string()),
-        };
-        let created_id = match vsr_runtime::native_insert::execute_insert(
+        match vsr_runtime::native_audit::execute_audited_insert(
             &resource,
             &prepared,
-            &NativeInsertExecutor(&tx),
-        )
-        .await
-        {
-            Ok(created_id) => created_id,
-            Err(message) => {
-                let _ = tx.rollback().await;
-                return errors::internal_error(message);
-            }
-        };
-
-        let Some(created_id) = created_id else {
-            let _ = tx.rollback().await;
-            return errors::internal_error("created row id was not returned");
-        };
-        let after = match fetch_unfiltered_by_id_with_executor(&resource, &tx, created_id).await {
-            Ok(Some(after)) => after,
-            Ok(None) => {
-                let _ = tx.rollback().await;
-                return errors::internal_error("created row could not be reloaded for audit");
-            }
-            Err(response) => {
-                let _ = tx.rollback().await;
-                return response;
-            }
-        };
-        if let Err(response) = insert_audit_event(
-            &resource,
-            &tx,
-            &user,
+            &AuditActor {
+                user_id: user.id,
+                roles: &user.roles,
+            },
             event_kind,
-            created_id,
-            None,
-            Some(&after),
+            &NativeAuditDatabase(&state.pool),
         )
         .await
         {
-            let _ = tx.rollback().await;
-            return response;
+            Ok(created_id) => Some(created_id),
+            Err(error) => return errors::internal_error(error),
         }
-        if let Err(error) = tx.commit().await {
-            return errors::internal_error(error.to_string());
-        }
-        Some(created_id)
     } else {
         match vsr_runtime::native_insert::execute_insert(
             &resource,
@@ -2317,6 +2232,50 @@ where
         .map_err(|error| error.to_string())
 }
 
+struct NativeAuditDatabase<'a>(&'a DbPool);
+
+struct NativeAuditTransaction(DbTransaction);
+
+impl AuditDatabase for NativeAuditDatabase<'_> {
+    type Transaction = NativeAuditTransaction;
+
+    async fn begin(&self) -> Result<Self::Transaction, String> {
+        self.0
+            .begin()
+            .await
+            .map(NativeAuditTransaction)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl InsertExecutor for NativeAuditTransaction {
+    async fn insert(&self, plan: &InsertPlan) -> Result<Option<i64>, String> {
+        NativeInsertExecutor(&self.0).insert(plan).await
+    }
+}
+
+impl AuditTransaction for NativeAuditTransaction {
+    async fn snapshot(
+        &self,
+        resource: &DynamicResource,
+        record_id: i64,
+    ) -> Result<Option<Value>, String> {
+        fetch_native_row(resource, &self.0, record_id).await
+    }
+
+    async fn execute(&self, statement: &MutationStatement) -> Result<u64, String> {
+        execute_native_statement(&self.0, statement).await
+    }
+
+    async fn commit(self) -> Result<(), String> {
+        self.0.commit().await.map_err(|error| error.to_string())
+    }
+
+    async fn rollback(self) -> Result<(), String> {
+        self.0.rollback().await.map_err(|error| error.to_string())
+    }
+}
+
 struct NativeMutationExecutor<'a> {
     state: &'a NativeServeState,
     resource: &'a DynamicResource,
@@ -2334,58 +2293,21 @@ impl MutationExecutor for NativeMutationExecutor<'_> {
         let Some(event_kind) = self.event_kind else {
             return execute_native_statement(&self.state.pool, statement).await;
         };
-        let tx = self
-            .state
-            .pool
-            .begin()
-            .await
-            .map_err(|error| error.to_string())?;
-        let result = async {
-            let before = fetch_native_row(self.resource, &tx, self.record_id).await?;
-            let affected = execute_native_statement(&tx, statement).await?;
-            if affected == 0 {
-                return Ok(0);
-            }
-            let after = match action {
-                MutationAction::Update => Some(
-                    fetch_native_row(self.resource, &tx, self.record_id)
-                        .await?
-                        .ok_or_else(|| "updated row could not be reloaded for audit".to_owned())?,
-                ),
-                MutationAction::Delete => {
-                    if before.is_none() {
-                        return Err("deleted row could not be reloaded for audit".to_owned());
-                    }
-                    None
-                }
-            };
-            insert_native_audit_event(
-                self.resource,
-                &tx,
-                self.user,
+        vsr_runtime::native_audit::execute_audited_mutation(
+            &AuditedMutation {
+                resource: self.resource,
+                actor: AuditActor {
+                    user_id: self.user.id,
+                    roles: &self.user.roles,
+                },
                 event_kind,
-                self.record_id,
-                before.as_ref(),
-                after.as_ref(),
-            )
-            .await?;
-            Ok(affected)
-        }
-        .await;
-        match result {
-            Ok(0) => {
-                tx.rollback().await.map_err(|error| error.to_string())?;
-                Ok(0)
-            }
-            Ok(affected) => {
-                tx.commit().await.map_err(|error| error.to_string())?;
-                Ok(affected)
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                Err(error)
-            }
-        }
+                record_id: self.record_id,
+                action,
+                statement,
+            },
+            &NativeAuditDatabase(&self.state.pool),
+        )
+        .await
     }
 }
 
