@@ -66,6 +66,8 @@ pub mod native_service;
 pub mod native_sqlx;
 #[cfg(feature = "native-validation")]
 pub mod native_validation;
+#[cfg(feature = "native-validation")]
+pub mod native_write;
 pub mod rate_limit;
 pub mod resource;
 pub mod runtime;

@@ -598,3 +598,10 @@ Native collection filtering, sorting, count/page SQL, and cursor response
 metadata now run in `vsr-runtime::native_list`. The CLI supplies
 request query values and maps the planner's classified errors to HTTP
 responses. This path remains independent of the compiler crate.
+
+Native create, update, and action input preparation now runs in
+`vsr-runtime::native_write`. The CLI supplies a hybrid create authorization
+adapter and maps classified input errors to existing HTTP responses. Create
+requirements reuse the validated values prepared for insertion, avoiding a
+second claim resolution or scoped grant lookup. Database writes, audit
+transactions, and the other hybrid authorization paths still need migration.
