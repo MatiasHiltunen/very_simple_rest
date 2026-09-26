@@ -57,9 +57,10 @@ use vsr_runtime::native_resource::{
 };
 use vsr_runtime::native_service::RuntimeService;
 use vsr_runtime::native_sqlx::row_to_json;
-use vsr_runtime::native_validation::{
-    bound_value_from_action_json, bound_value_to_json, parse_json_value,
-    validate_bound_value,
+use vsr_runtime::native_validation::bound_value_from_action_json;
+use vsr_runtime::native_write::{
+    HybridCreateAuthorizer, HybridCreateRequest, PreparedCreate,
+    WriteAssignment as UpdateAssignment, WriteInputError,
 };
 
 use super::serve_manager::{self, ServeInstanceContext};
@@ -824,10 +825,23 @@ fn lower_dynamic_resource_action(
     })
 }
 
-#[derive(Clone)]
-struct UpdateAssignment {
-    field_name: String,
-    value: BoundValue,
+struct NativeCreateAuthorizer<'a>(&'a AuthorizationRuntime);
+
+impl HybridCreateAuthorizer for NativeCreateAuthorizer<'_> {
+    async fn allows_create(&self, request: HybridCreateRequest<'_>) -> Result<bool, String> {
+        self.0
+            .evaluate_runtime_access_for_user(
+                request.user_id,
+                request.resource_name,
+                AuthorizationAction::Create,
+                AuthorizationScopeBinding {
+                    scope: request.scope.to_owned(),
+                    value: request.scope_value.to_owned(),
+                },
+            )
+            .await
+            .map(|result| result.allowed)
+    }
 }
 
 fn lower_action_update_assignment(
@@ -1372,22 +1386,6 @@ fn create_assignment_source<'a>(
         .map(|policy| &policy.source)
 }
 
-fn should_insert_field(resource: &DynamicResource, field: &DynamicField) -> bool {
-    if field.generated.skip_insert() {
-        return false;
-    }
-    if resource
-        .create_fields
-        .iter()
-        .any(|rule| rule.name == field.name)
-    {
-        return true;
-    }
-    resource
-        .create_assignment_sources
-        .contains_key(field.name.as_str())
-}
-
 fn placeholder(backend: DbBackend, index: usize) -> String {
     backend.placeholder(index)
 }
@@ -1493,45 +1491,13 @@ fn is_bool_type(ty: &Type) -> bool {
     matches!(type_leaf_name(ty).as_deref(), Some("bool"))
 }
 
-fn parse_body_value(
-    field: &DynamicField,
-    value: Option<&Value>,
-    allow_missing: bool,
-) -> Result<BoundValue, HttpResponse> {
-    match value {
-        None => {
-            if allow_missing {
-                Ok(BoundValue::Null)
-            } else {
-                Err(errors::bad_request(
-                    "invalid_json",
-                    "Request body is not valid JSON",
-                ))
-            }
-        }
-        Some(Value::Null) => {
-            if field.optional || allow_missing {
-                Ok(BoundValue::Null)
-            } else {
-                Err(errors::bad_request(
-                    "invalid_json",
-                    "Request body is not valid JSON",
-                ))
-            }
-        }
-        Some(value) => parse_json_value(field, value).map_err(|error| {
-            if field.object_fields.is_some() {
-                errors::validation_error(error.field, error.message)
-            } else {
-                errors::bad_request("invalid_json", "Request body is not valid JSON")
-            }
-        }),
+fn write_input_error(error: WriteInputError) -> HttpResponse {
+    match error {
+        WriteInputError::BadRequest { code, message } => errors::bad_request(code, message),
+        WriteInputError::Validation(error) => errors::validation_error(error.field, error.message),
+        WriteInputError::Forbidden { code, message } => errors::forbidden(code, message),
+        WriteInputError::Internal(message) => errors::internal_error(message),
     }
-}
-
-fn apply_validation(field: &DynamicField, value: &BoundValue) -> Result<(), HttpResponse> {
-    validate_bound_value(field, value)
-        .map_err(|error| errors::validation_error(error.field, error.message))
 }
 
 fn request_response_context(req: &HttpRequest) -> Option<String> {
@@ -1645,162 +1611,6 @@ async fn hybrid_runtime_allows(
     }
 }
 
-fn resolve_create_source_value(
-    resource: &DynamicResource,
-    source: &PolicyValueSource,
-    target_field: &DynamicField,
-    payload: &Map<String, Value>,
-    user: &UserContext,
-) -> Result<Option<BoundValue>, HttpResponse> {
-    match source {
-        PolicyValueSource::UserId => Ok(Some(BoundValue::Integer(user.id))),
-        PolicyValueSource::Claim(name) => match target_field.kind {
-            FieldKind::Integer => Ok(user.claim_i64(name).map(BoundValue::Integer)),
-            FieldKind::Boolean => Ok(user.claim_bool(name).map(BoundValue::Bool)),
-            _ => Ok(user
-                .claim_str(name)
-                .map(|value| BoundValue::Text(value.to_owned()))),
-        },
-        PolicyValueSource::InputField(name) => {
-            let field = resource
-                .field(name)
-                .map_err(|error| errors::internal_error(error.to_string()))?;
-            parse_body_value(field, payload.get(field.api_name.as_str()), field.optional).map(Some)
-        }
-    }
-}
-
-async fn effective_create_field_value(
-    resource: &DynamicResource,
-    field: &DynamicField,
-    payload: &Map<String, Value>,
-    user: &UserContext,
-    state: &NativeServeState,
-) -> Result<BoundValue, HttpResponse> {
-    if let Some(source) = resource.create_assignment_sources.get(field.name.as_str()) {
-        match source {
-            PolicyValueSource::UserId => return Ok(BoundValue::Integer(user.id)),
-            PolicyValueSource::Claim(_) => {
-                let claim_value =
-                    resolve_create_source_value(resource, source, field, payload, user)?;
-                let allow_admin_override = resource
-                    .create_fields
-                    .iter()
-                    .find(|rule| rule.name == field.name)
-                    .map(|rule| rule.allow_admin_override)
-                    .unwrap_or(false);
-                let allow_hybrid_runtime = resource
-                    .create_fields
-                    .iter()
-                    .find(|rule| rule.name == field.name)
-                    .map(|rule| rule.allow_hybrid_runtime)
-                    .unwrap_or(false);
-                if allow_hybrid_runtime {
-                    if is_admin(user) && allow_admin_override {
-                        if let Some(value) = payload.get(field.api_name.as_str()) {
-                            return parse_body_value(field, Some(value), true);
-                        }
-                        if let Some(value) = claim_value {
-                            return Ok(value);
-                        }
-                        return Err(errors::validation_error(
-                            field.api_name.clone(),
-                            format!("Missing required create field `{}`", field.api_name),
-                        ));
-                    }
-                    if let Some(value) = claim_value {
-                        return Ok(value);
-                    }
-                    let Some(raw_scope) = payload.get(field.api_name.as_str()) else {
-                        return Err(errors::validation_error(
-                            field.api_name.clone(),
-                            format!("Missing required create field `{}`", field.api_name),
-                        ));
-                    };
-                    let scope_value = parse_body_value(field, Some(raw_scope), true)?;
-                    let scope = AuthorizationScopeBinding {
-                        scope: resource
-                            .hybrid
-                            .as_ref()
-                            .map(|hybrid| hybrid.scope.clone())
-                            .unwrap_or_default(),
-                        value: json_field_to_scope_value(&bound_value_to_json(&scope_value))
-                            .unwrap_or_default(),
-                    };
-                    if hybrid_runtime_allows(
-                        resource,
-                        user,
-                        state,
-                        AuthorizationAction::Create,
-                        scope,
-                    )
-                    .await?
-                    {
-                        return Ok(scope_value);
-                    }
-                    return Err(errors::forbidden(
-                        "forbidden",
-                        format!(
-                            "Insufficient privileges for create scope field `{}`",
-                            field.api_name
-                        ),
-                    ));
-                }
-                if allow_admin_override {
-                    if is_admin(user) {
-                        if let Some(value) = payload.get(field.api_name.as_str()) {
-                            return parse_body_value(field, Some(value), true);
-                        }
-                        if let Some(value) = claim_value {
-                            return Ok(value);
-                        }
-                        return Err(errors::validation_error(
-                            field.api_name.clone(),
-                            format!("Missing required create field `{}`", field.api_name),
-                        ));
-                    }
-                    return claim_value.ok_or_else(|| {
-                        errors::forbidden(
-                            "missing_claim",
-                            format!(
-                                "Missing required claim for create field `{}`",
-                                field.api_name
-                            ),
-                        )
-                    });
-                }
-                return claim_value.ok_or_else(|| {
-                    errors::forbidden(
-                        "missing_claim",
-                        format!(
-                            "Missing required claim for create field `{}`",
-                            field.api_name
-                        ),
-                    )
-                });
-            }
-            PolicyValueSource::InputField(_) => {
-                return Err(errors::internal_error(
-                    "create assignments do not support input-field sources".to_owned(),
-                ));
-            }
-        }
-    }
-
-    let rule = resource
-        .create_fields
-        .iter()
-        .find(|rule| rule.name == field.name)
-        .ok_or_else(|| {
-            errors::internal_error(format!("missing create field rule `{}`", field.name))
-        })?;
-    parse_body_value(
-        field,
-        payload.get(field.api_name.as_str()),
-        rule.payload_optional,
-    )
-}
-
 fn build_row_policy_plan(
     current: &DynamicResource,
     service: &DynamicService,
@@ -1818,21 +1628,14 @@ fn build_row_policy_plan(
 async fn evaluate_create_require(
     resource: &DynamicResource,
     service: &DynamicService,
-    payload: &Map<String, Value>,
+    prepared: &PreparedCreate,
     user: &UserContext,
     state: &NativeServeState,
 ) -> Result<bool, HttpResponse> {
     let Some(expression) = resource.policies.create_require.as_ref() else {
         return Ok(true);
     };
-    let mut effective = HashMap::new();
-    for field in &resource.fields {
-        if !should_insert_field(resource, field) {
-            continue;
-        }
-        let value = effective_create_field_value(resource, field, payload, user, state).await?;
-        effective.insert(field.name.clone(), value);
-    }
+    let effective = prepared.effective_values();
     let plan = vsr_runtime::native_policy_sql::build_create_requirement_plan(
         resource,
         &service.resources,
@@ -2283,25 +2086,33 @@ async fn create_handler(
     let dynamic_service = state.dynamic_service.clone();
     let requested_context = request_response_context(&req);
 
-    let mut insert_fields = Vec::new();
-    let mut insert_values = Vec::new();
-    for field in &resource.fields {
-        if !should_insert_field(&resource, field) {
-            continue;
-        }
-        let value =
-            match effective_create_field_value(&resource, field, &payload, &user, &state).await {
-                Ok(value) => value,
-                Err(response) => return response,
-            };
-        if let Err(response) = apply_validation(field, &value) {
-            return response;
-        }
-        insert_fields.push(field.name.clone());
-        insert_values.push(value);
-    }
+    let prepared = match vsr_runtime::native_write::prepare_create(
+        &resource,
+        &payload,
+        &PolicyPrincipal {
+            user_id: user.id,
+            claims: &user.claims,
+        },
+        is_admin(&user),
+        &NativeCreateAuthorizer(&state.authorization_runtime),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => return write_input_error(error),
+    };
+    let insert_fields = prepared
+        .assignments
+        .iter()
+        .map(|assignment| assignment.field_name.clone())
+        .collect::<Vec<_>>();
+    let insert_values = prepared
+        .assignments
+        .iter()
+        .map(|assignment| assignment.value.clone())
+        .collect::<Vec<_>>();
 
-    match evaluate_create_require(&resource, dynamic_service.as_ref(), &payload, &user, &state)
+    match evaluate_create_require(&resource, dynamic_service.as_ref(), &prepared, &user, &state)
         .await
     {
         Ok(true) => {}
@@ -2531,29 +2342,10 @@ async fn update_handler(
     {
         return response;
     }
-    if resource.update_field_names.is_empty() {
-        return errors::bad_request("no_updatable_fields", "No updatable fields configured");
-    }
-
-    let mut assignments = Vec::new();
-    for field_name in &resource.update_field_names {
-        let field = match resource.field(field_name.as_str()) {
-            Ok(field) => field,
-            Err(error) => return errors::internal_error(error.to_string()),
-        };
-        let value =
-            match parse_body_value(field, payload.get(field.api_name.as_str()), field.optional) {
-                Ok(value) => value,
-                Err(response) => return response,
-            };
-        if let Err(response) = apply_validation(field, &value) {
-            return response;
-        }
-        assignments.push(UpdateAssignment {
-            field_name: field.name.clone(),
-            value,
-        });
-    }
+    let assignments = match vsr_runtime::native_write::prepare_update(&resource, &payload) {
+        Ok(assignments) => assignments,
+        Err(error) => return write_input_error(error),
+    };
     if let Some(event_kind) = resource
         .audit
         .as_ref()
@@ -2589,10 +2381,11 @@ async fn action_handler(
             }
             let empty_payload = Map::new();
             let payload = payload.as_ref().unwrap_or(&empty_payload);
-            let assignments = match action_update_assignments(&resource, assignments, payload) {
-                Ok(assignments) => assignments,
-                Err(response) => return response,
-            };
+            let assignments =
+                match vsr_runtime::native_write::prepare_action_update(&resource, assignments, payload) {
+                    Ok(assignments) => assignments,
+                    Err(error) => return write_input_error(error),
+                };
             if let Some(event_kind) = resource
                 .audit
                 .as_ref()
@@ -2621,37 +2414,6 @@ async fn action_handler(
             delete_handler(id, user, state, resource).await
         }
     }
-}
-
-fn action_update_assignments(
-    resource: &DynamicResource,
-    action_assignments: &[ActionUpdateAssignment],
-    payload: &Map<String, Value>,
-) -> Result<Vec<UpdateAssignment>, HttpResponse> {
-    let mut assignments = Vec::with_capacity(action_assignments.len());
-
-    for assignment in action_assignments {
-        let field = resource
-            .field(assignment.field_name.as_str())
-            .map_err(|error| errors::internal_error(error.to_string()))?;
-        let value = match &assignment.source {
-            ActionAssignmentSource::Literal(value) => value.clone(),
-            ActionAssignmentSource::InputField(name) => {
-                let mut input_field = field.clone();
-                input_field.api_name = name.clone();
-                let value =
-                    parse_body_value(&input_field, payload.get(name.as_str()), field.optional)?;
-                apply_validation(&input_field, &value)?;
-                value
-            }
-        };
-        assignments.push(UpdateAssignment {
-            field_name: assignment.field_name.clone(),
-            value,
-        });
-    }
-
-    Ok(assignments)
 }
 
 async fn audited_execute_update_assignments(
@@ -3343,7 +3105,7 @@ async fn delete_hybrid_fallback(
 mod tests {
     use super::{
         BoundValue, DynamicField, DynamicService, FieldKind, NativeServeState, build_api_scope,
-        build_openapi_json, database_engine_bootstrap_error, parse_json_value,
+        build_openapi_json, database_engine_bootstrap_error,
     };
     use actix_web::{App, HttpResponse, http::StatusCode, test, web};
     use jsonwebtoken::{EncodingKey, Header, encode};
@@ -3362,6 +3124,7 @@ mod tests {
     use serde::Serialize;
     use serde_json::{Value, json};
     use sqlx::Row;
+    use vsr_runtime::native_validation::parse_json_value;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{
@@ -4012,6 +3775,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(title, "allowed");
+    }
+
+    #[actix_web::test]
+    async fn native_serve_create_checks_hybrid_scope_grants() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("JWT_SECRET", TEST_JWT_SECRET);
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("hybrid_runtime_api.eon", false).await;
+        state
+            .pool
+            .execute_batch(
+                &rest_macro_core::authorization::authorization_runtime_migration_sql(
+                    auth::AuthDbBackend::Sqlite,
+                ),
+            )
+            .await
+            .unwrap();
+        query("INSERT INTO family (id) VALUES (42), (43)")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let app =
+            test::init_service(App::new().service(build_api_scope(dynamic_service, state.clone())))
+                .await;
+        let scoped_token = |user_id| {
+            encode(
+                &Header::default(),
+                &json!({
+                    "sub": user_id,
+                    "roles": ["member"],
+                    "exp": 4_102_444_800_u64,
+                    "iss": "hybrid_runtime_tests",
+                    "aud": "hybrid_runtime_clients",
+                }),
+                &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+            )
+            .unwrap()
+        };
+        let auth = ("Authorization", format!("Bearer {}", scoped_token(11)));
+        let request = |family_id| {
+            test::TestRequest::post()
+                .uri("/api/scoped_doc")
+                .insert_header(auth.clone())
+                .set_json(json!({"family_id": family_id, "title": "Scoped create"}))
+                .to_request()
+        };
+        let denied = test::call_service(&app, request(42)).await;
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let denied: Value = test::read_body_json(denied).await;
+        assert_eq!(denied["code"], "forbidden");
+
+        use rest_macro_core::authorization::{
+            AuthorizationScopeBinding, AuthorizationScopedAssignmentRecord,
+            AuthorizationScopedAssignmentTarget, insert_runtime_assignment,
+        };
+        let assignment = AuthorizationScopedAssignmentRecord::new(
+            11,
+            AuthorizationScopedAssignmentTarget::Template {
+                name: "FamilyMember".to_owned(),
+            },
+            AuthorizationScopeBinding {
+                scope: "Family".to_owned(),
+                value: "42".to_owned(),
+            },
+        );
+        insert_runtime_assignment(&state.pool, &assignment)
+            .await
+            .unwrap();
+        let allowed = test::call_service(&app, request(42)).await;
+        assert_eq!(allowed.status(), StatusCode::CREATED);
+        let created: Value = test::read_body_json(allowed).await;
+        assert_eq!(created["family_id"], 42);
+        assert_eq!(created["user_id"], 11);
+        assert_eq!(
+            test::call_service(&app, request(43)).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let wrong_user = test::TestRequest::post()
+            .uri("/api/scoped_doc")
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", scoped_token(21)),
+            ))
+            .set_json(json!({"family_id": 42, "title": "Foreign create"}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, wrong_user).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM scoped_doc")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[actix_web::test]
