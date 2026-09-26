@@ -180,6 +180,8 @@ jobs:
         run: cargo test -p vsra --all-features server_database_migration_integrity_and_concurrency -- --ignored --nocapture
       - name: Verify Recovery Registration Admin And Provisioning Concurrency
         run: cargo test -p rest_macro_core --all-features server_database_auth_tokens_are_consumed_once -- --ignored --nocapture
+      - name: Verify Native Default Inserts And Transaction Rollback
+        run: cargo test -p vsra --all-features --lib server_database_native_insert_default_values --locked -- --ignored
 
   rust-feature-check:
     name: Rust Check (${{ matrix.os }}, ${{ matrix.feature_profile }})

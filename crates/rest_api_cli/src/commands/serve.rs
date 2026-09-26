@@ -39,6 +39,7 @@ use vsr_runtime::http::native_actix::{
     workers_from_env,
 };
 use vsr_runtime::model::{self, DbBackend, GeneratedTemporalKind, StructuredScalarKind};
+use vsr_runtime::native_insert::{InsertExecutor, InsertPlan};
 use vsr_runtime::native_list::{ListPlanError, ListQueryPlan, ListScope};
 use vsr_runtime::native_policy_sql::{
     BIND_MARKER, CreatePlanError, PlanOutcome, PolicyPrincipal,
@@ -826,6 +827,34 @@ fn lower_dynamic_resource_action(
 }
 
 struct NativeCreateAuthorizer<'a>(&'a AuthorizationRuntime);
+
+struct NativeInsertExecutor<'a, E: ?Sized>(&'a E);
+
+impl<E: DbExecutor + Sync + ?Sized> InsertExecutor for NativeInsertExecutor<'_, E> {
+    async fn insert(&self, plan: &InsertPlan) -> Result<Option<i64>, String> {
+        if plan.returning_id {
+            let mut insert = query_scalar::<sqlx::Any, i64>(&plan.sql);
+            for value in &plan.binds {
+                insert = bind_scalar_query(insert, value);
+            }
+            insert
+                .fetch_one(self.0)
+                .await
+                .map(Some)
+                .map_err(|error| error.to_string())
+        } else {
+            let mut insert = query(&plan.sql);
+            for value in &plan.binds {
+                insert = bind_query(insert, value);
+            }
+            insert
+                .execute(self.0)
+                .await
+                .map(|result| result.last_insert_rowid())
+                .map_err(|error| error.to_string())
+        }
+    }
+}
 
 impl HybridCreateAuthorizer for NativeCreateAuthorizer<'_> {
     async fn allows_create(&self, request: HybridCreateRequest<'_>) -> Result<bool, String> {
@@ -2101,17 +2130,6 @@ async fn create_handler(
         Ok(prepared) => prepared,
         Err(error) => return write_input_error(error),
     };
-    let insert_fields = prepared
-        .assignments
-        .iter()
-        .map(|assignment| assignment.field_name.clone())
-        .collect::<Vec<_>>();
-    let insert_values = prepared
-        .assignments
-        .iter()
-        .map(|assignment| assignment.value.clone())
-        .collect::<Vec<_>>();
-
     match evaluate_create_require(&resource, dynamic_service.as_ref(), &prepared, &user, &state)
         .await
     {
@@ -2131,67 +2149,17 @@ async fn create_handler(
             Ok(tx) => tx,
             Err(error) => return errors::internal_error(error.to_string()),
         };
-        let created_id = if insert_fields.is_empty() {
-            if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
-                let sql = format!(
-                    "INSERT INTO {} DEFAULT VALUES RETURNING {}",
-                    resource.table_name, resource.id_field
-                );
-                match query_scalar::<sqlx::Any, i64>(&sql).fetch_one(&tx).await {
-                    Ok(id) => Some(id),
-                    Err(error) => {
-                        let _ = tx.rollback().await;
-                        return errors::internal_error(error.to_string());
-                    }
-                }
-            } else {
-                let sql = format!("INSERT INTO {} DEFAULT VALUES", resource.table_name);
-                match query(&sql).execute(&tx).await {
-                    Ok(result) => result.last_insert_rowid(),
-                    Err(error) => {
-                        let _ = tx.rollback().await;
-                        return errors::internal_error(error.to_string());
-                    }
-                }
-            }
-        } else {
-            let placeholders = (1..=insert_fields.len())
-                .map(|index| placeholder(resource.db, index))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let field_sql = insert_fields.join(", ");
-            if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
-                let sql = format!(
-                    "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
-                    resource.table_name, field_sql, placeholders, resource.id_field
-                );
-                let mut insert_query = query_scalar::<sqlx::Any, i64>(&sql);
-                for value in &insert_values {
-                    insert_query = bind_scalar_query(insert_query, value);
-                }
-                match insert_query.fetch_one(&tx).await {
-                    Ok(id) => Some(id),
-                    Err(error) => {
-                        let _ = tx.rollback().await;
-                        return errors::internal_error(error.to_string());
-                    }
-                }
-            } else {
-                let sql = format!(
-                    "INSERT INTO {} ({}) VALUES ({})",
-                    resource.table_name, field_sql, placeholders
-                );
-                let mut insert_query = query(&sql);
-                for value in &insert_values {
-                    insert_query = bind_query(insert_query, value);
-                }
-                match insert_query.execute(&tx).await {
-                    Ok(result) => result.last_insert_rowid(),
-                    Err(error) => {
-                        let _ = tx.rollback().await;
-                        return errors::internal_error(error.to_string());
-                    }
-                }
+        let created_id = match vsr_runtime::native_insert::execute_insert(
+            &resource,
+            &prepared,
+            &NativeInsertExecutor(&tx),
+        )
+        .await
+        {
+            Ok(created_id) => created_id,
+            Err(message) => {
+                let _ = tx.rollback().await;
+                return errors::internal_error(message);
             }
         };
 
@@ -2228,58 +2196,16 @@ async fn create_handler(
             return errors::internal_error(error.to_string());
         }
         Some(created_id)
-    } else if insert_fields.is_empty() {
-        if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
-            let sql = format!(
-                "INSERT INTO {} DEFAULT VALUES RETURNING {}",
-                resource.table_name, resource.id_field
-            );
-            match query_scalar::<sqlx::Any, i64>(&sql)
-                .fetch_one(&state.pool)
-                .await
-            {
-                Ok(id) => Some(id),
-                Err(error) => return errors::internal_error(error.to_string()),
-            }
-        } else {
-            let sql = format!("INSERT INTO {} DEFAULT VALUES", resource.table_name);
-            match query(&sql).execute(&state.pool).await {
-                Ok(result) => result.last_insert_rowid(),
-                Err(error) => return errors::internal_error(error.to_string()),
-            }
-        }
     } else {
-        let placeholders = (1..=insert_fields.len())
-            .map(|index| placeholder(resource.db, index))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let field_sql = insert_fields.join(", ");
-        if matches!(resource.db, DbBackend::Postgres | DbBackend::Sqlite) {
-            let sql = format!(
-                "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
-                resource.table_name, field_sql, placeholders, resource.id_field
-            );
-            let mut insert_query = query_scalar::<sqlx::Any, i64>(&sql);
-            for value in &insert_values {
-                insert_query = bind_scalar_query(insert_query, value);
-            }
-            match insert_query.fetch_one(&state.pool).await {
-                Ok(id) => Some(id),
-                Err(error) => return errors::internal_error(error.to_string()),
-            }
-        } else {
-            let sql = format!(
-                "INSERT INTO {} ({}) VALUES ({})",
-                resource.table_name, field_sql, placeholders
-            );
-            let mut insert_query = query(&sql);
-            for value in &insert_values {
-                insert_query = bind_query(insert_query, value);
-            }
-            match insert_query.execute(&state.pool).await {
-                Ok(result) => result.last_insert_rowid(),
-                Err(error) => return errors::internal_error(error.to_string()),
-            }
+        match vsr_runtime::native_insert::execute_insert(
+            &resource,
+            &prepared,
+            &NativeInsertExecutor(&state.pool),
+        )
+        .await
+        {
+            Ok(created_id) => created_id,
+            Err(message) => return errors::internal_error(message),
         }
     };
 
@@ -3775,6 +3701,137 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(title, "allowed");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires VSR_TEST_DATABASE_URL with an isolated PostgreSQL or MySQL database"]
+    async fn server_database_native_insert_default_values() {
+        let database_url = std::env::var("VSR_TEST_DATABASE_URL").expect("database URL is required");
+        let backend = if database_url.starts_with("postgres") {
+            vsr_runtime::model::DbBackend::Postgres
+        } else if database_url.starts_with("mysql") {
+            vsr_runtime::model::DbBackend::Mysql
+        } else {
+            panic!("expected a PostgreSQL or MySQL test database");
+        };
+        let pool = DbPool::connect(&database_url)
+            .await
+            .expect("test database should connect");
+        let service =
+            compiler::load_service_from_path(&fixture_path("hybrid_runtime_api.eon")).unwrap();
+        let dynamic = DynamicService::from_spec(service, "{}".into(), false, None).unwrap();
+        let mut resource = dynamic
+            .resources
+            .iter()
+            .find(|resource| resource.resource_name == "Family")
+            .unwrap()
+            .as_ref()
+            .clone();
+        resource.db = backend;
+        resource.table_name = format!(
+            "vsr_native_insert_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        query(&format!(
+            "CREATE TABLE {} ({})",
+            resource.table_name,
+            backend.primary_key_sql("id")
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let prepared = vsr_runtime::native_write::PreparedCreate {
+            assignments: Vec::new(),
+        };
+        let result: Result<(), String> = async {
+            let inserted = vsr_runtime::native_insert::execute_insert(
+                &resource,
+                &prepared,
+                &super::NativeInsertExecutor(&pool),
+            )
+            .await?
+            .ok_or("insert must return a generated ID")?;
+            if inserted <= 0 {
+                return Err("inserted ID must be positive".into());
+            }
+            let tx = pool.begin().await.map_err(|error| error.to_string())?;
+            let staged = vsr_runtime::native_insert::execute_insert(
+                &resource,
+                &prepared,
+                &super::NativeInsertExecutor(&tx),
+            )
+            .await?
+            .ok_or("transaction insert must return a generated ID")?;
+            if staged <= 0 || staged == inserted {
+                return Err("transaction insert must return a new positive ID".into());
+            }
+            tx.rollback().await.map_err(|error| error.to_string())?;
+            let count = query_scalar::<sqlx::Any, i64>(&format!(
+                "SELECT COUNT(*) FROM {}",
+                resource.table_name
+            ))
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| error.to_string())?;
+            if count != 1 {
+                return Err(format!(
+                    "rollback must leave one committed insert, found {count}"
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        let cleanup = query(&format!("DROP TABLE {}", resource.table_name))
+            .execute(&pool)
+            .await;
+        result.expect("default insert and transaction rollback should succeed");
+        cleanup.expect("isolated test table should be removed");
+    }
+
+    #[actix_web::test]
+    async fn native_serve_creates_resources_with_database_defaults() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        unsafe {
+            std::env::set_var("TURSO_ENCRYPTION_KEY", TEST_TURSO_KEY);
+        }
+        let (dynamic_service, state) = build_test_state("hybrid_runtime_api.eon", false).await;
+        let resource = dynamic_service
+            .resources
+            .iter()
+            .find(|resource| resource.resource_name == "Family")
+            .unwrap()
+            .clone();
+        let response = super::create_handler(
+            test::TestRequest::post()
+                .uri("/api/family")
+                .to_http_request(),
+            serde_json::Map::new(),
+            auth::UserContext {
+                id: 11,
+                roles: Vec::new(),
+                claims: Default::default(),
+            },
+            web::Data::new(state.clone()),
+            resource,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&body).unwrap();
+        assert!(created["id"].as_i64().unwrap() > 0);
+        assert_eq!(
+            query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM family")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[actix_web::test]
