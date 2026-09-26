@@ -616,10 +616,12 @@ resolve a required claim. Grant and database errors stop dispatch. Regular CRUD
 and custom actions use the same executor boundary.
 
 `vsr-runtime::native_audit` serializes actors and row snapshots and builds the
-audit insert. The CLI database adapter commits a successful mutation together
-with its audit event and rolls back failed or unmatched attempts before hybrid
-dispatch continues. Native HTTP coverage exercises denied scopes, read-only
+audit insert. It also owns transaction orchestration for native creates,
+updates, and deletes through database and transaction traits. A successful
+write commits together with its audit event; failed or unmatched attempts roll
+back before hybrid dispatch continues. The CLI implements the database
+operations adapter. Native HTTP coverage exercises denied scopes, read-only
 grants, successful hybrid mutations, and rollback on audit failures. CI also
 exercises audited update/delete plans and rollback on PostgreSQL and MySQL.
-Transaction lifecycle adapters and hybrid read/list orchestration still need
-migration, alongside streaming and general native/emitted backend selection.
+Database driver adapters and hybrid read/list orchestration still need migration,
+alongside streaming and general native/emitted backend selection.
