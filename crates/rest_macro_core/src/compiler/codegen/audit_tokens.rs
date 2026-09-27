@@ -5,6 +5,7 @@ use quote::quote;
 use syn::Path;
 
 use super::super::model::ResourceSpec;
+use super::list_bind_type;
 
 pub(super) fn audit_sink_resource<'a>(
     resource: &ResourceSpec,
@@ -65,14 +66,15 @@ pub(super) fn audit_helper_method_tokens(
     let id_field = Literal::string(&resource.id_field);
     let sink_table = Literal::string(&sink.table_name);
     let resource_name = Literal::string(&resource.struct_ident.to_string());
+    let list_bind_ty = list_bind_type(resource);
 
     quote! {
         async fn fetch_unfiltered_by_id_for_audit<E>(
             id: i64,
             executor: &E,
-        ) -> Result<Option<Self>, #runtime_crate::sqlx::Error>
+        ) -> Result<Option<Self>, String>
         where
-            E: #runtime_crate::db::DbExecutor + ?Sized,
+            E: #runtime_crate::vsr_runtime::typed_read::TypedItemReadExecutor<Self> + ?Sized,
         {
             let sql = format!(
                 "SELECT * FROM {} WHERE {} = {}",
@@ -80,10 +82,7 @@ pub(super) fn audit_helper_method_tokens(
                 #id_field,
                 Self::list_placeholder(1),
             );
-            #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                .bind(id)
-                .fetch_optional(executor)
-                .await
+            Self::execute_item_query(executor, &sql, vec![#list_bind_ty::Integer(id)]).await
         }
 
         fn audit_actor_user_id(user: &#runtime_crate::core::auth::UserContext) -> Option<i64> {

@@ -25,7 +25,7 @@
 //! | [`config_secret`] | Serializable secret references for service configuration |
 //! | [`database`] | Database configuration and engine startup |
 //! | `db` | Feature-gated SQLx and local Turso pools and queries |
-//! | [`typed_read`] | Driver-independent typed collection execution |
+//! | [`typed_read`] | Driver-independent typed item and collection execution |
 //! | [`static_config`] | Framework-neutral static mount settings |
 //! | [`runtime`] | Shared compression settings |
 //! | `static_files` | Feature-gated Actix static-file adapter |

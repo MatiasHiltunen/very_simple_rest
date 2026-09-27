@@ -13,7 +13,7 @@ use crate::{
     native_read::{ReadExecutor, ReadStatement, unfiltered_item_statement},
     native_resource::{RuntimeBoundValue, RuntimeResource},
     native_sqlx::row_to_json,
-    typed_read::{TypedReadExecutor, TypedReadQuery},
+    typed_read::{TypedItemReadExecutor, TypedReadExecutor, TypedReadQuery},
 };
 
 impl IntoDbValue for RuntimeBoundValue {
@@ -125,6 +125,25 @@ async fn insert<E: DbExecutor + Sync + ?Sized>(
 
 macro_rules! impl_native_executor {
     ($executor:ty) => {
+        impl<T> TypedItemReadExecutor<T> for $executor
+        where
+            T: for<'row> sqlx::FromRow<'row, sqlx::any::AnyRow> + Send + Unpin,
+        {
+            async fn fetch_optional(
+                &self,
+                statement: TypedReadQuery<'_>,
+            ) -> Result<Option<T>, String> {
+                let mut request = query_as::<sqlx::Any, T>(statement.sql);
+                for bind in statement.binds {
+                    request = request.bind(bind);
+                }
+                request
+                    .fetch_optional(self)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
+
         impl<T> TypedReadExecutor<T> for $executor
         where
             T: for<'row> sqlx::FromRow<'row, sqlx::any::AnyRow> + Send + Unpin,
@@ -256,7 +275,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     #[tokio::test]
-    async fn typed_collection_adapters_preserve_filters_pagination_nulls_and_transactions() {
+    async fn typed_read_adapters_preserve_filters_pagination_nulls_and_transactions() {
         use crate::typed_read::read_collection;
         type Row = (i64, String, Option<String>, f64);
 
@@ -326,6 +345,38 @@ mod tests {
             .await
             .unwrap();
             assert!(empty.is_empty());
+            let item_query = |id| TypedReadQuery {
+                sql: "SELECT id, title, note, score FROM typed_note WHERE id = ? AND enabled = ? AND title = ? AND score >= ?",
+                binds: vec![
+                    RuntimeBoundValue::Integer(id),
+                    RuntimeBoundValue::Bool(true),
+                    RuntimeBoundValue::Text("bravo".into()),
+                    RuntimeBoundValue::Real(2.5),
+                ],
+            };
+            let item = TypedItemReadExecutor::<Row>::fetch_optional(&pool, item_query(2))
+                .await
+                .unwrap();
+            assert_eq!(item, Some((2, "bravo".into(), None, 2.5)));
+            for id in [3, 99] {
+                assert!(
+                    TypedItemReadExecutor::<Row>::fetch_optional(&pool, item_query(id))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            assert!(
+                TypedItemReadExecutor::<Row>::fetch_optional(
+                    &pool,
+                    TypedReadQuery {
+                        sql: "SELECT * FROM missing_typed_table",
+                        binds: vec![],
+                    },
+                )
+                .await
+                .is_err()
+            );
             let tx = DbPool::begin(&pool).await.unwrap();
             query("INSERT INTO typed_note VALUES (4, 'transaction', 'visible in transaction', 4.5, 1)").execute(&tx).await.unwrap();
             let page = read_collection::<Row, _>(
@@ -339,6 +390,14 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(page.total, 3);
+            let transaction_item = || TypedReadQuery {
+                sql: "SELECT id, title, note, score FROM typed_note WHERE id = ?",
+                binds: vec![RuntimeBoundValue::Integer(4)],
+            };
+            let item = TypedItemReadExecutor::<Row>::fetch_optional(&tx, transaction_item())
+                .await
+                .unwrap();
+            assert_eq!(item.as_ref(), page.items.first());
             assert_eq!(
                 page.items,
                 vec![(
@@ -349,6 +408,12 @@ mod tests {
                 )]
             );
             DbTransaction::rollback(&tx).await.unwrap();
+            assert!(
+                TypedItemReadExecutor::<Row>::fetch_optional(&pool, transaction_item())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
             assert_eq!(
                 TypedReadExecutor::<Row>::count(&pool, count())
                     .await
