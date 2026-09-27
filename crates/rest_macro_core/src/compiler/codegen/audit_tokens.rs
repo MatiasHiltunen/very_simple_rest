@@ -124,7 +124,7 @@ pub(super) fn audit_helper_method_tokens(
             after: Option<&Self>,
         ) -> Result<(), HttpResponse>
         where
-            E: #runtime_crate::db::DbExecutor + ?Sized,
+            E: #runtime_crate::vsr_runtime::statement::StatementExecutor + ?Sized,
         {
             let payload_json = Self::audit_payload_json(before, after)?;
             let actor_roles_json = #runtime_crate::serde_json::to_string(&user.roles)
@@ -141,7 +141,7 @@ pub(super) fn audit_helper_method_tokens(
                 Self::list_placeholder(5),
                 Self::list_placeholder(6),
             );
-            #runtime_crate::db::query(&sql)
+            #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
                 .bind(event_kind)
                 .bind(#resource_name)
                 .bind(record_id)

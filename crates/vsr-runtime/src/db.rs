@@ -5,6 +5,10 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::statement::{
+    IntoStatementValue, ReturningIdExecutor, StatementExecutor, StatementQuery,
+};
+pub use crate::statement::{StatementResult as DbQueryResult, StatementValue as DbValue};
 use chrono::{DateTime, NaiveDate, NaiveTime, SecondsFormat, Utc};
 use rust_decimal::Decimal;
 use sqlx::AnyPool;
@@ -113,46 +117,16 @@ fn default_turso_local_max_connections() -> usize {
     suggested.clamp(4, DEFAULT_TURSO_LOCAL_MAX_CONNECTIONS)
 }
 
-/// Affected row count and generated ID from a write statement.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DbQueryResult {
-    rows_affected: u64,
-    last_insert_rowid: Option<i64>,
-}
-
-impl DbQueryResult {
-    /// Number of rows affected by the executed statement.
-    pub fn rows_affected(&self) -> u64 {
-        self.rows_affected
-    }
-
-    /// Generated insert ID when the driver reports one.
-    pub fn last_insert_rowid(&self) -> Option<i64> {
-        self.last_insert_rowid
-    }
-}
-
-/// Owned scalar or binary value bound to a database statement.
-#[derive(Clone, Debug, PartialEq)]
-pub enum DbValue {
-    /// SQL NULL.
-    Null,
-    /// Boolean value.
-    Bool(bool),
-    /// Signed 64-bit integer.
-    Integer(i64),
-    /// 64-bit floating point value.
-    Double(f64),
-    /// UTF-8 text.
-    Text(String),
-    /// Binary value.
-    Blob(Vec<u8>),
-}
-
 /// Convert supported Rust values into portable database binds.
 pub trait IntoDbValue {
     /// Convert this value or return a bind validation error.
     fn into_db_value(self) -> Result<DbValue, sqlx::Error>;
+}
+
+impl<T: IntoDbValue> IntoStatementValue for T {
+    fn into_statement_value(self) -> Result<DbValue, String> {
+        self.into_db_value().map_err(|error| error.to_string())
+    }
 }
 
 macro_rules! impl_integer_value {
@@ -602,6 +576,14 @@ pub struct Query<'q> {
 }
 
 impl<'q> Query<'q> {
+    fn from_statement(statement: StatementQuery<'q>) -> Self {
+        Self {
+            sql: statement.sql,
+            binds: statement.binds,
+            bind_error: None,
+        }
+    }
+
     /// Append a value, deferring conversion errors until execution.
     pub fn bind<T>(mut self, value: T) -> Self
     where
@@ -659,6 +641,35 @@ impl<'q> Query<'q> {
         }
     }
 }
+
+macro_rules! impl_statement_executor {
+    ($executor:ty) => {
+        impl StatementExecutor for $executor {
+            async fn execute(
+                &self,
+                statement: StatementQuery<'_>,
+            ) -> Result<DbQueryResult, String> {
+                Query::from_statement(statement)
+                    .execute(self)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
+
+        impl ReturningIdExecutor for $executor {
+            async fn returning_id(&self, statement: StatementQuery<'_>) -> Result<i64, String> {
+                let row = Query::from_statement(statement)
+                    .fetch_one(self)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                row.try_get(0).map_err(|error| error.to_string())
+            }
+        }
+    };
+}
+
+impl_statement_executor!(DbPool);
+impl_statement_executor!(DbTransaction);
 
 /// Statement whose rows are decoded through SQLx `FromRow`.
 pub struct QueryAs<'q, T> {

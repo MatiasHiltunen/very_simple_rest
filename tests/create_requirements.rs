@@ -142,4 +142,29 @@ async fn create_require_exists_allows_owner_bootstrap_and_blocks_outsiders() {
         .to_request();
     let outsider_response = test::call_service(&app, create_member_as_outsider).await;
     assert_eq!(outsider_response.status(), StatusCode::FORBIDDEN);
+
+    query("DROP TABLE family")
+        .execute(&pool)
+        .await
+        .expect("test policy source should be removable");
+    let failed_guard_request = test::TestRequest::post()
+        .uri("/api/family_member")
+        .insert_header(("Authorization", format!("Bearer {}", alice_token.token)))
+        .set_json(&create_require_api::FamilyMemberCreate {
+            family_id,
+            user_id: 2,
+            display_name: "Must not insert".to_owned(),
+        })
+        .to_request();
+    let failed_guard_response = test::call_service(&app, failed_guard_request).await;
+    assert_eq!(
+        failed_guard_response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let count =
+        very_simple_rest::db::query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM family_member")
+            .fetch_one(&pool)
+            .await
+            .expect("membership count should query");
+    assert_eq!(count, 1);
 }

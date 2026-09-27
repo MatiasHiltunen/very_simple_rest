@@ -26,6 +26,7 @@
 //! | [`database`] | Database configuration and engine startup |
 //! | `db` | Feature-gated SQLx and local Turso pools and queries |
 //! | [`typed_read`] | Driver-independent typed item and collection execution |
+//! | [`statement`] | Driver-independent write binding, execution, and results |
 //! | [`static_config`] | Framework-neutral static mount settings |
 //! | [`runtime`] | Shared compression settings |
 //! | `static_files` | Feature-gated Actix static-file adapter |
@@ -88,6 +89,7 @@ pub mod rate_limit;
 pub mod resource;
 pub mod runtime;
 pub mod security;
+pub mod statement;
 pub mod static_config;
 #[cfg(feature = "static-actix")]
 pub mod static_files;

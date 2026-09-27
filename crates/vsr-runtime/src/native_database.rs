@@ -275,6 +275,173 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     #[tokio::test]
+    async fn generated_statement_adapters_preserve_values_ids_failures_and_transactions() {
+        use crate::statement::Statement;
+        use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+        type Stored = (
+            i64,
+            Option<String>,
+            Vec<u8>,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
+
+        for local_turso in [false, true] {
+            if local_turso && !cfg!(feature = "turso-local") {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("statements.db");
+            let config = DatabaseConfig {
+                engine: if local_turso {
+                    DatabaseEngine::TursoLocal(TursoLocalConfig {
+                        path: path.display().to_string(),
+                        encryption_key: None,
+                    })
+                } else {
+                    DatabaseEngine::Sqlx
+                },
+                resilience: None,
+            };
+            let pool = DbPool::connect_with_config(
+                &format!("sqlite:{}?mode=rwc", path.display()),
+                &config,
+            )
+            .await
+            .unwrap();
+            pool.execute_batch("CREATE TABLE typed_statement (id INTEGER PRIMARY KEY AUTOINCREMENT, enabled INTEGER, optional_text TEXT, payload BLOB, day TEXT, time TEXT, stamp TEXT, uid TEXT, amount TEXT, metadata TEXT)").await.unwrap();
+            let stamp = DateTime::parse_from_rfc3339("2026-09-27T12:34:56.123456789Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let id = Statement::new("INSERT INTO typed_statement (enabled, optional_text, payload, day, time, stamp, uid, amount, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+                .bind(true).bind(None::<String>).bind(vec![0_u8, 128, 255])
+                .bind(NaiveDate::from_ymd_opt(2026, 9, 27).unwrap())
+                .bind(NaiveTime::from_hms_micro_opt(1, 2, 3, 123456).unwrap())
+                .bind(stamp).bind(Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap())
+                .bind(Decimal::new(123400, 4)).bind(json!({"names": ["one", "two"]}).to_string())
+                .returning_id(&pool).await.unwrap();
+            assert_eq!(id, 1);
+            let stored = query_as::<sqlx::Any, Stored>("SELECT enabled, optional_text, payload, day, time, stamp, uid, amount, metadata FROM typed_statement WHERE id = ?").bind(id).fetch_one(&pool).await.unwrap();
+            assert_eq!(stored.0, 1);
+            assert_eq!(stored.1, None);
+            assert_eq!(stored.2, vec![0, 128, 255]);
+            assert_eq!(stored.3, "2026-09-27");
+            assert_eq!(stored.4, "01:02:03.123456");
+            assert_eq!(stored.5, "2026-09-27T12:34:56.123456+00:00");
+            assert_eq!(stored.6, "123e4567-e89b-12d3-a456-426614174000");
+            assert_eq!(stored.7, "12.34");
+            assert_eq!(
+                serde_json::from_str::<Value>(&stored.8).unwrap(),
+                json!({"names": ["one", "two"]})
+            );
+            let result = Statement::new("INSERT INTO typed_statement DEFAULT VALUES")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(result.rows_affected(), 1);
+            assert_eq!(
+                result.last_insert_rowid(),
+                if local_turso { Some(2) } else { None }
+            );
+            let result =
+                Statement::new("UPDATE typed_statement SET optional_text = ? WHERE id = ?")
+                    .bind("unmatched")
+                    .bind(999_i64)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(result.rows_affected(), 0);
+
+            let tx = DbPool::begin(&pool).await.unwrap();
+            let result =
+                Statement::new("UPDATE typed_statement SET optional_text = ? WHERE id = ?")
+                    .bind("rollback")
+                    .bind(id)
+                    .execute(&tx)
+                    .await
+                    .unwrap();
+            assert_eq!(result.rows_affected(), 1);
+            let inserted =
+                Statement::new("INSERT INTO typed_statement DEFAULT VALUES RETURNING id")
+                    .returning_id(&tx)
+                    .await
+                    .unwrap();
+            assert_eq!(inserted, 3);
+            assert!(
+                Statement::new("INSERT INTO typed_statement (id) VALUES (?)")
+                    .bind(id)
+                    .execute(&tx)
+                    .await
+                    .is_err()
+            );
+            DbTransaction::rollback(&tx).await.unwrap();
+            let optional = query_scalar::<sqlx::Any, Option<String>>(
+                "SELECT optional_text FROM typed_statement WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(optional, None);
+            let tx = DbPool::begin(&pool).await.unwrap();
+            Statement::new("UPDATE typed_statement SET optional_text = ? WHERE id = ?")
+                .bind("committed")
+                .bind(id)
+                .execute(&tx)
+                .await
+                .unwrap();
+            DbTransaction::commit(&tx).await.unwrap();
+            let optional = query_scalar::<sqlx::Any, String>(
+                "SELECT optional_text FROM typed_statement WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(optional, "committed");
+
+            let error = Statement::new("INSERT INTO typed_statement (id) VALUES (?)")
+                .bind(u64::MAX)
+                .execute(&pool)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.contains("u64 is too large"));
+            assert!(
+                Statement::new("UPDATE missing_table SET value = 1")
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                Statement::new(
+                    "INSERT INTO typed_statement (enabled) SELECT 1 WHERE 0 RETURNING id"
+                )
+                .returning_id(&pool)
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM typed_statement")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                2
+            );
+            if let Some(sqlx_pool) = pool.sqlx_pool() {
+                sqlx_pool.close().await;
+            }
+            drop(pool);
+        }
+    }
+
+    #[tokio::test]
     async fn typed_read_adapters_preserve_filters_pagination_nulls_and_transactions() {
         use crate::typed_read::read_collection;
         type Row = (i64, String, Option<String>, f64);

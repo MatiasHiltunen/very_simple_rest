@@ -269,7 +269,7 @@ pub(super) fn resource_action_handler_tokens(
                                 }
                             };
                             let sql = #sql;
-                            let mut q = #runtime_crate::db::query(sql);
+                            let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                             #(#action_bind_statements)*
                             q = q.bind(id);
                             match q.execute(&tx).await {
@@ -330,7 +330,7 @@ pub(super) fn resource_action_handler_tokens(
                             let id = path.into_inner();
                             #action_payload_setup
                             let sql = #sql;
-                            let mut q = #runtime_crate::db::query(sql);
+                            let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                             #(#action_bind_statements)*
                             q = q.bind(id);
                             match q.execute(db.get_ref()).await {
@@ -380,7 +380,7 @@ pub(super) fn resource_action_handler_tokens(
                                         }
                                     };
                                     let sql = #admin_sql;
-                                    let mut q = #runtime_crate::db::query(sql);
+                                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                                     #(#action_bind_statements)*
                                     q = q.bind(id);
                                     match q.execute(&tx).await {
@@ -443,7 +443,7 @@ pub(super) fn resource_action_handler_tokens(
                             {
                                 Ok(Some(_)) => {
                                     let sql = #admin_sql;
-                                    let mut q = #runtime_crate::db::query(sql);
+                                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                                     #(#action_bind_statements)*
                                     q = q.bind(id);
                                     match q.execute(db.get_ref()).await {
@@ -485,7 +485,7 @@ pub(super) fn resource_action_handler_tokens(
                                     Self::list_placeholder(#where_index_literal),
                                     condition
                                 );
-                                let mut q = #runtime_crate::db::query(&sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                                 #(#action_bind_statements)*
                                 q = q.bind(id);
                                 for bind in binds {
@@ -551,7 +551,7 @@ pub(super) fn resource_action_handler_tokens(
                                     Self::list_placeholder(#where_index_literal),
                                     condition
                                 );
-                                let mut q = #runtime_crate::db::query(&sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                                 #(#action_bind_statements)*
                                 q = q.bind(id);
                                 for bind in binds {
@@ -589,7 +589,7 @@ pub(super) fn resource_action_handler_tokens(
                                     }
                                 };
                                 let sql = #admin_sql;
-                                let mut q = #runtime_crate::db::query(sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                                 #(#action_bind_statements)*
                                 q = q.bind(id);
                                 match q.execute(&tx).await {
@@ -644,7 +644,7 @@ pub(super) fn resource_action_handler_tokens(
                             #action_payload_setup
                             if #is_admin {
                                 let sql = #admin_sql;
-                                let mut q = #runtime_crate::db::query(sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                                 #(#action_bind_statements)*
                                 q = q.bind(id);
                                 match q.execute(db.get_ref()).await {
@@ -732,7 +732,7 @@ pub(super) fn resource_action_handler_tokens(
                                 #id_field,
                                 #id_placeholder
                             );
-                            match #runtime_crate::db::query(&sql)
+                            match #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
                                 .bind(id)
                                 .execute(&tx)
                                 .await
@@ -783,7 +783,7 @@ pub(super) fn resource_action_handler_tokens(
                                 #id_field,
                                 #id_placeholder
                             );
-                            match #runtime_crate::db::query(&sql)
+                            match #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
                                 .bind(path.into_inner())
                                 .execute(db.get_ref())
                                 .await
@@ -835,7 +835,7 @@ pub(super) fn resource_action_handler_tokens(
                                         }
                                     };
                                     let sql = #admin_sql;
-                                    match #runtime_crate::db::query(sql)
+                                    match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                                         .bind(id)
                                         .execute(&tx)
                                         .await
@@ -886,7 +886,7 @@ pub(super) fn resource_action_handler_tokens(
                             {
                                 Ok(Some(_)) => {
                                     let sql = #admin_sql;
-                                    match #runtime_crate::db::query(sql)
+                                    match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                                         .bind(id)
                                         .execute(db.get_ref())
                                         .await
@@ -928,7 +928,7 @@ pub(super) fn resource_action_handler_tokens(
                                     Self::list_placeholder(1),
                                     condition
                                 );
-                                let mut q = #runtime_crate::db::query(&sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                                 q = q.bind(id);
                                 for bind in binds {
                                     q = match bind {
@@ -988,7 +988,7 @@ pub(super) fn resource_action_handler_tokens(
                                     Self::list_placeholder(1),
                                     condition
                                 );
-                                let mut q = #runtime_crate::db::query(&sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                                 q = q.bind(id);
                                 for bind in binds {
                                     q = match bind {
@@ -1028,7 +1028,7 @@ pub(super) fn resource_action_handler_tokens(
                                     }
                                 };
                                 let sql = #admin_sql;
-                                match #runtime_crate::db::query(sql)
+                                match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                                     .bind(id)
                                     .execute(&tx)
                                     .await
@@ -1070,7 +1070,7 @@ pub(super) fn resource_action_handler_tokens(
                             let id = path.into_inner();
                             if #is_admin {
                                 let sql = #admin_sql;
-                                match #runtime_crate::db::query(sql)
+                                match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                                     .bind(id)
                                     .execute(db.get_ref())
                                     .await

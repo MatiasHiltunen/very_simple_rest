@@ -678,5 +678,22 @@ SQLite and local Turso. Cross-platform generated coverage also exercises owner
 and tenant policies, admin bypass settings, response contexts, computed fields,
 and audited CRUD/actions.
 
-Generated write execution and transport presentation, streaming, and general
+Generated CRUD, custom actions, and audit inserts now execute through
+`vsr-runtime::statement`. This driver-independent contract owns statement
+values, affected-row results, deferred binding failures, and returning insert
+IDs. The `db::DbValue` and `db::DbQueryResult` names re-export these shared
+types. Its driver adapter reuses the existing conversions for nullable,
+binary, temporal, UUID, decimal, and JSON-text values. Generated create-policy
+guards also use the typed optional-row executor.
+
+SQL planning, role/policy/grant decisions, audit serialization, transaction
+begin/commit/rollback, and HTTP presentation remain in the generated code.
+The runtime executes against the supplied pool or existing transaction. Tests
+cover returning IDs, driver-reported IDs, zero affected rows, bind failures,
+nullable/binary/scalar encoding, and commit/rollback on SQLite and local Turso.
+Generated coverage additionally checks failed guards and rollback when audit
+inserts fail, along with custom actions and list/object fields on all three
+platforms.
+
+Generated orchestration and transport presentation, streaming, and general
 native/emitted backend selection still need migration.
