@@ -27,6 +27,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum WorkspaceListBindValue
+  impl WorkspaceListBindValue
+    fn into_runtime_value
   enum WorkspaceCursorValue
   struct WorkspaceCursorPayload
   struct WorkspaceListQueryPlan
@@ -48,6 +50,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -84,6 +87,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum MemberProfileListBindValue
+  impl MemberProfileListBindValue
+    fn into_runtime_value
   enum MemberProfileCursorValue
   struct MemberProfileCursorPayload
   struct MemberProfileListQueryPlan
@@ -105,6 +110,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -144,6 +150,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum MediaAssetListBindValue
+  impl MediaAssetListBindValue
+    fn into_runtime_value
   enum MediaAssetCursorValue
   struct MediaAssetCursorPayload
   struct MediaAssetListQueryPlan
@@ -165,6 +173,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -204,6 +213,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum TopicListBindValue
+  impl TopicListBindValue
+    fn into_runtime_value
   enum TopicCursorValue
   struct TopicCursorPayload
   struct TopicListQueryPlan
@@ -226,6 +237,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -268,6 +280,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum EntryListBindValue
+  impl EntryListBindValue
+    fn into_runtime_value
   enum EntryCursorValue
   struct EntryCursorPayload
   struct EntryListQueryPlan
@@ -292,6 +306,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -331,6 +346,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum EntryTopicListBindValue
+  impl EntryTopicListBindValue
+    fn into_runtime_value
   enum EntryTopicCursorValue
   struct EntryTopicCursorPayload
   struct EntryTopicListQueryPlan
@@ -351,6 +368,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -389,6 +407,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum NavigationMenuListBindValue
+  impl NavigationMenuListBindValue
+    fn into_runtime_value
   enum NavigationMenuCursorValue
   struct NavigationMenuCursorPayload
   struct NavigationMenuListQueryPlan
@@ -410,6 +430,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan
@@ -448,6 +469,8 @@ pub mod modern_cms_api
     fn as_name
     fn from_name
   enum NavigationItemListBindValue
+  impl NavigationItemListBindValue
+    fn into_runtime_value
   enum NavigationItemCursorValue
   struct NavigationItemCursorPayload
   struct NavigationItemListQueryPlan
@@ -469,6 +492,7 @@ pub mod modern_cms_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn take_list_placeholder
       fn read_policy_plan

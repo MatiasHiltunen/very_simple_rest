@@ -606,8 +606,8 @@ requirements reuse the validated values prepared for insertion, avoiding a
 second claim resolution or scoped grant lookup.
 
 `vsr-runtime::native_insert` builds and dispatches native insert statements
-through an executor trait. A CLI database adapter runs the same plan against a
-pool or an existing audit transaction.
+through an executor trait. The runtime database adapter runs the same plan
+against a pool or an existing audit transaction.
 
 `vsr-runtime::native_mutation` now plans updates and deletes, including generated
 timestamps and row-policy bind ordering. Its shared dispatcher attempts the row
@@ -619,7 +619,7 @@ and custom actions use the same executor boundary.
 audit insert. It also owns transaction orchestration for native creates,
 updates, and deletes through database and transaction traits. A successful
 write commits together with its audit event; failed or unmatched attempts roll
-back before hybrid dispatch continues. The CLI implements the database
+back before hybrid dispatch continues. The runtime implements the database
 operations adapter. Native HTTP coverage exercises denied scopes, read-only
 grants, successful hybrid mutations, and rollback on audit failures. CI also
 exercises audited update/delete plans and rollback on PostgreSQL and MySQL.
@@ -650,5 +650,19 @@ transaction drop cleanup on SQLite and local Turso. Environment-based Turso
 encryption compatibility remains covered through the facade. Driver tests and
 normal dependency graph checks run across Linux, macOS, and Windows.
 
-Generated handler integration, streaming, and general native/emitted backend
-selection still need migration.
+Generated collection and count handlers now execute through
+`vsr-runtime::typed_read`. Its `TypedReadExecutor<T>` contract accepts query
+text and VSR scalar values and returns application-owned rows; it exposes no
+driver or HTTP framework types. The runtime counts before fetching a page and
+stops on either error. SQLx and local Turso implementations live in
+`native_database` and support pools and existing transactions.
+
+Generated top-level, nested, and many-to-many collections use this execution
+path while retaining their typed query, policy, cursor, and response plans.
+The public facade re-exports `vsr_runtime` for macro consumers. Standalone
+coverage verifies separate count/page bindings, error ordering, nullable rows,
+and transaction visibility. CI exercises generated filter/count, pagination,
+relation, scalar, enum, and hybrid policy routes across all three platforms.
+
+Generated item/write handlers and transport presentation, streaming, and
+general native/emitted backend selection still need migration.

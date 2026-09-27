@@ -27,6 +27,8 @@ pub mod blog_api
     fn as_name
     fn from_name
   enum PostListBindValue
+  impl PostListBindValue
+    fn into_runtime_value
   enum PostCursorValue
   struct PostCursorPayload
   struct PostListQueryPlan
@@ -47,6 +49,7 @@ pub mod blog_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn sort_supports_cursor
       fn cursor_id_for_item
@@ -81,6 +84,8 @@ pub mod blog_api
     fn as_name
     fn from_name
   enum CommentListBindValue
+  impl CommentListBindValue
+    fn into_runtime_value
   enum CommentCursorValue
   struct CommentCursorPayload
   struct CommentListQueryPlan
@@ -101,6 +106,7 @@ pub mod blog_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_list_plan
       fn list_placeholder
       fn sort_supports_cursor
       fn cursor_id_for_item

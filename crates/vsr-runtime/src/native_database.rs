@@ -3,14 +3,30 @@
 use serde_json::Value;
 
 use crate::{
-    db::{DbExecutor, DbPool, DbTransaction, Query, QueryScalar, query, query_scalar},
+    db::{
+        DbExecutor, DbPool, DbTransaction, DbValue, IntoDbValue, Query, QueryScalar, query,
+        query_as, query_scalar,
+    },
     native_audit::{AuditDatabase, AuditTransaction},
     native_insert::{InsertExecutor, InsertPlan},
     native_mutation::MutationStatement,
     native_read::{ReadExecutor, ReadStatement, unfiltered_item_statement},
     native_resource::{RuntimeBoundValue, RuntimeResource},
     native_sqlx::row_to_json,
+    typed_read::{TypedReadExecutor, TypedReadQuery},
 };
+
+impl IntoDbValue for RuntimeBoundValue {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        Ok(match self {
+            Self::Null => DbValue::Null,
+            Self::Bool(value) => DbValue::Bool(value),
+            Self::Integer(value) => DbValue::Integer(value),
+            Self::Real(value) => DbValue::Double(value),
+            Self::Text(value) => DbValue::Text(value),
+        })
+    }
+}
 
 /// Append a native value to a portable database query.
 pub fn bind_query<'q>(query: Query<'q>, value: &RuntimeBoundValue) -> Query<'q> {
@@ -109,6 +125,33 @@ async fn insert<E: DbExecutor + Sync + ?Sized>(
 
 macro_rules! impl_native_executor {
     ($executor:ty) => {
+        impl<T> TypedReadExecutor<T> for $executor
+        where
+            T: for<'row> sqlx::FromRow<'row, sqlx::any::AnyRow> + Send + Unpin,
+        {
+            async fn count(&self, statement: TypedReadQuery<'_>) -> Result<i64, String> {
+                let mut request = query_scalar::<sqlx::Any, i64>(statement.sql);
+                for bind in statement.binds {
+                    request = request.bind(bind);
+                }
+                request
+                    .fetch_one(self)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+
+            async fn fetch_all(&self, statement: TypedReadQuery<'_>) -> Result<Vec<T>, String> {
+                let mut request = query_as::<sqlx::Any, T>(statement.sql);
+                for bind in statement.binds {
+                    request = request.bind(bind);
+                }
+                request
+                    .fetch_all(self)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        }
+
         impl InsertExecutor for $executor {
             async fn insert(&self, plan: &InsertPlan) -> Result<Option<i64>, String> {
                 insert(self, plan).await
@@ -211,6 +254,113 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::{BTreeSet, HashMap};
+
+    #[tokio::test]
+    async fn typed_collection_adapters_preserve_filters_pagination_nulls_and_transactions() {
+        use crate::typed_read::read_collection;
+        type Row = (i64, String, Option<String>, f64);
+
+        for local_turso in [false, true] {
+            if local_turso && !cfg!(feature = "turso-local") {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("typed.db");
+            let config = DatabaseConfig {
+                engine: if local_turso {
+                    DatabaseEngine::TursoLocal(TursoLocalConfig {
+                        path: path.display().to_string(),
+                        encryption_key: None,
+                    })
+                } else {
+                    DatabaseEngine::Sqlx
+                },
+                resilience: None,
+            };
+            let pool = DbPool::connect_with_config(
+                &format!("sqlite:{}?mode=rwc", path.display()),
+                &config,
+            )
+            .await
+            .unwrap();
+            pool.execute_batch("CREATE TABLE typed_note (id INTEGER PRIMARY KEY, title TEXT NOT NULL, note TEXT, score REAL NOT NULL, enabled INTEGER NOT NULL)").await.unwrap();
+            for (id, title, enabled, score) in [
+                (1, "alpha", true, 1.5),
+                (2, "bravo", true, 2.5),
+                (3, "hidden", false, 3.5),
+            ] {
+                query("INSERT INTO typed_note (id, title, note, score, enabled) VALUES (?, ?, ?, ?, ?)")
+                    .bind(RuntimeBoundValue::Integer(id))
+                    .bind(RuntimeBoundValue::Text(title.into()))
+                    .bind(RuntimeBoundValue::Null)
+                    .bind(RuntimeBoundValue::Real(score))
+                    .bind(RuntimeBoundValue::Bool(enabled))
+                    .execute(&pool).await.unwrap();
+            }
+            let count = || TypedReadQuery {
+                sql: "SELECT COUNT(*) FROM typed_note WHERE enabled = ? AND score >= ?",
+                binds: vec![RuntimeBoundValue::Bool(true), RuntimeBoundValue::Real(1.5)],
+            };
+            let select = || TypedReadQuery {
+                sql: "SELECT id, title, note, score FROM typed_note WHERE enabled = ? AND score >= ? AND id > ? ORDER BY id LIMIT ? OFFSET ?",
+                binds: vec![
+                    RuntimeBoundValue::Bool(true),
+                    RuntimeBoundValue::Real(1.5),
+                    RuntimeBoundValue::Integer(1),
+                    RuntimeBoundValue::Integer(1),
+                    RuntimeBoundValue::Integer(0),
+                ],
+            };
+            let page = read_collection::<Row, _>(&pool, count(), select())
+                .await
+                .unwrap();
+            assert_eq!(page.total, 2);
+            assert_eq!(page.items, vec![(2, "bravo".into(), None, 2.5)]);
+            let empty = TypedReadExecutor::<Row>::fetch_all(
+                &pool,
+                TypedReadQuery {
+                    sql: "SELECT id, title, note, score FROM typed_note WHERE id = ?",
+                    binds: vec![RuntimeBoundValue::Integer(99)],
+                },
+            )
+            .await
+            .unwrap();
+            assert!(empty.is_empty());
+            let tx = DbPool::begin(&pool).await.unwrap();
+            query("INSERT INTO typed_note VALUES (4, 'transaction', 'visible in transaction', 4.5, 1)").execute(&tx).await.unwrap();
+            let page = read_collection::<Row, _>(
+                &tx,
+                count(),
+                TypedReadQuery {
+                    sql: "SELECT id, title, note, score FROM typed_note WHERE id = ?",
+                    binds: vec![RuntimeBoundValue::Integer(4)],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(page.total, 3);
+            assert_eq!(
+                page.items,
+                vec![(
+                    4,
+                    "transaction".into(),
+                    Some("visible in transaction".into()),
+                    4.5
+                )]
+            );
+            DbTransaction::rollback(&tx).await.unwrap();
+            assert_eq!(
+                TypedReadExecutor::<Row>::count(&pool, count())
+                    .await
+                    .unwrap(),
+                2
+            );
+            if let Some(sqlx_pool) = pool.sqlx_pool() {
+                sqlx_pool.close().await;
+            }
+            drop(pool);
+        }
+    }
 
     fn resource() -> RuntimeResource {
         let fields = [

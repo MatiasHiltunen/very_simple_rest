@@ -275,6 +275,7 @@ pub use serde;
 pub use serde_json;
 pub use sqlx;
 pub use uuid;
+pub use vsr_runtime;
 
 pub mod prelude {
     pub use crate::auth;
