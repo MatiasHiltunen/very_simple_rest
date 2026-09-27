@@ -24,7 +24,7 @@ use super::{
     // Helper functions that live in codegen.rs and are called from here.
     // Child modules may access private items from their parent.
     create_payload_field_is_optional, create_payload_fields, create_payload_type,
-    hybrid_resource_enforcement, list_bind_ident, list_bind_match_tokens,
+    hybrid_resource_enforcement, list_bind_ident,
     policy_expression_helper_usage, typed_object_validator_ident,
     PolicyHelperUsage,
 };
@@ -486,7 +486,6 @@ pub(super) fn create_requirement_method_tokens(
     let bind_ident = list_bind_ident(resource);
     let create_payload_ty = create_payload_type(resource);
     let next_index_ident = format_ident!("next_index");
-    let bind_matches = list_bind_match_tokens(resource, resources, "q");
     let expression_tokens = create_requirement_expression_plan_tokens(
         resource,
         resources,
@@ -560,13 +559,13 @@ pub(super) fn create_requirement_method_tokens(
             let mut #next_index_ident = 1usize;
             let (condition, binds) = #expression_tokens;
             let sql = format!("SELECT 1 WHERE {}", condition);
-            let mut q = #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql);
-            for bind in binds {
-                q = match bind {
-                    #(#bind_matches)*
-                };
-            }
-            match q.fetch_optional(db).await {
+            match #runtime_crate::vsr_runtime::typed_read::TypedItemReadExecutor::<(i64,)>::fetch_optional(
+                db,
+                #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                    sql: &sql,
+                    binds: binds.into_iter().map(#bind_ident::into_runtime_value).collect(),
+                },
+            ).await {
                 Ok(result) => Ok(result.is_some()),
                 Err(error) => Err(#runtime_crate::core::errors::internal_error(error.to_string())),
             }

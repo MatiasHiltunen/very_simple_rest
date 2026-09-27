@@ -41,7 +41,7 @@ jobs:
           if grep -E '^(rest_macro_core |actix[-_ ]|axum[- ])' database-dependencies.txt; then
             exit 1
           fi
-      - name: Test Generated Typed Read Handlers
+      - name: Test Generated Runtime CRUD And Actions
         env:
           # Keep multi-fixture test builds within runner disk budgets.
           CARGO_PROFILE_TEST_DEBUG: "0"
@@ -52,7 +52,9 @@ jobs:
           --test composed_policies --test exists_group_policies
           --test row_policy --test tenant_policy --test fine_grained_policies_api
           --test api_contexts_api --test api_computed_fields_api
-          --test audit_events_api --test audit_action_events_api --locked
+          --test audit_events_api --test audit_action_events_api
+          --test resource_actions_api --test create_requirements --test create_visibility_api
+          --test list_fields_api --test object_fields_api --locked
 
   builtin-auth-migration:
     name: Built-in Auth Migration (${{ matrix.os }})

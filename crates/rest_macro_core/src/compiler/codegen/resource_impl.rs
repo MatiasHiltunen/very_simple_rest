@@ -1188,8 +1188,8 @@ pub(super) fn resource_impl_tokens(
                         }
                     };
                     let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #table_name, #id_field);
-                    match #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql)
-                        .fetch_one(&tx)
+                    match #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
+                        .returning_id(&tx)
                         .await
                     {
                         Ok(created_id) => {
@@ -1249,9 +1249,9 @@ pub(super) fn resource_impl_tokens(
                         #insert_placeholders,
                         #id_field
                     );
-                    let mut q = #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                     #create_insert_binds
-                    match q.fetch_one(&tx).await {
+                    match q.returning_id(&tx).await {
                         Ok(created_id) => {
                             let after = match Self::fetch_unfiltered_by_id_for_audit(created_id, &tx).await {
                                 Ok(Some(item)) => item,
@@ -1300,7 +1300,7 @@ pub(super) fn resource_impl_tokens(
                         }
                     };
                     let sql = format!("INSERT INTO {} DEFAULT VALUES", #table_name);
-                    match #runtime_crate::db::query(&sql).execute(&tx).await {
+                    match #runtime_crate::vsr_runtime::statement::Statement::new(&sql).execute(&tx).await {
                         Ok(result) => match result.last_insert_rowid() {
                             Some(created_id) => {
                                 let after = match Self::fetch_unfiltered_by_id_for_audit(created_id, &tx).await {
@@ -1355,7 +1355,7 @@ pub(super) fn resource_impl_tokens(
                         }
                     };
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                    let mut q = #runtime_crate::db::query(&sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                     #create_insert_binds
                     match q.execute(&tx).await {
                         Ok(result) => match result.last_insert_rowid() {
@@ -1412,8 +1412,8 @@ pub(super) fn resource_impl_tokens(
             ) => {
                 quote! {
                     let sql = format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #table_name, #id_field);
-                    match #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql)
-                        .fetch_one(db.get_ref())
+                    match #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
+                        .returning_id(db.get_ref())
                         .await
                     {
                         Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await,
@@ -1433,9 +1433,9 @@ pub(super) fn resource_impl_tokens(
                         #insert_placeholders,
                         #id_field
                     );
-                    let mut q = #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                     #create_insert_binds
-                    match q.fetch_one(db.get_ref()).await {
+                    match q.returning_id(db.get_ref()).await {
                         Ok(created_id) => Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await,
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                     }
@@ -1444,7 +1444,7 @@ pub(super) fn resource_impl_tokens(
             (_, true) => {
                 quote! {
                     let sql = format!("INSERT INTO {} DEFAULT VALUES", #table_name);
-                    match #runtime_crate::db::query(&sql).execute(db.get_ref()).await {
+                    match #runtime_crate::vsr_runtime::statement::Statement::new(&sql).execute(db.get_ref()).await {
                         Ok(result) => match result.last_insert_rowid() {
                             Some(created_id) => {
                                 Self::created_response(created_id, &req, &user, db.get_ref(), #created_response_runtime).await
@@ -1458,7 +1458,7 @@ pub(super) fn resource_impl_tokens(
             (_, false) => {
                 quote! {
                     let sql = format!("INSERT INTO {} ({}) VALUES ({})", #table_name, #insert_fields_csv, #insert_placeholders);
-                    let mut q = #runtime_crate::db::query(&sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                     #create_insert_binds
                     match q.execute(db.get_ref()).await {
                         Ok(result) => match result.last_insert_rowid() {
@@ -1508,7 +1508,7 @@ pub(super) fn resource_impl_tokens(
                         }
                     };
                     let sql = #sql;
-                    let mut q = #runtime_crate::db::query(sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                     #(#bind_fields_update)*
                     q = q.bind(id);
                     match q.execute(&tx).await {
@@ -1590,7 +1590,7 @@ pub(super) fn resource_impl_tokens(
                                     }
                                 };
                                 let sql = #admin_sql;
-                                let mut q = #runtime_crate::db::query(sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                                 #(#bind_fields_update)*
                                 q = q.bind(id);
                                 match q.execute(&tx).await {
@@ -1668,7 +1668,7 @@ pub(super) fn resource_impl_tokens(
                                 Self::list_placeholder(#update_where_index),
                                 condition
                             );
-                            let mut q = #runtime_crate::db::query(&sql);
+                            let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                             #(#bind_fields_update)*
                             q = q.bind(id);
                             for bind in binds {
@@ -1740,7 +1740,7 @@ pub(super) fn resource_impl_tokens(
                                 }
                             };
                             let sql = #admin_sql;
-                            let mut q = #runtime_crate::db::query(sql);
+                            let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                             #(#bind_fields_update)*
                             q = q.bind(id);
                             match q.execute(&tx).await {
@@ -1808,7 +1808,7 @@ pub(super) fn resource_impl_tokens(
 
                 quote! {
                     let sql = #sql;
-                    let mut q = #runtime_crate::db::query(sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                     #(#bind_fields_update)*
                     q = q.bind(path.into_inner());
                     match q.execute(db.get_ref()).await {
@@ -1840,7 +1840,7 @@ pub(super) fn resource_impl_tokens(
                         {
                             Ok(Some(_)) => {
                                 let sql = #admin_sql;
-                                let mut q = #runtime_crate::db::query(sql);
+                                let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                                 #(#bind_fields_update)*
                                 q = q.bind(id);
                                 match q.execute(db.get_ref()).await {
@@ -1868,7 +1868,7 @@ pub(super) fn resource_impl_tokens(
                                 Self::list_placeholder(#update_where_index),
                                 condition
                             );
-                            let mut q = #runtime_crate::db::query(&sql);
+                            let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                             #(#bind_fields_update)*
                             q = q.bind(id);
                             for bind in binds {
@@ -1890,7 +1890,7 @@ pub(super) fn resource_impl_tokens(
                         let id = path.into_inner();
                         if #is_admin {
                             let sql = #admin_sql;
-                            let mut q = #runtime_crate::db::query(sql);
+                            let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(sql);
                             #(#bind_fields_update)*
                             q = q.bind(id);
                             match q.execute(db.get_ref()).await {
@@ -1935,7 +1935,7 @@ pub(super) fn resource_impl_tokens(
                     }
                 };
                 let sql = format!("DELETE FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-                match #runtime_crate::db::query(&sql)
+                match #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
                     .bind(id)
                     .execute(&tx)
                     .await
@@ -2007,7 +2007,7 @@ pub(super) fn resource_impl_tokens(
                                 }
                             };
                             let sql = #admin_sql;
-                            match #runtime_crate::db::query(sql)
+                            match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                                 .bind(id)
                                 .execute(&tx)
                                 .await
@@ -2071,7 +2071,7 @@ pub(super) fn resource_impl_tokens(
                             Self::list_placeholder(1),
                             condition
                         );
-                        let mut q = #runtime_crate::db::query(&sql);
+                        let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                         q = q.bind(id);
                         for bind in binds {
                             q = match bind {
@@ -2142,7 +2142,7 @@ pub(super) fn resource_impl_tokens(
                             }
                         };
                         let sql = #admin_sql;
-                        match #runtime_crate::db::query(sql)
+                        match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                             .bind(id)
                             .execute(&tx)
                             .await
@@ -2190,7 +2190,7 @@ pub(super) fn resource_impl_tokens(
         let id_placeholder = resource.db.placeholder(1);
         quote! {
             let sql = format!("DELETE FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-            match #runtime_crate::db::query(&sql)
+            match #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
                 .bind(path.into_inner())
                 .execute(db.get_ref())
                 .await
@@ -2221,7 +2221,7 @@ pub(super) fn resource_impl_tokens(
                 {
                     Ok(Some(_)) => {
                         let sql = #admin_sql;
-                        match #runtime_crate::db::query(sql)
+                        match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                             .bind(id)
                             .execute(db.get_ref())
                             .await
@@ -2248,7 +2248,7 @@ pub(super) fn resource_impl_tokens(
                         Self::list_placeholder(1),
                         condition
                     );
-                    let mut q = #runtime_crate::db::query(&sql);
+                    let mut q = #runtime_crate::vsr_runtime::statement::Statement::new(&sql);
                     q = q.bind(id);
                     for bind in binds {
                         q = match bind {
@@ -2269,7 +2269,7 @@ pub(super) fn resource_impl_tokens(
                 let id = path.into_inner();
                 if #is_admin {
                     let sql = #admin_sql;
-                    match #runtime_crate::db::query(sql)
+                    match #runtime_crate::vsr_runtime::statement::Statement::new(sql)
                         .bind(id)
                         .execute(db.get_ref())
                         .await

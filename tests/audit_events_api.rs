@@ -193,6 +193,74 @@ async fn generated_handlers_write_audit_events_and_keep_sink_read_only() {
     assert_eq!(list_sink_response.status(), StatusCode::OK);
     let list_sink_body: Value = test::read_body_json(list_sink_response).await;
     assert_eq!(list_sink_body["count"], 3);
+
+    query("DROP TABLE audit_event")
+        .execute(&pool)
+        .await
+        .expect("test audit sink should be removable");
+    let failed_create_request = test::TestRequest::post()
+        .uri("/api/posts")
+        .insert_header(("Authorization", format!("Bearer {}", user_token.as_str())))
+        .set_json(json!({"title": "Must roll back"}))
+        .to_request();
+    let failed_create_response = test::call_service(&app, failed_create_request).await;
+    assert_eq!(
+        failed_create_response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM post")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    query("INSERT INTO post (title) VALUES (?)")
+        .bind("Preserve on audit failure")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let record_id = query_scalar::<sqlx::Any, i64>("SELECT id FROM post")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let failed_update_request = test::TestRequest::put()
+        .uri(&format!("/api/posts/{record_id}"))
+        .insert_header(("Authorization", format!("Bearer {}", user_token.as_str())))
+        .set_json(json!({"title": "Must roll back update"}))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, failed_update_request)
+            .await
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        query_scalar::<sqlx::Any, String>("SELECT title FROM post WHERE id = ?")
+            .bind(record_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "Preserve on audit failure"
+    );
+    let failed_delete_request = test::TestRequest::delete()
+        .uri(&format!("/api/posts/{record_id}"))
+        .insert_header(("Authorization", format!("Bearer {}", user_token.as_str())))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, failed_delete_request)
+            .await
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        query_scalar::<sqlx::Any, i64>("SELECT COUNT(*) FROM post")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 fn issue_token(user_id: i64, roles: &[&str]) -> String {
