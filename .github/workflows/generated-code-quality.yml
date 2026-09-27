@@ -42,6 +42,9 @@ jobs:
             exit 1
           fi
       - name: Test Generated Typed Collection Handlers
+        env:
+          # Keep multi-fixture test builds within runner disk budgets.
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: >-
           cargo test -p very_simple_rest --features turso-local
           --test list_filter_in_count --test list_pagination --test many_to_many_api
