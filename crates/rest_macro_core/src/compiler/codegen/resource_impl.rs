@@ -1024,12 +1024,9 @@ pub(super) fn resource_impl_tokens(
             async fn fetch_by_id_unfiltered(
                 id: i64,
                 db: &DbPool,
-            ) -> Result<Option<Self>, #runtime_crate::sqlx::Error> {
+            ) -> Result<Option<Self>, String> {
                 let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, Self::list_placeholder(1));
-                #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                    .bind(id)
-                    .fetch_optional(db)
-                    .await
+                Self::execute_item_query(db, &sql, vec![#list_bind_ty::Integer(id)]).await
             }
 
             fn hybrid_scope_binding_for_item(
@@ -1085,10 +1082,7 @@ pub(super) fn resource_impl_tokens(
             }
 
             let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
-            #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                .bind(id)
-                .fetch_optional(db)
-                .await
+            Self::execute_item_query(db, &sql, vec![#list_bind_ty::Integer(id)]).await
         }
     } else {
         let id_placeholder = resource.db.placeholder(1);
@@ -1103,14 +1097,9 @@ pub(super) fn resource_impl_tokens(
                         #id_placeholder,
                         condition
                     );
-                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&filtered_sql)
-                        .bind(id);
-                    for bind in binds {
-                        q = match bind {
-                            #(#query_bind_matches)*
-                        };
-                    }
-                    q.fetch_optional(db).await
+                    let mut item_binds = vec![#list_bind_ty::Integer(id)];
+                    item_binds.extend(binds);
+                    Self::execute_item_query(db, &filtered_sql, item_binds).await
                 }
                 #plan_ident::Indeterminate => Ok(None),
             }
@@ -1124,10 +1113,7 @@ pub(super) fn resource_impl_tokens(
                 let sql = format!("SELECT * FROM {} WHERE {} = {}", #table_name, #id_field, #id_placeholder);
 
                 if #is_admin {
-                    #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&sql)
-                        .bind(id)
-                        .fetch_optional(db)
-                        .await
+                    Self::execute_item_query(db, &sql, vec![#list_bind_ty::Integer(id)]).await
                 } else {
                     #filtered_read
                 }
@@ -2923,7 +2909,7 @@ pub(super) fn resource_impl_tokens(
                 id: i64,
                 user: &#runtime_crate::core::auth::UserContext,
                 db: &DbPool,
-            ) -> Result<Option<Self>, #runtime_crate::sqlx::Error> {
+            ) -> Result<Option<Self>, String> {
                 #fetch_readable_by_id_body
             }
 
@@ -3058,6 +3044,23 @@ pub(super) fn resource_impl_tokens(
                     Ok(None) => #created_response_fallback,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
+            }
+
+            async fn execute_item_query<E>(
+                db: &E,
+                sql: &str,
+                binds: Vec<#list_bind_ty>,
+            ) -> Result<Option<Self>, String>
+            where
+                E: #runtime_crate::vsr_runtime::typed_read::TypedItemReadExecutor<Self> + ?Sized,
+            {
+                #runtime_crate::vsr_runtime::typed_read::TypedItemReadExecutor::<Self>::fetch_optional(
+                    db,
+                    #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                        sql,
+                        binds: binds.into_iter().map(#list_bind_ty::into_runtime_value).collect(),
+                    },
+                ).await
             }
 
             async fn execute_list_plan(

@@ -366,6 +366,35 @@ async fn generated_item_routes_support_hybrid_runtime_enforcement() {
         .expect("remaining row count should be queryable");
     assert_eq!(remaining, 0);
 
+    let missing_item_request = test::TestRequest::get()
+        .uri(&format!("/api/scoped_doc/{shared_doc_id}"))
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let missing_item_response = test::call_service(&app, missing_item_request).await;
+    assert_eq!(missing_item_response.status(), StatusCode::NOT_FOUND);
+
+    query("DROP TABLE scoped_doc")
+        .execute(&pool)
+        .await
+        .expect("test resource table should be removable");
+    let failed_item_request = test::TestRequest::get()
+        .uri(&format!("/api/scoped_doc/{other_doc_id}"))
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let failed_item_response = test::call_service(&app, failed_item_request).await;
+    assert_eq!(failed_item_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    query("DROP TABLE scoped_claim_doc")
+        .execute(&pool)
+        .await
+        .expect("test claim resource table should be removable");
+    let failed_fallback_request = test::TestRequest::get()
+        .uri(&format!("/api/scoped_claim_doc/{}", created_claim_doc.id.unwrap()))
+        .insert_header(("Authorization", format!("Bearer {}", member_token.token)))
+        .to_request();
+    let failed_fallback_response = test::call_service(&app, failed_fallback_request).await;
+    assert_eq!(failed_fallback_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
     unsafe {
         std::env::remove_var("JWT_SECRET");
     }

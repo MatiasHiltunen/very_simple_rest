@@ -49,6 +49,7 @@ pub mod blog_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_item_query
       fn execute_list_plan
       fn list_placeholder
       fn sort_supports_cursor
@@ -106,6 +107,7 @@ pub mod blog_api
       fn list_ok_response
       fn created_location
       fn created_response
+      fn execute_item_query
       fn execute_list_plan
       fn list_placeholder
       fn sort_supports_cursor

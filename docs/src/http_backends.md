@@ -664,5 +664,19 @@ coverage verifies separate count/page bindings, error ordering, nullable rows,
 and transaction visibility. CI exercises generated filter/count, pagination,
 relation, scalar, enum, and hybrid policy routes across all three platforms.
 
-Generated item/write handlers and transport presentation, streaming, and
-general native/emitted backend selection still need migration.
+Generated item reads also use `typed_read::TypedItemReadExecutor<T>`, a separate
+optional-row contract that leaves collection-only implementations unchanged.
+The generated public, filtered, admin-bypass, and hybrid-fallback queries share
+one emitted helper. Audit snapshots use the same helper inside their existing
+transactions. SQLx/Turso row decoding and database errors stay in the runtime;
+missing rows return `None`. Role checks, policy resolution, grant decisions,
+created-response fallback, and HTTP presentation remain in the generated code.
+
+Standalone coverage checks scalar binding order, nullable items, absent and
+filtered rows, database failures, transaction visibility, and rollback on both
+SQLite and local Turso. Cross-platform generated coverage also exercises owner
+and tenant policies, admin bypass settings, response contexts, computed fields,
+and audited CRUD/actions.
+
+Generated write execution and transport presentation, streaming, and general
+native/emitted backend selection still need migration.

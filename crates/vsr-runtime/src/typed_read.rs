@@ -1,4 +1,4 @@
-//! Typed collection reads shared by generated handlers and database adapters.
+//! Typed item and collection reads shared by generated handlers and database adapters.
 
 use std::future::Future;
 
@@ -10,6 +10,18 @@ pub struct TypedReadQuery<'a> {
     pub sql: &'a str,
     /// Ordered scalar bindings supplied by that planner.
     pub binds: Vec<RuntimeBoundValue>,
+}
+
+/// Database lookup for an application-owned row type.
+///
+/// This separate contract lets collection-only executors remain unchanged.
+/// Implementations own row decoding without exposing driver or HTTP types.
+pub trait TypedItemReadExecutor<T>: Send + Sync {
+    /// Fetch and decode an optional item; a missing row is not an error.
+    fn fetch_optional(
+        &self,
+        query: TypedReadQuery<'_>,
+    ) -> impl Future<Output = Result<Option<T>, String>> + Send;
 }
 
 /// Database operations for a collection of application-owned row types.
