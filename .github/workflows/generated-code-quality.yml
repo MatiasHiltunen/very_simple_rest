@@ -41,6 +41,12 @@ jobs:
           if grep -E '^(rest_macro_core |actix[-_ ]|axum[- ])' database-dependencies.txt; then
             exit 1
           fi
+      - name: Test Generated Typed Collection Handlers
+        run: >-
+          cargo test -p very_simple_rest --features turso-local
+          --test list_filter_in_count --test list_pagination --test many_to_many_api
+          --test hybrid_runtime_enforcement --test scalar_types_api --test enum_fields_api
+          --test composed_policies --test exists_group_policies --locked
 
   builtin-auth-migration:
     name: Built-in Auth Migration (${{ matrix.os }})

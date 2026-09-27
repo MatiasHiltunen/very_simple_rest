@@ -409,8 +409,6 @@ pub(super) fn resource_impl_tokens(
         }
     };
     let query_filter_conditions = list_query_condition_tokens(resource, runtime_crate);
-    let list_bind_matches = list_bind_match_tokens(resource, resources, "q");
-    let count_bind_matches = list_bind_match_tokens(resource, resources, "count_query");
     let query_bind_matches = list_bind_match_tokens(resource, resources, "q");
     let has_static_policy_filters = resource.policies.has_read_filters()
         || resource.policies.has_update_filters()
@@ -2434,25 +2432,8 @@ pub(super) fn resource_impl_tokens(
                             Ok(parts) => parts,
                             Err(response) => return response,
                         };
-                        let mut count_query =
-                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                        for bind in &plan.filter_binds {
-                            count_query = match bind.clone() {
-                                #(#count_bind_matches)*
-                            };
-                        }
-                        let total = match count_query.fetch_one(db.get_ref()).await {
-                            Ok(total) => total,
-                            Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                        };
-                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                        for bind in &plan.select_binds {
-                            q = match bind.clone() {
-                                #(#list_bind_matches)*
-                            };
-                        }
-                        match q.fetch_all(db.get_ref()).await {
-                            Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                        match Self::execute_list_plan(db.get_ref(), &plan).await {
+                            Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                                 Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                 Err(response) => response,
                             },
@@ -2480,25 +2461,8 @@ pub(super) fn resource_impl_tokens(
                             Ok(parts) => parts,
                             Err(response) => return response,
                         };
-                        let mut count_query =
-                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                        for bind in &plan.filter_binds {
-                            count_query = match bind.clone() {
-                                #(#count_bind_matches)*
-                            };
-                        }
-                        let total = match count_query.fetch_one(db.get_ref()).await {
-                            Ok(total) => total,
-                            Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                        };
-                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                        for bind in &plan.select_binds {
-                            q = match bind.clone() {
-                                #(#list_bind_matches)*
-                            };
-                        }
-                        match q.fetch_all(db.get_ref()).await {
-                            Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                        match Self::execute_list_plan(db.get_ref(), &plan).await {
+                            Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                                 Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                 Err(response) => response,
                             },
@@ -2525,25 +2489,8 @@ pub(super) fn resource_impl_tokens(
                         Ok(parts) => parts,
                         Err(response) => return response,
                     };
-                    let mut count_query =
-                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                    for bind in &plan.filter_binds {
-                        count_query = match bind.clone() {
-                            #(#count_bind_matches)*
-                        };
-                    }
-                    let total = match count_query.fetch_one(db.get_ref()).await {
-                        Ok(total) => total,
-                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                    };
-                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                    for bind in &plan.select_binds {
-                        q = match bind.clone() {
-                            #(#list_bind_matches)*
-                        };
-                    }
-                    match q.fetch_all(db.get_ref()).await {
-                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                    match Self::execute_list_plan(db.get_ref(), &plan).await {
+                        Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                             Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                             Err(response) => response,
                         },
@@ -2586,25 +2533,8 @@ pub(super) fn resource_impl_tokens(
                                 Ok(parts) => parts,
                                 Err(response) => return response,
                             };
-                            let mut count_query =
-                                #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                            for bind in &plan.filter_binds {
-                                count_query = match bind.clone() {
-                                    #(#count_bind_matches)*
-                                };
-                            }
-                            let total = match count_query.fetch_one(db.get_ref()).await {
-                                Ok(total) => total,
-                                Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                            };
-                            let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                            for bind in &plan.select_binds {
-                                q = match bind.clone() {
-                                    #(#list_bind_matches)*
-                                };
-                            }
-                            match q.fetch_all(db.get_ref()).await {
-                                Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                            match Self::execute_list_plan(db.get_ref(), &plan).await {
+                                Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                                     Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                     Err(response) => response,
                                 },
@@ -2635,25 +2565,8 @@ pub(super) fn resource_impl_tokens(
                                 Ok(parts) => parts,
                                 Err(response) => return response,
                             };
-                            let mut count_query =
-                                #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                            for bind in &plan.filter_binds {
-                                count_query = match bind.clone() {
-                                    #(#count_bind_matches)*
-                                };
-                            }
-                            let total = match count_query.fetch_one(db.get_ref()).await {
-                                Ok(total) => total,
-                                Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                            };
-                            let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                            for bind in &plan.select_binds {
-                                q = match bind.clone() {
-                                    #(#list_bind_matches)*
-                                };
-                            }
-                            match q.fetch_all(db.get_ref()).await {
-                                Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                            match Self::execute_list_plan(db.get_ref(), &plan).await {
+                                Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                                     Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                     Err(response) => response,
                                 },
@@ -2683,25 +2596,8 @@ pub(super) fn resource_impl_tokens(
                             Ok(parts) => parts,
                             Err(response) => return response,
                         };
-                        let mut count_query =
-                            #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                        for bind in &plan.filter_binds {
-                            count_query = match bind.clone() {
-                                #(#count_bind_matches)*
-                            };
-                        }
-                        let total = match count_query.fetch_one(db.get_ref()).await {
-                            Ok(total) => total,
-                            Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                        };
-                        let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                        for bind in &plan.select_binds {
-                            q = match bind.clone() {
-                                #(#list_bind_matches)*
-                            };
-                        }
-                        match q.fetch_all(db.get_ref()).await {
-                            Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                        match Self::execute_list_plan(db.get_ref(), &plan).await {
+                            Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                                 Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                                 Err(response) => response,
                             },
@@ -2737,25 +2633,8 @@ pub(super) fn resource_impl_tokens(
                         Ok(parts) => parts,
                         Err(response) => return response,
                     };
-                    let mut count_query =
-                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                    for bind in &plan.filter_binds {
-                        count_query = match bind.clone() {
-                            #(#count_bind_matches)*
-                        };
-                    }
-                    let total = match count_query.fetch_one(db.get_ref()).await {
-                        Ok(total) => total,
-                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                    };
-                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                    for bind in &plan.select_binds {
-                        q = match bind.clone() {
-                            #(#list_bind_matches)*
-                        };
-                    }
-                    match q.fetch_all(db.get_ref()).await {
-                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                    match Self::execute_list_plan(db.get_ref(), &plan).await {
+                        Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                             Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                             Err(response) => response,
                         },
@@ -2776,25 +2655,8 @@ pub(super) fn resource_impl_tokens(
                         Ok(parts) => parts,
                         Err(response) => return response,
                     };
-                    let mut count_query =
-                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                    for bind in &plan.filter_binds {
-                        count_query = match bind.clone() {
-                            #(#count_bind_matches)*
-                        };
-                    }
-                    let total = match count_query.fetch_one(db.get_ref()).await {
-                        Ok(total) => total,
-                        Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                    };
-                    let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                    for bind in &plan.select_binds {
-                        q = match bind.clone() {
-                            #(#list_bind_matches)*
-                        };
-                    }
-                    match q.fetch_all(db.get_ref()).await {
-                        Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                    match Self::execute_list_plan(db.get_ref(), &plan).await {
+                        Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                             Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                             Err(response) => response,
                         },
@@ -2815,25 +2677,8 @@ pub(super) fn resource_impl_tokens(
                     Ok(parts) => parts,
                     Err(response) => return response,
                 };
-                let mut count_query =
-                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                for bind in &plan.filter_binds {
-                    count_query = match bind.clone() {
-                        #(#count_bind_matches)*
-                    };
-                }
-                let total = match count_query.fetch_one(db.get_ref()).await {
-                    Ok(total) => total,
-                    Err(error) => return #runtime_crate::core::errors::internal_error(error.to_string()),
-                };
-                let mut q = #runtime_crate::db::query_as::<#runtime_crate::sqlx::Any, Self>(&plan.select_sql);
-                for bind in &plan.select_binds {
-                    q = match bind.clone() {
-                        #(#list_bind_matches)*
-                    };
-                }
-                match q.fetch_all(db.get_ref()).await {
-                    Ok(items) => match Self::finalize_list_response(plan, total, items) {
+                match Self::execute_list_plan(db.get_ref(), &plan).await {
+                    Ok(page) => match Self::finalize_list_response(plan, page.total, page.items) {
                         Ok(response) => Self::list_ok_response(response, query.context.as_deref()),
                         Err(response) => response,
                     },
@@ -2864,14 +2709,13 @@ pub(super) fn resource_impl_tokens(
                         Ok(parts) => parts,
                         Err(response) => return response,
                     };
-                    let mut count_query =
-                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                    for bind in &plan.filter_binds {
-                        count_query = match bind.clone() {
-                            #(#count_bind_matches)*
-                        };
-                    }
-                    match count_query.fetch_one(db.get_ref()).await {
+                    match #runtime_crate::vsr_runtime::typed_read::TypedReadExecutor::<Self>::count(
+                        db.get_ref(),
+                        #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                            sql: &plan.count_sql,
+                            binds: plan.filter_binds.iter().cloned().map(#list_bind_ty::into_runtime_value).collect(),
+                        },
+                    ).await {
                         Ok(count) => HttpResponse::Ok().json(#runtime_crate::serde_json::json!({ "count": count })),
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                     }
@@ -2890,14 +2734,13 @@ pub(super) fn resource_impl_tokens(
                         Ok(parts) => parts,
                         Err(response) => return response,
                     };
-                    let mut count_query =
-                        #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                    for bind in &plan.filter_binds {
-                        count_query = match bind.clone() {
-                            #(#count_bind_matches)*
-                        };
-                    }
-                    match count_query.fetch_one(db.get_ref()).await {
+                    match #runtime_crate::vsr_runtime::typed_read::TypedReadExecutor::<Self>::count(
+                        db.get_ref(),
+                        #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                            sql: &plan.count_sql,
+                            binds: plan.filter_binds.iter().cloned().map(#list_bind_ty::into_runtime_value).collect(),
+                        },
+                    ).await {
                         Ok(count) => HttpResponse::Ok().json(#runtime_crate::serde_json::json!({ "count": count })),
                         Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                     }
@@ -2916,14 +2759,13 @@ pub(super) fn resource_impl_tokens(
                     Ok(parts) => parts,
                     Err(response) => return response,
                 };
-                let mut count_query =
-                    #runtime_crate::db::query_scalar::<#runtime_crate::sqlx::Any, i64>(&plan.count_sql);
-                for bind in &plan.filter_binds {
-                    count_query = match bind.clone() {
-                        #(#count_bind_matches)*
-                    };
-                }
-                match count_query.fetch_one(db.get_ref()).await {
+                match #runtime_crate::vsr_runtime::typed_read::TypedReadExecutor::<Self>::count(
+                    db.get_ref(),
+                    #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                        sql: &plan.count_sql,
+                        binds: plan.filter_binds.iter().cloned().map(#list_bind_ty::into_runtime_value).collect(),
+                    },
+                ).await {
                     Ok(count) => HttpResponse::Ok().json(#runtime_crate::serde_json::json!({ "count": count })),
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
@@ -3216,6 +3058,23 @@ pub(super) fn resource_impl_tokens(
                     Ok(None) => #created_response_fallback,
                     Err(error) => #runtime_crate::core::errors::internal_error(error.to_string()),
                 }
+            }
+
+            async fn execute_list_plan(
+                db: &DbPool,
+                plan: &#list_plan_ty,
+            ) -> Result<#runtime_crate::vsr_runtime::typed_read::TypedReadPage<Self>, String> {
+                #runtime_crate::vsr_runtime::typed_read::read_collection(
+                    db,
+                    #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                        sql: &plan.count_sql,
+                        binds: plan.filter_binds.iter().cloned().map(#list_bind_ty::into_runtime_value).collect(),
+                    },
+                    #runtime_crate::vsr_runtime::typed_read::TypedReadQuery {
+                        sql: &plan.select_sql,
+                        binds: plan.select_binds.iter().cloned().map(#list_bind_ty::into_runtime_value).collect(),
+                    },
+                ).await
             }
 
             fn list_placeholder(index: usize) -> String {

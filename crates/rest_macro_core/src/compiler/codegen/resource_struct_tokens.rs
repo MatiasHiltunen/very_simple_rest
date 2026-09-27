@@ -422,6 +422,15 @@ pub(super) fn list_query_tokens(
             pub #field_ident: Option<String>,
         }
     });
+    let bind_conversions = list_bind_kinds(resource, resources)
+        .into_iter()
+        .map(|kind| match kind {
+            ListBindKind::Integer => quote!(Self::Integer(value) => Value::Integer(value),),
+            ListBindKind::Real => quote!(Self::Real(value) => Value::Real(value),),
+            ListBindKind::Boolean => quote!(Self::Boolean(value) => Value::Bool(value),),
+            ListBindKind::Text => quote!(Self::Text(value) => Value::Text(value),),
+        })
+        .collect::<Vec<_>>();
     let sort_variants = sortable_fields.iter().map(|field| {
         let variant_ident = super::super::model::sanitize_struct_ident(&field.name(), field.ident.span());
         let field_name = Literal::string(field.api_name());
@@ -526,6 +535,15 @@ pub(super) fn list_query_tokens(
         #[derive(Debug, Clone)]
         enum #bind_ident {
             #(#bind_variants)*
+        }
+
+        impl #bind_ident {
+            fn into_runtime_value(self) -> #runtime_crate::vsr_runtime::native_resource::RuntimeBoundValue {
+                use #runtime_crate::vsr_runtime::native_resource::RuntimeBoundValue as Value;
+                match self {
+                    #(#bind_conversions)*
+                }
+            }
         }
 
         #[derive(Debug, Clone, #runtime_crate::serde::Serialize, #runtime_crate::serde::Deserialize)]

@@ -25,6 +25,7 @@
 //! | [`config_secret`] | Serializable secret references for service configuration |
 //! | [`database`] | Database configuration and engine startup |
 //! | `db` | Feature-gated SQLx and local Turso pools and queries |
+//! | [`typed_read`] | Driver-independent typed collection execution |
 //! | [`static_config`] | Framework-neutral static mount settings |
 //! | [`runtime`] | Shared compression settings |
 //! | `static_files` | Feature-gated Actix static-file adapter |
@@ -92,3 +93,4 @@ pub mod static_config;
 pub mod static_files;
 pub mod storage;
 pub mod tls;
+pub mod typed_read;
