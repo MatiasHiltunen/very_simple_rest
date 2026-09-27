@@ -32,6 +32,8 @@ jobs:
         run: cargo test -p vsr-runtime --no-default-features --features native-sqlx,sqlite,turso-local --lib --locked
       - name: Check Facade With Runtime-Owned Turso Feature
         run: cargo check -p rest_macro_core --no-default-features --features sqlite,vsr-runtime/turso-local --tests --locked
+      - name: Test Legacy Encryption Facade
+        run: cargo test -p rest_macro_core --no-default-features --features sqlite,turso-local --lib db::tests --locked
       - name: Keep Compiler And Frameworks Out Of Database Adapters
         shell: bash
         run: |

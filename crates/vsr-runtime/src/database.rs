@@ -521,6 +521,12 @@ mod tests {
             }),
         })
         .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("database.engine.encryption_key references missing file"),
+            "unexpected error: {error}"
+        );
     }
 }
