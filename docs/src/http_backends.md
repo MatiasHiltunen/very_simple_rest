@@ -635,5 +635,20 @@ flags. Missing claims remain fail-closed, and database or grant errors stop
 execution. PostgreSQL and MySQL CI exercise item visibility, scoped counts,
 cursor pagination, and zero-limit pages through the CLI database adapter.
 
-Database driver adapters, generated handler integration, streaming, and general
-native/emitted backend selection still need migration.
+Database configuration, SQLx/local Turso pools, transactions, and portable
+queries now live in `vsr-runtime::database` and the feature-gated `db` adapter.
+`native_database` implements native read, insert, and audit transaction traits
+for those pools and transactions. The CLI uses these implementations directly.
+The `rest_macro_core::database` and `rest_macro_core::db` paths re-export the
+runtime APIs for existing generated and embedded services. Runtime driver
+features can be enabled independently of compiler facade features; backend
+inspection uses a pool accessor that preserves this feature combination.
+
+Standalone runtime database coverage exercises typed boolean binds, public
+field aliases, audited writes, unmatched mutations, explicit rollback, and
+transaction drop cleanup on SQLite and local Turso. Environment-based Turso
+encryption compatibility remains covered through the facade. Driver tests and
+normal dependency graph checks run across Linux, macOS, and Windows.
+
+Generated handler integration, streaming, and general native/emitted backend
+selection still need migration.

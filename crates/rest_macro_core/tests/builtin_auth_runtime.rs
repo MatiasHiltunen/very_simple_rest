@@ -621,10 +621,8 @@ async fn recovery_tokens_are_single_use_and_revoke_sessions_across_all_three_pat
     ActixHttpServer::shutdown(actix).await.unwrap();
     native_handle.stop(true).await;
     native_task.await.unwrap().unwrap();
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }
 
@@ -814,10 +812,8 @@ async fn account_operations_and_password_revocation_work_across_all_three_paths(
     ActixHttpServer::shutdown(actix).await.unwrap();
     native_handle.stop(true).await;
     native_task.await.unwrap().unwrap();
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }
 
@@ -1123,9 +1119,7 @@ async fn native_and_neutral_builtin_authentication_have_identical_live_policy() 
     native_handle.stop(true).await;
     native_task.await.unwrap().unwrap();
     // Close SQLite handles before TempDir cleanup, including on Windows.
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("fixture explicitly uses SQLite"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }

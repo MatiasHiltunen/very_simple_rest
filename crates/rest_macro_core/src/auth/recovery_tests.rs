@@ -33,10 +33,8 @@ impl Fixture {
             .unwrap()
     }
     async fn close(self) {
-        match &self.db {
-            DbPool::Sqlx { pool, .. } => pool.close().await,
-            #[cfg(feature = "turso-local")]
-            DbPool::TursoLocal(_) => {}
+        if let Some(pool) = self.db.sqlx_pool() {
+            pool.close().await;
         }
         drop(self.db);
         self.directory.close().unwrap();

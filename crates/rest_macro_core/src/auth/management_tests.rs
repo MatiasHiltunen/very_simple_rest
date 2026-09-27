@@ -116,10 +116,8 @@ pub(crate) async fn verify_server_concurrency(db: &DbPool, target: i64) {
     super::provisioning_tests::verify_server_flows(db).await;
 }
 pub(super) async fn close(db: DbPool, directory: tempfile::TempDir) {
-    match &db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => {}
+    if let Some(pool) = db.sqlx_pool() {
+        pool.close().await;
     }
     drop(db);
     directory.close().unwrap();

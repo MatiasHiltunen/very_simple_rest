@@ -315,9 +315,7 @@ async fn issued_email_links_work_across_native_actix_and_axum() {
     native_handle.stop(true).await;
     native_task.await.unwrap().unwrap();
     AxumHttpServer::shutdown(provider).await.unwrap();
-    match &fixture.db {
-        DbPool::Sqlx { pool, .. } => pool.close().await,
-        #[cfg(feature = "turso-local")]
-        DbPool::TursoLocal(_) => unreachable!("SQLite fixture"),
+    if let Some(pool) = fixture.db.sqlx_pool() {
+        pool.close().await;
     }
 }

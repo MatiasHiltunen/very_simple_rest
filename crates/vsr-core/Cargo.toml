@@ -33,9 +33,8 @@ metrics = ["dep:metrics"]
 telemetry = ["tracing", "metrics"]
 
 # ── Database back-end stubs ───────────────────────────────────────────────────
-# These are empty today. Phase 3 adds concrete sqlx-backed `DbPool` impls
-# behind each flag. Defined here so vsr-runtime can re-export them without
-# depending on sqlx directly in its own Cargo.toml.
+# These remain markers in the foundational crate. Concrete pool/query adapters
+# and driver feature forwarding live in vsr-runtime.
 sqlite     = []
 postgres   = []
 mysql      = []
