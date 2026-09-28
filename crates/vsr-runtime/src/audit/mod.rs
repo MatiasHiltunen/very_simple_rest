@@ -22,6 +22,9 @@
 use std::{collections::HashMap, future::Future};
 use vsr_core::error::VsrResult;
 
+/// Driver-independent planning for resource audit inserts.
+pub mod write;
+
 // ─── AuditEvent ───────────────────────────────────────────────────────────────
 
 /// The category of an auditable operation.

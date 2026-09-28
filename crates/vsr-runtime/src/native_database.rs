@@ -4,8 +4,7 @@ use serde_json::Value;
 
 use crate::{
     db::{
-        DbExecutor, DbPool, DbTransaction, DbValue, IntoDbValue, Query, QueryScalar, query,
-        query_as, query_scalar,
+        DbExecutor, DbPool, DbTransaction, Query, QueryScalar, query, query_as, query_scalar,
     },
     native_audit::{AuditDatabase, AuditTransaction},
     native_insert::{InsertExecutor, InsertPlan},
@@ -15,18 +14,6 @@ use crate::{
     native_sqlx::row_to_json,
     typed_read::{TypedItemReadExecutor, TypedReadExecutor, TypedReadQuery},
 };
-
-impl IntoDbValue for RuntimeBoundValue {
-    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
-        Ok(match self {
-            Self::Null => DbValue::Null,
-            Self::Bool(value) => DbValue::Bool(value),
-            Self::Integer(value) => DbValue::Integer(value),
-            Self::Real(value) => DbValue::Double(value),
-            Self::Text(value) => DbValue::Text(value),
-        })
-    }
-}
 
 /// Append a native value to a portable database query.
 pub fn bind_query<'q>(query: Query<'q>, value: &RuntimeBoundValue) -> Query<'q> {

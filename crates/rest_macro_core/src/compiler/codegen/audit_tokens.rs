@@ -89,32 +89,6 @@ pub(super) fn audit_helper_method_tokens(
             (user.id != 0).then_some(user.id)
         }
 
-        fn audit_payload_json(
-            before: Option<&Self>,
-            after: Option<&Self>,
-        ) -> Result<String, HttpResponse> {
-            let before = before
-                .map(|item| Self::serialize_item_value(item, None))
-                .transpose()?;
-            let after = after
-                .map(|item| Self::serialize_item_value(item, None))
-                .transpose()?;
-            #runtime_crate::serde_json::to_string(&match (before, after) {
-                (Some(before), Some(after)) => #runtime_crate::serde_json::json!({
-                    "before": before,
-                    "after": after,
-                }),
-                (Some(before), None) => #runtime_crate::serde_json::json!({
-                    "before": before,
-                }),
-                (None, Some(after)) => #runtime_crate::serde_json::json!({
-                    "after": after,
-                }),
-                (None, None) => #runtime_crate::serde_json::json!({}),
-            })
-            .map_err(|error| #runtime_crate::core::errors::internal_error(error.to_string()))
-        }
-
         async fn insert_audit_event<E>(
             executor: &E,
             user: &#runtime_crate::core::auth::UserContext,
@@ -126,28 +100,31 @@ pub(super) fn audit_helper_method_tokens(
         where
             E: #runtime_crate::vsr_runtime::statement::StatementExecutor + ?Sized,
         {
-            let payload_json = Self::audit_payload_json(before, after)?;
-            let actor_roles_json = #runtime_crate::serde_json::to_string(&user.roles)
-                .map_err(|error| {
-                    #runtime_crate::core::errors::internal_error(error.to_string())
-                })?;
-            let sql = format!(
-                "INSERT INTO {} (event_kind, resource_name, record_id, actor_user_id, actor_roles_json, payload_json) VALUES ({}, {}, {}, {}, {}, {})",
-                #sink_table,
-                Self::list_placeholder(1),
-                Self::list_placeholder(2),
-                Self::list_placeholder(3),
-                Self::list_placeholder(4),
-                Self::list_placeholder(5),
-                Self::list_placeholder(6),
-            );
-            #runtime_crate::vsr_runtime::statement::Statement::new(&sql)
-                .bind(event_kind)
-                .bind(#resource_name)
-                .bind(record_id)
-                .bind(Self::audit_actor_user_id(user))
-                .bind(actor_roles_json)
-                .bind(payload_json)
+            let before = before
+                .map(|item| Self::serialize_item_value(item, None))
+                .transpose()?;
+            let after = after
+                .map(|item| Self::serialize_item_value(item, None))
+                .transpose()?;
+            let plan = #runtime_crate::vsr_runtime::audit::write::plan_audit_insert(
+                #runtime_crate::vsr_runtime::audit::write::AuditInsert {
+                    sink_table: #sink_table,
+                    resource_name: #resource_name,
+                    event_kind,
+                    record_id,
+                    actor_user_id: Self::audit_actor_user_id(user),
+                    actor_roles: &user.roles,
+                    before: before.as_ref(),
+                    after: after.as_ref(),
+                },
+                Self::list_placeholder,
+            )
+            .map_err(|error| #runtime_crate::core::errors::internal_error(error.to_string()))?;
+            let mut statement = #runtime_crate::vsr_runtime::statement::Statement::new(&plan.sql);
+            for bind in plan.binds {
+                statement = statement.bind(bind);
+            }
+            statement
                 .execute(executor)
                 .await
                 .map_err(|error| {
