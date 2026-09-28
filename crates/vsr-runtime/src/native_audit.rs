@@ -2,12 +2,13 @@
 
 use std::future::Future;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{
+    audit::write::{AuditInsert, plan_audit_insert},
     native_insert::{InsertExecutor, execute_insert},
     native_mutation::{MutationAction, MutationStatement},
-    native_resource::{RuntimeBoundValue, RuntimeResource},
+    native_resource::RuntimeResource,
     native_write::PreparedCreate,
 };
 
@@ -191,32 +192,21 @@ pub fn build_audit_plan(
     let Some(audit) = &resource.audit else {
         return Ok(None);
     };
-    let payload = match (before, after) {
-        (Some(before), Some(after)) => json!({"before": before, "after": after}),
-        (Some(before), None) => json!({"before": before}),
-        (None, Some(after)) => json!({"after": after}),
-        (None, None) => json!({}),
-    };
+    let plan = plan_audit_insert(
+        AuditInsert {
+            sink_table: &audit.sink_table_name,
+            resource_name: &resource.resource_name,
+            event_kind,
+            record_id,
+            actor_user_id: (actor.user_id != 0).then_some(actor.user_id),
+            actor_roles: actor.roles,
+            before,
+            after,
+        },
+        |index| resource.db.placeholder(index),
+    )?;
     Ok(Some(MutationStatement {
-        sql: format!(
-            "INSERT INTO {} (event_kind, resource_name, record_id, actor_user_id, actor_roles_json, payload_json) VALUES ({})",
-            audit.sink_table_name,
-            (1..=6)
-                .map(|index| resource.db.placeholder(index))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        binds: vec![
-            RuntimeBoundValue::Text(event_kind.to_owned()),
-            RuntimeBoundValue::Text(resource.resource_name.clone()),
-            RuntimeBoundValue::Integer(record_id),
-            if actor.user_id == 0 {
-                RuntimeBoundValue::Null
-            } else {
-                RuntimeBoundValue::Integer(actor.user_id)
-            },
-            RuntimeBoundValue::Text(serde_json::to_string(actor.roles)?),
-            RuntimeBoundValue::Text(serde_json::to_string(&payload)?),
-        ],
+        sql: plan.sql,
+        binds: plan.binds,
     }))
 }

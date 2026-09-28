@@ -695,5 +695,12 @@ Generated coverage additionally checks failed guards and rollback when audit
 inserts fail, along with custom actions and list/object fields on all three
 platforms.
 
+Generated and native audited writes now share `vsr-runtime::audit::write` for
+audit insert SQL, placeholder order, actor bindings, and before/after JSON.
+Generated resources serialize their own snapshots first, including computed
+response fields; the native path supplies its existing response snapshots.
+Both paths keep their current transaction and authorization boundaries while
+using the same audit event plan.
+
 Generated orchestration and transport presentation, streaming, and general
 native/emitted backend selection still need migration.

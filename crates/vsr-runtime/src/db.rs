@@ -129,6 +129,20 @@ impl<T: IntoDbValue> IntoStatementValue for T {
     }
 }
 
+impl IntoDbValue for crate::native_resource::RuntimeBoundValue {
+    fn into_db_value(self) -> Result<DbValue, sqlx::Error> {
+        use crate::native_resource::RuntimeBoundValue;
+
+        Ok(match self {
+            RuntimeBoundValue::Null => DbValue::Null,
+            RuntimeBoundValue::Bool(value) => DbValue::Bool(value),
+            RuntimeBoundValue::Integer(value) => DbValue::Integer(value),
+            RuntimeBoundValue::Real(value) => DbValue::Double(value),
+            RuntimeBoundValue::Text(value) => DbValue::Text(value),
+        })
+    }
+}
+
 macro_rules! impl_integer_value {
     ($($ty:ty),* $(,)?) => {
         $(
